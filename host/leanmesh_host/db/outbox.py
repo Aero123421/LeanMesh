@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..api.codec import canonical_json
-from ..api.errors import ApiError, invalid
+from ..api.errors import ApiError, invalid, no_capacity
 from ..events.journal import now_ms
 from ..settings import Settings
 from .ops import is_critical, operation_event, view_any
@@ -30,7 +30,22 @@ ASSURANCES = ("END_VERIFIED", "LINK_VERIFIED", "SELF_REPORTED", "UNKNOWN")
 # (rank 1) are "we do not know / we did not send" and yield to real evidence.
 _RANK = {"PENDING": 0, "CANCELLED_NOT_SENT": 1, "INDETERMINATE": 1, "SUBMITTED": 2, "PARTIAL": 3,
          "RECEIVED": 3, "APPLIED": 4, "REJECTED": 4, "EXPIRED": 4, "SUPERSEDED": 4}
-_STATE_RANK = {s: i for i, s in enumerate(STATES)}
+# Explicit transition graph (S7-D17). WAIT_WAKE is a waiting phase, not a rank: it is entered from
+# any live state and left towards sending, waiting for a receipt or the end. Nothing leaves FINAL;
+# a request for any other transition is ignored (late/reordered reports never move a state back).
+_NEXT = {
+    "HOST_COMMITTED": {"PENDING", "SENDING", "WAITING_RECEIPT", "WAIT_WAKE", "FINAL"},
+    "PENDING": {"SENDING", "WAITING_RECEIPT", "WAIT_WAKE", "FINAL"},
+    "SENDING": {"WAITING_RECEIPT", "WAIT_WAKE", "FINAL"},
+    "WAITING_RECEIPT": {"WAIT_WAKE", "FINAL"},
+    "WAIT_WAKE": {"SENDING", "WAITING_RECEIPT", "FINAL"},
+    "FINAL": set(),
+}
+# Evidence history per operation (S7-D18). Identical redelivered evidence is not added again. Past
+# MAX_EVIDENCE - 1 entries only evidence that changes state/outcome is kept (up to
+# EVIDENCE_TERMINAL_EXTRA more); the rest is dropped and one HOST_EVIDENCE_TRUNCATED marker says so.
+MAX_EVIDENCE = 64
+EVIDENCE_TERMINAL_EXTRA = 16
 
 
 @dataclass(frozen=True)
@@ -74,12 +89,23 @@ def claim(conn: sqlite3.Connection, cfg: Settings, adapter_incarnation: bytes,
     return items
 
 
-def release_unwritten(conn: sqlite3.Connection, op_id: bytes) -> None:
+def release_unwritten(conn: sqlite3.Connection, cfg: Settings, op_id: bytes) -> None:
     """The bridge proves that not a single byte of the request reached the root (e.g. the frame
-    was refused before the write). Only then is it safe to queue it again."""
-    conn.execute("UPDATE outbox SET state='QUEUED', external_write_possible=0 WHERE operation=? "
-                 "AND state='SENDING'", (op_id,))
-    conn.execute("UPDATE operations SET state='HOST_COMMITTED' WHERE id=? AND state='SENDING'", (op_id,))
+    was refused before the write). Only then is it safe to queue it again, unless the owner asked
+    to cancel meanwhile: then the durable cancel request is honoured and the operation ends as
+    CANCELLED_NOT_SENT (S7-D7)."""
+    row = conn.execute("SELECT o.evidence_json FROM operations o JOIN outbox b ON b.operation=o.id "
+                       "WHERE o.id=? AND b.state='SENDING'", (op_id,)).fetchone()
+    if row is None:
+        return
+    conn.execute("UPDATE outbox SET external_write_possible=0 WHERE operation=?", (op_id,))
+    if any(e["kind"] == "HOST_CANCEL_REQUESTED" for e in json.loads(row[0])):
+        record(conn, cfg, op_id, state="FINAL", outcome="CANCELLED_NOT_SENT", outbox_state="CANCELLED",
+               evidence={"kind": "HOST_CANCELLED_NOT_SENT", "assurance": "SELF_REPORTED",
+                         "details": {"reason": "cancel requested; the bridge proved nothing was written"}})
+        return
+    conn.execute("UPDATE outbox SET state='QUEUED' WHERE operation=?", (op_id,))
+    conn.execute("UPDATE operations SET state='HOST_COMMITTED' WHERE id=?", (op_id,))
 
 
 def pending_reconcile(conn: sqlite3.Connection) -> list[tuple[bytes, bytes | None]]:
@@ -101,7 +127,9 @@ def record(conn: sqlite3.Connection, cfg: Settings, op_id: bytes, *, state: str 
            outcome: str | None = None, evidence: dict[str, Any] | None = None,
            message_id: bytes | None = None, outbox_state: str | None = None) -> dict[str, Any]:
     """Appends evidence and advances state/outcome monotonically, emitting one journal event when
-    something changed. Evidence is history: it is added even to a FINAL or cancelled operation."""
+    something changed. Evidence is history: it is added even to a FINAL or cancelled operation.
+    A message_id that differs from the one the operation already has is a receipt for another
+    message: ApiError 409 before anything is written (the caller's transaction rolls back)."""
     if state is not None and state not in STATES or outcome is not None and outcome not in OUTCOMES:
         raise invalid("unknown operation state/outcome")
     if evidence is not None and evidence.get("assurance") not in ASSURANCES:
@@ -111,18 +139,34 @@ def record(conn: sqlite3.Connection, cfg: Settings, op_id: bytes, *, state: str 
     if row is None:
         raise ApiError(404, "NOT_FOUND", "operation not found")
     domain, typ, req_json, cur_state, cur_outcome, ev_json, cur_mid = row
-    changed = evidence is not None
-    ev_list = json.loads(ev_json) + ([evidence] if evidence is not None else [])
-    if state is not None and cur_state != "FINAL" and _STATE_RANK[state] >= _STATE_RANK[cur_state]:
-        changed |= state != cur_state
+    if message_id is not None and cur_mid is not None and bytes(cur_mid) != message_id:
+        raise ApiError(409, "CONFLICT", "receipt belongs to another message id")
+    ev_list = json.loads(ev_json)
+    changed = False
+    if state is not None and state in _NEXT[cur_state]:
+        changed = True
         cur_state = state
     if outcome is not None and _RANK[outcome] > _RANK[cur_outcome]:
         changed = True
         cur_outcome = outcome
     if message_id is not None and cur_mid is None:
         cur_mid, changed = message_id, True
-    if not changed:
+    stored = None  # the evidence that really went into the row (and goes into the event)
+    marker = False
+    if evidence is not None and evidence not in ev_list:  # redelivery of the same report adds nothing
+        if changed and len(ev_list) < MAX_EVIDENCE + EVIDENCE_TERMINAL_EXTRA or len(ev_list) < MAX_EVIDENCE - 1:
+            stored = evidence
+        elif changed:
+            raise no_capacity("evidence")  # never accept an outcome whose proof cannot be kept
+        else:
+            marker = all(e["kind"] != "HOST_EVIDENCE_TRUNCATED" for e in ev_list)
+    if stored is None and not changed and not marker:
         return view_any(conn, op_id)
+    if stored is not None:
+        ev_list.append(stored)
+    if marker:
+        ev_list.append({"kind": "HOST_EVIDENCE_TRUNCATED", "assurance": "SELF_REPORTED",
+                        "details": {"reason": "evidence history is full; later reports were not kept"}})
     conn.execute("UPDATE operations SET state=?, outcome=?, evidence_json=?, message_id=? WHERE id=?",
                  (cur_state, cur_outcome, canonical_json(ev_list), cur_mid, op_id))
     if outbox_state is not None:
@@ -130,6 +174,7 @@ def record(conn: sqlite3.Connection, cfg: Settings, op_id: bytes, *, state: str 
     elif cur_state == "FINAL":
         conn.execute("UPDATE outbox SET state='DONE' WHERE operation=? AND state IN ('SENDING','RECONCILE')",
                      (op_id,))
-    operation_event(conn, cfg, op_id, bytes(domain), is_critical(typ, json.loads(req_json)),
-                    evidence["kind"] if evidence else cur_state)
+    if stored is not None or changed:
+        operation_event(conn, cfg, op_id, bytes(domain), is_critical(typ, json.loads(req_json)),
+                        stored["kind"] if stored else cur_state, evidence=stored)
     return view_any(conn, op_id)

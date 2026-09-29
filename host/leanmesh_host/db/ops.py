@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from typing import Any
 from ..api.codec import canonical_json
 from ..api.errors import ApiError, no_capacity, not_found
 from ..events import journal
+from . import budget
 from ..events.journal import now_ms
 from ..settings import Settings
 
@@ -26,7 +26,8 @@ _UNFINISHED = "state!='FINAL'"
 
 
 # ---- epochs -----------------------------------------------------------------------------------
-def open_epoch(conn: sqlite3.Connection, principal: str, idem_key: str, request_id: str) -> dict[str, str]:
+def open_epoch(conn: sqlite3.Connection, cfg: Settings, principal: str, idem_key: str,
+               request_id: str) -> dict[str, str]:
     """Host-issued 16 B epoch. Retries with the same Idempotency-Key + request_id return the same
     epoch (meta row `epoch-open:<principal>:<key>` = request_hash || epoch id); a different
     request_id under that key is a 409."""
@@ -40,15 +41,34 @@ def open_epoch(conn: sqlite3.Connection, principal: str, idem_key: str, request_
         epoch = stored[16:]
         state = conn.execute("SELECT state FROM client_epochs WHERE id=?", (epoch,)).fetchone()[0]
         return {"id": epoch.hex(), "state": state}
-    (open_count,) = conn.execute("SELECT COUNT(*) FROM client_epochs WHERE principal=? AND state='OPEN'",
-                                 (principal,)).fetchone()
+    open_count, total = conn.execute(
+        "SELECT COALESCE(SUM(state='OPEN'),0), COUNT(*) FROM client_epochs WHERE principal=?",
+        (principal,)).fetchone()
     if open_count >= MAX_OPEN_EPOCHS_PER_PRINCIPAL:
         raise no_capacity("open_epochs", 429, retry_after_ms=1000)
+    if total >= cfg.max_epochs_per_principal:
+        total -= _prune_epochs(conn, cfg)
+        if total >= cfg.max_epochs_per_principal:
+            raise no_capacity("epochs", 429, retry_after_ms=60000)
+    budget.room(conn, cfg)
     epoch = os.urandom(16)
     conn.execute("INSERT INTO client_epochs(id,principal,state,created_utc_ms) VALUES(?,?,'OPEN',?)",
                  (epoch, principal, now_ms()))
     conn.execute("INSERT INTO meta(key,value) VALUES(?,?)", (key, want + epoch))
     return {"id": epoch.hex(), "state": "OPEN"}
+
+
+def _prune_epochs(conn: sqlite3.Connection, cfg: Settings) -> int:
+    """Drops closed epochs that no operation refers to once past retention, with their
+    idempotency record. An epoch that has operations is history and stays (S7-D15)."""
+    old = conn.execute(
+        "SELECT id FROM client_epochs e WHERE state='CLOSED' AND closed_utc_ms<=? AND NOT EXISTS "
+        "(SELECT 1 FROM operations o WHERE o.client_epoch=e.id) ORDER BY closed_utc_ms LIMIT 64",
+        (now_ms() - cfg.epoch_retention_ms,)).fetchall()
+    for (epoch,) in old:
+        conn.execute("DELETE FROM meta WHERE key LIKE 'epoch-open:%' AND substr(value,17)=?", (epoch,))
+        conn.execute("DELETE FROM client_epochs WHERE id=?", (epoch,))
+    return len(old)
 
 
 def close_epoch(conn: sqlite3.Connection, principal: str, epoch: bytes) -> dict[str, str]:
@@ -112,15 +132,7 @@ class Submission:
     latest_key: str | None = None  # set for LATEST: coalesce_key (u63 string)
 
 
-def _storage_room(conn: sqlite3.Connection, cfg: Settings, db_path: str) -> None:
-    pages = conn.execute("PRAGMA page_count").fetchone()[0] * conn.execute("PRAGMA page_size").fetchone()[0]
-    if pages >= cfg.max_db_bytes:
-        raise no_capacity("db_bytes")
-    if shutil.disk_usage(os.path.dirname(os.path.abspath(db_path))).free < cfg.free_reserve_bytes:
-        raise no_capacity("disk_free")
-
-
-def accept(conn: sqlite3.Connection, cfg: Settings, db_path: str, sub: Submission,
+def accept(conn: sqlite3.Connection, cfg: Settings, sub: Submission,
            precheck: Callable[[sqlite3.Connection], None] | None = None) -> tuple[dict[str, Any], bool]:
     """Returns (operation view, created). created=False is an idempotent replay: nothing was
     written, so nothing is re-sent."""
@@ -145,7 +157,8 @@ def accept(conn: sqlite3.Connection, cfg: Settings, db_path: str, sub: Submissio
     open_ops = conn.execute(f"SELECT COUNT(*) FROM operations WHERE {_UNFINISHED}").fetchone()[0]
     if open_ops >= cfg.max_open_operations:
         raise no_capacity("open_operations", 429, retry_after_ms=1000)
-    _storage_room(conn, cfg, db_path)
+    journal.check_reserve(conn, cfg, open_ops)  # every open op keeps room for its progress/terminal events
+    budget.room(conn, cfg)
     op_id = os.urandom(16)
     conn.execute(
         "INSERT INTO operations(id,principal,domain,type,client_epoch,idempotency_key,request_hash,"
@@ -161,14 +174,29 @@ def accept(conn: sqlite3.Connection, cfg: Settings, db_path: str, sub: Submissio
 
 
 def operation_event(conn: sqlite3.Connection, cfg: Settings, op_id: bytes, domain: bytes,
-                    critical: bool, kind: str, admission: bool = False) -> None:
-    """HOST_COMMITTED is the Host's own DB evidence (assurance SELF_REPORTED); it says nothing
-    about the mesh."""
-    state, outcome = conn.execute("SELECT state,outcome FROM operations WHERE id=?", (op_id,)).fetchone()
+                    critical: bool, kind: str, admission: bool = False,
+                    evidence: dict[str, Any] | None = None) -> None:
+    """One OPERATION_UPDATE event. Host-generated evidence (HOST_COMMITTED, cancel, ...) is the
+    Host's own DB fact (SELF_REPORTED). Evidence handed in by the bridge is never re-labelled: the
+    event carries it verbatim inside a HOST_RECORDED wrapper (S7-D24).
+
+    Each operation may use at most cfg.op_event_reserve events: progress events beyond that are
+    coalesced (the operation row keeps every evidence entry), the terminal event is always kept
+    (S7-D14)."""
+    state, outcome, message_id = conn.execute(
+        "SELECT state,outcome,message_id FROM operations WHERE id=?", (op_id,)).fetchone()
+    if not admission:
+        used = conn.execute("SELECT COUNT(*) FROM events WHERE operation=?", (op_id,)).fetchone()[0]
+        if used >= cfg.op_event_reserve - (0 if state == "FINAL" else 1):
+            return
+    details: dict[str, Any] = {"operation_id": op_id.hex(), "state": state, "outcome": outcome}
+    if evidence is not None:
+        details["recorded_evidence"] = evidence
+        kind = "HOST_RECORDED"
     journal.append(conn, cfg, domain, "OPERATION_UPDATE", critical, {"evidence": {
-        "kind": kind, "assurance": "SELF_REPORTED",
-        "details": {"operation_id": op_id.hex(), "state": state, "outcome": outcome}}},
-        operation=op_id, admission=admission)
+        "kind": kind, "assurance": "SELF_REPORTED", "details": details}},
+        operation=op_id, message_id=bytes(message_id) if message_id is not None else None,
+        admission=admission)
 
 
 def _supersede_unsent(conn: sqlite3.Connection, cfg: Settings, sub: Submission, new_id: bytes) -> None:

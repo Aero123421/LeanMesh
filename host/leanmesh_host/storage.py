@@ -16,6 +16,7 @@ import os
 import queue
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -50,6 +51,8 @@ class StorageThread:
         self._queue: queue.Queue[object] = queue.Queue(maxsize=max_queue)
         self._thread: threading.Thread | None = None
         self._lock_fd: int | None = None
+        self._closing = False  # set by stop(): no new work is accepted
+        self._sentinel_queued = False
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
         self.journal_id: bytes = b""
@@ -79,17 +82,33 @@ class StorageThread:
             raise StorageFault(str(self._start_error)) from self._start_error
 
     def stop(self, timeout_s: float = 10.0) -> None:
-        """Stops accepting work, drains queued transactions, checkpoints and closes."""
+        """Stops accepting work, drains queued transactions, checkpoints and closes.
+
+        The singleton lock is released only after the thread has really exited. When it has not
+        (a stuck transaction, a full queue that does not drain) this raises StorageFault and keeps
+        the lock: another process must not open a database this one may still commit to.
+        """
         if self._thread is None:
             return
-        self._queue.put(_SENTINEL)
-        self._thread.join(timeout_s)
+        self._closing = True
+        deadline = time.monotonic() + timeout_s
+        if not self._sentinel_queued:
+            try:
+                self._queue.put(_SENTINEL, timeout=timeout_s)
+            except queue.Full:
+                raise StorageFault("storage queue did not drain; lock kept") from None
+            self._sentinel_queued = True
+        self._thread.join(max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            raise StorageFault("storage thread did not stop in time; lock kept")
         self._thread = None
         self._release_lock()
 
     # ---- work submission -------------------------------------------------------------------
     def submit(self, fn: Callable[[sqlite3.Connection], T]) -> concurrent.futures.Future[T]:
         """Queues fn(conn) to run in its own transaction. Raises StorageBusy when full."""
+        if self._closing:
+            raise StorageBusy("storage is shutting down")
         fut: concurrent.futures.Future[T] = concurrent.futures.Future()
         try:
             self._queue.put_nowait((fn, fut))

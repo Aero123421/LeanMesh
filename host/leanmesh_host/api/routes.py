@@ -61,7 +61,7 @@ async def open_epoch(body: EpochRequest, request: Request, idempotency_key: Idem
     key = _idem(idempotency_key)
 
     def open_(conn: sqlite3.Connection) -> dict[str, str]:
-        return ops.open_epoch(conn, p.id, key, body.request_id)
+        return ops.open_epoch(conn, _hub(request).cfg, p.id, key, body.request_id)
 
     return await _hub(request).write(open_)
 
@@ -81,18 +81,12 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
     payload = body.payload()
     if len(payload) > (MAX_OBJECT_BYTES if body.object_transfer else MAX_MESSAGE_BYTES):
         raise ApiError(413, "PAYLOAD_TOO_LARGE", "payload exceeds the message limit")
-    if body.object_transfer and "OBJECT_4K" not in hub.capabilities:
-        raise ApiError(503, "UNSUPPORTED", "object transfer is not enabled", required_capability="OBJECT_4K")
     dest = body.destination
     if isinstance(dest, DestGroup):
         # Group registry, snapshots and per-target fan-out arrive with the GROUP slice.
         raise ApiError(503, "UNSUPPORTED", "group destinations are not available",
                        required_capability="GROUP_FANOUT_V2")
-    expiry = None
-    if isinstance(body.deadline, DeadlineUtc):
-        expiry = body.deadline.expiry_ms()
-        if expiry <= journal.now_ms():
-            raise ApiError(400, "EXPIRED", "deadline is already in the past")
+    expiry = body.deadline.expiry_ms() if isinstance(body.deadline, DeadlineUtc) else None
     domain = codec.hex_bytes(body.domain_id, 16)
     target = bytes.fromhex(dest.device_id) if isinstance(dest, DestNode) else None
     request_doc, digest = _dump(body, "payload_b64")
@@ -104,13 +98,19 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
         latest_key=body.coalesce_key if body.queue_mode == "LATEST" else None)
 
     def precheck(conn: sqlite3.Connection) -> None:
+        # Mutable admission state: checked for NEW operations only. An exact retry after a lost
+        # response returns the stored operation even if the root or the clock moved on (S7-D8).
+        if body.object_transfer and "OBJECT_4K" not in hub.capabilities:
+            raise ApiError(503, "UNSUPPORTED", "object transfer is not enabled", required_capability="OBJECT_4K")
+        if expiry is not None and expiry <= journal.now_ms():
+            raise ApiError(400, "EXPIRED", "deadline is already in the past")
         if target is not None and conn.execute("SELECT 1 FROM nodes WHERE domain=? AND device=?",
                                                (domain, target)).fetchone() is None:
             raise ApiError(404, "NOT_FOUND", "destination node not found")
 
     def accept(conn: sqlite3.Connection) -> dict[str, Any]:
         # Replay (same key + same request) returns the stored operation and writes nothing.
-        return ops.accept(conn, hub.cfg, str(hub.storage.db_path), sub, precheck)[0]
+        return ops.accept(conn, hub.cfg, sub, precheck)[0]
 
     return await hub.write(accept)
 
@@ -122,9 +122,6 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
     hub = _hub(request)
     need_all(p, body.permissions())
     rule = CONTROL_RULES[body.type]
-    if rule.capability and not hub.capabilities.intersection(rule.capability):
-        raise ApiError(503, "UNSUPPORTED", "control type needs a capability the root has not enabled",
-                       required_capability=rule.capability[0])
     domain = codec.hex_bytes(body.domain_id, 16)
     request_doc, digest = _dump(body, "signed_cbor_b64")
     signed = codec.decode_b64(body.signed_cbor_b64) if body.signed_cbor_b64 else None
@@ -138,6 +135,9 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
         payload=signed, target=target, expiry_utc_ms=None, critical=True)
 
     def precheck(conn: sqlite3.Connection) -> None:
+        if rule.capability and not hub.capabilities.intersection(rule.capability):  # new operations only (S7-D8)
+            raise ApiError(503, "UNSUPPORTED", "control type needs a capability the root has not enabled",
+                           required_capability=rule.capability[0])
         current = None
         if body.type == "POLICY_SET":
             current = conn.execute("SELECT policy_revision FROM domains WHERE id=?", (domain,)).fetchone()[0]
@@ -150,7 +150,7 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
 
     def accept(conn: sqlite3.Connection) -> dict[str, Any]:
         # Replay (same key + same request) returns the stored operation and writes nothing.
-        return ops.accept(conn, hub.cfg, str(hub.storage.db_path), sub, precheck)[0]
+        return ops.accept(conn, hub.cfg, sub, precheck)[0]
 
     return await hub.write(accept)
 
@@ -296,7 +296,7 @@ async def ack_consumer(name: str, body: ConsumerAck, request: Request,
     sequence = codec.parse_u63(body.sequence)
 
     def ack(conn: sqlite3.Connection) -> dict[str, Any]:
-        page = journal.ack(conn, p.id, name, domain, body.journal_id, sequence)
+        page = journal.ack(conn, hub.cfg, p.id, name, domain, body.journal_id, sequence)
         journal.prune_acknowledged(conn, hub.cfg)
         return page
 

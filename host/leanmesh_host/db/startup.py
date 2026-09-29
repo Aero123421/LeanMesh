@@ -8,6 +8,7 @@ an older backup has a lower counter/sequence, or another journal id. Then the Ho
   * turns every unfinished operation into INDETERMINATE + quarantined outbox: after a restore the
     Host cannot know what the lost run already sent, so it never re-sends blindly,
   * appends a critical HOST_DB_ROLLBACK event per domain.
+A floor file that exists but is truncated/garbage is quarantined like a rollback (S7-D13).
 Without a floor file (first start, or the sidecar lost too) a rollback cannot be detected: that is
 stated, not hidden. The root/fleet high-water comparison belongs to the serial bridge (S13).
 """
@@ -36,22 +37,31 @@ class Floor:
     boot_counter: int
 
 
+class FloorUnreadable(Exception):
+    """The floor file exists but is not a floor record (truncated, garbage): not a first start."""
+
+
 class FloorFile:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._fd: int | None = None
 
     def read(self) -> Floor | None:
+        """None only when the file does not exist (first start). Any other read error propagates
+        (fail closed); a file of the wrong size raises FloorUnreadable."""
         try:
             raw = self._path.read_bytes()
         except FileNotFoundError:
             return None
-        return Floor(*_FLOOR.unpack(raw)) if len(raw) == _FLOOR.size else None
+        if len(raw) != _FLOOR.size:
+            raise FloorUnreadable(f"{self._path} has {len(raw)} bytes, expected {_FLOOR.size}")
+        return Floor(*_FLOOR.unpack(raw))
 
     def write(self, floor: Floor, sync: bool = False) -> None:
         if self._fd is None:
             self._fd = os.open(self._path, os.O_WRONLY | os.O_CREAT, 0o600)
         os.pwrite(self._fd, _FLOOR.pack(floor.journal_id, floor.max_sequence, floor.boot_counter), 0)
+        os.ftruncate(self._fd, _FLOOR.size)  # a repaired file must not keep stale trailing bytes
         if sync:
             os.fsync(self._fd)
 
@@ -79,9 +89,12 @@ def set_fault(conn: sqlite3.Connection, code: str, detail: dict[str, Any]) -> No
         (code, now_ms(), now_ms(), canonical_json(detail)))
 
 
-def recover(conn: sqlite3.Connection, cfg: Settings, floor: Floor | None) -> str | None:
-    """One transaction at start. Returns the rollback reason when one was detected."""
-    reason = None
+def recover(conn: sqlite3.Connection, cfg: Settings, floor: Floor | None,
+            floor_unreadable: bool = False) -> str | None:
+    """One transaction at start. Returns the rollback reason when one was detected. A floor file
+    that exists but cannot be parsed is treated as a possible rollback (quarantine), never as a
+    first start."""
+    reason = "floor_unreadable" if floor_unreadable else None
     now = current_floor(conn)
     if floor is not None:
         if floor.journal_id != now.journal_id:

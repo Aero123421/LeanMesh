@@ -21,12 +21,23 @@ class Settings:
     serial_device: str | None = None
     # Capacity (docs/11 §7). Tests shrink these to reach the limits with a few requests.
     max_events: int = 1_000_000
-    event_margin: int = 1000  # progress events of already accepted operations may exceed max_events
+    # Progress events of accepted operations may exceed max_events by this margin. Admission keeps
+    # op_event_reserve slots free per open operation, so the margin must cover
+    # max_open_operations * op_event_reserve (S7-D14).
+    event_margin: int = 4096 * 4
+    op_event_reserve: int = 4  # journal events one operation may ever use: HOST_COMMITTED, progress, terminal
     max_open_operations: int = 4096
     max_db_bytes: int = 1 << 30
     free_reserve_bytes: int = 128 << 20
     event_retention_ms: int = 7 * 24 * 3600 * 1000  # acknowledged events are kept this long
-    max_page_count: int | None = None  # SQLite hard page limit (real SQLITE_FULL in tests)
+    # SQLite hard page limit: 25 % above the soft max_db_bytes budget, so a transaction that slips
+    # past the soft check fails with SQLITE_FULL (-> 507), never fills the disk (S7-D15).
+    max_page_count: int | None = (1 << 30) * 5 // 4 // 4096
+    max_epochs_per_principal: int = 1024  # open + closed epochs kept per principal
+    epoch_retention_ms: int = 24 * 3600 * 1000  # closed epochs without operations are dropped after this
+    max_consumers: int = 64
+    max_consumers_per_principal: int = 8
+    consumer_lease_ms: int = 7 * 24 * 3600 * 1000  # every ACK renews it; an expired consumer pins nothing
     max_subscribers: int = 64  # long-poll waiters + SSE streams
 
     @staticmethod

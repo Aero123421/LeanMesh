@@ -22,6 +22,7 @@ from typing import Any
 
 from ..api.codec import U63_MAX, canonical_json, encode_b64
 from ..api.errors import ApiError, invalid, no_capacity
+from ..db import budget
 from ..settings import Settings
 
 _CURSOR = re.compile(r"^([0-9a-f]{32}):([0-9]+)$")
@@ -119,14 +120,20 @@ def _compact_noncritical(conn: sqlite3.Connection) -> None:
 
 
 def _min_ack(conn: sqlite3.Connection, domain: bytes) -> int | None:
-    row = conn.execute("SELECT MIN(ack_sequence), COUNT(*) FROM consumers WHERE domain=?",
-                       (domain,)).fetchone()
-    return row[0] if row[1] else None  # no consumer: nothing is acknowledged
+    """Only live consumers pin the journal: enabled principal and an unexpired lease (S7-D16)."""
+    row = conn.execute(
+        "SELECT MIN(c.ack_sequence), COUNT(*) FROM consumers c JOIN principals p ON p.id=c.principal "
+        "WHERE c.domain=? AND p.enabled=1 AND (c.lease_expires_utc_ms IS NULL OR c.lease_expires_utc_ms>?)",
+        (domain, now_ms())).fetchone()
+    return row[0] if row[1] else None  # no live consumer: nothing is acknowledged
 
 
 def _delete_acknowledged(conn: sqlite3.Connection, retention_ms: int) -> None:
-    """Prefix deletion of events every consumer of the domain has acknowledged."""
+    """Prefix deletion of events every live consumer of the domain has acknowledged. The inbox
+    dedup rows of deleted MESSAGE_RECEIVED events go with them (S7-D15)."""
     cutoff = now_ms() - retention_ms
+    conn.execute("DELETE FROM consumers WHERE lease_expires_utc_ms IS NOT NULL AND lease_expires_utc_ms<=?",
+                 (now_ms(),))
     for (raw,) in conn.execute("SELECT DISTINCT domain FROM consumers").fetchall():
         domain = bytes(raw)
         ack = _min_ack(conn, domain)
@@ -137,8 +144,26 @@ def _delete_acknowledged(conn: sqlite3.Connection, retention_ms: int) -> None:
             "AND created_utc_ms<=? ORDER BY sequence LIMIT ?)",
             (domain, ack, cutoff, _PRUNE_BATCH)).fetchone()[0]
         if last is not None:
+            for origin, message_id, body in conn.execute(
+                    "SELECT origin,message_id,payload_json FROM events WHERE domain=? AND sequence<=? "
+                    "AND kind='MESSAGE_RECEIVED'", (domain, last)).fetchall():
+                conn.execute("DELETE FROM inbox WHERE domain=? AND origin=? AND assignment_generation=? "
+                             "AND message_id=?", (domain, origin, int(json.loads(body)["assignment_generation"]),
+                                                  message_id))
             conn.execute("DELETE FROM events WHERE domain=? AND sequence<=?", (domain, last))
             _set_purged(conn, domain, last)
+
+
+def check_reserve(conn: sqlite3.Connection, cfg: Settings, open_ops: int | None = None) -> None:
+    """An admission (operation or inbox commit) is refused unless every open operation, the new
+    one included, can still journal its progress and terminal events (S7-D14). Each operation may
+    use at most cfg.op_event_reserve events (see db/ops.operation_event), so this bound holds."""
+    if open_ops is None:
+        open_ops = conn.execute("SELECT COUNT(*) FROM operations WHERE state!='FINAL'").fetchone()[0]
+    need = cfg.op_event_reserve * (open_ops + 1)
+    hard = cfg.max_events + cfg.event_margin
+    if max_sequence(conn) + need > hard and _count(conn) + need > hard:  # seq >= rows: cheap common case
+        raise no_capacity("event_reserve")
 
 
 def append(conn: sqlite3.Connection, cfg: Settings, domain: bytes, kind: str, critical: bool,
@@ -197,9 +222,10 @@ def _require_domain(conn: sqlite3.Connection, domain: bytes) -> None:
 
 
 # ---- consumer ACK -------------------------------------------------------------------------------
-def ack(conn: sqlite3.Connection, principal: str, name: str, domain: bytes, journal_hex: str,
-        sequence: int) -> dict[str, Any]:
-    """Monotonic, idempotent. Owner = the (principal, name) primary key. Rejects a foreign journal
+def ack(conn: sqlite3.Connection, cfg: Settings, principal: str, name: str, domain: bytes,
+        journal_hex: str, sequence: int) -> dict[str, Any]:
+    """Monotonic, idempotent. Owner = the (principal, name) primary key; every ACK renews the
+    consumer's lease, a consumer that stops acknowledging expires. Rejects a foreign journal
     (410) and a position the journal never reached (409): a future ACK would let the Host delete
     events nobody has read."""
     _require_domain(conn, domain)
@@ -209,11 +235,22 @@ def ack(conn: sqlite3.Connection, principal: str, name: str, domain: bytes, jour
     if sequence > max(top or 0, _purged(conn, domain)):
         raise ApiError(409, "CONFLICT", "acknowledgement is ahead of the journal",
                        latest_cursor=cursor_text(conn, max(top or 0, _purged(conn, domain))))
+    known = conn.execute("SELECT 1 FROM consumers WHERE principal=? AND name=? AND domain=?",
+                         (principal, name, domain)).fetchone()
+    if known is None:  # implicit registration is bounded: per principal and globally (S7-D16)
+        conn.execute("DELETE FROM consumers WHERE lease_expires_utc_ms IS NOT NULL AND lease_expires_utc_ms<=?",
+                     (now_ms(),))
+        mine, total = conn.execute("SELECT COALESCE(SUM(principal=?),0), COUNT(*) FROM consumers",
+                                   (principal,)).fetchone()
+        if mine >= cfg.max_consumers_per_principal or total >= cfg.max_consumers:
+            raise no_capacity("consumers", 429, retry_after_ms=60000)
+        budget.room(conn, cfg)
     conn.execute(
-        "INSERT INTO consumers(principal,name,domain,journal_id,ack_sequence) VALUES(?,?,?,?,?) "
-        "ON CONFLICT(principal,name,domain) DO UPDATE SET ack_sequence=max(ack_sequence, excluded.ack_sequence), "
-        "journal_id=excluded.journal_id",
-        (principal, name, domain, bytes.fromhex(journal_hex), sequence))
+        "INSERT INTO consumers(principal,name,domain,journal_id,ack_sequence,lease_expires_utc_ms) "
+        "VALUES(?,?,?,?,?,?) ON CONFLICT(principal,name,domain) DO UPDATE SET "
+        "ack_sequence=max(ack_sequence, excluded.ack_sequence), journal_id=excluded.journal_id, "
+        "lease_expires_utc_ms=excluded.lease_expires_utc_ms",
+        (principal, name, domain, bytes.fromhex(journal_hex), sequence, now_ms() + cfg.consumer_lease_ms))
     current = conn.execute("SELECT ack_sequence FROM consumers WHERE principal=? AND name=? AND domain=?",
                            (principal, name, domain)).fetchone()[0]
     return {"events": [], "next_cursor": cursor_text(conn, current),
@@ -251,6 +288,8 @@ def ingest(conn: sqlite3.Connection, cfg: Settings, domain: bytes, origin: bytes
         ev = conn.execute("SELECT sequence FROM events WHERE domain=? AND kind='MESSAGE_RECEIVED' "
                           "AND origin=? AND message_id=?", (domain, origin, message_id)).fetchone()
         return InboxCommit(cursor_text(conn, ev[0]) if ev else cursor_text(conn, 0), True)
+    check_reserve(conn, cfg)
+    budget.room(conn, cfg)
     seq = append(conn, cfg, domain, "MESSAGE_RECEIVED", True, {
         "intent_hash": intent_hash.hex(), "assignment_generation": str(assignment_generation),
         "payload_b64": encode_b64(payload), "evidence": assurance,

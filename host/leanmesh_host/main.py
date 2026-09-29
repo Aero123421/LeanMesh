@@ -64,9 +64,13 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
         storage.start()
         try:
             hub = Hub(storage, settings)
-            found = floor_file.read()
+            try:
+                found, unreadable = floor_file.read(), False
+            except startup.FloorUnreadable as exc:
+                log.error("rollback floor unusable: %s", exc)
+                found, unreadable = None, True
             await storage.run(lambda conn: sync_principals(conn, principals))
-            rollback = await storage.run(lambda conn: startup.recover(conn, settings, found))
+            rollback = await storage.run(lambda conn: startup.recover(conn, settings, found, unreadable))
             if rollback:
                 log.error("database is older than the rollback floor (%s): unfinished operations "
                           "are quarantined as INDETERMINATE, epochs closed", rollback)
