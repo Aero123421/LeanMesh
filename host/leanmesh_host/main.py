@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import SPEC_VERSION
-from .api import routes
+from .api import health, routes
 from .api.deps import require
 from .api.errors import ApiError
 from .api.limits import BodyLimit, RateLimiter
@@ -129,6 +129,7 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
                   docs_url=None, redoc_url=None, openapi_url=None)  # no unauthenticated surface
     app.add_middleware(BodyLimit)
     app.include_router(routes.router)
+    app.include_router(health.router)  # [SLICE:S19]
 
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
@@ -182,7 +183,10 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
             "root_connected": hub.root_connected,
             "journal_id": hub.storage.journal_id.hex(),
             "capabilities": {
-                "build": [], "implemented": [], "qualified": [], "enabled": sorted(hub.capabilities),
+                "build": sorted(hub.feature_facts.get("build", ())),
+                "implemented": sorted(hub.feature_facts.get("implemented", ())),
+                "qualified": sorted(hub.feature_facts.get("qualified", ())),
+                "enabled": sorted(hub.capabilities),
                 "max_root_depth": 20, "max_path_hops": 40, "max_message_bytes": 512,
                 "max_object_bytes": 4096 if "OBJECT_4K" in hub.capabilities else 0,
             },

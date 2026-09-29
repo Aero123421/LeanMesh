@@ -230,6 +230,26 @@ Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
         l.man_.domain != l.load_domain_) {
         return Status::RecoveryRequired; // unreadable, or another domain's ledger
     }
+    // [S18] A RootHandover that named this root the old one retired it for good (docs/21 §8).
+    rec.id = store::rec::root_handover;
+    st = store::record_load(env.store, rec);
+    if (st != Status::NotFound) {
+        LM_TRY(st);
+        l.retired_ = true;
+    }
+    // [S18] The budget record of the last commissioning window (docs/21 §2: counted by durable reservations).
+    rec.id = store::rec::commissioning_window;
+    st = store::record_load(env.store, rec);
+    l.window_rec_used_ = 0;
+    l.window_rec_id_ = {};
+    if (st != Status::NotFound) {
+        LM_TRY(st);
+        if (rec.payload_len != 17) {
+            return Status::RecoveryRequired;
+        }
+        std::copy_n(rec.payload.begin(), 16, l.window_rec_id_.begin());
+        l.window_rec_used_ = rec.payload[16];
+    }
     for (std::size_t i = 0; i < k_ledger_slots; ++i) {
         rec.id = static_cast<uint16_t>(k_rec_ledger_base + i);
         st = store::record_load(env.store, rec);
@@ -255,29 +275,43 @@ Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
     return Status::Ok;
 }
 
-// Worker. The fleet-signed ticket names this device, its credential and this root's delegation;
-// only initial assignments exist in this slice (source domain zero, expected-old 0), and only mode 1 (SEC-D4a:
-// a mode-0 ticket is bound to a device nonce whose freshness nobody here can judge yet).
+// Worker. The fleet-signed ticket names this device, its credential and this root's delegation. An initial
+// assignment comes from no domain (expected-old 0); a transfer (docs/07 §8) from another one. Mode 1 is a one-time
+// grant (consumed by generation, SEC-D4); mode 0 is bound to the nonce the device issued and presents in its
+// authenticated JoinRequest (S18: the device exports it, lm_transfer_nonce_get). [S18] The object may instead be the
+// fleet's RootHandover naming this root the new one: this ledger's own member asks for its credential again.
 Status Ledger::verify_ticket_job(port::JobEnv & /*env*/, void *arg) {
     auto &l = *static_cast<Ledger *>(arg);
     VerifyArgs &v = l.vargs_;
     member::Envelope env;
     ByteView data;
+    if (member::peek_signed(v.ticket_cose, member::k_type_root_handover, env, data) == Status::Ok) {
+        member::RootHandover h;
+        LM_TRY(member::open_signed(v.ticket_cose, v.trust.key, member::k_type_root_handover, env, data));
+        LM_TRY(member::decode_handover(data, h));
+        if (env.domain != v.delegation.domain || h.new_root != v.delegation.root ||
+            h.new_delegation_hash != v.delegation_hash || h.new_generation != v.delegation.generation ||
+            h.new_term != v.term) {
+            return Status::NetworkMismatch; // a handover to another root, delegation or term
+        }
+        v.out.kind = 2;
+        return sec::sha256(v.ticket_cose, v.out.grant);
+    }
     LM_TRY(member::open_signed(v.ticket_cose, v.trust.key, member::k_type_assignment_ticket, env, data));
     member::AssignmentTicket t;
     LM_TRY(member::decode_assignment_ticket(data, t));
-    if (t.fleet != v.trust.fleet || env.domain != t.target || t.target != v.delegation.domain) {
+    if (t.fleet != v.trust.fleet || env.domain != t.target || t.target != v.delegation.domain ||
+        t.source == v.delegation.domain) {
         return Status::NetworkMismatch;
     }
     if (t.device != v.device || t.device_credential_hash != v.dc_hash ||
-        t.root_delegation_hash != v.delegation_hash || t.new_generation <= t.expected_old) {
-        return Status::AuthRejected;
-    }
-    if (!t.source.is_zero() || t.expected_old != 0 || t.mode != 1) {
-        return Status::Unsupported; // signed replacement (transfer) is the lifecycle slice's; mode 0: SEC-D4a
+        t.root_delegation_hash != v.delegation_hash || t.new_generation <= t.expected_old ||
+        (t.source.is_zero() != (t.expected_old == 0)) || (t.mode == 0 && t.nonce != v.nonce)) {
+        return Status::AuthRejected; // mode 0: not the nonce the device vouched for in this very request
     }
     v.out.new_generation = t.new_generation;
     v.out.mode = t.mode;
+    v.out.kind = t.source.is_zero() ? 0 : 1;
     return sec::sha256(v.ticket_cose, v.out.grant);
 }
 
@@ -306,6 +340,7 @@ void Ledger::on_identity_ready(MonoTime now) {
     load_pending_ = false;
     man_ = Manifest{};
     man_dirty_ = false;
+    retired_ = false;
     load_domain_ = engine_.identity().delegation().domain; // the job reads only its own copies
     if (submit(Step::LoadAll, JobClass::Flash, &load_all_job, this) != Status::Ok) {
         release(-2);
@@ -341,14 +376,19 @@ void Ledger::stop() {
     }
     loaded_ = false;
     exp_active_ = false;
+    renew_mask_ = 0;
+    lc_.active = false;
+    window_set_ = false;
+    notice_until_ = MonoTime::never();
     leave_pending_ = abort_pending_ = load_pending_ = confirm_pending_ = false;
     maint_retry_ = MonoTime::never();
 }
 
 // ---- hooks ----
 bool Ledger::responder_open() const {
-    if (!loaded_ || failed_ || mode_ == JoinMode::Closed || !engine_.identity().is_member()) {
-        return false;
+    if (!loaded_ || failed_ || retired_ || !engine_.identity().is_member() ||
+        (mode_ == JoinMode::Closed && !window_open(engine_.step_time()))) {
+        return false; // [S18] a CLOSED root admits during a commissioning window only
     }
     return std::any_of(txns_.begin(), txns_.end(), [](const Txn &t) { return t.state == TxnState::Free; });
 }
@@ -357,7 +397,7 @@ bool Ledger::responder_open() const {
 // ACTIVE entry of exactly this device with the credential's address, assignment and membership. A credential
 // the ledger does not list was never issued by this ledger or outlived it (left, aborted, reused slot).
 bool Ledger::link_admit(const DeviceId &device, const member::MemberCredential &mc) const {
-    if (!loaded_ || failed_) {
+    if (!loaded_ || failed_ || retired_) {
         return false;
     }
     const Entry *e = find(device);
@@ -513,6 +553,22 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
     case Step::CommitExpectedDone:
         expected_step_done(step, s, now);
         return;
+    case Step::RenewLoad: // [S18]
+    case Step::RenewSign:
+        renew_step(step, s, now);
+        return;
+    case Step::LcVerify: // [S18]
+    case Step::LcFloors:
+    case Step::LcEntry:
+    case Step::LcRetire:
+    case Step::LcWindow:
+        lc_step(step, s, now);
+        return;
+    case Step::WindowReserve: // [S18]
+        if (t != nullptr && t->state == TxnState::Preparing) {
+            window_reserved(*t, s, now);
+        }
+        return;
     case Step::None:
         return;
     }
@@ -520,7 +576,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
 
 // ---- timers ----
 MonoTime Ledger::deadline() const {
-    MonoTime next = maint_retry_;
+    MonoTime next = earliest(maint_retry_, notice_until_);
     for (const Txn &t : txns_) {
         if (t.state != TxnState::Free) {
             next = earliest(next, earliest(t.deadline, earliest(t.retry_at, t.pipe.deadline())));
@@ -568,6 +624,10 @@ void Ledger::on_timer(MonoTime now) {
         }
     }
     abort_expired(now);
+    if (now >= notice_until_) { // [S18] the revoked member's notice had its chance: its sessions end now
+        notice_until_ = MonoTime::never();
+        forget_member(notice_device_, notice_addr_);
+    }
     if (maint_retry_ != MonoTime::never() && now >= maint_retry_) {
         maint_retry_ = MonoTime::never();
         maintenance(now);
@@ -661,7 +721,20 @@ void Ledger::maintenance(MonoTime now) {
         }
         return;
     }
+    if (renew_mask_ != 0) { // [S18] last: renewals never delay a durable ledger change
+        start_renew(now);
+        return;
+    }
     release(-2);
+}
+
+void Ledger::set_entry(std::size_t slot, const Entry &e) {
+    const Entry &old = entries_[slot];
+    if (old.state != EntryState::Free && old.device != e.device) {
+        forget_member(old.device, old.address);
+        engine_.delivery().invalidate_routes();
+    }
+    entries_[slot] = e;
 }
 
 void Ledger::mark_used(std::size_t slot) {

@@ -102,21 +102,19 @@ void Delivery::forward(const link::RxInfo &info, wire::RouteHeader &h, ByteView 
             note_accepted(info.src, info.counter);
         }
     };
+    // FIX4-D2: a relay carries only a well-formed end record (strict header decode, the same as the destination's):
+    // a malformed one gets no buffer and no ACK Accepted, whatever its length.
     wire::EndHeader eh;
     ByteView sealed;
-    if (wire::decode_end_record(record, eh, sealed) != Status::Ok && record.size() < wire::k_end_header_bytes) {
+    if (wire::decode_end_record(record, eh, sealed) != Status::Ok) {
         answer(A::Rejected, 0);
         return;
     }
     // A frame that is provably past its deadline is not carried further (uncertain time is).
-    if (record.size() >= wire::k_end_header_bytes) {
-        Reader r{record.subspan(32, 8)};
-        const uint64_t expires = r.u64be();
-        if (expires != 0 && deadline_state(expires, h.root_term) == DeadlineCheck::After) {
-            ++stats_.expired;
-            answer(A::Rejected, 0);
-            return;
-        }
+    if (eh.expires_root_ms != 0 && deadline_state(eh.expires_root_ms, h.root_term) == DeadlineCheck::After) {
+        ++stats_.expired;
+        answer(A::Rejected, 0);
+        return;
     }
     link::Neighbor *nb = neighbor_at(h.path[h.next_index]);
     if (nb == nullptr) {
@@ -145,6 +143,8 @@ void Delivery::forward(const link::RxInfo &info, wire::RouteHeader &h, ByteView 
         answer(A::Rejected, 0);
         return;
     }
+    f->expires_root_ms = eh.expires_root_ms; // FIX4-D1: checked again before every hand-off and retry
+    f->term = h.root_term;
     ++stats_.rx_forward;
     answer(A::Accepted, 0);
     hop_.submit(fh, OwnerKind::Forward, Handle{}, nb->mac, now);

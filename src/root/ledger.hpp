@@ -55,7 +55,9 @@ inline constexpr uint32_t k_tag_ledger = 0x4A520000;      // "JR"+i: the root's 
 inline constexpr uint32_t k_tag_offer = 0x4A4F0000;       // "JO": the discovery offer (broadcast)
 inline constexpr Duration k_reservation = Duration::from_ms(120000); // registry/defaults prepared_timeout_ms
 inline constexpr Duration k_approval_timeout = Duration::from_ms(300000);
-inline constexpr Duration k_member_lease = Duration::from_s(15 * 60); // docs/06 §7 (renewal: mesh slice)
+inline constexpr Duration k_member_lease = Duration::from_s(15 * 60); // docs/06 §7: at most 15 min
+inline constexpr Duration k_renew_before = Duration::from_s(5 * 60);  // docs/06 §7: renewed after ~10 min
+inline constexpr Duration k_renew_gap = Duration::from_s(60);         // one renewal per member per READY period
 
 enum class EntryState : uint8_t { Free = 0, Expected = 1, Prepared = 2, Active = 3, Left = 4, Aborted = 5, Blocked = 6 };
 static_assert(k_ledger_slots <= 64, "the manifest's used-slot bitmap is 64 bits");
@@ -97,7 +99,8 @@ struct Entry {
     EntryState state = EntryState::Free;
     bool confirmed = false;   // Active: the device's own JOIN_ACTIVE evidence was recorded
     bool recovered = false;   // Prepared and read at boot: its reservation deadline is unknown
-    MonoTime reserved_until = MonoTime::never(); // RAM only
+    // RAM only: the reservation deadline while Prepared; while Active [S18] the earliest next renewal.
+    MonoTime reserved_until = MonoTime::never();
 };
 
 // Decision of the operator for a pending (external mode) request. Root-local command (D4).
@@ -136,7 +139,7 @@ class Ledger {
     [[nodiscard]] bool link_admit(const DeviceId &device, const member::MemberCredential &mc) const;
     // SEC-D2: can any admission be decided? Busy until the ledger is loaded, RecoveryRequired once it is lost.
     [[nodiscard]] Status admission() const {
-        return failed_ ? Status::RecoveryRequired : (loaded_ ? Status::Ok : Status::Busy);
+        return failed_ || retired_ ? Status::RecoveryRequired : (loaded_ ? Status::Ok : Status::Busy);
     }
     void session_up(const MacAddr &mac, const DeviceId &peer, const Sha256Digest &peer_dc_hash, MonoTime now);
     void discovery(const MacAddr &src, const wire::BootstrapCarrier &c, MonoTime now);
@@ -177,6 +180,22 @@ class Ledger {
     [[nodiscard]] TxnState txn_state(std::size_t i) const { return txns_[i].state; }
     // [S13] i < k_join_txns; false unless that transaction waits for the operator.
     [[nodiscard]] bool pending_join(std::size_t i, PendingJoin &out) const;
+
+    // ---- [S18] lifecycle (lifecycle.cpp) ----
+    // A member's READY names the lease of its credential (a claim about itself, over its end session). Near the
+    // end of the lease (k_renew_before) or in another term the root signs the same credential with a fresh lease
+    // and sends it back over the end session. Only an ACTIVE entry of exactly this device above every floor: a
+    // departed, revoked or unknown device is never renewed, so its credential dies with its lease (docs/06 §7).
+    void renew_due(const DeviceId &device, uint32_t term, uint64_t lease_ms, MonoTime now);
+    // A signed lifecycle object for this root (lm_install_control): RevokeObject (11: floors raised, the entry
+    // blocked, the device's sessions closed after a signed notice to it), AssignmentTicket (3: a member of this
+    // domain moved to another one: its entry is left and its generations floored, the reconciliation of docs/07 §8),
+    // CommissioningWindow (30) or RootHandover (31). Verified on the worker; completion is an OPERATION event.
+    [[nodiscard]] Status install_lifecycle(uint8_t type, ByteView signed_cose, MonoTime now, uint64_t &operation);
+    // A commissioning window admits new devices now (docs/21 §2): of this term, begun, not expired, not full.
+    [[nodiscard]] bool window_open(MonoTime now) const;
+    // RootHandover (31) named this root the old one: it acts as root no more (admits and renews nobody).
+    [[nodiscard]] bool retired() const { return retired_; }
     struct Stats {
         uint64_t requests = 0;
         uint64_t refused = 0;
@@ -187,6 +206,11 @@ class Ledger {
         uint64_t left = 0;
         uint64_t conflicts = 0;
         uint64_t busy_drops = 0;
+        uint64_t renewals = 0;      // [S18] renewed credentials handed to the control lane
+        uint64_t renew_deferred = 0; // [S18] worker, record memory or control lane busy: tried again
+        uint64_t revoked = 0;        // [S18] entries blocked by a RevokeObject
+        uint64_t reconciled = 0;     // [S18] members that moved away (a transfer ticket installed here)
+        uint64_t window_admitted = 0; // [S18] reservations made under a commissioning window
     };
     [[nodiscard]] const Stats &stats() const { return stats_; }
 
@@ -195,6 +219,9 @@ class Ledger {
         uint64_t new_generation = 0;
         uint8_t mode = 0;
         Sha256Digest grant{}; // SHA-256 of the ticket COSE
+        // [S18] 0: an initial assignment; 1: a transfer from another domain (docs/07 §8); 2: the re-issue of this
+        // ledger's own member under a RootHandover (the object in the ticket field is that handover).
+        uint8_t kind = 0;
     };
     struct Txn {
         member::JoinPipe pipe;
@@ -211,6 +238,7 @@ class Ledger {
         uint16_t slot = 0;      // ledger slot of this device
         uint8_t role = 0;
         uint8_t retry_kind_ = 0; // 1: start_prepare, 2: answer_repeat, waiting for the shared memory
+        bool windowed = false;   // [S18] admitted by the commissioning window, not by the join mode
         bool resend = false;     // answers a repeated request: no new reservation
         bool confirmed_done = false;
         uint64_t membership = 0;
@@ -240,6 +268,14 @@ class Ledger {
         CommitExpectedEntry,
         CommitExpectedDone,   // the page is marked received
         CommitManifest,
+        RenewLoad, // [S18] the entry record: the credential the renewal repeats
+        RenewSign,
+        LcVerify,  // [S18] a lifecycle object on the worker
+        LcFloors,  // [S18] revocation floors committed
+        LcEntry,   // [S18] the entry blocked / left
+        LcRetire,  // [S18] the RootHandover that retires this root, committed
+        LcWindow,  // [S18] a new commissioning window's budget record, committed
+        WindowReserve, // [S18] a windowed join's reservation counted durably before its entry commit
     };
 
     struct VerifyArgs { // copied at submit: the worker never reads owner-mutable state
@@ -249,6 +285,8 @@ class Ledger {
         DeviceId device;
         Sha256Digest dc_hash{};
         ByteView ticket_cose;
+        std::array<uint8_t, 16> nonce{}; // [S18] the JoinRequest's: a mode-0 ticket must name it (SEC-D4a)
+        RootTerm term;                   // [S18] this root's term: a RootHandover must name it
         TicketInfo out;
     };
     struct SignArgs {
@@ -285,6 +323,8 @@ class Ledger {
     void decide_policy(Txn &t, MonoTime now);
     void start_prepare(Txn &t, MonoTime now);
     void prepare_signed(Txn &t, Status s, MonoTime now);
+    void window_reserved(Txn &t, Status s, MonoTime now); // [S18]
+    [[nodiscard]] Status commit_window(Step step, uint8_t used, int holder); // [S18] rec::commissioning_window
     void prepare_committed(Txn &t, Status s, MonoTime now);
     void send_prepare(Txn &t, MonoTime now);
     void on_stored(Txn &t, ByteView data, const member::JoinObjectHeader &h, MonoTime now);
@@ -307,6 +347,9 @@ class Ledger {
     void forget_member(const DeviceId &device, ShortAddr address);
     // An entry record now exists for `slot`: the manifest must say so (committed by maintenance).
     void mark_used(std::size_t slot);
+    // `e` is now the durable entry of `slot`. When the slot changes owner (the ledger reused the address of a device
+    // that left), nothing learned about the old owner may route on (review finding 20).
+    void set_entry(std::size_t slot, const Entry &e);
     [[nodiscard]] Status commit_manifest(const Manifest &m, Step step);
     // SEC-D7: may this verified page be applied? `applied` = it is applied already (the same bytes again).
     [[nodiscard]] Status expected_admit(bool &applied);
@@ -316,6 +359,15 @@ class Ledger {
     void expected_finish(Status s);
     void confirm_loaded(Status s, MonoTime now);
     void confirm_done(MonoTime now);
+    // [S18] lifecycle.cpp
+    void start_renew(MonoTime now);
+    void renew_step(Step step, Status s, MonoTime now);
+    static Status lc_verify_job(port::JobEnv &env, void *arg);
+    void lc_step(Step step, Status s, MonoTime now);
+    void lc_verified(MonoTime now);
+    void lc_retire_entry(MonoTime now);
+    void lc_finish(Status s, MonoTime now);
+    void stop_admitting(MonoTime now);
     void send_echo(MonoTime now);
     static Status verify_expected_job(port::JobEnv &env, void *arg);
     [[nodiscard]] uint32_t hint() const;
@@ -372,6 +424,35 @@ class Ledger {
     };
     Confirm confirm_;
     bool confirm_pending_ = false;
+    uint64_t renew_mask_ = 0; // [S18] ledger slots whose credential is to be renewed (one at a time)
+    // [S18] the one lifecycle install in progress (verify job output, then the commits it makes)
+    // The decoded lifecycle object: one install at a time, so one of them (the verify job starts its lifetime).
+    union LcObject {
+        member::RevokeObject revoke;
+        member::AssignmentTicket ticket;
+        member::CommissioningWindow window;
+        member::RootHandover handover;
+        LcObject() : revoke() {}
+    };
+    struct Lifecycle {
+        bool active = false;
+        uint8_t type = 0;
+        uint64_t op = 0;
+        std::size_t len = 0; // the object, at the head of the shared credential buffer
+        LcObject obj;
+        std::size_t slot = 0;
+        EntryState to = EntryState::Free; // the entry state the install commits (Blocked / Left)
+    };
+    Lifecycle lc_;
+    member::CommissioningWindow window_; // RAM only: a root restart ends it (its times are of this boot's clock)
+    bool window_set_ = false;
+    uint8_t window_used_ = 0;              // durable: rec::commissioning_window counts the window's reservations
+    std::array<uint8_t, 16> window_rec_id_{}; // ... of the window this record holds (loaded at boot)
+    uint8_t window_rec_used_ = 0;
+    bool retired_ = false;
+    DeviceId notice_device_; // a revoked member whose sessions end once its notice had its chance
+    ShortAddr notice_addr_;
+    MonoTime notice_until_ = MonoTime::never();
     std::size_t abort_slot_ = 0;
     bool abort_pending_ = false;
     MonoTime maint_retry_ = MonoTime::never();
@@ -399,6 +480,9 @@ struct NoLedger {
     [[nodiscard]] bool link_control(const link::RxInfo &, ByteView, MonoTime) { return false; }
     void set_join_mode(JoinMode) {}
     [[nodiscard]] Status install_expected(ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
+    [[nodiscard]] Status install_lifecycle(uint8_t, ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
+    void renew_due(const DeviceId &, uint32_t, uint64_t, MonoTime) {}
+    [[nodiscard]] bool retired() const { return false; }
     [[nodiscard]] Status decide(const JoinDecision &, MonoTime) { return Status::Unsupported; }
     [[nodiscard]] bool pending_join(std::size_t, PendingJoin &) const { return false; }
 };

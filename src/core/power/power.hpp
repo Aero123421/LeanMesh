@@ -91,7 +91,7 @@ struct Stats {
     uint64_t episodes = 0, sleeps = 0, polls = 0, grants = 0, missed_windows = 0, overruns = 0;
     uint64_t wake_denied = 0, ticket_stale = 0, sessions_kept = 0, sessions_dropped = 0;
     uint64_t parked_expired = 0, polls_served = 0, polls_refused = 0, flash_commits = 0, reports_sent = 0;
-    uint64_t reports_rx = 0;
+    uint64_t reports_rx = 0, sleep_refused = 0, lock_faults = 0;
 };
 
 class Power {
@@ -121,6 +121,8 @@ class Power {
     void on_frame(const link::RxInfo &info, ByteView plain, MonoTime now); // frame kind POWER
     // An authenticated DATA frame arrived: a sleep ticket in hand is stale, and the receive window is not over.
     void note_rx(MonoTime now);
+    // The channel plan changed (PREPARE, COMMIT, ABORT, switch): a sleep ticket in hand no longer describes this node.
+    void note_state_change();
     // We sent a frame of our own (device side): its answer can come within the receive window that follows it.
     void note_uplink(MonoTime now);
     // A neighbour sent us an authenticated frame (parent side): if it is a sleepy child it is awake, and stays so
@@ -148,6 +150,11 @@ class Power {
     [[nodiscard]] bool sleepy_target(const DeviceId &dest, MonoTime now) const;
     // WAIT_WAKE (root origin): how long until the earliest possible wake of `dest`; zero when awake or unknown.
     [[nodiscard]] Duration wait_for_wake(const DeviceId &dest, MonoTime now) const;
+    // WAIT_WAKE at target level (group fan-out, FIX3-D9): the root's schedule view says `dest` is asleep until `at`
+    // (a moment before its earliest possible wake). No delivery child, no in-flight slot is needed while waiting.
+    // Unreachable: the deadline lies before that wake (the answer a unicast send gets at submit time).
+    enum class WakeWait : uint8_t { None, Wait, Unreachable };
+    [[nodiscard]] WakeWait target_wake(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now, MonoTime &at) const;
     [[nodiscard]] bool member_power(ShortAddr addr, MemberPower &out) const;
     // The root's wake estimate for a member, on the root clock (ms). quality per k_quality_*.
     [[nodiscard]] uint8_t next_wake(ShortAddr addr, uint64_t now_ms, uint64_t &earliest_ms, uint64_t &latest_ms) const;
@@ -236,11 +243,16 @@ class Power {
     void advance_budgets(MonoTime now);
     void clamp_budgets();
     void account_radio(MonoTime now);
+    void settle_boot_budgets();
+    [[nodiscard]] uint64_t off_limit() const;  // policy limits in bucket units (us, us, micro-wakes)
+    [[nodiscard]] uint64_t ext_limit() const;
+    [[nodiscard]] uint64_t wake_limit() const;
     [[nodiscard]] bool offline() const;
     [[nodiscard]] MonoTime search_due() const;
     void save_retained();
     void load_retained(const port::WakeInfo &w);
-    void set_locks();
+    void set_locks(MonoTime now);
+    [[nodiscard]] bool locks_ok() const { return (lock_have_ & lock_want_) == lock_want_; }
     void send_report(MonoTime now);
     [[nodiscard]] Status root_check_target(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) const;
 
@@ -262,7 +274,8 @@ class Power {
     SleepRequest cur_;
     port::WakeInfo pending_wake_;
     bool auto_ = false; // WINDOWED cycle: the app tasks keep running, only the radio sleeps
-    uint8_t lock_mask_ = 0;
+    uint8_t lock_want_ = 0, lock_have_ = 0; // PM locks wanted / confirmed held by the port
+    MonoTime lock_retry_ = MonoTime::never();
     int64_t sl_auth_ms_ = 0, sl_key_ms_ = 0, sl_life_ms_ = 0;
     SessionPath last_path_ = SessionPath::FreshEdhoc;
     // the ticket race
@@ -285,6 +298,9 @@ class Power {
     MonoTime acct_at_ = MonoTime::never();
     bool acct_offline_ = false;
     bool boot_grant_ = false;
+    bool settled_ = true;        // false from boot until the stored policy is known (buckets untouched meanwhile)
+    bool ret_proven_ = false;
+    uint64_t ret_elapsed_ms_ = 0;
     uint32_t search_used_ms_ = 0;
     // tables
     std::array<Child, k_children> children_{};

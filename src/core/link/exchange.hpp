@@ -68,6 +68,8 @@ struct LinkPolicy {
     Duration join_session_life =
         Duration::from_s(420);             // [S8-D1] JOIN_ONLY: approval 300 s + prepared 120 s
     Duration linger = Duration::from_s(5); // responder keeps its ACK for bind repeats (1 hop)
+    // [S18] Life of a link session admitted with a provably expired peer lease (renewal only, restricted).
+    Duration renew_window = Duration::from_s(120);
     Duration end_linger = Duration::from_s(10); // the same over a route
 };
 
@@ -86,6 +88,7 @@ struct LinkStats {
     uint64_t rx_lease_restricted = 0; // application DATA over a time-uncertain session (SEC-D3)
     uint64_t tx_lease_restricted = 0;
     uint64_t sessions_lease_expired = 0; // closed because the peer's lease is provably over (SEC-D3)
+    uint64_t renew_only = 0; // [S18] sessions admitted with a provably expired peer lease (renewal only)
     uint64_t rx_no_consumer = 0;
     uint64_t tx_sealed = 0;
     uint64_t tx_refused = 0;    // no session / refresh required
@@ -192,7 +195,7 @@ struct JoinHooks {
     // The joiner's exchange ended without a session (why != Ok).
     void (*exchange_failed)(void *ctx, Status why) = nullptr;
     // JOIN_PROXY carriers that are not an exchange object (hello / offer discovery).
-    void (*discovery)(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c) = nullptr;
+    void (*discovery)(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c, uint32_t domain_hint) = nullptr;
     // Authenticated CONTROL frame of a JOIN_ONLY session / of an ordinary link session.
     void (*join_control)(void *ctx, const RxInfo &info, ByteView plain) = nullptr;
     bool (*link_control)(void *ctx, const RxInfo &info, ByteView plain) = nullptr;
@@ -261,7 +264,7 @@ class Exchange {
     // [S8] Joiner (identity Ready, not a member): JOIN_ONLY handshake with the root at `mac`.
     // `out` receives the root's verified delegation; it must outlive the exchange (zombie rule).
     // AuthPending: not Ready / already a member. Busy/RateLimited/NoCapacity as start_initiator().
-    [[nodiscard]] Status start_join(const MacAddr &mac, JoinPeerOut *out, MonoTime now);
+    [[nodiscard]] Status start_join(const MacAddr &mac, JoinPeerOut *out, MonoTime now, bool transfer = false);
     // [S8] The 1024 B credential buffer doubles as the join modules' reassembly/object buffer while
     // the exchange is idle. While lent the exchange counts as busy (a handshake gets Busy, an
     // incoming CredI is dropped: local shortage, never RF loss). Empty view when busy.
@@ -407,6 +410,9 @@ class Exchange {
     [[nodiscard]] Status run_hs(sec::HsStep step, ByteView input = ByteView{});
     void after_verify(MonoTime now);
     [[nodiscard]] Status admit_peer(bool first, DeadlineCheck *lease = nullptr);
+    // [S18] The root admits by its ledger (SEC-D2), which a lease only approximates for everyone else: its own
+    // sessions are neither capped nor restricted by the peer's lease; a ledger change closes them.
+    [[nodiscard]] bool lease_exempt() const;
     void after_hs(MonoTime now);
     void start_hs(sec::HsRole role, ByteView msg1, MonoTime now);
     [[nodiscard]] Status stage(ObjKind kind, ByteView bytes);

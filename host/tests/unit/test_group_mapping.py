@@ -24,3 +24,80 @@ def test_tracking_is_bounded_and_marks_only_known_operations() -> None:
     assert not g.touched(1000) and not g.pending          # forgotten: no mark
     g.clear()
     assert not g._number and not g.pending
+
+
+# ---- FIX3-10: a partial root page is never reported as a complete group ----------------------------------------------
+import asyncio  # noqa: E402
+import sqlite3  # noqa: E402
+from pathlib import Path  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from leanmesh_host import storage  # noqa: E402
+from leanmesh_host.bridge import mapping  # noqa: E402
+from leanmesh_host.wire import cbor_encode  # noqa: E402
+
+_SCHEMA = Path(__file__).resolve().parents[3] / "db" / "schema.sql"
+
+
+def _page(total: int, offset: int, count: int, token: bytes = b"\x01" * 16) -> bytes:
+    targets = [{"phase": 6, "reason": 0, "outcome": 3, "device_id": bytes([offset + k + 1]) * 32,
+                "message_id": bytes(16), "assignment_generation": 1, "membership_generation": 1} for k in range(count)]
+    nxt = offset + count
+    return cbor_encode({"total": total, "offset": offset, "targets": targets,
+                        "next_offset": nxt if nxt < total else None, "snapshot_hash": b"\x02" * 32,
+                        "snapshot_token": token, "progress_revision": 3})
+
+
+class _Link:
+    def __init__(self, pages: list[bytes]) -> None:
+        self.pages, self.asked = pages, []
+
+    async def request(self, method: int, params: list) -> SimpleNamespace:
+        self.asked.append(params[3])
+        assert len(self.asked) < 20, "the Host keeps asking for pages"
+        if params[3] // 16 >= len(self.pages):
+            return SimpleNamespace(status=mapping.CONFLICT, result=None)
+        return SimpleNamespace(status=mapping.OK, result=self.pages[params[3] // 16])
+
+
+def _run(pages: list[bytes]) -> tuple[sqlite3.Connection, groups.Groups, bytes]:
+    conn = sqlite3.connect(":memory:")
+    conn.isolation_level = None
+    storage._apply_schema(conn, _SCHEMA.read_text())
+    conn.commit()
+    op = b"\x09" * 16
+
+    class _Hub:
+        async def write(self, fn):  # one transaction, like Storage.run
+            conn.execute("BEGIN")
+            try:
+                fn(conn)
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+
+    g = groups.Groups()
+    g.track(op, 7)
+    bridge = SimpleNamespace(link=_Link(pages), info=SimpleNamespace(boot=1, root=b"\xaa" * 32), hub=_Hub())
+    asyncio.run(g.sync(bridge))
+    return conn, g, op
+
+
+def test_partial_root_page_is_not_stored_as_a_complete_group() -> None:
+    # total=64, but the series ends after one target: nothing is written and the operation stays marked for a retry.
+    conn, g, op = _run([_page(64, 0, 1)])
+    assert conn.execute("SELECT COUNT(*) FROM group_targets").fetchone()[0] == 0
+    assert g.pending
+
+
+def test_series_short_of_its_total_is_not_stored_and_a_full_series_is_stored_whole() -> None:
+    conn, g, op = _run([_page(20, 0, 16)])  # next_offset = 16 but the root has no page 2
+    assert conn.execute("SELECT COUNT(*) FROM group_targets").fetchone()[0] == 0 and g.pending
+    conn, g, op = _run([_page(20, 0, 16), _page(20, 16, 4)])
+    assert conn.execute("SELECT COUNT(*) FROM group_targets").fetchone()[0] == 20 and not g.pending
+
+
+def test_pages_of_different_snapshots_are_not_mixed() -> None:
+    conn, g, op = _run([_page(20, 0, 16), _page(20, 16, 4, token=b"\x07" * 16)])
+    assert conn.execute("SELECT COUNT(*) FROM group_targets").fetchone()[0] == 0 and g.pending

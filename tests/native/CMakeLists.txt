@@ -68,3 +68,13 @@ target_compile_definitions(test_power PRIVATE LM_POWER_GOLDEN="${LM_REPO_ROOT}/t
 # CHANNEL slice (S17): time bounds, survey, PREPARE / COMMIT / recovery, freeze, rollback, persisted states.
 lm_add_test(test_channel SOURCES test_channel.cpp LABELS "integration;sim;channel;scenario")
 target_link_libraries(test_channel PRIVATE lm_fleet)
+# DIAG slice (S19): diagnostics snapshot with validity bits, capability rows, no polling.
+lm_add_test(test_diag SOURCES test_diag.cpp LABELS "integration;sim;diag;scenario")
+# OTA software part (S19): manifest check, rollback state, boot decisions, state-record power-cut sweep (sim).
+lm_add_test(test_ota SOURCES test_ota.cpp LABELS "unit;integration;store;ota;scenario")
+target_link_libraries(test_ota PRIVATE lm_fleet)
+# LIFECYCLE slice (S18): lease renewal, revocation, transfer, commissioning window, root handover (sim, hours of
+# virtual time: the soak runs longer than the default timeout).
+lm_add_test(test_lifecycle SOURCES test_lifecycle.cpp LABELS "integration;sim;lifecycle;scenario")
+target_link_libraries(test_lifecycle PRIVATE lm_fleet)
+set_tests_properties(test_lifecycle PROPERTIES TIMEOUT 900)

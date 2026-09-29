@@ -8,6 +8,7 @@
 
 #include "capi/context.hpp"
 #include "core/profile.hpp"
+#include "port/sim/sim_health.hpp"
 #include "port/sim/sim_pm.hpp"
 #include "port/sim/sim_ports.hpp"
 #include "port/sim/sim_store.hpp"
@@ -40,6 +41,8 @@ struct NodeOptions {
     // The channel module (clock, plans, recovery scan, survey) runs. Off for the tests of earlier slices, which
     // give their nodes a root clock by hand and never change the channel.
     bool channel = false;
+    // [S19] The node has a Health port (SimHealth). Off: Ports::health is null and the driver facts are unknown.
+    bool health_port = true;
 };
 
 // Counters the simulator itself observes (not device diagnostics).
@@ -81,6 +84,7 @@ class SimNode {
     SimJobs jobs;
     SimStore store;
     SimPm pm{*this};
+    SimHealth health{radio};
     DirectOwnerCall owner_call;
     SerialCounters serial;
 

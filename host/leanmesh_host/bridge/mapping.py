@@ -23,8 +23,22 @@ STATUS_NAMES = (
     "SESSION_REFRESH_REQUIRED", "PEER_ASLEEP", "TARGET_GENERATION_CHANGED",
 )
 OK, UNSUPPORTED, CONFLICT, EXPIRED, NOT_FOUND, CANCEL_TOO_LATE = 0, 2, 9, 10, 24, 18
+STORAGE_FAILURE, RECOVERY_REQUIRED = 14, 15
 # Local, temporary shortages of the root: nothing was accepted, the same request may be repeated.
 TRANSIENT = frozenset({3, 4, 5, 6, 11, 28})
+# The root's own state is in question (a commit may or may not be durable, a page half applied): never "rejected".
+UNKNOWN_STATE = frozenset({STORAGE_FAILURE, RECOVERY_REQUIRED})
+_O_APPLIED, _O_INDETERMINATE = 2, 6
+
+
+def control_outcome(outcome: int, reason: int) -> tuple[str, str]:
+    """(Host outcome, evidence kind) of a finished membership/control operation of the root (SEC-D7 follow-up):
+    RECOVERY_REQUIRED and STORAGE_FAILURE are INDETERMINATE, whatever an older root called them."""
+    if outcome == _O_APPLIED and reason == 0:
+        return "APPLIED", "ROOT_APPLIED"
+    if outcome == _O_INDETERMINATE or reason in UNKNOWN_STATE:
+        return "INDETERMINATE", "ROOT_OUTCOME_UNKNOWN"
+    return "REJECTED", "ROOT_REFUSED"
 
 
 def status_name(code: int) -> str:
@@ -46,7 +60,7 @@ EVIDENCE_BITS = (
 PHASES = ("PENDING", "SENDING", "WAITING_RECEIPT", "FINAL")
 OUTCOMES = ("PENDING", "RECEIVED", "APPLIED", "REJECTED", "EXPIRED", "CANCELLED_NOT_SENT",
             "INDETERMINATE", "SUPERSEDED", "PARTIAL", "SUBMITTED")
-MEMBERSHIP = {0: "UNASSIGNED", 4: "PREPARED", 5: "ACTIVE"}  # lm_membership state numbers the root reports
+MEMBERSHIP = {0: "UNASSIGNED", 4: "PREPARED", 5: "ACTIVE", 7: "REVOKED"}  # lm_membership states the root reports
 
 _DELIVERY = {"BEST_EFFORT": 0, "RECEIVED": 1, "APPLIED": 2}
 _STORAGE = {"VOLATILE": 0, "DURABLE": 1}

@@ -490,6 +490,10 @@ class Delivery {
     void on_bitmap(const EndSession &s, const OpenedEnd &o, MonoTime now);
     void frag_refuse(EndSession &s, const Sha256Digest &hash, ReceiptEv ev, Status why, wire::HopAckStatus &ack);
     void frag_release(RxSlot &slot);
+    [[nodiscard]] bool control_done_live(const ControlDone &c) const;
+    [[nodiscard]] const ControlDone *find_control_done(const EndSession &s, const std::array<uint8_t, 16> &mid,
+                                                       const Sha256Digest &hash) const;
+    [[nodiscard]] ControlDone *free_control_done();
     void frag_expire(MonoTime now);
     [[nodiscard]] RxSlot *frag_alloc(const wire::FragmentPrefix &p, const wire::EndHeader &eh, uint32_t term,
                                      const EndSession &s, MonoTime now);

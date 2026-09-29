@@ -14,6 +14,7 @@
 #include "core/channel/channel.hpp"
 #include "core/command.hpp"
 #include "core/delivery/delivery.hpp"
+#include "core/diag/health.hpp"
 #include "core/events.hpp"
 #include "core/group/group.hpp"
 #include "core/jobs.hpp"
@@ -43,6 +44,7 @@ struct Ports {
     port::Radio &radio;
     port::Jobs &jobs;
     port::Pm *pm = nullptr; // [S16] optional: a build without it cannot sleep
+    port::Health *health = nullptr; // [S19] optional: without it the driver facts of the diagnostics are unknown
     // port::Store is reached only through job bodies on the worker (JobEnv).
 };
 
@@ -162,10 +164,15 @@ class Engine {
     // [SLICE:S16] power modes, sleep tickets, poll/grant, mailbox parking (src/core/power).
     power::Power &power() { return power_; }
     [[nodiscard]] port::Pm *pm() const { return ports_.pm; }
+    // [SLICE:S19] diagnostics inputs (src/core/diag): the platform's facts, the app event queue, the first start.
+    [[nodiscard]] port::Health *health() const { return ports_.health; }
+    [[nodiscard]] std::size_t events_pending() const { return events_.depth(); }
+    [[nodiscard]] uint64_t events_lost() const { return events_.lost_total(); }
+    [[nodiscard]] MonoTime first_start() const { return first_start_; }
     [[nodiscard]] MonoTime clock_now() const { return ports_.clock.now(); }
     // The driver goes off / comes back with RAM state kept (light sleep, a withheld radio); the peers are
     // registered again and the channel is kept. Owner thread only.
-    void radio_sleep();
+    [[nodiscard]] Status radio_sleep(); // Ok only when the driver is confirmed stopped
     void radio_wake(MonoTime now);
     // The platform woke the CPU (an interrupt, or the port returned from a blocking light sleep).
     void power_wake(const port::WakeInfo &w, MonoTime now) { power_.wake(w, now); }
@@ -176,6 +183,9 @@ class Engine {
     [[nodiscard]] MonoTime step_time() const { return step_now_; }
     // [SLICE:S10] Root-only USB serial adapter (src/serial); nullptr on leaf/relay. Not owned.
     void attach_serial(SerialHook *hook) { serial_ = hook; }
+    // [SLICE:S18] The membership moved to another root (transfer/handover committed): at the end of this step, once no
+    // job runs, the engine stops and starts again (like lm_stop + lm_start) so every module starts in the new domain.
+    void request_restart() { restart_pending_ = true; }
 
   private:
     void on_radio_event(const port::RadioEvent &ev, MonoTime now);
@@ -195,6 +205,8 @@ class Engine {
     static void rx_sink(void *ctx, const link::RxInfo &info, ByteView plain); // [SLICE:S9]
     static void discovery_sink(void *ctx, const MacAddr &src, ByteView body, MonoTime now); // [SLICE:S11]
     static bool proxy_sink(void *ctx, const port::RadioRx &rx, MonoTime now);               // [SLICE:S11]
+    static void control_sink(void *ctx, const DeviceId &origin, const std::array<uint8_t, 16> &mid, ByteView payload,
+                             MonoTime now); // [SLICE:S18]
     // [SLICE:S8] link::JoinHooks trampolines: the root routes to the ledger, everything else to the
     // membership module.
     [[nodiscard]] bool is_root() const { return k_root_capable && config_.role == Role::Root; }
@@ -226,10 +238,12 @@ class Engine {
     group::Fanout group_{*this};                        // [SLICE:S15]
     SerialHook *serial_ = nullptr; // [SLICE:S10]
     RadioState radio_state_ = RadioState::Stopped;
+    MonoTime first_start_ = MonoTime::never(); // [SLICE:S19] counters accumulate from here (never reset)
     uint8_t channel_ = 0;
     int recover_attempts_ = 0;
     MonoTime recover_at_ = MonoTime::never();
     bool yield_ = false; // RX budget of the last step was exhausted: run again without sleeping
+    bool restart_pending_ = false; // [SLICE:S18]
 };
 
 } // namespace lm

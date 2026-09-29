@@ -17,7 +17,7 @@ class SimPm final : public port::Pm {
   public:
     explicit SimPm(SimNode &node) : node_(node) {}
 
-    void set_locks(uint8_t mask) override;
+    [[nodiscard]] uint8_t set_locks(uint8_t mask) override;
     port::WakeInfo boot_info() override;
     void retain(ByteView state) override;
     [[nodiscard]] port::SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, port::WakeInfo &woke) override;
@@ -26,11 +26,14 @@ class SimPm final : public port::Pm {
     bool supported = true;        // false: sleep() answers Unsupported (a port without the capability)
     bool ram_complete = true;     // reported by a light wake
     bool elapsed_known = true;    // reported by a light/deep wake (false: RTC continuity unknown)
+    uint8_t take_fail = 0;        // lock bits whose acquire fails (the level does not change)
+    uint8_t drop_fail = 0;        // lock bits whose release fails (the bit stays held)
     [[nodiscard]] uint8_t locks() const { return mask_; }
     [[nodiscard]] uint64_t acquired(unsigned bit) const { return acquired_[bit]; }
     [[nodiscard]] uint64_t released(unsigned bit) const { return released_[bit]; }
     [[nodiscard]] bool leaked() const { return mask_ != 0; }
     [[nodiscard]] uint64_t set_calls() const { return set_calls_; }
+    [[nodiscard]] uint64_t sleep_calls() const { return sleep_calls_; } // sleeps the owner actually started
     void clear_retained() { retained_len_ = 0; } // a power-on reset: RTC memory is gone
     // Deep sleep (the node's RAM goes with it; the SimNode powers it off and boots it at the wake).
     [[nodiscard]] bool deep_requested() const { return deep_; }
@@ -44,7 +47,7 @@ class SimPm final : public port::Pm {
     SimNode &node_;
     uint8_t mask_ = 0;
     std::array<uint64_t, 4> acquired_{}, released_{};
-    uint64_t set_calls_ = 0;
+    uint64_t set_calls_ = 0, sleep_calls_ = 0;
     std::array<uint8_t, 32> retained_{};
     uint8_t retained_len_ = 0;
     bool deep_ = false;

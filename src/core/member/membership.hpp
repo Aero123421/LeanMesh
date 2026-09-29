@@ -126,7 +126,7 @@ class Membership {
     // Trampolines for link::JoinHooks (the Engine routes them by role).
     void session_up(bool initiator, const MacAddr &mac, const DeviceId &peer, ByteView bundle, MonoTime now);
     void exchange_failed(Status why, MonoTime now);
-    void discovery(const MacAddr &src, const wire::BootstrapCarrier &c, MonoTime now);
+    void discovery(const MacAddr &src, const wire::BootstrapCarrier &c, uint32_t domain_hint, MonoTime now);
     void join_control(const link::RxInfo &info, ByteView plain, MonoTime now);
     void link_up(const DeviceId &peer, uint8_t role, MonoTime now);
     [[nodiscard]] bool link_control(const link::RxInfo &info, ByteView plain, MonoTime now);
@@ -138,6 +138,19 @@ class Membership {
     void get_membership(lm_membership_t &out, MonoTime now) const;
     [[nodiscard]] Status get_request(const RequestId &id, lm_operation_t &out, MonoTime now) const;
     void set_hooks(const MembershipHooks &h) { hooks_ = h; }
+
+    // ---- [S18] lifecycle (lifecycle.cpp) ----
+    // A signed lifecycle object the root sent over the end session with it (the engine's control sink): a renewed
+    // MemberCredential. Checked against the live credential (every field but the lease equal, the lease later),
+    // verified on the worker, committed, then live; every link session is then made again so that each neighbour
+    // holds the new lease. Anything else, or no room right now, is dropped: the root offers it again.
+    void on_lifecycle_object(const DeviceId &origin, ByteView cose, MonoTime now);
+    // SEC-D4a / S18: the nonce a mode-0 AssignmentTicket must name (docs/07 §8 transfer_nonce16). One outstanding
+    // nonce, RAM only: made on the first call, the same until a join made ACTIVE with it, lost with a restart (a
+    // ticket for it is then refused: never a replayed or stale grant).
+    [[nodiscard]] Status transfer_nonce(std::array<uint8_t, 16> &out);
+    // A committed transfer/handover is switching this device to its new root (no new Link/End sessions meanwhile).
+    [[nodiscard]] bool switching() const { return switch_ && phase_ == JoinPhase::Activate; }
 
     // ---- observability ----
     [[nodiscard]] JoinPhase phase() const { return phase_; }
@@ -158,6 +171,8 @@ class Membership {
         uint64_t offers_seen = 0;
         uint64_t stale_job_completions = 0;
         uint64_t scratch_busy = 0;
+        uint64_t renewals = 0;       // [S18] renewed credentials made live
+        uint64_t renew_dropped = 0;  // [S18] not taken (busy, refused, not newer): the root sends it again
     };
     [[nodiscard]] const Stats &stats() const { return stats_; }
 
@@ -176,6 +191,13 @@ class Membership {
         ConsumePrepared, // refusal or leave of a PREPARED join
         InstallTicket,
         LeaveCommit,
+        RenewVerify, // [S18] worker: the renewed credential under the delegation
+        RenewCommit, // [S18] membership record := the renewed credential
+        RevokeVerify,  // [S18] worker: the root's RevokeObject for this device
+        CommitPending, // [S18] pending_delegation := the new root's delegation (transfer/handover)
+        SwitchLoad,    // [S18] after the ACTIVE commit: the pending delegation ...
+        SwitchCommit,  // [S18] ... becomes root_delegation
+        SwitchPeek,    // [S18] the installed object says where a member's switch looks (its target domain)
     };
     enum class LeavePhase : uint8_t { Idle, Draining, Notifying, Committing };
 
@@ -199,7 +221,7 @@ class Membership {
     // flash / worker plumbing
     [[nodiscard]] Status start_flash(Step step, store::RecordJob::Op op, uint16_t id, uint8_t state,
                                      std::size_t payload_len, MonoTime now);
-    [[nodiscard]] Status start_verify(MonoTime now);
+    [[nodiscard]] Status start_verify(Step step);
     static Status verify_job(port::JobEnv &env, void *arg);
     void flash_done(Step step, Status s, MonoTime now);
 
@@ -234,8 +256,20 @@ class Membership {
     [[nodiscard]] uint32_t hint() const;
     [[nodiscard]] Status parse_prepared_record(const store::RecordJob &rec);
     void install_done(Status s, MonoTime now);
+    // [S18] lifecycle.cpp
+    void renew_step(Step step, Status s, MonoTime now);
+    void renew_adopt(MonoTime now);
+    [[nodiscard]] Status check_request_object(ByteView obj, uint64_t &assignment);
+    void wrong_root(MonoTime now);
+    void leave_old_domain();
+    void switch_done(MonoTime now);
+    void mark_activated(MonoTime now);
+    void on_revoke_notice(ByteView cose, MonoTime now);
+    void revoke_verified(Status s, MonoTime now);
     void send_confirm(MonoTime now);
     void parse_activated_record(const store::RecordJob &rec);
+    void resume_switch(const store::RecordJob &rec);
+    void switch_peeked(Status s, MonoTime now);
 
     // leave
     void leave_timer(MonoTime now);
@@ -306,6 +340,15 @@ class Membership {
     uint64_t op_counter_ = 0;
     uint64_t install_op_ = 0;
     bool boot_failed_ = false;       // reading the PREPARED record failed: unknown state, refuse to join
+    bool renew_adopt_ = false;       // [S18] a renewed credential is durable and waits for an idle exchange
+    bool switch_ = false;            // [S18] this join moves an ACTIVE member to another root (transfer/handover)
+    bool handover_ = false;          // [S18] ... to its own domain's new root (the object is a RootHandover)
+    DomainId switch_domain_;         // [S18] the domain whose root that switch asks (offers of others are skipped)
+    std::array<uint8_t, 16> nonce_{}; // [S18] the outstanding mode-0 nonce
+    bool nonce_valid_ = false;
+    bool revoked_ = false;            // [S18] the running leave is the erasure a revocation notice asked for
+    uint64_t revoke_af_ = 0;          // [S18] ... and the floors it named (assignment, membership)
+    uint64_t revoke_mf_ = 0;
     uint64_t leave_assignment_ = 0;  // this device's generations, for the floors written on leave
     uint64_t leave_membership_ = 0;
     MonoTime poll_at_ = MonoTime::never(); // RESUME of a member: waits for the link session

@@ -42,7 +42,7 @@ esp_pm_lock_type_t type_of(unsigned bit) {
 
 } // namespace
 
-void IdfPm::set_locks(uint8_t mask) {
+uint8_t IdfPm::set_locks(uint8_t mask) {
 #if CONFIG_PM_ENABLE
     for (unsigned b = 0; b < k_locks; ++b) {
         const bool want = ((mask >> b) & 1U) != 0;
@@ -67,8 +67,9 @@ void IdfPm::set_locks(uint8_t mask) {
             ++failures_; // a release that failed leaves the bit held: the next set_locks() tries it again
         }
     }
+    return held_;
 #else
-    (void)mask; // no power management in this build: there is nothing to hold
+    return mask; // no power management in this build: there is nothing to hold, so nothing can be missing
 #endif
 }
 

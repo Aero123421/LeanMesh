@@ -15,7 +15,7 @@ set(LM_PORT_SIM_SOURCES "")
 set(LM_PORT_IDF_SOURCES "")
 set(LM_MODULE_DIRS
     core core/wire core/radio core/link core/member core/route core/delivery core/sched
-    core/group core/channel core/power core/diag
+    core/group core/channel core/power core/diag core/ota
     security store capi root serial
     port/sim port/idf)
 foreach(dir IN LISTS LM_MODULE_DIRS)

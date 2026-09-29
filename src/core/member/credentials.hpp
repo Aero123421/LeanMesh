@@ -29,6 +29,8 @@ inline constexpr uint8_t k_type_assignment_ticket = 3;
 inline constexpr uint8_t k_type_member_credential = 4;
 inline constexpr uint8_t k_type_expected_set = 5;
 inline constexpr uint8_t k_type_revoke = 11;
+inline constexpr uint8_t k_type_commissioning_window = 30; // [S18]
+inline constexpr uint8_t k_type_root_handover = 31;        // [S18]
 
 // RootDelegation permission bits (control.cddl note 2).
 inline constexpr uint8_t k_perm_approve = 1;
@@ -118,6 +120,30 @@ struct RevokeObject {
     uint64_t revision = 0;
 };
 
+// [S18] control.cddl 30: an admission window of one root term (docs/21 §2).
+struct CommissioningWindow {
+    std::array<uint8_t, 16> id{};
+    RootTerm term;
+    uint64_t expected_revision = 0;
+    uint64_t not_before_ms = 0; // root clock of `term`
+    uint64_t expires_ms = 0;
+    uint8_t max_new_members = 1; // 1..64
+    uint8_t allowed_roles = 1;   // bit 0 leaf, bit 1 relay
+    uint64_t policy_revision = 0;
+};
+
+// [S18] control.cddl 31: the fleet moves a domain's root authority to another device (docs/21 §8).
+struct RootHandover {
+    std::array<uint8_t, 16> id{};
+    DeviceId old_root;
+    DeviceId new_root;
+    uint64_t old_generation = 0;
+    uint64_t new_generation = 0;
+    Sha256Digest new_delegation_hash{};
+    RootTerm new_term;
+    uint8_t recovery_mode = 0;
+};
+
 // The fleet trust anchor a node holds (docs/07 §2 "Fleet trust anchor").
 struct TrustAnchor {
     FleetId fleet;
@@ -138,6 +164,8 @@ struct TrustAnchor {
 [[nodiscard]] Status decode_member_credential(ByteView data, MemberCredential &out);
 [[nodiscard]] Status decode_expected_set(ByteView data, ExpectedSet &out);
 [[nodiscard]] Status decode_revoke(ByteView data, RevokeObject &out);
+[[nodiscard]] Status decode_window(ByteView data, CommissioningWindow &out);
+[[nodiscard]] Status decode_handover(ByteView data, RootHandover &out);
 // The root issues member credentials and revocations, so these encoders are production code.
 [[nodiscard]] Status encode_member_credential(const MemberCredential &m, MutByteView out,
                                               std::size_t &len);
@@ -169,6 +197,10 @@ struct TrustAnchor {
 [[nodiscard]] Status check_assignment_ticket(const TrustAnchor &trust, ByteView cose,
                                              const DeviceCredential &dc, ByteView dc_cose,
                                              ByteView target_delegation_cose, AssignmentTicket &out);
+// A signed object of `type` from the fleet, or from the delegated root when its delegation holds `permission` (then
+// for its own domain only). AuthRejected for any other signer. Public-key work.
+[[nodiscard]] Status open_authority(const TrustAnchor &trust, const RootDelegation *delegation, uint8_t permission,
+                                    ByteView cose, uint8_t type, Envelope &env, ByteView &data);
 // Signed by the fleet or by the delegated root with the approve permission (its domain only).
 [[nodiscard]] Status check_expected_set(const TrustAnchor &trust, const RootDelegation *delegation,
                                         ByteView cose, ExpectedSet &out);
@@ -213,6 +245,9 @@ class Floors {
 // permission for its domain, and raises the floors. AuthRejected when neither holds.
 [[nodiscard]] Status apply_revoke(const TrustAnchor &trust, const RootDelegation *delegation,
                                   ByteView cose, Floors &floors, RevokeObject &out);
+// [S18] The verification alone (a worker job; the owner raises the floors).
+[[nodiscard]] Status verify_revoke(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose,
+                                   RevokeObject &out);
 
 // Lease of a member credential on the root clock. Before: provably valid; After: expired;
 // Uncertain: no proof either way (the caller decides, see the link layer).

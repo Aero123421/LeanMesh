@@ -235,13 +235,17 @@ void HopTx::pump(MonoTime now) {
     in_pump_ = false;
 }
 
-void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
-    if (engine_.tx().in_flight()) {
-        sent = true; // wait for the outcome event, no timer needed
-        return;
-    }
+// True: this step is spent on the ACK (sent, or a local shortage armed a retry). False: the airtime bucket refuses it
+// for now (retry_at_ is armed); the caller may still serve a queued frame.
+bool HopTx::send_ack(MonoTime now, bool &sent, bool &progress) {
     if (const PendingAck *front = acks_.front()) {
         PendingAck a = *front;
+        constexpr std::size_t k_ack_frame = wire::k_link_header_bytes + wire::k_hop_ack_body_bytes + wire::k_tag_bytes;
+        if (!engine_.sched().admit_direct(k_ack_frame, now)) {
+            ++stats_.local_busy; // the bucket, not RF: the ACK waits for the refill, the sender's RTO repeats meanwhile
+            retry_at_ = earliest(retry_at_, engine_.sched().direct_wake(k_ack_frame, now));
+            return false;
+        }
         wire::HopAck ack;
         ack.acked_link_counter = a.counter;
         ack.status = a.status;
@@ -254,22 +258,31 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
         if (st == Status::Ok) {
             st = link_.seal(a.peer, wire::FrameKind::HopAck, ByteView{plain.data(), plen}, buf.buf(), now);
         }
-        if (st == Status::Ok) { // never gated by the scheduler: the ACK frees the sender's buffer
+        if (st == Status::Ok) { // bounded by the bucket floor (FIX4-D3) but not queued behind data: the ACK frees the sender's buffer
             st = engine_.transmit(a.mac, buf.buf().view(), k_tag_ack | ack_seq_, now, sched::Class::Control, false);
         }
         if (st == Status::Busy || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
             ++stats_.local_busy;
             retry_at_ = now + k_pump_retry;
             sent = true;
-            return;
+            return true;
         }
         (void)acks_.pop(a); // sent, or unsendable (no session any more): the sender retries the DATA
         ++ack_seq_;
         progress = true;
         if (st == Status::Ok) {
             ++stats_.acks_sent;
+            ++ack_run_;
             sent = true;
         }
+        return true;
+    }
+    return true;
+}
+
+void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
+    if (engine_.tx().in_flight()) {
+        sent = true; // wait for the outcome event, no timer needed
         return;
     }
     // The oldest ready frame of every class is what the scheduler chooses between. A frame the owner
@@ -316,10 +329,25 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
     for (uint16_t b : head_bytes) {
         ready = ready || b != 0;
     }
+    // FIX4-D3: HOP_ACKs go first (they free the sender's buffer), but at most k_ack_run_max in a row while a queued frame
+    // that may go waits, and only while the bucket admits them (urgent debt at most). A queued frame that cannot go
+    // (hold, tokens) does not keep an ACK back.
+    const bool ack_due = acks_.front() != nullptr;
+    if (!ready) {
+        ack_run_ = 0; // nothing queued waits behind the ACKs
+    }
+    if (ack_due && ack_run_ < k_ack_run_max && send_ack(now, sent, progress)) {
+        return;
+    }
     if (!ready) {
         return;
     }
     if (!engine_.sched().pick(head_bytes, now, cls, wake)) {
+        // The cap is reached and the queued frames wait for tokens: they are served next, not another ACK. (A hold
+        // is not their fault: the ACK goes.)
+        if (ack_due && ack_run_ >= k_ack_run_max && engine_.sched().held(now) && send_ack(now, sent, progress)) {
+            return;
+        }
         retry_at_ = earliest(retry_at_, wake); // airtime tokens: the frame waits, nothing is lost
         sent = true;
         return;
@@ -348,6 +376,7 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
         progress = true;
         return;
     }
+    ack_run_ = 0;
     pick->air_seq = seq;
     pick->st = TxFrame::St::OnAir;
     pick->at = MonoTime::never();

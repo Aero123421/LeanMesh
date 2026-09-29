@@ -139,7 +139,7 @@ void Topology::unattach_children(uint8_t idx) {
     }
 }
 
-Status Topology::admit(ShortAddr addr, uint32_t gen) {
+Status Topology::admit(ShortAddr addr, uint64_t gen) {
     if (!is_valid_short_addr(addr) || addr == root_addr_) {
         return Status::InvalidArgument;
     }
@@ -178,7 +178,7 @@ Status Topology::reset(ShortAddr addr) {
         return Status::NotFound;
     }
     unattach_children(at); // the address means another generation now: old links are void
-    const uint32_t gen = nodes_[at].gen;
+    const uint64_t gen = nodes_[at].gen;
     nodes_[at] = Node{};
     nodes_[at].used = true;
     nodes_[at].addr = addr.value();

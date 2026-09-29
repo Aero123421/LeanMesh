@@ -49,16 +49,27 @@ Status Membership::start_flash(Step step, store::RecordJob::Op op, uint16_t id, 
 
 Status Membership::verify_job(port::JobEnv & /*env*/, void *arg) {
     auto &m = *static_cast<Membership *>(arg);
-    return check_member_credential(m.peer_.delegation, m.verify_input_, m.req_.mc);
+    if (m.step_ == Step::RevokeVerify) { // [S18] the fleet or this domain's root (revoke permission) signed it
+        RevokeObject rv;
+        return verify_revoke(m.engine_.identity().trust(), &m.peer_.delegation, m.verify_input_, rv);
+    }
+    MemberCredential renewed; // [S18] a renewal only needs the check: the owner read its fields already
+    return check_member_credential(m.peer_.delegation, m.verify_input_,
+                                   m.step_ == Step::RenewVerify ? renewed : m.req_.mc);
 }
 
-Status Membership::start_verify(MonoTime /*now*/) {
+// `step` is set before the worker can read it.
+Status Membership::start_verify(Step step) {
     if (job_in_flight_) {
         return Status::Busy;
     }
     job_slot_ = Handle{0, ++job_gen_};
-    LM_TRY(engine_.submit_job(JobOwner::Join, job_slot_, JobClass::PublicKey, &verify_job, this));
-    step_ = Step::VerifyActivation;
+    step_ = step;
+    const Status st = engine_.submit_job(JobOwner::Join, job_slot_, JobClass::PublicKey, &verify_job, this);
+    if (st != Status::Ok) {
+        step_ = Step::None;
+        return st;
+    }
     job_in_flight_ = true;
     return Status::Ok;
 }
@@ -103,6 +114,7 @@ void Membership::stop() {
     resume_ = false;
     confirm_pending_ = confirm_consume_ = false;
     confirm_at_ = MonoTime::never();
+    switch_ = handover_ = renew_adopt_ = false;
 }
 
 void Membership::release_join() {
@@ -139,10 +151,41 @@ void Membership::on_identity_ready(MonoTime now) {
         (rec_ = engine_.identity().lend_record()) == nullptr) {
         return;
     }
-    if (start_flash(Step::BootLoadPrepared, store::RecordJob::Op::Load, store::rec::membership_prepared, 0, 0,
-                    now) != Status::Ok) {
+    // [S18] A switch cut between its two commits: root_delegation is rewritten from the pending record first.
+    const bool repair = engine_.identity().delegation_behind();
+    if (start_flash(repair ? Step::SwitchLoad : Step::BootLoadPrepared, store::RecordJob::Op::Load,
+                    repair ? store::rec::pending_delegation : store::rec::membership_prepared, 0, 0, now) != Status::Ok) {
         engine_.identity().return_record();
         rec_ = nullptr;
+    }
+}
+
+// [S18] The delegation of a switch is written (or its write failed and the next boot repairs it). A live transfer
+// goes on with the ACTIVATED mark; a boot-time repair goes on with the boot's own load of the PREPARED record.
+void Membership::switch_done(MonoTime now) {
+    if (phase_ == JoinPhase::Activate) {
+        mark_activated(now);
+        return;
+    }
+    if (start_flash(Step::BootLoadPrepared, store::RecordJob::Op::Load, store::rec::membership_prepared, 0, 0, now) !=
+        Status::Ok) {
+        engine_.identity().return_record();
+        rec_ = nullptr;
+    }
+}
+
+// ACTIVE is durable. The record now says "the root's acknowledgement is owed": if JoinActive or the root's answer is
+// lost, the next link session repeats it (docs/21 §5, LC06) instead of guessing.
+void Membership::mark_activated(MonoTime now) {
+    Writer w{MutByteView{rec_->payload}};
+    w.bytes(req_.id.view());
+    w.bytes(ByteView{req_.nonce});
+    w.bytes(ByteView{req_.prepare_hash});
+    w.u64be(activated_generation_);
+    if (w.finish() != Status::Ok ||
+        start_flash(Step::ActivateMark, store::RecordJob::Op::Commit, store::rec::membership_prepared,
+                    k_prepared_activated, w.size(), now) != Status::Ok) {
+        active_out(now);
     }
 }
 
@@ -201,16 +244,22 @@ void Membership::send_hello(MonoTime now) {
 // Offers are hints (docs/07 §3): nothing they say authorises anything, every candidate goes through the full
 // bounded handshake. The root itself (depth 0) is taken at once; otherwise the shallowest of the first
 // 300 ms wins. A higher expected-list revision than the one we were refused at ends a NOT_EXPECTED hold.
-void Membership::discovery(const MacAddr &src, const wire::BootstrapCarrier &c, MonoTime now) {
+void Membership::discovery(const MacAddr &src, const wire::BootstrapCarrier &c, uint32_t domain_hint, MonoTime now) {
     OfferHint h;
     if (phase_ != JoinPhase::Discover || c.object_kind != k_obj_join_offer || decode_offer_hint(c.body, h) != Status::Ok ||
         !scope_ok(engine_.identity().scope_key(), k_obj_join_offer, c.exchange_id, h)) {
         return; // SEC-Da: a scoped device hears only offers of its own scope
     }
-    if (disc_.revision_advanced(h.expected_revision)) {
+    // [S18] A member looks in one domain: its own (RESUME: a link session needs it) or, switching, the target's.
+    const LocalIdentity &id = engine_.identity();
+    if ((switch_ || id.is_member()) &&
+        domain_hint != link::domain_hint_of(switch_ ? switch_domain_ : id.delegation().domain)) {
+        return;
+    }
+    // An offer is unauthenticated: its higher revision ends a NOT_EXPECTED hold only through the rate-limited hint
+    // bucket, and it neither resets the backoff nor the hold's escalation (docs/21 §3, review finding 1).
+    if (disc_.revision_advanced(h.expected_revision) && disc_.hint(now)) {
         disc_.clear_suppress();
-        disc_.wake(now, 0);
-        not_expected_ = 0;
     }
     if (have_cand_ || c.exchange_id != hello_nonce_) {
         return; // only answers to our own hello are followed
@@ -268,10 +317,10 @@ void Membership::choose_offer(MonoTime now) {
 
 void Membership::try_connect(MonoTime now) {
     Status st;
-    if (engine_.identity().is_member()) {
+    if (engine_.identity().is_member() && !switch_) {
         st = engine_.link().connect(cand_, now); // RESUME: an ordinary fresh link session
     } else {
-        st = engine_.link().exchange().start_join(cand_, &peer_, now);
+        st = engine_.link().exchange().start_join(cand_, &peer_, now, switch_); // [S18] a member's transfer too
     }
     if (st == Status::Ok) {
         phase_ = JoinPhase::Connect;
@@ -279,7 +328,7 @@ void Membership::try_connect(MonoTime now) {
         retry_at_ = MonoTime::never();
         return;
     }
-    if (st == Status::Conflict && engine_.identity().is_member()) {
+    if (st == Status::Conflict && engine_.identity().is_member() && !switch_) {
         finish_join(Status::Ok, LM_OUTCOME_APPLIED, now); // a session already exists
         return;
     }
@@ -339,7 +388,10 @@ void Membership::session_up(bool initiator, const MacAddr &mac, const DeviceId &
     pipe_.bind(mac, peer, hint());
     std::memcpy(rec_->payload.data(), b.delegation_cose.data(), b.delegation_cose.size());
     phase_ = JoinPhase::PersistDelegation;
-    if (start_flash(Step::CommitDelegation, store::RecordJob::Op::Commit, store::rec::root_delegation, 0,
+    // [S18] A member's transfer/handover must not touch root_delegation before its new credential is committed: the
+    // new root's delegation waits in pending_delegation (every cut then loads the old or the new membership).
+    if (start_flash(switch_ ? Step::CommitPending : Step::CommitDelegation, store::RecordJob::Op::Commit,
+                    switch_ ? store::rec::pending_delegation : store::rec::root_delegation, 0,
                     b.delegation_cose.size(), now) != Status::Ok) {
         finish_join(Status::Busy, LM_OUTCOME_REJECTED, now);
     }
@@ -380,6 +432,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         return;
 
     case Step::CommitDelegation:
+    case Step::CommitPending:
         if (s != Status::Ok) {
             finish_join(s, LM_OUTCOME_REJECTED, now);
             return;
@@ -442,20 +495,29 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         }
         req_.evidence |= kEvDeviceActive;
         ++stats_.joins_active;
-        {
-            // ACTIVE is durable. The record now says "the root's acknowledgement is owed": if JoinActive or the
-            // root's answer is lost, the next link session repeats it (docs/21 §5, LC06) instead of guessing.
-            Writer w{MutByteView{rec_->payload}};
-            w.bytes(req_.id.view());
-            w.bytes(ByteView{req_.nonce});
-            w.bytes(ByteView{req_.prepare_hash});
-            w.u64be(activated_generation_);
-            if (w.finish() != Status::Ok ||
-                start_flash(Step::ActivateMark, store::RecordJob::Op::Commit, store::rec::membership_prepared,
-                            k_prepared_activated, w.size(), now) != Status::Ok) {
-                active_out(now);
-            }
+        if (switch_ && start_flash(Step::SwitchLoad, store::RecordJob::Op::Load, store::rec::pending_delegation, 0, 0,
+                                   now) == Status::Ok) {
+            return; // [S18] root_delegation follows the committed credential (the loader bridges a cut between)
         }
+        mark_activated(now);
+        return;
+
+    case Step::SwitchLoad: // [S18]
+        if (s != Status::Ok || start_flash(Step::SwitchCommit, store::RecordJob::Op::Commit, store::rec::root_delegation,
+                                           0, rec_->payload_len, now) != Status::Ok) {
+            switch_done(now); // the loader repairs it at the next boot (delegation_behind)
+        }
+        return;
+
+    case Step::SwitchCommit:
+        if (s == Status::Ok) {
+            engine_.identity().delegation_repaired();
+        }
+        switch_done(now);
+        return;
+
+    case Step::SwitchPeek:
+        switch_peeked(s, now);
         return;
 
     case Step::ActivateMark:
@@ -488,6 +550,15 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
 
     case Step::LeaveCommit:
         leave_flash_done(step, s, now);
+        return;
+
+    case Step::RenewVerify: // [S18]
+    case Step::RenewCommit:
+        renew_step(step, s, now);
+        return;
+
+    case Step::RevokeVerify: // [S18]
+        revoke_verified(s, now);
         return;
 
     case Step::None:
@@ -583,6 +654,8 @@ void Membership::retry_work(MonoTime now) {
     default:
         if (retry_consume_) {
             fail_and_consume(req_.reason, now);
+        } else if (renew_adopt_) {
+            renew_adopt(now); // [S18] the exchange was sending our bundle
         }
         break;
     }

@@ -118,10 +118,12 @@ root-handover = [handover-id: id16, old-root: id32, new-root: id32,
 ; 32. Root signature. Snapshot binds identity AND assignment/membership generation.
 group-target = [device: id32, assignment: u63, membership: u63]
 group-snapshot-v2 = [group-id: u32, group-revision: u63, token: id16,
- origin: id32, total: 0..64, page: 0..3, snapshot-hash: id32,
+ origin: id32, total: 0..64, page: 0..4, snapshot-hash: id32,
  targets: [* 16 group-target]]
+; A page holds at most 16 rows and at most 700 B of encoded rows, so 64 targets take 4 pages (generations < 2^16)
+; up to 5 (generations near 2^63); the rows of page p follow from the snapshot alone (FIX3-D10).
 
 ; 33. AEAD-only request to the root. Origin is the authenticated session identity.
 ; page0/token=nil starts a snapshot; later pages require the returned token.
 group-snapshot-request = [group-id: u32, group-revision: u63,
- page: 0..3, snapshot-token: id16 / nil]
+ page: 0..4, snapshot-token: id16 / nil]

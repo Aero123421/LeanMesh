@@ -4,15 +4,22 @@
 
 namespace lm::sim {
 
-void SimPm::set_locks(uint8_t mask) {
+uint8_t SimPm::set_locks(uint8_t mask) {
     ++set_calls_;
+    uint8_t held = mask_;
     for (unsigned b = 0; b < 4; ++b) {
         const bool was = (mask_ >> b) & 1U;
         const bool now = (mask >> b) & 1U;
-        acquired_[b] += (!was && now) ? 1U : 0U;
-        released_[b] += (was && !now) ? 1U : 0U;
+        if (!was && now && ((take_fail >> b) & 1U) == 0) {
+            ++acquired_[b];
+            held = static_cast<uint8_t>(held | (1U << b));
+        } else if (was && !now && ((drop_fail >> b) & 1U) == 0) {
+            ++released_[b];
+            held = static_cast<uint8_t>(held & ~(1U << b));
+        }
     }
-    mask_ = mask;
+    mask_ = held;
+    return held;
 }
 
 port::WakeInfo SimPm::boot_info() {
@@ -31,6 +38,7 @@ port::SleepStart SimPm::sleep(uint8_t kind, uint8_t sources, uint64_t duration_m
     if (!supported) {
         return port::SleepStart::Unsupported;
     }
+    ++sleep_calls_;
     if (kind == LM_SLEEP_DEEP) {
         deep_ = true;
         deep_ms_ = duration_ms;

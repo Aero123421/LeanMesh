@@ -33,7 +33,7 @@ Status SimNode::boot() {
     void *at = workspace_.get() + (aligned - base);
     clock.on_boot(world_.now_us());
     jobs.set_epoch(epoch_);
-    LM_TRY(capi::init_context(at, ws.bytes, &cfg, Ports{clock, radio, jobs, opts_.power_port ? &pm : nullptr}, owner_call, opts_.rf, &ctx_));
+    LM_TRY(capi::init_context(at, ws.bytes, &cfg, Ports{clock, radio, jobs, opts_.power_port ? &pm : nullptr, opts_.health_port ? &health : nullptr}, owner_call, opts_.rf, &ctx_));
     ctx_->engine.mesh().set_enabled(opts_.mesh);
     ctx_->engine.chan().set_enabled(opts_.channel);
     notify();

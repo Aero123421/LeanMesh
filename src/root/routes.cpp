@@ -56,7 +56,7 @@ bool Routes::path_to_addr(ShortAddr dest, delivery::PathSpec &out, MonoTime now)
 // Who is this member? Its ACTIVE ledger entry, and an end session (if any) of exactly that entry's address and
 // generations (SEC-D2: the ledger admitted it). A device the ledger does not list gets nothing (S8-D7 is gone).
 // Never by an address alone.
-bool Routes::identify(const DeviceId &dev, ShortAddr &addr, uint32_t &gen) {
+bool Routes::identify(const DeviceId &dev, ShortAddr &addr, uint64_t &gen) {
     const delivery::EndSession *s = engine_.delivery().sessions().find_peer(dev);
     const Entry *e = engine_.ledger().find(dev);
     if (e == nullptr || e->state != EntryState::Active ||
@@ -65,13 +65,13 @@ bool Routes::identify(const DeviceId &dev, ShortAddr &addr, uint32_t &gen) {
         return false;
     }
     addr = e->address;
-    gen = static_cast<uint32_t>(e->membership);
+    gen = e->membership;
     return true;
 }
 
 bool Routes::path_to(const DeviceId &dest, delivery::PathSpec &out, MonoTime now) {
     ShortAddr addr;
-    uint32_t gen = 0;
+    uint64_t gen = 0;
     return identify(dest, addr, gen) && path_to_addr(addr, out, now);
 }
 
@@ -92,7 +92,7 @@ void Routes::on_control(const DeviceId &peer, const delivery::PathSpec &reply, B
     // Who is asking: the end session says (verified MemberCredential) and the ledger must not object.
     // Anyone else gets no answer at all.
     ShortAddr addr;
-    uint32_t gen = 0;
+    uint64_t gen = 0;
     if (!identify(peer, addr, gen)) {
         return;
     }
@@ -115,7 +115,7 @@ void Routes::on_control(const DeviceId &peer, const delivery::PathSpec &reply, B
 }
 
 // REGISTER: validate against the current tree only (rank and advertisements are no proof, docs/04 §3).
-void Routes::on_register(const DeviceId &peer, ShortAddr addr, uint32_t gen, const delivery::PathSpec &reply,
+void Routes::on_register(const DeviceId &peer, ShortAddr addr, uint64_t gen, const delivery::PathSpec &reply,
                          ByteView body, MonoTime now) {
     route::Register r;
     if (route::decode(body, r) != Status::Ok) {
@@ -201,6 +201,7 @@ void Routes::on_ready(const DeviceId &peer, ShortAddr addr, const delivery::Path
         }
     }
     send_lease(peer, reply, l, now, lease);
+    engine_.ledger().renew_due(peer, r.term, r.credential_lease_ms, now); // [S18] after the answer: never delays it
 }
 
 void Routes::on_query(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now) {
@@ -220,7 +221,7 @@ void Routes::on_query(const DeviceId &peer, const delivery::PathSpec &reply, Byt
         a.path[0] = a.dest;
     } else {
         ShortAddr da;
-        uint32_t dgen = 0;
+        uint64_t dgen = 0;
         if (identify(q.dest, da, dgen)) {
             a.status = topo_.path_from_root(da, ms(now), g);
             if (a.status == Status::Ok) {

@@ -617,6 +617,13 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
         }
         return Status::Ok;
     }
+    case OwnerKind::Forward:
+        // FIX4-D1: a relay never puts a frame on the air (first time or retry) once it can prove the deadline passed.
+        if (f.expires_root_ms != 0 && deadline_state(f.expires_root_ms, f.term) == DeadlineCheck::After) {
+            ++stats_.expired;
+            return Status::Expired;
+        }
+        return Status::Ok;
     case OwnerKind::Exchange:
         return link_.exchange().end_alive(f.owner()) ? Status::Ok : Status::Conflict;
     default:

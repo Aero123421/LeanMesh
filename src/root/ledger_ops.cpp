@@ -280,7 +280,8 @@ bool Ledger::expected_room() const {
     std::size_t room = 0;
     const member::Floors &f = engine_.identity().floors();
     for (const Entry &e : entries_) {
-        const bool reusable = (e.state == EntryState::Left || e.state == EntryState::Aborted) &&
+        const bool reusable = (e.state == EntryState::Left || e.state == EntryState::Aborted ||
+                               e.state == EntryState::Blocked) && // [S18] a revoked one too, once floored
                               f.check(e.device, AssignmentGen{e.assignment}, MembershipGen{e.membership}) ==
                                   Status::Revoked;
         room += e.state == EntryState::Free || reusable ? 1 : 0;
@@ -324,7 +325,7 @@ void Ledger::expected_step_done(Step step, Status s, MonoTime now) {
         exp_next_ = 0;
         break;
     case Step::CommitExpectedEntry:
-        entries_[job_slot_index_] = job_entry_;
+        set_entry(job_slot_index_, job_entry_);
         mark_used(job_slot_index_);
         ++exp_next_;
         break;

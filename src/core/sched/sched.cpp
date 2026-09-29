@@ -30,6 +30,26 @@ void Scheduler::roll_window(MonoTime now) {
 
 bool Scheduler::allowed(Class c, int64_t cost) const { return tokens_ - cost >= floor_of(c); }
 
+bool Scheduler::admit_direct(std::size_t bytes, MonoTime now) {
+    refill(now);
+    roll_window(now);
+    if (control_due()) {
+        return true; // the CONTROL entitlement of this window (20 %): bounded, and charged by charge()
+    }
+    if (tokens_ - airtime_us(bytes) >= -k_direct_debt_us) {
+        return true;
+    }
+    ++stats_.direct_refused;
+    return false;
+}
+
+MonoTime Scheduler::direct_wake(std::size_t bytes, MonoTime now) {
+    refill(now);
+    const int64_t need = airtime_us(bytes) - k_direct_debt_us - tokens_; // tokens missing
+    const int64_t us = need <= 0 ? 0 : (need * 1000 + k_rate_ms_per_s - 1) / k_rate_ms_per_s;
+    return now + Duration{us < 1000 ? 1000 : us};
+}
+
 int64_t Scheduler::tokens_us(MonoTime now) {
     refill(now);
     return tokens_;
@@ -128,6 +148,9 @@ void Scheduler::charge(Class c, std::size_t bytes, MonoTime now, bool queued) {
     s.airtime_us += static_cast<uint64_t>(cost);
     if (!queued) {
         stats_.ack_charged_us += static_cast<uint64_t>(cost);
+        if (c == Class::Control) {
+            win_ctrl_us_ += static_cast<int32_t>(cost); // direct control-plane traffic spends the same entitlement
+        }
         return;
     }
     if (c == Class::Control) {

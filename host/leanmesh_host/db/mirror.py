@@ -13,6 +13,8 @@ from typing import Any
 
 from ..api.codec import canonical_json
 from ..api.errors import ApiError, invalid, not_found
+from ..events.journal import now_ms
+from ..power_state import resolve as resolve_power
 
 _NODE_EXTRAS = ("root_depth", "last_authenticated_rx_mono_ms", "parent_rssi_dbm")
 
@@ -42,6 +44,15 @@ def upsert_node(conn: sqlite3.Connection, domain: bytes, device: bytes, *, assig
 
 def put_power(conn: sqlite3.Connection, domain: bytes, device: bytes, policy: dict[str, Any],
               snapshot: dict[str, Any]) -> None:
+    if "_root_offset_ms" not in snapshot:
+        # No root clock: the report is aged from when the Host first saw it (the root stamped it no later than
+        # that), and the anchor is kept while the same report is seen again. Stale is then detectable, never late-proof.
+        prev = conn.execute("SELECT snapshot_json FROM node_power WHERE domain=? AND device=?", (domain, device)).fetchone()
+        old = json.loads(prev[0]) if prev is not None else {}
+        if old.get("reported_root_ms") == snapshot.get("reported_root_ms") and "_root_offset_ms" in old:
+            snapshot["_root_offset_ms"] = old["_root_offset_ms"]
+        elif "reported_root_ms" in snapshot:
+            snapshot["_root_offset_ms"] = int(snapshot["reported_root_ms"]) - now_ms()
     conn.execute(
         "INSERT INTO node_power(domain,device,policy_revision,mode,policy_json,snapshot_json) "
         "VALUES(?,?,?,?,?,?) ON CONFLICT(domain,device) DO UPDATE SET policy_revision="
@@ -71,7 +82,7 @@ def _node(row: tuple[Any, ...], power: str | None) -> dict[str, Any]:
         "membership": membership, "connectivity": connectivity, "confirmed": bool(confirmed)}
     out.update({k: extras[k] for k in _NODE_EXTRAS if k in extras})
     if power is not None:
-        out["power"] = json.loads(power)
+        out["power"] = resolve_power(json.loads(power), now_ms())
     return out
 
 
@@ -101,7 +112,7 @@ def get_power(conn: sqlite3.Connection, domain: bytes, device: bytes) -> dict[st
                        (domain, device)).fetchone()
     if row is None:
         raise not_found("power state")  # not reported by the root: never a guessed default
-    return json.loads(row[0])
+    return resolve_power(json.loads(row[0]), now_ms())
 
 
 def get_channel(conn: sqlite3.Connection, domain: bytes) -> dict[str, Any]:

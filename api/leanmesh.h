@@ -205,6 +205,9 @@ lm_status_t lm_leave(lm_context_t*, uint32_t mode, uint32_t deadline_ms,
                      lm_operation_id_t*);
 lm_status_t lm_install_control(lm_context_t*, uint32_t control_type,
  const uint8_t *signed_cbor, size_t, lm_operation_id_t*);
+/* The device's outstanding transfer_nonce16 (docs/07 §8): a mode-0 AssignmentTicket must name it. Made on the first
+   call and kept (RAM only) until a join made ACTIVE with it; a restart voids it (a ticket for it is refused). */
+lm_status_t lm_transfer_nonce_get(lm_context_t*, uint8_t nonce[16]);
 lm_status_t lm_group_set(lm_context_t*, uint32_t group_id, uint64_t expected_revision,
  const lm_device_id_t *members, size_t count, lm_operation_id_t*);
 lm_status_t lm_policy_get(lm_context_t*, lm_policy_t*);

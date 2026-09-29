@@ -60,6 +60,10 @@ struct Register { // node -> root: "approve this parent for me"
 struct Ready { // node -> root: the granted revision is applied; repeated as the lease renewal
     uint32_t term = 0;
     uint32_t revision = 0;
+    // [S18] The authorisation lease of the node's MemberCredential (root ms of `term`): the root renews the
+    // credential when it is near its end (docs/06 §7). A claim about the sender only: it costs the root at most
+    // one signature per member per minute, it authorises nothing.
+    uint64_t credential_lease_ms = 0;
 };
 struct LeaseRec { // root -> node
     Status status = Status::Ok; // Ok = a grant; anything else = the reason of a refusal

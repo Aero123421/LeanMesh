@@ -19,7 +19,8 @@ DURABLEは予めjournal capacityを予約。APPLIEDは受信アプリの`lm_repo
 - `lm_membership_get` / `lm_connectivity_get`：07の独立状態とfull identityを返す。
 - `lm_join`：初回/既存復帰/transfer-candidate、target_domain制約、budget、request_id。
 - `lm_leave`：DRAIN/IMMEDIATE。鍵とpendingの扱いは07。
-- `lm_install_control`：署名済みAssignmentTicket/ExpectedSet/Policy/ChannelPlan/RootDelegationをtype付きで受ける。署名検査・権限・revision照合を省略不可。
+- `lm_install_control`：署名済みAssignmentTicket/ExpectedSet/Policy/ChannelPlan/RootDelegationをtype付きで受ける。署名検査・権限・revision照合を省略不可。S18: rootはRevokeObject（11）、CommissioningWindow（30）、RootHandover（31）、移設済みmemberのtransfer ticket（3、旧rootでのreconciliation）も受け、memberは移設ticket（3）とRootHandover（31）を保存する。
+- `lm_transfer_nonce_get(ctx, nonce[16])`（S18）：mode 0 AssignmentTicketへ結び付けるfreshなnonceを返す。RAMだけに保持し、再起動で失われる（新しいnonceで再発行を依頼する）。そのnonceを名指すticketだけを保存・提示でき、得たmembershipで消費される。IDENTITY未loadはAUTH_PENDING、読取失敗はRECOVERY_REQUIRED。
 - `lm_policy_get/set`：expected_revision必須。06の暗号条件を低セキュリティへ変えるflagは存在しない。
 - `lm_channel_request`：auto/freeze/recalculateはrootへ認可要求。radioを直接操作しない。
 

@@ -6,16 +6,20 @@ namespace lm {
 // Sleep or a withheld radio: only the driver stops. Sessions, counters, routes and queued frames stay (docs/20 §7
 // row 1); the peer table of the driver is rebuilt from the registry at wake. Never called with a frame on the air
 // (the ticket requires quiescence).
-void Engine::radio_sleep() {
-    if (radio_state_ != RadioState::Running) {
-        return;
+Status Engine::radio_sleep() {
+    if (radio_state_ == RadioState::Asleep) {
+        return Status::Ok; // already confirmed off
     }
-    if (ports_.radio.stop() != Status::Ok) {
+    if (radio_state_ != RadioState::Running) {
+        return Status::Busy; // starting, recovering or failed: there is no driver state to put to sleep
+    }
+    if (const Status s = ports_.radio.stop(); s != Status::Ok) {
         enter_fault(); // a driver that cannot be stopped may still call back: like a failed lm_stop
-        return;
+        return s;
     }
     tx_.reinitialised();
     radio_state_ = RadioState::Asleep;
+    return Status::Ok;
 }
 
 void Engine::radio_wake(MonoTime now) {

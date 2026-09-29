@@ -15,6 +15,7 @@ constexpr uint32_t k_lease_cap_ms = 7200000;   // a sleepy member's route lease 
 constexpr uint32_t k_lease_margin_ms = 60000;
 constexpr uint32_t k_max_age_s = gen::defaults::power_limits::schedule_max_age_ms / 1000U;
 constexpr uint64_t k_wake_settle_ms = 20000;
+constexpr uint64_t k_wake_lead_ms = 3000; // a group target is sent this long before its earliest wake (the mailbox holds it)
 constexpr uint64_t k_ppm = gen::defaults::channel::qualified_clock_drift_ppm; // drift of each clock
 // A report crosses up to 40 hops before the root sees it: its "next wake in X" started that much earlier.
 constexpr uint64_t k_transit_ms = 600 + 240 * static_cast<uint64_t>(gen::limits::path_hops);
@@ -123,6 +124,34 @@ Duration Power::wait_for_wake(const DeviceId &dest, MonoTime now) const {
     // this runs out. Only then does the origin send it again (the parent may have lost the mailbox); the settle
     // time lets a target that had to re-attach after that finish doing so first.
     return Duration::from_ms(static_cast<int64_t>(hi - now.to_ms() + k_wake_settle_ms));
+}
+
+Power::WakeWait Power::target_wake(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now, MonoTime &at) const {
+    if (members_.empty() || engine_.config().role != Role::Root) {
+        return WakeWait::None;
+    }
+    const delivery::EndSession *es = engine_.delivery().sessions().find_peer(dest); // the member reported through it
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+    if (es == nullptr || !es->rec.active() || next_wake(es->peer_addr, now.to_ms(), lo, hi) == k_quality_unknown) {
+        return WakeWait::None; // unknown schedule: never waited for, never called unreachable
+    }
+    if (expires_root_ms != 0) {
+        TargetFacts f;
+        f.now_ms = now.to_ms();
+        f.has_deadline = true;
+        f.deadline_ms = expires_root_ms;
+        f.wake_known = true;
+        f.next_wake_earliest_ms = lo;
+        if (target_wait(f) == Target::DeadlineUnreachable) {
+            return WakeWait::Unreachable;
+        }
+    }
+    if (lo <= now.to_ms() + k_wake_lead_ms) {
+        return WakeWait::None;
+    }
+    at = now + Duration::from_ms(static_cast<int64_t>(lo - k_wake_lead_ms - now.to_ms()));
+    return WakeWait::Wait;
 }
 
 // docs/22 §5 at submit time. Origin = the root; every other origin has no schedule and waits for the deadline.

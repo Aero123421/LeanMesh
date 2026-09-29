@@ -186,6 +186,8 @@ const Entry k_commands[] = {
     {"mesh", cmd_mesh},
     {"power", cmd_power}, {"power-set", cmd_power_set}, {"sleep", cmd_sleep}, {"wake", cmd_wake},
     {"channel", cmd_channel},
+    {"diag", cmd_diag},
+    {"lc-object", cmd_lc_object},
 };
 
 } // namespace

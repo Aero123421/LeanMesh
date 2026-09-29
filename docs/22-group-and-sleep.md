@@ -12,7 +12,7 @@ Nodeアプリの実適用結果を要求できるが、64台×20hopが一定時�
 
 spec0.2の新規送信は`GroupSnapshotV2`（control type32）を使う。type22は0.1の履歴用予約であり、新実装が意味を変えて再利用しない。旧22を必須機能として送りつけられたらUNSUPPORTED。
 
-snapshotは`domain, group_id, group_revision, token, origin DeviceId, sorted unique targets`を固定し、targetは`[DeviceId, assignment_generation, membership_generation]`。SHA-256(deterministic CBORの上記配列)をsnapshot_hashとする。先にrootが全集合を固定してから最大16targets/pageで返す。全pageに同token/hash/total。pageの追加取得で集合を作り直さない。
+snapshotは`domain, group_id, group_revision, token, origin DeviceId, sorted unique targets`を固定し、targetは`[DeviceId, assignment_generation, membership_generation]`。SHA-256(deterministic CBORの上記配列)をsnapshot_hashとする。先にrootが全集合を固定してから最大16targets/pageで返す。ただし1 pageの符号化済みtarget行は700 Bまでとし（世代が2^63近い最悪値で13行、最大5page。page番号は0..4）、各pageの範囲は集合だけから決まる（署名済みpageと封筒が交換の1 KiB領域に収まる）。全pageに同token/hash/total。pageの追加取得で集合を作り直さない。
 
 snapshot取得は認証済みoriginがcontrol type33でrootへ要求する。SerialのGROUP_SNAPSHOT=8も同じ意味とし、originはUSB sessionのrootアプリIdentityになる。page0/token=nullで新snapshotを予約し、返されたtokenを後続page要求に付ける。各page要求は独立request_idで、再送は同一ID・同一params。rootはtokenをdomain/origin/group/revisionへ結合し、別originのtokenを拒否する。snapshotは最大4件・120秒だけrootに保持し、満杯はNO_CAPACITY、消失/満了はSNAPSHOT_EXPIRED相当のreasonで拒否する。取得が終わるまでは送信受付を完了しない。originが検証済み全集合を保存した後はrootのpage cache満了が送信操作を無効にしない。
 

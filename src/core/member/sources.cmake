@@ -9,4 +9,5 @@ list(APPEND LM_COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/membership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/membership_join.cpp
     ${CMAKE_CURRENT_LIST_DIR}/membership_ops.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/membership_cmd.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/membership_cmd.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/lifecycle.cpp)

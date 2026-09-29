@@ -85,6 +85,8 @@ class Coordinator {
         uint64_t policy_revision = 0;
         std::array<uint8_t, 16> plan_id{};
         uint64_t required = 0, ready = 0, stored = 0, applied = 0, unreachable = 0, deferred = 0;
+        uint32_t cooldown_left_ms = 0;  // pacing debt (kept across restarts)
+        uint8_t changes_24h = 0;
     };
     [[nodiscard]] View view() const;
     [[nodiscard]] CState state() const { return state_; }
@@ -117,6 +119,10 @@ class Coordinator {
     [[nodiscard]] unsigned children_of(uint16_t addr, MonoTime now) const;
     [[nodiscard]] bool device_at(uint16_t addr, DeviceId &out) const;
     [[nodiscard]] bool member_of(const DeviceId &peer, uint16_t &addr) const;
+    using Tag = std::array<uint8_t, 16>;
+    [[nodiscard]] bool tag_for(uint16_t addr, const DeviceId &dev, Tag &out) const;
+    [[nodiscard]] bool is_participant(uint16_t addr, const DeviceId &dev) const;
+    void rebind();
     [[nodiscard]] Status send_to(uint16_t addr, ByteView rec, MonoTime now);
     template <class M> Status send_to(uint16_t addr, const M &m, MonoTime now) {
         std::array<uint8_t, channel::k_max_record> buf{};
@@ -131,7 +137,7 @@ class Coordinator {
     void send_round(channel::Phase phase, uint64_t missing, MonoTime now);
     void abort_plan(Why why, MonoTime now);
     void finish_settle(MonoTime now);
-    void apply(bool self, uint16_t addr, const channel::Receipt &r, MonoTime now);
+    void apply(bool self, uint16_t addr, const DeviceId &peer, const channel::Receipt &r, MonoTime now);
     void set_state(CState s, Why why);
     void changed(MonoTime now);
 
@@ -162,6 +168,8 @@ class Coordinator {
     // the plan in flight or the last one
     channel::Plan plan_;
     uint64_t required_ = 0, ready_ = 0, stored_ = 0, applied_ = 0, deferred_ = 0;
+    std::array<Tag, 64> part_{}; // per required address: the identity the plan was made for (immutable while it runs)
+    bool bound_ = false;         // part_ is valid (false after a restart until rebind() proved it)
     uint8_t self_ev_ = 0; // the root's own evidence (0 none, 1 ready, 2 stored, 3 applied)
     uint8_t cursor_ = 0;
     uint8_t rollback_to_ = 0; // the channel before the last committed plan
@@ -169,10 +177,14 @@ class Coordinator {
     Status last_refusal_ = Status::Ok;
     MonoTime plan_start_{}, tick_at_ = MonoTime::never(), switched_at_ = MonoTime::never();
 
-    // pacing limits (seconds of this boot: the windows start again at a restart)
+    // pacing limits: kept across restarts as debt (save/restore), elapsed power-off time is never counted
     MonoTime cool_until_{};
-    std::array<uint32_t, 4> changes_{};
+    std::array<int64_t, 4> changes_{}; // seconds of this boot at which a plan finished (negative: before this boot)
     uint8_t n_changes_ = 0;
+    std::array<uint32_t, 4> restored_age_{};
+    uint8_t restored_n_ = 0;
+    uint32_t restored_cool_ms_ = 0;
+    bool restored_ = false;
     struct Deg {
         uint16_t addr = 0;
         uint32_t at_s = 0;

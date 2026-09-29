@@ -105,6 +105,11 @@ class LinkLayer {
     // SEC-D11: may this fresh authentic frame's counter enter the replay window?
     [[nodiscard]] bool admissible(const Neighbor &n, wire::FrameKind kind, ByteView plain) const;
     [[nodiscard]] MonoTime rotation_time(const Neighbor &n) const;
+    [[nodiscard]] bool has_join_session() {
+        bool any = false;
+        neighbors_.for_each([&](Handle, Neighbor &n) { any = any || n.join_only; });
+        return any;
+    }
 
     member::LocalIdentity &identity_;
     LinkPolicy policy_;

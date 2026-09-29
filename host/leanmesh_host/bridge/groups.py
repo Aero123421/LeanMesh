@@ -25,6 +25,7 @@ EV_GROUP_PROGRESS = 10
 PHASES = ("WAIT_ROUTE", "WAIT_AUTH", "WAIT_WAKE", "READY", "SENDING", "WAIT_RECEIPT", "FINAL")
 MAX_TRACKED = 64  # group operations followed per root boot (oldest are forgotten: their last page stays)
 MAX_TARGET_EVIDENCE = 8
+MAX_TARGETS = 64  # limits.members: group_targets.position is 0..63
 
 
 def group_dest(group_id: int, revision: int) -> bytes:
@@ -64,7 +65,8 @@ class Groups:
         return bool(self._dirty)
 
     async def sync(self, bridge: Bridge) -> None:
-        """Copies every page of every operation that changed. One failed exchange keeps the mark."""
+        """Copies every page of every operation that changed, all pages in one transaction. One failed exchange, or a
+        series that is short of its announced total, keeps the mark and stores nothing."""
         link, info = bridge.link, bridge.info
         assert link is not None and info is not None
         for op in list(self._dirty):
@@ -73,19 +75,48 @@ class Groups:
                 self._dirty.discard(op)
                 continue
             self._dirty.discard(op)  # a change during the copy marks it again
-            token, offset = bytes(16), 0  # a zero token names the operation's own snapshot
-            while offset is not None:
-                res = await link.request(M_GROUP_TARGETS, [info.boot, number, token, offset, 16])
-                if res.status != mapping.OK or res.result is None:
-                    if res.status == mapping.NOT_FOUND:
-                        self._number.pop(op, None)  # a restarted root: its numbers are void
-                    else:
-                        self._dirty.add(op)
-                    break
-                page = cbor_decode(res.result)
-                token = bytes(page["snapshot_token"])
-                await bridge.hub.write(lambda conn, p=page, o=op: write_page(conn, o, info.root, p))
-                offset = page["next_offset"]
+            pages, gone = await self._fetch(link, info, number)
+            if pages is None:  # a failed exchange keeps the mark; a partial or inconsistent series is never stored
+                if gone:
+                    self._number.pop(op, None)  # a restarted root: its numbers are void
+                else:
+                    self._dirty.add(op)
+                continue
+            await bridge.hub.write(lambda conn, o=op, ps=pages: write_pages(conn, o, info.root, ps))
+
+    async def _fetch(self, link: Any, info: Any, number: int) -> tuple[list[dict[str, Any]] | None, bool]:
+        """(all pages of one operation's snapshot | None, the root no longer knows the operation). One transaction
+        writes them all later, so the mirror never shows a complete-looking prefix (a root that answers total=64
+        with one target does not have a group of 1)."""
+        token, offset, pages = bytes(16), 0, []  # a zero token names the operation's own snapshot
+        first: dict[str, Any] | None = None
+        got = 0
+        while offset is not None:
+            res = await link.request(M_GROUP_TARGETS, [info.boot, number, token, offset, 16])
+            if res.status != mapping.OK or res.result is None:
+                return None, res.status == mapping.NOT_FOUND
+            page = cbor_decode(res.result)
+            token = bytes(page["snapshot_token"])
+            if first is None:
+                first = page
+            targets = page["targets"]
+            nxt = page["next_offset"]
+            consistent = (page["offset"] == offset and page["total"] == first["total"] and token == bytes(first["snapshot_token"])
+                          and bytes(page["snapshot_hash"]) == bytes(first["snapshot_hash"])
+                          and page["total"] <= MAX_TARGETS and (nxt is None or (targets and nxt == offset + len(targets))))
+            if not consistent:
+                return None, False
+            got += len(targets)
+            pages.append(page)
+            offset = nxt
+        if first is None or got != first["total"]:
+            return None, False  # the series ended before the announced total
+        return pages, False
+
+
+def write_pages(conn: sqlite3.Connection, op: bytes, root: bytes, pages: list[dict[str, Any]]) -> None:
+    for page in pages:
+        write_page(conn, op, root, page)
 
 
 def write_page(conn: sqlite3.Connection, op: bytes, root: bytes, page: dict[str, Any]) -> None:

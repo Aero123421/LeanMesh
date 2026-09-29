@@ -53,12 +53,20 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         }
         uint64_t op = 0;
         Status s = Status::Unsupported; // other control types belong to other slices
-        switch (*static_cast<const uint32_t *>(cmd.request)) {
-        case member::k_type_assignment_ticket:
-            s = is_root() ? Status::RoleNotAllowed : membership_.install_ticket(cmd.payload, now, op);
+        const uint32_t type = *static_cast<const uint32_t *>(cmd.request);
+        switch (type) {
+        case member::k_type_assignment_ticket: // [S18] on the root: a member of this domain moved away
+        case member::k_type_root_handover:     // [S18] a member's authorisation for its domain's new root
+            s = is_root() ? ledger_.install_lifecycle(static_cast<uint8_t>(type), cmd.payload, now, op)
+                          : membership_.install_ticket(cmd.payload, now, op);
             break;
         case member::k_type_expected_set:
             s = is_root() ? ledger_.install_expected(cmd.payload, now, op) : Status::RoleNotAllowed;
+            break;
+        case member::k_type_revoke: // [S18]
+        case member::k_type_commissioning_window:
+            s = is_root() ? ledger_.install_lifecycle(static_cast<uint8_t>(type), cmd.payload, now, op)
+                          : Status::RoleNotAllowed;
             break;
         default:
             break;
@@ -76,6 +84,17 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         const Status s = membership_.get_request(id, out, now);
         if (s == Status::Ok) {
             std::memcpy(cmd.response, &out, sizeof(out));
+        }
+        return Reply{s, 0, 0};
+    }
+    case CommandKind::TransferNonce: { // [S18]
+        std::array<uint8_t, 16> nonce{};
+        if (is_root() || cmd.response == nullptr || cmd.response_size != nonce.size()) {
+            return Reply{is_root() ? Status::RoleNotAllowed : Status::InvalidArgument, 0, 0};
+        }
+        const Status s = membership_.transfer_nonce(nonce);
+        if (s == Status::Ok) {
+            std::memcpy(cmd.response, nonce.data(), nonce.size());
         }
         return Reply{s, 0, 0};
     }

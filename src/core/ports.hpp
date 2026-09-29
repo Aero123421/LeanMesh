@@ -191,7 +191,9 @@ enum class SleepStart : uint8_t { Woke, Pending, Unsupported }; // Woke: the cal
 
 class Pm {
   public:
-    virtual void set_locks(uint8_t mask) = 0;
+    // Returns the locks actually held afterwards: a bit the port could not take or release is visible to the owner,
+    // which asks again and refuses new work / a sleep it cannot cover (docs/20 §11).
+    [[nodiscard]] virtual uint8_t set_locks(uint8_t mask) = 0;
     virtual WakeInfo boot_info() = 0;
     // Survives a deep sleep, not a power-on reset. At most 32 bytes.
     virtual void retain(ByteView state) = 0;

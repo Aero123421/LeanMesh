@@ -582,7 +582,7 @@ LM_TEST("J02 policy: closed root offers nothing; preapproved refuses an unexpect
     LM_CHECK_OK(n.install_ticket(1, wrong_domain));
     n.run_ms(31000);
     op = n.join(1, 0x92, LM_JOIN_NEW, &st);
-    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::AuthRejected));
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::NetworkMismatch)); // names another root
     LM_CHECK_EQ(n.ledger().stats().requests, 1ull); // only the NOT_EXPECTED attempt ever reached the root
 }
 
@@ -1111,25 +1111,45 @@ LM_TEST("SEC-1 the PREPARE artifact never opens an ordinary session with a membe
     LM_CHECK(n.eng(2).link().stats().cred_rejected > rejected); // refused by the peer's own signature check
 }
 
-// SEC-D4: ticket modes (docs/07 §8, control.cddl note 3). Mode 0 needs the device's fresh nonce, which no API can
-// hand to the fleet yet: refused (fail closed) by the device at install and by the root when presented anyway.
-LM_TEST("SEC-4 a mode-0 ticket (fresh device nonce) is refused: by the device at install, by the root when presented") {
+// SEC-D4 / S18 (supersedes SEC-D4a): ticket modes (docs/07 §8, control.cddl note 3). A mode-0 ticket names the nonce
+// the device issued (lm_transfer_nonce_get) and the device vouches for it in its authenticated JoinRequest; a ticket
+// for any other nonce - one it never issued, or one a restart forgot - never reaches the root.
+LM_TEST("SEC-4 S18 a mode-0 ticket works only for the device's own outstanding nonce, once") {
     JNet n(2, 83);
     std::array<uint8_t, 16> nonce{};
     nonce.fill(0x5A);
-    const Bytes t0 = n.net.fleet.ticket(n.kits[1].kit, DomainId{}, n.net.domain, n.net.delegation_cose, 0, 1, 0, &nonce);
-    LM_CHECK_EQ(n.install_ticket(1, t0), Status::Unsupported);
-    // A device whose ticket record was written behind the install check: the root does not act on it.
+    const Bytes forged = n.net.fleet.ticket(n.kits[1].kit, DomainId{}, n.net.domain, n.net.delegation_cose, 0, 1, 0, &nonce);
+    LM_CHECK_EQ(n.install_ticket(1, forged), Status::AuthRejected); // a nonce this device never issued
+    // A ticket record written behind the install check (another nonce): the device does not present it.
     n.node(1).power_cut();
     n.node(1).store.power_restore();
-    commit_record(n.node(1).store, store::rec::assignment_ticket, 0, view(t0));
+    commit_record(n.node(1).store, store::rec::assignment_ticket, 0, view(forged));
     n.boot(1);
     n.run_ms(100);
-    LM_CHECK_OK(n.install_expected(n.expected_page(1, 1, t0, 1)));
-    const uint64_t op = n.join(1, 0x72);
-    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::Unsupported));
-    LM_CHECK_EQ(n.ledger().stats().prepared, 0ull);
-    LM_CHECK(!n.eng(1).identity().is_member());
+    LM_CHECK_OK(n.install_expected(n.expected_page(1, 1, forged, 1)));
+    uint64_t op = n.join(1, 0x72);
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::AuthRejected));
+    LM_CHECK_EQ(n.ledger().stats().requests, 0ull);
+    // The real thing: the device's nonce, the fleet's ticket for it, the join.
+    std::array<uint8_t, 16> mine{};
+    LM_CHECK_EQ(lm_transfer_nonce_get(n.ctx(1), mine.data()), LM_STATUS_OK);
+    std::array<uint8_t, 16> again{};
+    LM_CHECK_EQ(lm_transfer_nonce_get(n.ctx(1), again.data()), LM_STATUS_OK);
+    LM_CHECK(mine == again); // one outstanding nonce until it is spent
+    const Bytes t0 = n.net.fleet.ticket(n.kits[1].kit, DomainId{}, n.net.domain, n.net.delegation_cose, 0, 1, 0, &mine);
+    LM_CHECK_OK(n.install_ticket(1, t0));
+    n.run_ms(31000); // the full-handshake gate after the refused attempt
+    LM_CHECK_OK(n.install_expected(n.expected_page(1, 1, t0, 2)));
+    op = n.join(1, 0x73);
+    LM_CHECK_EQ(n.wait_operation(1, op, 60000), 0u);
+    LM_CHECK(n.eng(1).identity().is_member());
+    LM_CHECK_EQ(lm_transfer_nonce_get(n.ctx(1), again.data()), LM_STATUS_OK);
+    LM_CHECK(mine != again); // spent by the membership it bought
+    // A restart forgets an outstanding nonce: a ticket issued for it is refused afterwards.
+    const Bytes stale = n.net.fleet.ticket(n.kits[1].kit, n.net.domain, n.net.domain, n.net.delegation_cose, 1, 2, 0, &again);
+    n.reboot(1);
+    n.run_ms(200);
+    LM_CHECK_EQ(n.install_ticket(1, stale), Status::AuthRejected);
 }
 
 // SEC-D4: the root keeps what a device consumed (its highest ACTIVE assignment generation) in the ledger entry

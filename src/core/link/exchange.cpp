@@ -303,13 +303,19 @@ Status Exchange::admit_peer(bool first, DeadlineCheck *lease) {
         return Status::Revoked;
     }
     // The estimate as of now for either mode (the link layer's own copy is only the last anchor, SEC-D3).
-    const DeadlineCheck lc = member::check_lease(mc, root_time(s_.engine.step_time()));
+    const DeadlineCheck lc =
+        lease_exempt() ? DeadlineCheck::Before : member::check_lease(mc, root_time(s_.engine.step_time()));
     if (lease != nullptr) {
         *lease = lc;
     }
     switch (lc) {
     case DeadlineCheck::After:
-        return Status::Expired;
+        // [S18-D2] A link only to get renewed: a member whose lease ran out (a sleep, an outage) reaches its root
+        // through this neighbour; the session carries SDK control only and ends after renew_window.
+        if (mode_ != Mode::Link) {
+            return Status::Expired;
+        }
+        break;
     case DeadlineCheck::Uncertain:
         if (first) {
             count(Count::TimeUncertain); // no root time yet: the session comes first, time sync follows
@@ -320,6 +326,8 @@ Status Exchange::admit_peer(bool first, DeadlineCheck *lease) {
     }
     return Status::Ok;
 }
+
+bool Exchange::lease_exempt() const { return k_root_capable && s_.engine.config().role == Role::Root; }
 
 // Starts EDHOC with the verified peer's CCS as the only acceptable credential. The initiator
 // composes message_1, the responder processes the received one.
@@ -653,6 +661,19 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
         nb.remove(*other);
         ++s_.stats.sessions_replaced;
     }
+    // Review finding 20: this address now belongs to the verified peer; a neighbour of another device holding it is
+    // an owner the root replaced, and routes learned through it are stale.
+    Neighbor *stale = nullptr;
+    nb.for_each([&](Handle, Neighbor &x) {
+        stale = stale == nullptr && &x != n && !x.join_only && x.device != device && x.address == peer_state_.mc.address
+                    ? &x
+                    : stale;
+    });
+    if (stale != nullptr) {
+        (void)s_.engine.release_peer(stale->peer);
+        nb.remove(*stale);
+        s_.engine.delivery().invalidate_routes();
+    }
     if (n == nullptr) {
         n = nb.acquire();
         if (n == nullptr) {
@@ -688,9 +709,13 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
     // SEC-D3: the session lives no longer than the peer's lease; unprovable, it carries no application DATA.
     n->lease = member::lease_of(peer_state_.mc);
     n->lease_uncertain = lease != DeadlineCheck::Before;
-    if (lease == DeadlineCheck::Before) {
+    n->renew_only = lease == DeadlineCheck::After;
+    if (lease == DeadlineCheck::Before && !lease_exempt()) {
         n->cur.valid_until = earliest(n->cur.valid_until,
                                       member::lease_local_end(root_time(now), n->lease, now));
+    } else if (n->renew_only) {
+        n->cur.valid_until = earliest(n->cur.valid_until, now + s_.policy.renew_window);
+        ++s_.stats.renew_only;
     }
     if (s_.join.link_up != nullptr) {
         s_.join.link_up(s_.join.ctx, n->device,

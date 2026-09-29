@@ -34,6 +34,7 @@ namespace lm::member {
 
 inline constexpr uint8_t k_membership_active = 1;
 inline constexpr uint8_t k_membership_left = 3; // tombstone after leave, carries the own floor (SEC-D8)
+inline constexpr uint8_t k_membership_revoked = 5; // [S18] the same tombstone after a revocation notice
 inline constexpr std::size_t k_left_bytes = 16;
 inline constexpr std::size_t k_trust_bytes = 16 + 64 + 8;
 inline constexpr std::size_t k_floor_entry_bytes = 32 + 8 + 8;
@@ -110,10 +111,15 @@ class LocalIdentity {
                                       ByteView mc_cose);
     // Logical erase of the domain membership (leave): identity, trust and floors stay; the generations below
     // `floor` are consumed for good (the LEFT tombstone holds them durably).
-    void drop_member(const Floors::Entry &floor);
+    void drop_member(const Floors::Entry &floor, bool revoked = false);
     // SEC-D8: this device's own floor from its LEFT tombstone (zero: nothing consumed and left). A ticket below
     // its assignment floor was consumed before; a credential below either floor is dead.
     [[nodiscard]] const Floors::Entry &own_floor() const { return own_floor_; }
+    // [S18] The membership record holds the credential of a transfer/handover that committed while root_delegation
+    // still names the old root (a cut between the two commits): the credential was verified under the pending
+    // delegation, which is live now; root_delegation must be rewritten from the pending record.
+    [[nodiscard]] bool delegation_behind() const { return delegation_behind_; }
+    void delegation_repaired() { delegation_behind_ = false; }
     // Borrow of the record I/O memory (docs/IMPLEMENTATION.md §13: no per-feature buffers). Null while
     // the boot load owns it or another module holds it. The lender returns it after the job's
     // completion was polled.
@@ -134,6 +140,7 @@ class LocalIdentity {
     [[nodiscard]] Status run_load(port::JobEnv &env);
     [[nodiscard]] Status load_record(port::JobEnv &env, uint16_t id);
     [[nodiscard]] Status load_membership(port::JobEnv &env);
+    [[nodiscard]] Status load_pending_delegation(port::JobEnv &env, ByteView mc);
     void load_paired_host(port::JobEnv &env);
     void load_power(port::JobEnv &env);
     void load_scope(port::JobEnv &env);
@@ -146,6 +153,7 @@ class LocalIdentity {
     bool has_delegation_ = false;
     bool has_member_ = false;
     bool rec_lent_ = false;
+    bool delegation_behind_ = false; // [S18]
     Status load_status_ = Status::Ok;
     Status member_status_ = Status::NotFound;
     Handle slot_;

@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "core/diag/diag.hpp"
 #include "gen/registry.hpp"
 
 namespace lm {
@@ -16,7 +17,13 @@ bool hook_responder_open(void *ctx) { return root_role(eng(ctx)) && eng(ctx).led
 bool hook_link_admit(void *ctx, const DeviceId &d, const member::MemberCredential &mc) {
     return !root_role(eng(ctx)) || eng(ctx).ledger().link_admit(d, mc);
 }
-Status hook_admission(void *ctx) { return root_role(eng(ctx)) ? eng(ctx).ledger().admission() : Status::Ok; }
+Status hook_admission(void *ctx) {
+    Engine &e = eng(ctx);
+    if (root_role(e)) {
+        return e.ledger().admission();
+    }
+    return e.membership().switching() ? Status::Busy : Status::Ok; // [S18] no session of the old domain now
+}
 void hook_session_up(void *ctx, bool initiator, const MacAddr &mac, const DeviceId &peer, ByteView bundle,
                      const Sha256Digest &peer_hash) {
     Engine &e = eng(ctx);
@@ -34,14 +41,14 @@ void hook_exchange_failed(void *ctx, Status why) {
         e.membership().exchange_failed(why, e.step_time());
     }
 }
-void hook_discovery(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c) {
+void hook_discovery(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c, uint32_t hint) {
     Engine &e = eng(ctx);
     if (root_role(e)) {
         e.ledger().discovery(src, c, e.step_time());
     } else if (c.object_kind == member::k_obj_join_hello) {
         e.proxy().answer_hello(c, e.step_time()); // [SLICE:S11] an attached relay offers to carry the join
     } else {
-        e.membership().discovery(src, c, e.step_time());
+        e.membership().discovery(src, c, hint, e.step_time());
     }
 }
 void hook_join_control(void *ctx, const link::RxInfo &info, ByteView plain) {
@@ -87,6 +94,22 @@ Engine::Engine(const EngineConfig &config, Ports ports) : config_(config), ports
     link_.set_proxy_sink(&Engine::proxy_sink, this);         // [SLICE:S11] frames of a joiner behind us
     mesh_.install();                                         // [SLICE:S11] delivery plug points
     group_.install();                                        // [SLICE:S15] child hooks and the control sink
+    delivery_.set_control_sink(&Engine::control_sink, this); // [SLICE:S18] lifecycle objects first, then groups
+}
+
+// [SLICE:S18] A complete control object from `origin`: a signed MemberCredential (a renewal the root sends) is the
+// membership's; everything else is the group fan-out's (GroupSnapshotV2 pages and requests, S15).
+void Engine::control_sink(void *ctx, const DeviceId &origin, const std::array<uint8_t, 16> & /*mid*/, ByteView payload,
+                          MonoTime now) {
+    auto *e = static_cast<Engine *>(ctx);
+    member::Envelope env;
+    ByteView data;
+    if (!e->is_root() && (member::peek_signed(payload, member::k_type_member_credential, env, data) == Status::Ok ||
+                          member::peek_signed(payload, member::k_type_revoke, env, data) == Status::Ok)) {
+        e->membership_.on_lifecycle_object(origin, payload, now); // a renewal or a revocation notice
+        return;
+    }
+    e->group_.on_control(origin, payload, now);
 }
 
 bool Engine::proxy_sink(void *ctx, const port::RadioRx &rx, MonoTime now) {
@@ -176,6 +199,12 @@ MonoTime Engine::step(MonoTime now) {
         serial_->on_step(now); // [SLICE:S10] port input and USB timers
     }
     power_.after_step(now); // [SLICE:S16] sleep-prepare progress, radio-time accounting, PM locks
+    if (restart_pending_ && !jobs_.busy()) { // [SLICE:S18] a committed transfer/handover: boot into the new domain
+        restart_pending_ = false;
+        if (stop_radio().status == Status::Ok) {
+            (void)start_radio(now);
+        }
+    }
     return next_deadline();
 }
 
@@ -330,6 +359,9 @@ Status Engine::transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTi
     if (!dst.is_broadcast() && !peers_.has(dst)) {
         return Status::InvalidArgument; // register the peer first (docs/03 §3)
     }
+    if (!queued && !sched_.admit_direct(frame.size(), now)) {
+        return Status::Busy; // FIX4-D3: direct traffic is bounded by the airtime bucket too; the caller retries later
+    }
     const Status st = tx_.begin(ports_.radio, dst, frame, tag, now);
     if (st == Status::Ok) {
         sched_.charge(cls, frame.size(), now, queued); // the one accounting point of the node's airtime
@@ -405,6 +437,9 @@ Reply Engine::start_radio(MonoTime now) {
         return Reply{s, 0, 0};
     }
     radio_state_ = RadioState::Running;
+    if (first_start_.is_never()) {
+        first_start_ = now; // [SLICE:S19]
+    }
     power_.on_start(now); // [SLICE:S16] boot facts and budgets; the policy record loads with the identity
     emit(LM_EVENT_STARTED, 0);
     if (serial_ != nullptr) {
@@ -488,6 +523,15 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     switch (cmd.kind) {
     case CommandKind::GetCapabilities:
         return get_capabilities(cmd);
+    case CommandKind::DiagnosticsGet: { // [SLICE:S19] answered from what the owner already keeps: no timer, no wake
+        if (cmd.response == nullptr || cmd.response_size != sizeof(lm_diagnostics_t)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        diag::Snapshot snap;
+        diag::collect(*this, now, snap);
+        diag::to_abi(snap, *static_cast<lm_diagnostics_t *>(cmd.response));
+        return Reply{Status::Ok, 0, 0};
+    }
     case CommandKind::NextEvent:
         return next_event(cmd, now);
     case CommandKind::Start:
@@ -507,6 +551,7 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::InstallControl:
     case CommandKind::GetRequest:
     case CommandKind::RootJoinDecide:
+    case CommandKind::TransferNonce: // [SLICE:S18]
         return execute_membership(cmd, now);
     case CommandKind::Send: // [SLICE:S9]
     case CommandKind::SendObject: // [SLICE:S12]
@@ -556,6 +601,17 @@ Reply Engine::get_capabilities(const Command &cmd) const {
     caps.implemented_bits = LM_FEATURE_GROUP_FANOUT_V2;
     caps.qualified_bits = 0;
     caps.enabled_bits = LM_FEATURE_GROUP_FANOUT_V2;
+    // [SLICE:S19] Small messages (512 B) exist on every build. The 4 KiB object lane is compiled only with
+    // LM_OBJECT_TRANSFER and is enabled by the application's config; a build without it reports neither bit.
+    constexpr uint64_t k_small = LM_FEATURE_SMALL_MESSAGE;
+    caps.build_bits |= k_small;
+    caps.implemented_bits |= k_small;
+    caps.enabled_bits |= k_small;
+    if (delivery::k_object_capable) {
+        caps.build_bits |= LM_FEATURE_OBJECT_4K;
+        caps.implemented_bits |= LM_FEATURE_OBJECT_4K;
+        caps.enabled_bits |= config_.object_transfer_enabled ? LM_FEATURE_OBJECT_4K : 0;
+    }
     // [SLICE:S16] The power modes are built and implemented; they are enabled only where the platform has a sleep
     // port, and qualified nowhere (no HIL). RTC secure resume is reserved: implemented and enabled stay false.
     constexpr uint64_t k_power = LM_FEATURE_POWER_REPORT_ONLY | LM_FEATURE_POWER_WINDOWED_RX | LM_FEATURE_RAM_SESSION_RETAIN;
@@ -570,11 +626,17 @@ Reply Engine::get_capabilities(const Command &cmd) const {
     caps.max_regular_peers = gen::limits::regular_peers;
     // Common lower bound for every supported path (40 hops): 136 - 2*40 (docs/09 §5, docs/10).
     caps.available_single_frame_bytes = 136 - 2 * gen::limits::path_hops;
-    if (chan_.enabled()) { // [SLICE:S17] implemented and running; qualified_bits stay 0 until the RF tests pass
-        caps.build_bits |= LM_FEATURE_AUTO_CHANNEL;
-        caps.implemented_bits |= LM_FEATURE_AUTO_CHANNEL;
-        caps.enabled_bits |= LM_FEATURE_AUTO_CHANNEL;
-    }
+    // [SLICE:S17] The channel module is in every image; it is enabled where it runs (the bench can switch it off).
+    // qualified_bits stay 0 until the RF tests pass.
+    caps.build_bits |= LM_FEATURE_AUTO_CHANNEL;
+    caps.implemented_bits |= LM_FEATURE_AUTO_CHANNEL;
+    caps.enabled_bits |= chan_.enabled() ? LM_FEATURE_AUTO_CHANNEL : 0;
+    // [SLICE:S18] Every image moves its membership by a signed transfer and follows a RootHandover; the commissioning
+    // window is a root's admission rule (root-capable images, enabled on the root). Qualified nowhere yet (no HIL).
+    constexpr uint64_t k_lifecycle = LM_FEATURE_SIGNED_TRANSFER | LM_FEATURE_ROOT_HANDOVER;
+    caps.build_bits |= k_lifecycle | (k_root_capable ? LM_FEATURE_COMMISSIONING_WINDOW : 0);
+    caps.implemented_bits |= k_lifecycle | (k_root_capable ? LM_FEATURE_COMMISSIONING_WINDOW : 0);
+    caps.enabled_bits |= k_lifecycle | (config_.role == Role::Root ? LM_FEATURE_COMMISSIONING_WINDOW : 0);
     std::memcpy(cmd.response, &caps, sizeof(caps));
     return Reply{Status::Ok, 0, 0};
 }

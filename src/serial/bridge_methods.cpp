@@ -18,7 +18,8 @@ constexpr uint64_t k_u32_max = 0xFFFFFFFFULL;
 
 enum Method : uint64_t {
     kCapabilities = 1, kSend, kGetMessage, kCancel, kJoinDecide, kInstall, kNodeQuery, kGroupSnapshot,
-    kHostStoreAck, kEventAck, kChannelAction, kSleepWindow, kGetRequest, kGroupSet, kGroupTargets
+    kHostStoreAck, kEventAck, kChannelAction, kSleepWindow, kGetRequest, kGroupSet, kGroupTargets,
+    kDiagnostics // [S19] 16: not in the spec's table of 15; additive (protocol/serial.cddl, docs/19)
 };
 
 template <std::size_t N> void take(wire::CborReader &r, std::array<uint8_t, N> &out) {
@@ -60,6 +61,12 @@ void Bridge::handle(Pending &p, uint64_t method, ByteView params) {
         wire::CborReader r{params};
         p.status = r.try_null() && r.finish() == Status::Ok ? Status::Ok : Status::InvalidArgument;
         p.result = p.status == Status::Ok ? Result::Caps : Result::None;
+        return;
+    }
+    case kDiagnostics: { // [S19] on demand only: the Host asks, nothing here runs by itself
+        wire::CborReader r{params};
+        p.status = r.try_null() && r.finish() == Status::Ok ? Status::Ok : Status::InvalidArgument;
+        p.result = p.status == Status::Ok ? Result::Diag : Result::None;
         return;
     }
     case kSend:

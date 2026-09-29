@@ -17,7 +17,7 @@
 
 namespace lm::group {
 namespace {
-constexpr uint64_t k_u32_max = 0xFFFFFFFFULL;
+constexpr uint64_t k_u32_max = 0xFFFFFFFFULL; // group_id is a u32
 constexpr uint8_t k_cose_tag = 0xD2; // CBOR tag 18: a COSE_Sign1 (the signed page); a session body starts 0x87
 } // namespace
 
@@ -55,6 +55,31 @@ Status Fanout::snapshot_hash(const Op &g, Sha256Digest &out) const {
         &c, static_cast<std::size_t>(g.total) + 1U, out);
 }
 
+// The page boundaries are a pure function of the snapshot (rows in order, at most k_page rows and k_row_bytes of
+// encoding per page), so the root can serve any page by number and the origin needs only the number.
+void Fanout::page_span(const Op &g, unsigned page, std::size_t &first, std::size_t &n) {
+    auto width = [](uint64_t v) { return v < 24 ? 1U : (v < 256 ? 2U : (v < 65536 ? 3U : (v <= 0xFFFFFFFFULL ? 5U : 9U))); };
+    first = 0;
+    n = 0;
+    for (unsigned p = 0; p <= page; ++p) {
+        first += n;
+        n = 0;
+        std::size_t bytes = 0;
+        while (first + n < g.total && n < k_page) {
+            const Target &t = g.t[first + n];
+            const std::size_t row = 35U + width(t.assignment) + width(t.membership); // array(3), bstr(32), two uints
+            if (n != 0 && bytes + row > k_row_bytes) {
+                break;
+            }
+            bytes += row;
+            ++n;
+        }
+    }
+    if (first >= g.total && !(page == 0 && g.total == 0)) {
+        n = 0;
+    }
+}
+
 // ---- origin: fetch ----
 void Fanout::request_page(Op &g, MonoTime now) {
     if (job_ != Job::None && &ops_[job_op_] == &g) {
@@ -62,7 +87,7 @@ void Fanout::request_page(Op &g, MonoTime now) {
         return;
     }
     const member::LocalIdentity &id = engine_.identity();
-    const unsigned page = g.got / k_page;
+    const unsigned page = g.pages;
     std::array<uint8_t, 64> data{};
     wire::CborWriter d{MutByteView{data}};
     d.array(4);
@@ -133,8 +158,8 @@ void Fanout::on_control(const DeviceId &origin, ByteView payload, MonoTime now) 
 }
 
 void Fanout::on_page(ByteView cose, MonoTime now) {
-    if (k_id_slots == 0) {
-        return;
+    if (root_origin()) {
+        return; // the root is the origin of its own operations: it never fetches a snapshot
     }
     member::Envelope env;
     ByteView data;
@@ -175,17 +200,17 @@ void Fanout::accept_page(Op &g, ByteView cose, MonoTime now) {
     const ByteView token = r.bstr(16, 16);
     const ByteView origin = r.bstr(32, 32);
     const uint64_t total = r.uint_in(0, k_max_targets);
-    const uint64_t page = r.uint_in(0, 3);
+    const uint64_t page = r.uint_in(0, k_snap_pages - 1);
     const ByteView hash = r.bstr(32, 32);
     const std::size_t n = r.array(0, k_page);
-    const unsigned want = g.got / k_page;
-    const std::size_t left = total > want * k_page ? total - want * k_page : 0;
+    const unsigned want = g.pages;
+    const std::size_t left = total > g.got ? total - g.got : 0;
     const bool same = g.got == 0 || (total == g.total && std::equal(token.begin(), token.end(), g.token.begin()) &&
                                      std::equal(hash.begin(), hash.end(), g.hash.begin()));
     if (!r.ok() || page < want) {
         return; // malformed (the signature covers it, so this is the root's bug) or a repeated page
     }
-    if (gid != g.group_id || rev != g.revision || page != want || n != std::min<std::size_t>(k_page, left) || !same ||
+    if (gid != g.group_id || rev != g.revision || page != want || (left == 0 ? n != 0 : (n == 0 || n > left)) || !same ||
         !std::equal(origin.begin(), origin.end(), engine_.identity().self().bytes.begin())) {
         fetch_failed(g, static_cast<uint32_t>(Status::BadFrame));
         return;
@@ -199,17 +224,17 @@ void Fanout::accept_page(Op &g, ByteView cose, MonoTime now) {
         const std::size_t i = g.got + k;
         (void)r.array(3, 3);
         const ByteView dev = r.bstr(32, 32);
-        const uint64_t a = r.uint_in(0, k_u32_max); // a generation beyond 32 bit is refused (group.hpp)
-        const uint64_t m = r.uint_in(0, k_u32_max);
+        const uint64_t a = r.uint_in(0, k_u63_max);
+        const uint64_t m = r.uint_in(0, k_u63_max);
         if (!r.ok()) {
             break;
         }
-        std::copy(dev.begin(), dev.end(), ids_[i].bytes.begin());
+        DeviceId *ids = ids_of(g);
+        std::copy(dev.begin(), dev.end(), ids[i].bytes.begin());
         g.t[i] = Target();
-        g.t[i].assignment = static_cast<uint32_t>(a);
-        g.t[i].membership = static_cast<uint32_t>(m);
-        g.t[i].tag = static_cast<uint16_t>(dev[0] << 8U | dev[1]);
-        if (i > 0 && !(ids_[i - 1] < ids_[i])) {
+        g.t[i].assignment = a;
+        g.t[i].membership = m;
+        if (i > 0 && !(ids[i - 1] < ids[i])) {
             r.fail(); // sorted and unique, or the set is not the one that was hashed
         }
     }
@@ -219,6 +244,7 @@ void Fanout::accept_page(Op &g, ByteView cose, MonoTime now) {
         return;
     }
     g.got = static_cast<uint8_t>(g.got + n);
+    ++g.pages;
     ++stats_.pages_fetched;
     if (g.got < g.total) {
         engine_.random(MutByteView{g.req});
@@ -242,7 +268,7 @@ void Fanout::serve(const DeviceId &origin, const wire::ControlBody &b, MonoTime 
     (void)r.array(4, 4);
     const auto gid = static_cast<uint32_t>(r.uint_in(0, k_u32_max));
     const uint64_t rev = r.uint_in(0, k_u63_max);
-    const auto page = static_cast<unsigned>(r.uint_in(0, 3));
+    const auto page = static_cast<unsigned>(r.uint_in(0, k_snap_pages - 1));
     const bool named = !r.try_null();
     const ByteView token = named ? r.bstr(16, 16) : ByteView{};
     if (r.finish() != Status::Ok) {
@@ -276,7 +302,7 @@ void Fanout::serve(const DeviceId &origin, const wire::ControlBody &b, MonoTime 
             s->req = b.request_id;
             s->at = now + k_snapshot_life;
             engine_.random(MutByteView{s->token});
-            if (engine_.groups().snapshot(gid, rev, *s) != Status::Ok || snapshot_hash(*s, s->hash) != Status::Ok) {
+            if (engine_.groups().snapshot(gid, rev, *s, ids_of(*s)) != Status::Ok || snapshot_hash(*s, s->hash) != Status::Ok) {
                 reset_op(*s);
                 return;
             }
@@ -284,8 +310,11 @@ void Fanout::serve(const DeviceId &origin, const wire::ControlBody &b, MonoTime 
     } else if (s == nullptr || now >= s->at) {
         return; // unknown, other origin's, or expired (120 s)
     }
-    if (page * k_page > s->total || (page > 0 && page * k_page >= s->total)) {
-        return;
+    std::size_t first = 0;
+    std::size_t rows = 0;
+    page_span(*s, page, first, rows);
+    if (s->total == 0 ? page != 0 : rows == 0) {
+        return; // no such page
     }
     sign_page(*s, page, b.request_id, now);
 }
@@ -300,11 +329,14 @@ void Fanout::sign_page(Op &s, unsigned page, const std::array<uint8_t, 16> &req,
     }
     const member::LocalIdentity &id = engine_.identity();
     Page &p = page_;
-    p.n = static_cast<uint8_t>(std::min<std::size_t>(k_page, s.total - page * k_page));
+    std::size_t first = 0;
+    std::size_t rows = 0;
+    page_span(s, page, first, rows);
+    p.n = static_cast<uint8_t>(rows);
     bool ok = p.n <= k_serve_rows;
     for (std::size_t k = 0; k < p.n && ok; ++k) {
-        const Target &t = s.t[page * k_page + k];
-        ok = device_at(s, page * k_page + k, p.dev[k]);
+        const Target &t = s.t[first + k];
+        ok = device_at(s, first + k, p.dev[k]);
         p.a[k] = t.assignment;
         p.m[k] = t.membership;
     }
@@ -320,7 +352,7 @@ void Fanout::sign_page(Op &s, unsigned page, const std::array<uint8_t, 16> &req,
     p.total = s.total;
     p.page = static_cast<uint8_t>(page);
     if (!ok || submit(Job::Sign, s, now) != Status::Ok) {
-        release_scratch(); // a slot given to another device since the snapshot: no page, the origin times out
+        release_scratch(); // no page, the origin times out
     }
 }
 

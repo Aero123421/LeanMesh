@@ -960,4 +960,104 @@ LM_TEST("J01 sim: a tunnel record cannot capture the address of a real neighbour
     LM_CHECK(n.eng(0).proxy().owns(stranger));
 }
 
+// External review finding 1 (S18): unauthenticated beacons from ever new MACs (plausible term and path) must not keep a
+// searching node spending full handshakes. A hint may end a backoff at most once per hint period (one bucket for all
+// sources); it never resets the backoff and never grants a handshake budget of its own.
+LM_TEST("REV-1 sim: spoofed beacons from rotating MACs neither reset the backoff nor resume searches at will") {
+    MNet n(3); // root 0 - relay 1 - "attacker" position 2 (never powered: it only transmits what the test injects)
+    n.link(0, 1, false); // the relay has no real parent: it searches, spends its budget and backs off
+    n.boot(0);
+    n.boot(1);
+    n.set_time_at(1);
+    n.run_ms(200'000); // several searches spent: the backoff has grown
+    const member::Discovery &d = n.mesh(1).discovery();
+    const uint32_t grown = d.backoff_ms();
+    LM_CHECK(grown >= 8000u);
+    route::Beacon b;
+    b.flags = route::k_beacon_accepting;
+    b.term = 1;
+    b.revision = 1;
+    b.n = 2;
+    b.path[0] = 1;
+    b.path[1] = 9;
+    std::array<uint8_t, 96> frame{};
+    std::size_t len = 0;
+    LM_CHECK_OK(route::encode_beacon(b, link::domain_hint_of(n.net.domain), MutByteView{frame}, len));
+    const uint64_t minutes = 5;
+    unsigned resumes = 0;
+    uint32_t min_backoff = UINT32_MAX;
+    bool was_searching = d.searching();
+    const uint64_t hs0 = n.eng(1).link().stats().hs_started;
+    for (uint32_t k = 0; k < minutes * 60 * 5; ++k) { // a fresh source every 200 ms
+        MacAddr fake;
+        fake.bytes = {0x02, 0xEE, static_cast<uint8_t>(k >> 16), static_cast<uint8_t>(k >> 8), static_cast<uint8_t>(k), 1};
+        n.world.inject(fake, 2, n.node(1).radio.mac(), ByteView{frame.data(), len});
+        n.run_ms(200);
+        resumes += !was_searching && d.searching() ? 1U : 0U;
+        was_searching = d.searching();
+        min_backoff = std::min(min_backoff, d.backoff_ms());
+    }
+    std::printf("  REV-1: %u searches started, backoff %u -> min %u ms, %llu handshakes in %llu min of spoofed beacons\n",
+                resumes, grown, min_backoff,
+                static_cast<unsigned long long>(n.eng(1).link().stats().hs_started - hs0),
+                static_cast<unsigned long long>(minutes));
+    LM_CHECK(min_backoff >= grown); // no hint resets the backoff
+    // Natural resumes (one per 30 s search + backoff) plus at most one hint-ended backoff per minute.
+    LM_CHECK(resumes <= 2 * minutes + 1);
+}
+// External review finding 2 (S18): a SID-0 JoinProxy CredI start is unauthenticated. From ever new MACs it must not
+// hold a relay's tunnel slots: an unproven slot lives only as long as a handshake may take (the joiner's frames do
+// not extend it), one start per second is taken, and a full table gives the oldest unproven slot to a new start. Only
+// the root's answer (an authenticated downlink record) makes a slot a real tunnel with the 420 s life.
+LM_TEST("REV-2 sim: spoofed join starts cannot hold a relay's proxy slots; a real joiner gets through") {
+    MNet n(3, 0, 52, 2000, 1); // root 0 - relay 1 - joiner 2 (the joiner hears only the relay)
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(1); }, 60'000, 20));
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.grant(2, 1, 1); // the joiner is quiet until it is asked to join
+    // A CredI start: JOIN_PROXY carrier, object CredI, offset 0, complete in one fragment (junk: nobody but the root can
+    // judge it, and the root drops it at once, so only the relay's slots are at stake here).
+    std::array<uint8_t, 160> body{};
+    body.fill(0xA5);
+    wire::BootstrapCarrier c;
+    c.object_kind = 1; // CredI
+    c.total = static_cast<uint16_t>(body.size());
+    c.offset = 0;
+    c.body = ByteView{body};
+    std::array<uint8_t, 200> carrier{};
+    std::size_t clen = 0;
+    LM_CHECK_OK(wire::encode_bootstrap(c, MutByteView{carrier}, clen));
+    wire::LinkHeader h;
+    h.kind = wire::FrameKind::JoinProxy;
+    h.body_length = static_cast<uint16_t>(clen);
+    h.encrypted = false;
+    std::array<uint8_t, 250> frame{};
+    LM_CHECK_OK(wire::encode_link_header(h, MutByteView{frame.data(), wire::k_link_header_bytes}));
+    std::memcpy(frame.data() + wire::k_link_header_bytes, carrier.data(), clen);
+    const ByteView spoof{frame.data(), wire::k_link_header_bytes + clen};
+    const std::size_t slots = member::k_proxy_entries; // (a sim build sizes the table for the root)
+    auto flood = [&](uint64_t ms) { // one spoofed source per slot, each repeating its start every slots x 1.25 s
+        for (uint64_t t = 0; t < ms; t += 1250) {
+            MacAddr fake;
+            fake.bytes = {0x02, 0xEE, 0, 0, 0, static_cast<uint8_t>(1 + (t / 1250) % slots)};
+            n.world.inject(fake, 2, n.node(1).radio.mac(), spoof);
+            n.run_ms(1250);
+        }
+    };
+    flood(60'000);
+    LM_CHECK(n.eng(1).proxy().entries() >= 2u); // the flood holds what it can (also bounded by transient peers)
+    // The real joiner starts while the flood goes on.
+    const uint64_t op = n.join(2, 0x70);
+    uint32_t reason = 0xFFFF;
+    for (int k = 0; k < 96 && !n.op_done(2, op, reason); ++k) {
+        flood(2500);
+    }
+    LM_CHECK_EQ(reason, 0u);
+    LM_CHECK(n.eng(2).identity().is_member());
+    std::printf("  REV-2: dropped (table full) %llu, joiner %s\n",
+                static_cast<unsigned long long>(n.eng(1).proxy().stats().dropped_full),
+                n.eng(2).identity().is_member() ? "ACTIVE" : "not joined");
+}
+
 LM_TEST_MAIN()

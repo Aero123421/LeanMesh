@@ -370,9 +370,7 @@ void Delivery::on_end_fragment(EndSession &s, uint32_t term, MonoTime now, wire:
             done = true;
         }
     } else if (p.original_kind == wire::RecordKind::Control) {
-        for (const ControlDone &c : frag_.done) {
-            done = done || (c.used && c.mid == eh.message_id && std::memcmp(c.hash8.data(), p.intent_hash.data(), 8) == 0);
-        }
+        done = find_control_done(s, eh.message_id, p.intent_hash) != nullptr;
         if (done) {
             s.rec.accept(eh.end_counter);
             ack = A::Accepted;
@@ -510,14 +508,26 @@ void Delivery::frag_complete(RxSlot &slot, EndSession &s, uint32_t route_term, M
         frag_release(slot);
         return;
     }
-    s.rec.accept(eh.end_counter);
-    ack = A::Accepted;
     if (object_hash(s.peer, identity_.self(), identity_.delegation().domain, slot.kind, slot.flags, slot.term,
                     slot.expires, payload, hash) != Status::Ok ||
         hash != slot.hash) {
+        s.rec.accept(eh.end_counter);
+        ack = A::Accepted;
         frag_release(slot); // authentic but not what it promised: dropped, the sender's rounds end
         return;
     }
+    ControlDone *done = nullptr;
+    if (slot.kind == wire::RecordKind::Control && (done = free_control_done()) == nullptr) {
+        for (unsigned i = 0; i < n_fresh; ++i) { // FIX4-D4: every entry is live: the last fragment counts as not received
+            frag_have(slot)[fresh[i] / 8U] = static_cast<uint8_t>(frag_have(slot)[fresh[i] / 8U] & ~(1U << (fresh[i] % 8U)));
+        }
+        ++frag_.stats.rx_busy;
+        ack = A::Busy;
+        retry_ms = k_busy_retry_ms;
+        return;
+    }
+    s.rec.accept(eh.end_counter);
+    ack = A::Accepted;
     ++frag_.stats.completed;
     post_.free_slot = static_cast<uint8_t>(&slot - frag_.slots.data() + 1);
     post_.carrier = payload;
@@ -526,12 +536,48 @@ void Delivery::frag_complete(RxSlot &slot, EndSession &s, uint32_t route_term, M
         return;
     }
     post_.k = Post::K::Control;
-    ControlDone &d = frag_.done[frag_.done_next++ % k_control_done];
-    d.used = true;
-    d.mid = eh.message_id;
-    std::memcpy(d.hash8.data(), hash.data(), d.hash8.size());
+    done->used = true;
+    done->term = slot.term;
+    done->assignment = s.peer_assignment.value();
+    done->expires = slot.expires;
+    done->origin = s.peer;
+    done->mid = eh.message_id;
+    done->hash = hash;
     post_.bitmap = full_bitmap(slot.total);
     post_.bitmap_owed = true;
+}
+
+// A completed control object is live until its deadline is provably over, or its root term ended (a retry from an
+// older term is refused on arrival anyway, so it can never be dispatched again).
+bool Delivery::control_done_live(const ControlDone &c) const {
+    if (!c.used) {
+        return false;
+    }
+    if (bound_.valid && bound_.term.value() != c.term) {
+        return false;
+    }
+    return deadline_state(c.expires, c.term) != DeadlineCheck::After;
+}
+
+const ControlDone *Delivery::find_control_done(const EndSession &s, const std::array<uint8_t, 16> &mid,
+                                               const Sha256Digest &hash) const {
+    for (const ControlDone &c : frag_.done) {
+        if (control_done_live(c) && c.assignment == s.peer_assignment.value() && c.mid == mid && c.hash == hash &&
+            c.origin == s.peer) {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+ControlDone *Delivery::free_control_done() {
+    for (ControlDone &c : frag_.done) {
+        if (!control_done_live(c)) {
+            c = ControlDone{};
+            return &c;
+        }
+    }
+    return nullptr;
 }
 
 // ---- destination: answers ----

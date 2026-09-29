@@ -34,11 +34,15 @@ class Hub:
         # Set by the bridge when an authenticated root session is ACTIVE (never by guesswork).
         self.root_connected = False
         self.capabilities: frozenset[str] = frozenset()
+        # The other facts of docs/18 §6 (S19): what the root reported as built / implemented / qualified.
+        self.feature_facts: dict[str, frozenset[str]] = {}
 
     # ---- root state (bridge plug point) ------------------------------------------------------
-    def set_root(self, connected: bool, enabled_capabilities: Iterable[str] = ()) -> None:
+    def set_root(self, connected: bool, enabled_capabilities: Iterable[str] = (),
+                 facts: dict[str, frozenset[str]] | None = None) -> None:
         self.root_connected = connected
         self.capabilities = frozenset(enabled_capabilities) if connected else frozenset()
+        self.feature_facts = dict(facts or {}) if connected else {}
 
     # ---- database access ---------------------------------------------------------------------
     async def read(self, fn: Callable[[sqlite3.Connection], T]) -> T:

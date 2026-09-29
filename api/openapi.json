@@ -2182,6 +2182,244 @@
         },
         "summary": "getGroupTargets"
       }
+    },
+    "/v1/health": {
+      "get": {
+        "operationId": "get_health",
+        "description": "Host state only (database, serial link, bridge). Answers from committed state; never a root fact.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or unknown critical field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Hash/revision/epoch conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor gap or expired query window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or payload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit with retry_after_ms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Root, storage or recovery unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Insufficient durable capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/diagnostics": {
+      "get": {
+        "operationId": "get_diagnostics",
+        "description": "The root's own diagnostics, asked once per request (no background polling; answers within 1 s are shared). 503 ROOT_UNAVAILABLE without a root session. A value the root cannot know is absent and listed in `unknown`, never 0. driver = platform facts, sdk = owner counters, app = the application's view.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Diagnostics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or unknown critical field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Hash/revision/epoch conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor gap or expired query window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or payload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit with retry_after_ms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Root, storage or recovery unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Insufficient durable capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3125,7 +3363,8 @@
               "SLEEPING",
               "WAKING",
               "BUDGET_BLOCKED",
-              "FAULT"
+              "FAULT",
+              "UNKNOWN"
             ]
           },
           "policy_revision": {
@@ -3174,6 +3413,14 @@
           },
           "next_wake_latest_root_ms": {
             "$ref": "#/components/schemas/U63"
+          },
+          "reported_root_ms": {
+            "$ref": "#/components/schemas/U63",
+            "description": "Root clock at which the root received the member's schedule report (Host-served snapshots only)."
+          },
+          "report_age_ms": {
+            "$ref": "#/components/schemas/U63",
+            "description": "Upper bound of the report's age when served. state is SLEEPING only while the report is in force and UNKNOWN once its reported wake has passed."
           },
           "measured_energy_j": {
             "type": [
@@ -3281,6 +3528,255 @@
             "maxItems": 16,
             "items": {
               "$ref": "#/components/schemas/GroupTarget"
+            }
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ready",
+          "database",
+          "serial",
+          "root",
+          "root_connected",
+          "journal_id"
+        ],
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "database": {
+            "enum": [
+              "OK",
+              "FAILED"
+            ]
+          },
+          "serial": {
+            "enum": [
+              "NOT_CONFIGURED",
+              "CONNECTED",
+              "DISCONNECTED"
+            ]
+          },
+          "root": {
+            "enum": [
+              "NOT_CONFIGURED",
+              "READY",
+              "NOT_READY"
+            ]
+          },
+          "root_connected": {
+            "type": "boolean"
+          },
+          "journal_id": {
+            "$ref": "#/components/schemas/Id16"
+          }
+        }
+      },
+      "Diagnostics": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "validity_bits",
+          "driver",
+          "sdk",
+          "app",
+          "features",
+          "unknown",
+          "age_ms"
+        ],
+        "properties": {
+          "validity_bits": {
+            "$ref": "#/components/schemas/U63"
+          },
+          "age_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 = asked of the root now; else the shared answer of the last second."
+          },
+          "driver": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "reset_reason": {
+                "enum": [
+                  "UNKNOWN",
+                  "POWER_ON",
+                  "SOFTWARE",
+                  "PANIC",
+                  "WATCHDOG",
+                  "BROWNOUT",
+                  "DEEP_SLEEP_WAKE",
+                  "EXTERNAL"
+                ]
+              },
+              "min_heap_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "stack_free_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "owner_cpu_us": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "rx_ring_depth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "rx_ring_dropped": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          "sdk": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "root_term": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "channel_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "current_channel": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "pending_channel": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "regular_peers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "transient_peers": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "tx_depth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_state": {
+                "enum": [
+                  "STOPPED",
+                  "RUNNING",
+                  "RECOVERING",
+                  "FAULTED",
+                  "ASLEEP",
+                  "UNKNOWN"
+                ]
+              },
+              "tx_frames": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "rx_frames": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "link_retries": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "rf_failures": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "local_busy": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "mac_unknown": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "interval_us": {
+                "$ref": "#/components/schemas/U63"
+              }
+            }
+          },
+          "app": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "events_pending": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "events_lost": {
+                "$ref": "#/components/schemas/U63"
+              },
+              "ops_active": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "ops_uncommitted": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "ops_owed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          "unknown": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names (\"group.field\") the root could not provide."
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "build",
+                "implemented",
+                "enabled",
+                "qualified"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "build": {
+                  "type": "boolean"
+                },
+                "implemented": {
+                  "type": "boolean"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "qualified": {
+                  "type": "boolean"
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
             }
           }
         }

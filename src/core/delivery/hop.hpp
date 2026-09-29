@@ -84,6 +84,7 @@ class HopTx {
     static constexpr std::size_t k_frames = TxPool::k_frames;
     static constexpr std::size_t k_acks = 4;
     static constexpr uint8_t k_max_busy_defers = 16;
+    static constexpr uint8_t k_ack_run_max = 8; // FIX4-D3: consecutive HOP_ACKs served while a queued frame waits
     static constexpr uint32_t k_tag_frame = 0x44540000; // "DT"
     static constexpr uint32_t k_tag_ack = 0x44410000;   // "DA"
     [[nodiscard]] static bool is_hop_tag(uint32_t tag) {
@@ -148,6 +149,7 @@ class HopTx {
     void finish(Handle h, TxFrame &f, HopEnd end, MonoTime now);
     void apply_ack(Handle h, TxFrame &f, wire::HopAckStatus st, uint16_t retry_after_ms, MonoTime now);
     void pump_once(MonoTime now, bool &sent, bool &progress);
+    bool send_ack(MonoTime now, bool &sent, bool &progress);
     void rtt_sample(Duration r);
 
     Engine &engine_;
@@ -164,6 +166,7 @@ class HopTx {
     uint16_t order_ = 0;
     uint16_t air_seq_ = 0;
     uint16_t ack_seq_ = 0;
+    uint8_t ack_run_ = 0;
     MonoTime retry_at_ = MonoTime::never();
     MonoTime now_;
     bool in_pump_ = false;

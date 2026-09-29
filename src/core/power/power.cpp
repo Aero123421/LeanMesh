@@ -14,10 +14,16 @@ namespace {
 
 constexpr Duration k_ticket_life = Duration::from_ms(gen::defaults::power_limits::sleep_ticket_ms);
 constexpr Duration k_busy_retry = Duration::from_ms(50); // a window that cannot close yet looks again
+constexpr Duration k_lock_retry = Duration::from_ms(200); // a PM lock the port did not confirm is asked for again
 constexpr uint64_t k_hour_ms = 3600000ULL;
 constexpr uint64_t k_day_ms = 86400000ULL;
 constexpr uint8_t k_retained_magic = 0xB1;
 constexpr std::size_t k_retained_bytes = 1 + 3 * 8 + 2;
+
+// The buckets count microseconds (radio time) and micro-events (wakes): one place converts a policy value, so a
+// millisecond quantity cannot be scaled as if it were seconds (FIX3-D1).
+constexpr uint64_t us_of_ms(uint32_t ms) { return uint64_t{ms} * 1000U; }
+constexpr uint64_t micro_of(uint32_t n) { return uint64_t{n} * 1000000U; }
 
 // Leaky bucket: `used` drains at limit/window. dt is whole milliseconds so small steps carry no rounding loss.
 void leak(uint64_t &used, uint64_t limit, uint64_t window_ms, uint64_t dt_ms) {
@@ -32,6 +38,10 @@ uint64_t refill_ms(uint64_t used, uint64_t limit, uint64_t window_ms) {
 }
 
 } // namespace
+
+uint64_t Power::off_limit() const { return us_of_ms(policy_.offline_radio_ms_per_hour); }
+uint64_t Power::ext_limit() const { return us_of_ms(policy_.extra_radio_ms_per_day); }
+uint64_t Power::wake_limit() const { return micro_of(policy_.extra_wakes_per_day); }
 
 // ---- lifecycle ------------------------------------------------------------------------------------
 void Power::on_start(MonoTime now) {
@@ -48,10 +58,11 @@ void Power::on_start(MonoTime now) {
 }
 
 void Power::stop() {
-    if (lock_mask_ != 0 && engine_.pm() != nullptr) {
-        engine_.pm()->set_locks(0);
+    if ((lock_want_ != 0 || lock_have_ != 0) && engine_.pm() != nullptr) {
+        lock_have_ = engine_.pm()->set_locks(0);
     }
-    lock_mask_ = 0;
+    lock_want_ = 0;
+    lock_retry_ = MonoTime::never();
     st_ = State::Running;
     loaded_ = prep_active_ = ep_extra_ = false; // policy_job_ stays: a running job still owns rec_ (zombie rule)
     ticket_ = Ticket{};
@@ -80,6 +91,8 @@ void Power::on_identity_ready(MonoTime now) {
     } else if (st != Status::NotFound) {
         engine_.raise(LM_EVENT_FAULT, static_cast<uint32_t>(st == Status::Ok ? Status::RecoveryRequired : st));
     }
+    settle_boot_budgets();
+    advance_budgets(now);
     if (sleepy_mode()) {
         begin_episode(wake_reason_, now);
     }
@@ -160,23 +173,29 @@ bool Power::offline() const {
 
 // ---- budgets ----------------------------------------------------------------------------------------
 void Power::advance_budgets(MonoTime now) {
+    if (!settled_) {
+        return; // the boot budgets wait for the stored policy: no limit of a default policy may touch them
+    }
     const int64_t dt = (now - bud_at_).to_ms();
     if (dt <= 0) {
         return;
     }
     bud_at_ = bud_at_ + Duration::from_ms(dt);
     const auto d = static_cast<uint64_t>(dt);
-    leak(bud_.offline_us, uint64_t{policy_.offline_radio_ms_per_hour} * 1000U, k_hour_ms, d);
-    leak(bud_.extra_us, uint64_t{policy_.extra_radio_ms_per_day} * 1000000U, k_day_ms, d);
-    leak(bud_.extra_wakes_micro, uint64_t{policy_.extra_wakes_per_day} * 1000000U, k_day_ms, d);
+    leak(bud_.offline_us, off_limit(), k_hour_ms, d);
+    leak(bud_.extra_us, ext_limit(), k_day_ms, d);
+    leak(bud_.extra_wakes_micro, wake_limit(), k_day_ms, d);
     clamp_budgets();
 }
 
 // A bucket never holds more than its limit: a new policy with smaller limits takes effect at once.
 void Power::clamp_budgets() {
-    bud_.offline_us = std::min<uint64_t>(bud_.offline_us, uint64_t{policy_.offline_radio_ms_per_hour} * 1000U);
-    bud_.extra_us = std::min<uint64_t>(bud_.extra_us, uint64_t{policy_.extra_radio_ms_per_day} * 1000000U);
-    bud_.extra_wakes_micro = std::min<uint64_t>(bud_.extra_wakes_micro, uint64_t{policy_.extra_wakes_per_day} * 1000000U);
+    if (!settled_) {
+        return;
+    }
+    bud_.offline_us = std::min<uint64_t>(bud_.offline_us, off_limit());
+    bud_.extra_us = std::min<uint64_t>(bud_.extra_us, ext_limit());
+    bud_.extra_wakes_micro = std::min<uint64_t>(bud_.extra_wakes_micro, wake_limit());
 }
 
 // Radio-on time and, of it, the part spent without a parent (the hourly budget of docs/20 §8).
@@ -209,8 +228,11 @@ uint64_t Power::radio_on_us(MonoTime now) {
 }
 
 uint32_t Power::offline_remaining_ms(MonoTime now) {
+    if (!settled_) {
+        return 0; // the stored policy is not loaded yet: nothing is granted before its limits are known
+    }
     advance_budgets(now);
-    const uint64_t limit = uint64_t{policy_.offline_radio_ms_per_hour} * 1000U;
+    const uint64_t limit = off_limit();
     return static_cast<uint32_t>(bud_.offline_us >= limit ? 0 : (limit - bud_.offline_us) / 1000U);
 }
 
@@ -234,6 +256,9 @@ void Power::save_retained() {
     }
 }
 
+// Boot facts only: what the retained bytes hold and how long the sleep was proven to last. The limits they are
+// measured against belong to the STORED policy, which is not known yet - settle_boot_budgets() applies them once
+// it is (FIX3-D2: a cold boot must not draw on the ALWAYS_RX defaults).
 void Power::load_retained(const port::WakeInfo &w) {
     Reader r{ByteView{w.retained.data(), w.retained_len}};
     Budgets b;
@@ -243,22 +268,30 @@ void Power::load_retained(const port::WakeInfo &w) {
     b.extra_wakes_micro = r.u64be();
     b.cursor = r.u8();
     b.fail_streak = r.u8();
-    const uint64_t off = uint64_t{policy_.offline_radio_ms_per_hour} * 1000U;
-    const uint64_t ext = uint64_t{policy_.extra_radio_ms_per_day} * 1000000U;
-    const uint64_t wakes = uint64_t{policy_.extra_wakes_per_day} * 1000000U;
-    if (w.retained_len == k_retained_bytes && magic == k_retained_magic && r.finish() == Status::Ok && w.elapsed_known) {
-        bud_ = b;
-        leak(bud_.offline_us, off, k_hour_ms, w.elapsed_upper_ms); // the sleep refilled it as far as it was proven
-        leak(bud_.extra_us, ext, k_day_ms, w.elapsed_upper_ms);
-        leak(bud_.extra_wakes_micro, wakes, k_day_ms, w.elapsed_upper_ms);
-        boot_grant_ = false;
+    ret_proven_ = w.retained_len == k_retained_bytes && magic == k_retained_magic && r.finish() == Status::Ok && w.elapsed_known;
+    ret_elapsed_ms_ = w.elapsed_upper_ms;
+    bud_ = ret_proven_ ? b : Budgets{};
+    boot_grant_ = !ret_proven_;
+    settled_ = false;
+}
+
+// The policy is final: continuity proven -> the sleep refilled the buckets as far as it was proven; otherwise the
+// boot starts with every bucket used up ("zero remaining plus one boot episode", docs/20 §8).
+void Power::settle_boot_budgets() {
+    if (settled_) {
         return;
     }
-    bud_ = Budgets{};
-    bud_.offline_us = off;
-    bud_.extra_us = ext;
-    bud_.extra_wakes_micro = wakes;
-    boot_grant_ = true;
+    settled_ = true;
+    if (ret_proven_) {
+        leak(bud_.offline_us, off_limit(), k_hour_ms, ret_elapsed_ms_);
+        leak(bud_.extra_us, ext_limit(), k_day_ms, ret_elapsed_ms_);
+        leak(bud_.extra_wakes_micro, wake_limit(), k_day_ms, ret_elapsed_ms_);
+        clamp_budgets();
+        return;
+    }
+    bud_.offline_us = off_limit();
+    bud_.extra_us = ext_limit();
+    bud_.extra_wakes_micro = wake_limit();
 }
 
 bool Power::search_allowed(MonoTime now) {
@@ -267,7 +300,7 @@ bool Power::search_allowed(MonoTime now) {
     }
     advance_budgets(now);
     account_radio(now);
-    const bool hour = bud_.offline_us < uint64_t{policy_.offline_radio_ms_per_hour} * 1000U || boot_grant_;
+    const bool hour = bud_.offline_us < off_limit() || boot_grant_;
     const bool allowed = hour && now >= search_next_ && !ep_over_ && search_used_ms_ < policy_.search_budget_ms;
     if (!allowed && !search_ended_) { // once per episode: the application is told to stop waiting for a parent
         search_ended_ = true;
@@ -285,7 +318,7 @@ MonoTime Power::search_due() const {
     const uint64_t used_ms = search_used_ms_ + static_cast<uint64_t>((engine_.step_time() - acct_at_).to_ms());
     uint64_t left = used_ms < policy_.search_budget_ms ? policy_.search_budget_ms - used_ms : 0;
     if (!boot_grant_) {
-        const uint64_t lim = uint64_t{policy_.offline_radio_ms_per_hour} * 1000U;
+        const uint64_t lim = off_limit();
         left = std::min<uint64_t>(left, bud_.offline_us < lim ? (lim - bud_.offline_us) / 1000U : 0U);
     }
     return acct_at_ + Duration::from_ms(static_cast<int64_t>(left) + 1);
@@ -294,11 +327,14 @@ MonoTime Power::search_due() const {
 bool Power::handshake_allowed(MonoTime now) const {
     // The slowest step is an estimate (unmeasured: docs/20 §2 asks for the measured p95 once it exists).
     constexpr uint64_t k_step_ms = 1000;
-    return !sleepy_mode() || (!ep_over_ && can_start_work(policy_, static_cast<uint64_t>((now - ep_start_).to_ms()), k_step_ms));
+    return locks_ok() && (!sleepy_mode() || (!ep_over_ && can_start_work(policy_, static_cast<uint64_t>((now - ep_start_).to_ms()), k_step_ms)));
 }
 
 // ---- admission --------------------------------------------------------------------------------------
 Status Power::admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) {
+    if (!locks_ok()) {
+        return Status::Busy; // fail closed: no new work while a lock it needs is not confirmed (retried every step)
+    }
     if (sleepy_mode()) {
         if (st_ == State::Quiescing || st_ == State::SleepReady) {
             return Status::Busy; // a sleep is being prepared: nothing new may start (docs/20 §10)
@@ -313,6 +349,8 @@ Status Power::admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTim
     }
     return t;
 }
+
+void Power::note_state_change() { ++state_gen_; }
 
 void Power::note_rx(MonoTime now) {
     ++state_gen_;
@@ -454,7 +492,7 @@ Reply Power::prepare(const SleepRequest &req, MonoTime now) {
 // journal (SAVE_AND_SLEEP) or the caller's own wait (REQUIRE_SETTLED) is what keeps them (docs/20 §6).
 bool Power::quiet_now() const {
     return !engine_.tx().in_flight() && !engine_.delivery().job_pending() && !engine_.membership().job_pending() &&
-           !engine_.ledger().job_pending() && !engine_.identity().busy() && !policy_job_ && !engine_.jobs_busy();
+           !engine_.ledger().job_pending() && !engine_.identity().busy() && !policy_job_ && !engine_.jobs_busy() && !engine_.chan().unsettled();
 }
 
 void Power::progress_prepare(MonoTime now) {
@@ -526,7 +564,12 @@ Reply Power::enter(const lm_sleep_ticket_t &t, MonoTime now) {
         }
         return Reply{Status::SleepTicketStale, 0, 0};
     }
-    return Reply{begin_sleep(prep_req_, false, now), 0, 0};
+    const Status st = begin_sleep(prep_req_, false, now);
+    if (st != Status::Ok && st_ == State::SleepReady) {
+        st_ = prep_from_; // the sleep did not start: back to running, locks as before (the ticket is spent)
+        ++state_gen_;
+    }
+    return Reply{st, 0, 0};
 }
 
 Reply Power::sleep_abort(uint64_t op, MonoTime now) {
@@ -557,6 +600,14 @@ Status Power::begin_sleep(const SleepRequest &req, bool automatic, MonoTime now)
     }
     account_radio(now);
     advance_budgets(now);
+    const bool had_radio = engine_.radio_state() == RadioState::Running;
+    // The driver must be confirmed stopped before anything else happens: a sleep with a driver that may still call
+    // back is no sleep (FIX3-D3). Nothing below has been touched yet, so a failure leaves the node as it was.
+    if (const Status rs = engine_.radio_sleep(); rs != Status::Ok) {
+        ++stats_.sleep_refused;
+        last_reason_ = kSleepAborted;
+        return rs;
+    }
     // Session facts at entry (docs/20 §7): what would still be valid when we wake.
     const RootTimeBound b = engine_.delivery().root_time(now);
     const member::MemberCredential &mc = engine_.identity().member();
@@ -568,7 +619,7 @@ Status Power::begin_sleep(const SleepRequest &req, bool automatic, MonoTime now)
     sl_life_ms_ = std::min(sl_auth_ms_, sl_key_ms_);
     // An episode that ended without a parent counts towards the offline backoff (exponential, jitter <= 20 %). Only an
     // episode that had the radio on searched: a wake the budget denied leaves the backoff exactly as it was.
-    if (engine_.radio_state() != RadioState::Running) {
+    if (!had_radio) {
         // radio off: nothing was searched
     } else if (offline()) {
         bud_.fail_streak = static_cast<uint8_t>(std::min<int>(bud_.fail_streak + 1, 20));
@@ -590,7 +641,7 @@ Status Power::begin_sleep(const SleepRequest &req, bool automatic, MonoTime now)
     SleepRequest r = req;
     if (automatic && offline()) { // a WINDOWED node with no parent sleeps longer instead of searching every window
         const uint64_t backoff = static_cast<uint64_t>((search_next_ - now).to_ms());
-        const uint64_t refill = refill_ms(bud_.offline_us, uint64_t{policy_.offline_radio_ms_per_hour} * 1000U, k_hour_ms);
+        const uint64_t refill = refill_ms(bud_.offline_us, off_limit(), k_hour_ms);
         r.sleep_ms = std::max({r.sleep_ms, backoff, refill});
     }
     boot_grant_ = false;
@@ -602,8 +653,17 @@ Status Power::begin_sleep(const SleepRequest &req, bool automatic, MonoTime now)
     st_ = State::Sleeping;
     ++stats_.sleeps;
     last_reason_ = kSleepEntered;
-    engine_.radio_sleep();
-    set_locks();
+    set_locks(now);
+    if (r.kind == LM_SLEEP_LIGHT && lock_have_ != 0) { // a lock that could not be released would keep the CPU up
+        st_ = State::Running;                          // (deep sleep ends every lock with the reset)
+        --stats_.sleeps;
+        ++stats_.sleep_refused;
+        last_reason_ = kSleepAborted;
+        wake_at_ = MonoTime::never();
+        engine_.radio_wake(now);
+        set_locks(now);
+        return Status::Busy;
+    }
     port::WakeInfo w;
     switch (pm->sleep(r.kind, r.sources, r.sleep_ms, w)) {
     case port::SleepStart::Woke:
@@ -629,6 +689,7 @@ MonoTime Power::step_asleep(MonoTime now) {
         return MonoTime{0}; // awake: the caller runs a normal step
     }
     on_timer(now); // a radio-off episode (a wake the budget denied) still has prepare/ticket timers
+    set_locks(now);
     return deadline();
 }
 
@@ -642,10 +703,10 @@ void Power::wake(const port::WakeInfo &w, MonoTime now) {
     const uint32_t reason = auto_ ? kWindow : (external ? kExternal : kTimer);
     // Quota of unplanned wakes and the offline budget (docs/20 §8): a denied wake leaves the radio off and says so.
     const bool quota_ok = auto_ || !external ||
-                          (bud_.extra_wakes_micro + 1000000U <= uint64_t{policy_.extra_wakes_per_day} * 1000000U &&
-                           bud_.extra_us < uint64_t{policy_.extra_radio_ms_per_day} * 1000000U);
+                          (bud_.extra_wakes_micro + 1000000U <= wake_limit() &&
+                           bud_.extra_us < ext_limit());
     const bool search_ok = auto_ || !offline() ||
-                           (now >= search_next_ && bud_.offline_us < uint64_t{policy_.offline_radio_ms_per_hour} * 1000U);
+                           (now >= search_next_ && bud_.offline_us < off_limit());
     if (!quota_ok || !search_ok) {
         ++stats_.wake_denied;
         st_ = State::BudgetBlocked;
@@ -759,7 +820,10 @@ void Power::windowed_timer(MonoTime now) {
     r.pending = policy_.pending;
     const int64_t until = (next_window_ - now).to_ms();
     r.sleep_ms = until > 0 ? static_cast<uint64_t>(until) : policy_.guard_ms;
-    (void)begin_sleep(r, true, now);
+    if (begin_sleep(r, true, now) != Status::Ok) { // the driver would not stop, or a lock would not go: stay up, look again
+        window_end_ = now + k_busy_retry;
+        window_closed_ = false;
+    }
 }
 
 MonoTime Power::deadline() const {
@@ -767,6 +831,7 @@ MonoTime Power::deadline() const {
         return wake_at_;
     }
     MonoTime d = MonoTime::never();
+    d = earliest(d, lock_retry_);
     if (prep_active_) {
         d = earliest(d, prep_limit_);
     }
@@ -794,12 +859,12 @@ MonoTime Power::deadline() const {
 void Power::after_step(MonoTime now) {
     account_radio(now);
     progress_prepare(now);
-    set_locks();
+    set_locks(now);
 }
 
 // PM locks are a level, recomputed from what is actually happening: a timeout, a cancel or a failed job that
 // ends the activity ends the lock too, and nothing has to remember to release it (docs/20 §11).
-void Power::set_locks() {
+void Power::set_locks(MonoTime now) {
     port::Pm *pm = engine_.pm();
     if (pm == nullptr) {
         return;
@@ -817,10 +882,17 @@ void Power::set_locks() {
     if (engine_.tx().in_flight()) {
         m |= port::pm_lock::radio;
     }
-    if (m != lock_mask_) {
-        lock_mask_ = m;
-        pm->set_locks(m);
+    // Desired and confirmed are kept apart (FIX3-D4): the port reports what it actually holds, and any difference
+    // is asked for again at the next step. The level is never assumed.
+    if (m != lock_want_ || lock_have_ != m) {
+        lock_want_ = m;
+        lock_have_ = pm->set_locks(m);
+        if (lock_have_ != m) {
+            ++stats_.lock_faults;
+        }
     }
+    // A lock that is not what it should be is asked for again after a moment, whether or not anything else happens.
+    lock_retry_ = lock_have_ == lock_want_ ? MonoTime::never() : now + k_lock_retry;
 }
 
 // ---- commands ---------------------------------------------------------------------------------------

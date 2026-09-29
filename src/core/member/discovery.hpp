@@ -5,8 +5,11 @@
 //   2. HELLO    the first hint request after a jitter of 0..400 ms, then every second;
 //   3. budget   one search lasts at most 30 s, at most 2 full-handshake candidates are spent;
 //   4. BACKOFF  after a spent budget 1 s, doubling to 60 s; the next search starts by itself
-//               (auto_resume) or waits for its owner. A new candidate, a higher expected revision or an
-//               explicit request clears the backoff at once (docs/07 §3, J02).
+//               (auto_resume) or waits for its owner. An explicit request or the node's own authenticated
+//               evidence (a lost parent session, a refusal of the root) clears it at once (wake). An
+//               unauthenticated hint (a new candidate's beacon, an offer's higher expected revision) only ends a
+//               running backoff early, at most once per k_hint_gap for all sources together, and never shortens
+//               the backoff that follows (docs/07 §3, docs/21 §3: hints are rate-limited; review finding 1).
 // A spent budget or an unexpected device is not a fault (nothing here fails a device). Bounded state,
 // no allocation, no polling: `deadline()` is the only timer.
 #pragma once
@@ -44,6 +47,7 @@ class Discovery {
     static constexpr Duration k_backoff_min = Duration::from_s(1);
     static constexpr Duration k_backoff_max = Duration::from_s(60);
     static constexpr Duration k_not_expected_min = Duration::from_s(10);
+    static constexpr Duration k_hint_gap = Duration::from_s(60); // one unauthenticated hint acted on per minute
 
     enum class Act : uint8_t { None, Hello, Exhausted, Resumed };
 
@@ -64,8 +68,11 @@ class Discovery {
     // A full handshake with a candidate may start (the search's budget of two is not spent).
     [[nodiscard]] bool may_handshake() const { return searching() && handshakes_ < k_full_handshakes; }
     void note_handshake() { ++handshakes_; }
-    // A candidate appeared or the owner asks again: the backoff (and a spent handshake budget) is cleared.
+    // The owner asks again or has authenticated evidence: the backoff (and a spent handshake budget) is cleared.
     void wake(MonoTime now, uint16_t jitter_ms);
+    // An unauthenticated hint. False: the hint period of all sources is not over (ignore the hint). True: it may be
+    // acted on; a running backoff ended (the next search starts now; the backoff after it is as long as before).
+    [[nodiscard]] bool hint(MonoTime now);
     // The peer refused with "not expected": no hello before `hold` (10..60 s) unless the expected revision
     // advances beyond `revision` (then the owner calls wake()). Not the same timer as the backoff.
     void not_expected(MonoTime now, Duration hold, uint32_t revision) {
@@ -96,6 +103,7 @@ class Discovery {
     bool refused_ = false;
     uint8_t handshakes_ = 0;
     bool auto_resume_ = false;
+    MonoTime hint_at_{}; // the next unauthenticated hint that may be acted on (one bucket for all sources)
 };
 
 } // namespace lm::member

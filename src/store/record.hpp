@@ -58,11 +58,16 @@ inline constexpr uint16_t assignment_ticket = 12; // S8: signed AssignmentTicket
 inline constexpr uint16_t paired_host = 13;       // S10: the root's one paired Host DeviceId (D6)
 inline constexpr uint16_t power_policy = 14;      // S16: the node's PowerPolicy (docs/12 §5: a typed sealed record)
 inline constexpr uint16_t discovery_scope = 15;   // SEC-Da: the optional DiscoveryScopeKey (32 B, factory)
+inline constexpr uint16_t ota_state = 16;         // S19: the OTA rollback state (only written by an image built with LM_OTA)
+inline constexpr uint16_t root_handover = 17;     // S18: the fleet's RootHandover that retired this root (verbatim)
+inline constexpr uint16_t pending_delegation = 18; // S18: the RootDelegation of a transfer/handover target, until it is live
+inline constexpr uint16_t commissioning_window = 19; // S18: window id 16 || reservations made u8 (docs/21 §2 budget)
 // One owner per NVS key: two records on one id overwrite and misread each other (ARCH-D7 and SEC-Da each found
 // such a collision). Every id above is listed here; the ledger's entries use 0x100 + slot.
 inline constexpr uint16_t k_all[] = {boot_incarnation, identity, fleet_trust, membership, membership_prepared,
                                      assignment_high_water, channel_plan, policy, root_ledger, revocation_floors,
-                                     root_delegation, assignment_ticket, paired_host, power_policy, discovery_scope};
+                                     root_delegation, assignment_ticket, paired_host, power_policy, discovery_scope, ota_state,
+                                     root_handover, pending_delegation, commissioning_window};
 constexpr bool all_distinct() {
     for (std::size_t i = 0; i < std::size(k_all); ++i) {
         if (k_all[i] == 0 || k_all[i] >= 0x100) {

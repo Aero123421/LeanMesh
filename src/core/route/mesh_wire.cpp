@@ -171,6 +171,7 @@ Status encode(const Ready &m, MutByteView out, std::size_t &len) {
     w.u8(static_cast<uint8_t>(Op::Ready));
     w.u32be(m.term);
     w.u32be(m.revision);
+    w.u64be(m.credential_lease_ms);
     return finish(w, len);
 }
 Status encode(const LeaseRec &m, MutByteView out, std::size_t &len) {
@@ -233,6 +234,7 @@ Status decode(ByteView body, Ready &out) {
     const bool op = op_is(r, Op::Ready);
     m.term = r.u32be();
     m.revision = r.u32be();
+    m.credential_lease_ms = r.u64be();
     LM_TRY(r.finish());
     if (!op) {
         return Status::BadFrame;

@@ -671,4 +671,84 @@ LM_TEST("measure: sizeof of the fragment state and owner stack depth of fragment
 #endif
 }
 
+// ---- FIX4-D4: the completed-control table keeps live entries and answers BUSY when it is full ----
+namespace {
+
+struct ControlCrafter {
+    Net &n;
+    uint8_t mid;
+    Bytes payload;
+    uint64_t expires;
+
+    void send() const {
+        const uint8_t flags = wire::make_end_flags(wire::Delivery::BestEffort, wire::Priority::Control, false);
+        delivery::EndSession *s = n.dv(0).sessions().find_peer(n.id(1));
+        LM_CHECK(s != nullptr);
+        wire::FragmentPrefix p;
+        p.total_len = static_cast<uint16_t>(payload.size());
+        p.offset = 0;
+        p.fragment_len = p.total_len;
+        p.original_kind = wire::RecordKind::Control;
+        p.object_class = wire::ObjectClass::Control;
+        LM_CHECK_OK(delivery::object_hash(n.id(0), n.id(1), n.eng(0).identity().delegation().domain,
+                                          wire::RecordKind::Control, flags, 1, expires,
+                                          ByteView{payload.data(), payload.size()}, p.intent_hash));
+        Bytes plain(wire::k_fragment_prefix_bytes + payload.size());
+        LM_CHECK_OK(wire::encode_fragment_prefix(p, MutByteView{plain.data(), wire::k_fragment_prefix_bytes}));
+        std::memcpy(plain.data() + wire::k_fragment_prefix_bytes, payload.data(), payload.size());
+        wire::EndHeader h;
+        h.message_id.fill(mid);
+        h.app_port = 0;
+        h.record_kind = wire::RecordKind::Fragment;
+        h.flags = flags;
+        h.expires_root_ms = expires;
+        std::array<uint8_t, 250> rec{};
+        std::size_t rlen = 0;
+        LM_CHECK_OK(delivery::seal_end_record(*s, s->tx_sid, RootTerm{1}, h, ByteView{plain.data(), plain.size()},
+                                              MutByteView{rec}, rlen));
+        const delivery::PathSpec ps = n.spec(0, 1);
+        std::array<uint8_t, 250> body{};
+        std::size_t hl = 0;
+        LM_CHECK_OK(wire::encode_route(ps.header(), MutByteView{body}, hl));
+        std::memcpy(body.data() + hl, rec.data(), rlen);
+        link::SealedFrame f;
+        LM_CHECK_OK(n.eng(0).link().seal(n.id(1), wire::FrameKind::Data, ByteView{body.data(), hl + rlen}, f, n.now(0)));
+        n.world.inject(n.mac(0), 0, n.mac(1), f.view());
+        n.run_ms(60);
+    }
+};
+
+} // namespace
+
+LM_TEST("FIX4-D4 sim: a full completed-control table answers BUSY instead of evicting live entries; a retry never dispatches twice") {
+    Net n(2);
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    std::vector<Bytes> controls;
+    n.dv(1).set_control_sink(
+        [](void *ctx, const DeviceId &, const std::array<uint8_t, 16> &, ByteView p, MonoTime) {
+            static_cast<std::vector<Bytes> *>(ctx)->emplace_back(p.begin(), p.end());
+        },
+        &controls);
+    std::vector<ControlCrafter> c;
+    for (uint8_t i = 0; i < delivery::k_control_done; ++i) {
+        c.push_back(ControlCrafter{n, static_cast<uint8_t>(0x60 + i), bytes_of(i, 40), n.root_ms() + 20000});
+        c.back().send();
+    }
+    LM_CHECK_EQ(controls.size(), delivery::k_control_done);
+    ControlCrafter fifth{n, 0x6F, bytes_of(0x77, 40), n.root_ms() + 100000};
+    const uint64_t busy0 = n.dv(1).frag_stats().rx_busy;
+    fifth.send(); // no free slot and no dead entry: BUSY, not an eviction
+    LM_CHECK(n.dv(1).frag_stats().rx_busy > busy0);
+    LM_CHECK_EQ(controls.size(), delivery::k_control_done);
+    c[0].send(); // the retry of the oldest live one: still known, not dispatched again
+    c[1].send();
+    LM_CHECK_EQ(controls.size(), delivery::k_control_done);
+    n.run_ms(21000); // the four deadlines pass: their entries are dead
+    fifth.send();
+    LM_CHECK_EQ(controls.size(), delivery::k_control_done + 1);
+    fifth.send(); // and it is remembered until its own deadline
+    LM_CHECK_EQ(controls.size(), delivery::k_control_done + 1);
+}
+
 LM_TEST_MAIN()

@@ -113,6 +113,7 @@ class Mesh {
     [[nodiscard]] bool repairing() const { return repairing_; }
     [[nodiscard]] uint8_t attach_step_id() const { return static_cast<uint8_t>(att_.step); } // 0 idle .. 5 confirm
     [[nodiscard]] const Stats &stats() const { return stats_; }
+    [[nodiscard]] const member::Discovery &discovery() const { return disc_; }
     [[nodiscard]] ShortAddr parent_addr() const {
         return parent_ >= 0 ? ShortAddr{cands_[static_cast<std::size_t>(parent_)].addr} : ShortAddr{};
     }

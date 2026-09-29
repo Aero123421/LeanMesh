@@ -54,6 +54,9 @@ template <std::size_t N> class AppEventQueue {
     }
 
     [[nodiscard]] uint64_t lost() const { return lost_; }
+    // [S19] Diagnostics: events waiting for the application, and every event ever lost (lost_ restarts at each GAP).
+    [[nodiscard]] std::size_t depth() const { return ring_.size(); }
+    [[nodiscard]] uint64_t lost_total() const { return lost_total_ + lost_; }
 
   private:
     // Precondition: the ring has a free slot.
@@ -65,12 +68,14 @@ template <std::size_t N> class AppEventQueue {
         gap.event_sequence = ++sequence_;
         gap.payload_bytes = 0;
         (void)ring_.push(gap);
+        lost_total_ += lost_;
         lost_ = 0;
     }
 
     BoundedQueue<lm_event_t, N> ring_;
     uint64_t sequence_ = 0;
     uint64_t lost_ = 0;
+    uint64_t lost_total_ = 0;
 };
 
 } // namespace lm

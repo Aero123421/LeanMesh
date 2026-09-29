@@ -10,7 +10,11 @@
 //           frame, one chunk in flight, so a 250 B frame crosses 20 hops as three chunks.
 //   buffers one outgoing and one incoming frame (250 B each) per node, shared by all tunnels; a busy pipe
 //           refuses (radio Busy to the sender, or a dropped frame the joiner's retransmission repeats).
-//   tables  `join_slots` joiner MACs (relay 2, root 4), 420 s idle life.
+//   tables  `join_slots` joiner MACs (relay 2, root 4). A slot opened by an unauthenticated CredI start is unproven:
+//           it lives k_proxy_preauth from its start whatever the joiner sends, one start per k_proxy_start_gap is
+//           taken for all sources, and a full table gives its oldest unproven slot to a new start. It becomes a
+//           tunnel with the 420 s idle life only once the root answered (relay: an authenticated downlink record;
+//           root: its own join machinery sends to the MAC). Review finding 2: spoofed MACs cannot hold the slots.
 // Nothing here keeps a secret or a decision. Owner thread only.
 #pragma once
 
@@ -35,6 +39,8 @@ inline constexpr std::size_t k_proxy_entries = k_proxy_built ? k_build_limits.jo
 inline constexpr std::size_t k_proxy_frame = k_proxy_built ? port::k_max_frame_bytes : 1;
 inline constexpr uint32_t k_tag_proxy = 0x4A560000;   // "JV": TX completion of a frame handed to a joiner
 inline constexpr Duration k_proxy_idle = Duration::from_s(420); // JOIN_ONLY session life (approval + prepared)
+inline constexpr Duration k_proxy_preauth = Duration::from_s(30); // the exchange's own deadline (session_binding)
+inline constexpr Duration k_proxy_start_gap = Duration::from_s(1);
 inline constexpr std::size_t k_proxy_mac = 6;
 
 class Proxy {
@@ -74,6 +80,9 @@ class Proxy {
         uint16_t proxy_addr = 0; // root side: the relay this joiner is behind
         PeerHandle peer;         // relay side: transient driver registration to transmit to the joiner
         MonoTime last{};
+        MonoTime born{};
+        bool proven = false;     // the root answered this joiner (see the header comment)
+        [[nodiscard]] MonoTime expiry() const { return proven ? last + k_proxy_idle : born + k_proxy_preauth; }
     };
     struct Out { // the frame being carried through the route
         bool active = false, inflight = false;
@@ -111,6 +120,7 @@ class Proxy {
     uint8_t next_id_ = 1;
     MonoTime retry_at_ = MonoTime::never();
     MonoTime last_offer_{};
+    MonoTime next_start_{}; // the next unproven slot may open then (one bucket for all sources)
     MonoTime outcome_at_ = MonoTime::never(); // root: the TX result of the last frame is reported then
     uint32_t outcome_tag_ = 0;
     bool outcome_ok_ = false;

@@ -57,6 +57,7 @@ enum class CommandKind : uint8_t {
     RootSleepWindow,
     SendControl,  // [S12] internal: a control object to a device (delivery::ControlSendRequest)
     RootHostSend, // [S13] lm_send with the Host's MessageId and intent_hash (see delivery::HostSendRequest)
+    TransferNonce, // [S18] lm_transfer_nonce_get: the device's outstanding mode-0 ticket nonce (16 B response)
 };
 
 struct Command {

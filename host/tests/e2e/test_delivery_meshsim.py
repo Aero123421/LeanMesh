@@ -103,7 +103,7 @@ def test_deadline_rules_and_cancel_through_meshsim(meshsim: Callable[..., MeshSi
 
 
 @pytest.mark.e2e
-@pytest.mark.scenario("POWER-01")
+@pytest.mark.scenario("POWER-after-slot-commit")
 def test_durable_send_survives_a_power_cut_through_meshsim(meshsim: Callable[..., MeshSim]) -> None:
     sim = _chain(meshsim, 2)
     t0 = _set_clock(sim)

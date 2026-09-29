@@ -68,10 +68,17 @@ struct RxSlot {
     std::array<uint8_t, 8> have{};
 };
 
-struct ControlDone { // a dispatched control object (never dispatched twice)
+// A dispatched control object (never dispatched twice). FIX4-D4: keyed by (origin, its assignment generation,
+// MessageId, full hash) and kept until its own deadline passes (or its root term is over); a full table answers
+// BUSY, it never evicts a live entry.
+struct ControlDone {
     bool used = false;
+    uint32_t term = 0;
+    uint64_t assignment = 0;
+    uint64_t expires = 0;
+    DeviceId origin;
     std::array<uint8_t, 16> mid{};
-    std::array<uint8_t, 8> hash8{};
+    Sha256Digest hash{};
 };
 
 struct FragStats {
@@ -98,7 +105,6 @@ struct FragState {
     bool ctl_tx = false;   // the control buffer holds an outgoing control object
     bool obj_tx = false;   // the object buffer holds an outgoing object
     bool obj_held = false; // the object buffer holds a received object until the application takes it
-    uint8_t done_next = 0;
     uint32_t tick = 0;
     // What the application-visible control sink gets (control objects that complete here).
     void *sink_ctx = nullptr;
@@ -115,7 +121,6 @@ struct FragState {
             d = ControlDone{};
         }
         ctl_tx = obj_tx = obj_held = false;
-        done_next = 0;
     }
 };
 

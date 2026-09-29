@@ -478,10 +478,11 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
     std::copy(b.path.begin(), b.path.begin() + b.n, c->path.begin());
     c->heard = now;
     if (fresh && (state_ == State::Search || state_ == State::Listen)) {
-        // A candidate that is ready: no reason to wait for the end of the listen or of a backoff.
+        // A candidate that is ready: no reason to wait for the end of the listen. A beacon is unauthenticated: it may
+        // end a backoff only through the rate-limited hint bucket, never reset it (review finding 1).
         state_ = State::Search;
         if (disc_.in_backoff()) {
-            disc_.wake(now, 0);
+            (void)disc_.hint(now);
         }
         attempt_at_ = now;
     }
@@ -503,9 +504,14 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
     if (n == nullptr || !n->cur.active) {
         return;
     }
-    if (!c.probe_wait.is_never() && now >= c.probe_wait && ++c.probe_miss >= 3) {
-        drop_link(c);
-        return;
+    // [S18] A probe that went unanswered is one miss, counted once: a later attempt the radio refuses (Busy) must not
+    // count the same probe again (with frequent rotations that turned one lost probe into a dropped parent).
+    if (!c.probe_wait.is_never() && now >= c.probe_wait) {
+        c.probe_wait = MonoTime::never();
+        if (++c.probe_miss >= 3) {
+            drop_link(c);
+            return;
+        }
     }
     const member::MemberCredential &mc = engine_.identity().member();
     Probe p;
@@ -725,8 +731,10 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
     c->addr = n->address.value();
     if (att_.step == Step::Link && att_.cand == index_of(c)) {
         attach_step(now);
-    } else if (state_ == State::Ready) {
-        send_probe(*c, now); // a spare: first measurement
+    } else if (state_ == State::Ready && !c->q.known()) {
+        // A spare: first measurement. [S18] Not for a session made again (a rotation): its link is measured, and the
+        // responder installs before the initiator, so a probe sent at once would die on an SID the peer lacks yet.
+        send_probe(*c, now);
     }
 }
 
@@ -896,11 +904,12 @@ void Mesh::send_register(MonoTime now) {
 void Mesh::send_ready(MonoTime now) {
     // The granted path: READY travels the new way (the reverse of the granted root path).
     delivery::PathSpec route;
-    std::array<uint8_t, 16> body{};
+    std::array<uint8_t, 24> body{};
     std::size_t len = 0;
     Ready r;
     r.term = term().value();
     r.revision = att_.revision;
+    r.credential_lease_ms = engine_.identity().member().lease_expires_root_ms; // [S18] the root renews it when due
     if (!route_via(att_.path.data(), static_cast<uint8_t>(att_.n - 1U), att_.revision, route) ||
         encode(r, MutByteView{body}, len) != Status::Ok) {
         attach_fail(now);
@@ -1151,11 +1160,12 @@ void Mesh::commit(const LeaseRec &l, MonoTime now) {
 void Mesh::renew(MonoTime now) {
     renew_at_ = MonoTime::never();
     delivery::PathSpec route;
-    std::array<uint8_t, 16> body{};
+    std::array<uint8_t, 24> body{};
     std::size_t len = 0;
     Ready r;
     r.term = term().value();
     r.revision = rev_;
+    r.credential_lease_ms = engine_.identity().member().lease_expires_root_ms; // [S18]
     if (path_n_ < 2 || !route_via(path_.data(), static_cast<uint8_t>(path_n_ - 1U), rev_, route) ||
         encode(r, MutByteView{body}, len) != Status::Ok) {
         return;

@@ -16,6 +16,17 @@ menu "LeanMesh"
             bool "root"
     endchoice
 
+    config LEANMESH_OTA
+        bool "Optional OTA: signed manifest check and rollback state (software part)"
+        default n
+        help
+            Compiles the manifest verification, the persistent rollback state and the IDF ota hooks
+            (docs/13 section 6). Off (default): none of that is linked, no buffer exists and the
+            capability report says "not built". On does NOT enable OTA: there is no image transfer or
+            writer in this release, so nothing runs the hooks. Needs the 4 MiB two-slot layout
+            (config/partitions_4m.csv); on a layout without a second app slot the check answers
+            UNSUPPORTED. Real power-cut and rollback evidence (O01, O03) needs hardware.
+
     config LEANMESH_OBJECT_TRANSFER
         bool "Optional 4096 B object transfer (lm_send_object)"
         default n

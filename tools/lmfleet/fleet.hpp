@@ -59,6 +59,9 @@ class Fleet {
                  const std::array<uint8_t, 16> *nonce = nullptr);
     // Generic signed object (negative tests build malformed ones with it).
     Bytes sign(const member::Envelope &env, ByteView data);
+    // [S18] Fleet-signed lifecycle objects of `domain`: an admission window (control 30) and a root handover (31).
+    Bytes window(const DomainId &domain, const member::CommissioningWindow &w);
+    Bytes handover(const DomainId &domain, const member::RootHandover &h);
     // Negative tests: body says `env.issuer`, the COSE kid is the fleet's real key id (sign1_create
     // itself refuses a kid that is not the signer's, so this is the only way to build the lie).
     Bytes sign_body_issuer_mismatch(const member::Envelope &env, ByteView data);
@@ -94,7 +97,10 @@ struct NodeKit {
 // One fleet, one domain, one root: the common test topology.
 class Network {
   public:
-    explicit Network(uint64_t seed, const std::string &label = "fleet");
+    // [S18] `domain_label` / `root_index`: another domain (and root) of the same fleet (same seed and label: the same
+    // fleet key and the same device identities, e.g. for a transfer between two domains).
+    explicit Network(uint64_t seed, const std::string &label = "fleet", const std::string &domain_label = "",
+                     uint32_t root_index = 1000);
 
     Fleet fleet;
     DomainId domain;
@@ -103,6 +109,8 @@ class Network {
 
     // Root node (address 1) or an ordinary member; device index is unique per node.
     NodeKit make_root();
+    // [S18] A new root device for this domain (a handover): delegation of `generation`, its own credential of `term`.
+    NodeKit make_new_root(uint32_t index, uint64_t generation, uint32_t term, Bytes &delegation_out);
     // A member issued outside a join. It is also remembered as one the root's ledger lists (SEC-D2: the root
     // admits nobody else): provisioning the root writes all members made so far, register_member() a later one.
     NodeKit make_node(uint32_t index, uint16_t address, uint8_t role = 1,
@@ -121,5 +129,11 @@ class Network {
 // Bench only: lists `node` ACTIVE in the ledger held by `root_store` (address 2..65 is its slot, out: `slot`).
 // Alone (a member made after the root's provisioning) its manifest bit is repaired when the root loads.
 [[nodiscard]] Status register_member(sim::SimStore &root_store, const NodeKit &node, uint16_t *slot = nullptr);
+// [S18] A replacement root (a handover): its own delegation and credential; no ledger of its own - it gets the old
+// root's from a verified backup (copy_ledger), or it is RECOVERY_REQUIRED (docs/12 §5, docs/21 §8).
+[[nodiscard]] Status provision_replacement_root(sim::SimStore &store, const Network &net, const NodeKit &node,
+                                                const Bytes &delegation_cose);
+// [S18] Bench: the ledger records (manifest and entries) of one root's store copied into another's (the backup).
+[[nodiscard]] Status copy_ledger(sim::SimStore &from, sim::SimStore &to);
 
 } // namespace lm::fleet

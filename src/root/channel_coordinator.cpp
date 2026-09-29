@@ -63,6 +63,77 @@ bool Coordinator::member_of(const DeviceId &peer, uint16_t &addr) const {
            engine_.routes().topology().is_admitted(s->peer_addr);
 }
 
+// The identity behind an address: SHA-256 over (address, DeviceId, assignment, membership) of the CURRENT holder, but
+// only when `dev` is that holder (a factory-provisioned member without a ledger entry counts with generations 0).
+// A plan binds this tag per required address when it is made; whoever sits at the address later has another tag
+// (FIX3-D7).
+bool Coordinator::tag_for(uint16_t addr, const DeviceId &dev, Tag &out) const {
+    const Entry &e = engine_.ledger().entry(addr - k_first);
+    uint64_t a = 0, m = 0;
+    if (e.state == EntryState::Active && e.address.value() == addr) {
+        if (!(e.device == dev)) {
+            return false;
+        }
+        a = e.assignment;
+        m = e.membership;
+    } else {
+        const delivery::EndSession *s = engine_.delivery().end_session_at(ShortAddr{addr});
+        if (s == nullptr || !s->rec.active() || !(s->peer == dev)) {
+            return false;
+        }
+    }
+    std::array<uint8_t, 2 + 32 + 16> in{};
+    in[0] = static_cast<uint8_t>(addr >> 8U);
+    in[1] = static_cast<uint8_t>(addr);
+    std::copy(dev.bytes.begin(), dev.bytes.end(), in.begin() + 2);
+    for (unsigned i = 0; i < 8; ++i) {
+        in[34 + i] = static_cast<uint8_t>(a >> (56U - 8U * i));
+        in[42 + i] = static_cast<uint8_t>(m >> (56U - 8U * i));
+    }
+    Sha256Digest h{};
+    if (sec::sha256(ByteView{in}, h) != Status::Ok) {
+        return false;
+    }
+    std::copy(h.begin(), h.begin() + out.size(), out.begin());
+    return true;
+}
+
+// Is the current holder of `addr` the participant this plan was made for?
+bool Coordinator::is_participant(uint16_t addr, const DeviceId &dev) const {
+    Tag t{};
+    return bound_ && addr >= k_first && addr < k_end && tag_for(addr, dev, t) && t == part_[addr - k_first];
+}
+
+// After a restart the tags are gone (RAM): they are rebuilt from the holders now, but only when those are exactly
+// the devices the persisted plan's participant hash names. Any difference binds nobody - fail closed.
+void Coordinator::rebind() {
+    if (bound_ || required_ == 0) {
+        return;
+    }
+    Sha256Digest h{};
+    std::array<Tag, 64> tags{};
+    for (uint16_t a = k_first; a < k_end; ++a) {
+        if ((required_ & bit(a)) == 0) {
+            continue;
+        }
+        DeviceId dev;
+        if (!device_at(a, dev) || !tag_for(a, dev, tags[a - k_first])) {
+            return;
+        }
+        std::array<uint8_t, 34> part{};
+        part[0] = static_cast<uint8_t>(a >> 8U);
+        part[1] = static_cast<uint8_t>(a);
+        std::copy(dev.bytes.begin(), dev.bytes.end(), part.begin() + 2);
+        if (sec::sha256_parts(ByteView{h}, ByteView{part}, h) != Status::Ok) {
+            return;
+        }
+    }
+    if (h == plan_.participants) {
+        part_ = tags;
+        bound_ = true;
+    }
+}
+
 Status Coordinator::send_to(uint16_t addr, ByteView rec, MonoTime now) {
     DeviceId dev;
     delivery::PathSpec route;
@@ -162,6 +233,7 @@ Status Coordinator::begin_plan(uint8_t new_ch, MonoTime now) {
     // that cannot be reached defers the whole plan unless the operator accepted that explicitly (docs/20 §9).
     uint64_t required = 0, deferred = 0;
     Sha256Digest h{};
+    std::array<Tag, 64> tags{};
     for (uint16_t a = k_first; a < k_end; ++a) {
         if (!engine_.routes().topology().is_admitted(ShortAddr{a})) {
             continue;
@@ -171,7 +243,9 @@ Status Coordinator::begin_plan(uint8_t new_ch, MonoTime now) {
             required |= bit(a);
             std::array<uint8_t, 34> part{};
             DeviceId dev;
-            (void)device_at(a, dev);
+            if (!device_at(a, dev) || !tag_for(a, dev, tags[a - k_first])) {
+                return Status::AuthPending; // the holder changes under us: not a participant we can name
+            }
             part[0] = static_cast<uint8_t>(a >> 8U);
             part[1] = static_cast<uint8_t>(a);
             std::copy(dev.bytes.begin(), dev.bytes.end(), part.begin() + 2);
@@ -201,6 +275,8 @@ Status Coordinator::begin_plan(uint8_t new_ch, MonoTime now) {
     plan_.policy_rev = policy_rev_;
     plan_.participants = h;
     required_ = required;
+    part_ = tags;
+    bound_ = true;
     deferred_ = deferred;
     ready_ = stored_ = applied_ = 0;
     self_ev_ = 0;
@@ -252,7 +328,10 @@ void Coordinator::send_round(channel::Phase phase, uint64_t missing, MonoTime no
     for (unsigned sent = 0; cursor_ < 64 && sent < k_batch;) {
         const uint16_t a = static_cast<uint16_t>(k_first + cursor_++);
         if ((missing & bit(a)) != 0) {
-            (void)send_to(a, rec, now); // a refusal by the stack is local: the next round asks again
+            DeviceId dev;
+            if (device_at(a, dev) && is_participant(a, dev)) { // never a plan to a device that took the address later
+                (void)send_to(a, rec, now); // a refusal by the stack is local: the next round asks again
+            }
             ++sent;
         }
     }
@@ -265,6 +344,9 @@ void Coordinator::send_round(channel::Phase phase, uint64_t missing, MonoTime no
 
 void Coordinator::plan_tick(MonoTime now) {
     channel::Channel &ch = engine_.chan();
+    if (!bound_ && state_ == CState::Recovering && engine_.ledger().ready()) {
+        rebind();
+    }
     channel::PlanRec rec;
     rec.plan = plan_;
     switch (state_) {
@@ -337,7 +419,7 @@ void Coordinator::plan_tick(MonoTime now) {
 }
 
 void Coordinator::finish_settle(MonoTime now) {
-    changes_[n_changes_++ % 4] = static_cast<uint32_t>(now.to_ms() / 1000);
+    changes_[n_changes_++ % 4] = now.to_ms() / 1000;
     cool_until_ = now + ms(gen::defaults::channel::cooldown_ms);
     cursor_ = 0;
     if ((required_ & ~applied_) == 0) {
@@ -363,10 +445,10 @@ void Coordinator::on_local_switch(MonoTime now) {
 }
 
 // A receipt of the root itself (`self`) or of the member at `addr`.
-void Coordinator::apply(bool self, uint16_t addr, const channel::Receipt &r, MonoTime now) {
+void Coordinator::apply(bool self, uint16_t addr, const DeviceId &peer, const channel::Receipt &r, MonoTime now) {
     Sha256Digest h;
     if (state_ == CState::Monitor || state_ == CState::Survey || r.id != plan_.id || channel::plan_hash(plan_, h) != Status::Ok ||
-        h != r.hash || (!self && (required_ & bit(addr)) == 0)) {
+        h != r.hash || (!self && ((required_ & bit(addr)) == 0 || !is_participant(addr, peer)))) {
         return;
     }
     const uint64_t b = self ? 0 : bit(addr);
@@ -388,7 +470,7 @@ void Coordinator::apply(bool self, uint16_t addr, const channel::Receipt &r, Mon
     }
 }
 
-void Coordinator::on_local_receipt(const channel::Receipt &r, MonoTime now) { apply(true, 0, r, now); }
+void Coordinator::on_local_receipt(const channel::Receipt &r, MonoTime now) { apply(true, 0, DeviceId{}, r, now); }
 
 // ---- records ---------------------------------------------------------------------------------------------
 void Coordinator::on_record(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now) {
@@ -404,7 +486,7 @@ void Coordinator::on_record(const DeviceId &peer, const delivery::PathSpec &repl
     switch (channel::op_of(body)) {
     case channel::Op::Receipt:
         if (decode(body, rc) == Status::Ok) {
-            apply(false, addr, rc, now);
+            apply(false, addr, peer, rc, now);
         }
         break;
     case channel::Op::TimeReq:
@@ -689,6 +771,22 @@ void Coordinator::save(Writer &w) const {
     w.u8(rollback_to_);
     w.u64be(required_);
     channel::put_plan(w, plan_);
+    // Pacing debt (FIX3-D8): the age of each change of the last day and the cooldown still to run, as of this write.
+    // A restart cannot know how long the power was off, so it counts none of that time (it never refills a bucket).
+    const int64_t t = engine_.step_time().to_ms() / 1000;
+    uint8_t n = 0;
+    std::array<uint32_t, 4> age{};
+    for (uint8_t i = 0; i < std::min<uint8_t>(n_changes_, 4); ++i) {
+        if (t - changes_[i] < 86400) {
+            age[n++] = static_cast<uint32_t>(std::max<int64_t>(t - changes_[i], 0));
+        }
+    }
+    w.u8(n);
+    for (uint8_t i = 0; i < n; ++i) {
+        w.u32be(age[i]);
+    }
+    const int64_t cool = (cool_until_ - engine_.step_time()).to_ms();
+    w.u32be(cool > 0 ? static_cast<uint32_t>(std::min<int64_t>(cool, 0xFFFFFFFFLL)) : 0U);
 }
 
 void Coordinator::restore(Reader &r, const channel::Plan *committed) {
@@ -699,6 +797,24 @@ void Coordinator::restore(Reader &r, const channel::Plan *committed) {
     const uint64_t req = r.u64be();
     const channel::Plan p = channel::get_plan(r);
     const bool ok = r.ok() && rev <= k_u63_max;
+    // Pacing debt; a record without it (older format) is read as a cooldown that has just started.
+    const uint8_t n = r.u8();
+    std::array<uint32_t, 4> age{};
+    for (uint8_t i = 0; i < std::min<uint8_t>(n, 4); ++i) {
+        age[i] = r.u32be();
+    }
+    const uint32_t cool = r.u32be();
+    if (ok) {
+        if (r.ok() && n <= 4) {
+            restored_age_ = age;
+            restored_n_ = n;
+            restored_cool_ms_ = cool;
+        } else {
+            restored_n_ = 0;
+            restored_cool_ms_ = static_cast<uint32_t>(gen::defaults::channel::cooldown_ms);
+        }
+        restored_ = true;
+    }
     if (ok) {
         frozen_ = frozen;
         policy_rev_ = rev;
@@ -714,6 +830,14 @@ void Coordinator::restore(Reader &r, const channel::Plan *committed) {
 }
 
 void Coordinator::on_loaded(MonoTime now) {
+    if (restored_) { // the pacing debt of the previous run, with the elapsed time counted as zero
+        restored_ = false;
+        n_changes_ = restored_n_;
+        for (uint8_t i = 0; i < restored_n_; ++i) {
+            changes_[i] = now.to_ms() / 1000 - static_cast<int64_t>(restored_age_[i]);
+        }
+        cool_until_ = now + ms(restored_cool_ms_);
+    }
     if (state_ == CState::Recovering) {
         cursor_ = 0;
         tick_at_ = now + Duration::from_s(5);
@@ -726,6 +850,7 @@ void Coordinator::stop() {
     vs_ = Vs::Idle;
     tick_at_ = vs_at_ = MonoTime::never();
     required_ = ready_ = stored_ = applied_ = deferred_ = 0;
+    bound_ = false;
     self_ev_ = cursor_ = n_pairs_ = 0;
     plan_ = channel::Plan{};
     deg_ = {};
@@ -758,6 +883,11 @@ Coordinator::View Coordinator::view() const {
     v.frozen = frozen_;
     v.policy_revision = policy_rev_;
     v.plan_id = plan_.id.bytes;
+    const MonoTime t = engine_.step_time();
+    v.cooldown_left_ms = t < cool_until_ ? static_cast<uint32_t>(std::min<int64_t>((cool_until_ - t).to_ms(), 0xFFFFFFFFLL)) : 0U;
+    for (uint8_t i = 0; i < std::min<uint8_t>(n_changes_, 4); ++i) {
+        v.changes_24h = static_cast<uint8_t>(v.changes_24h + (t.to_ms() / 1000 - changes_[i] < 86400 ? 1U : 0U));
+    }
     if (plan_.epoch.value() != 0 && state_ != CState::Survey) { // the current plan, or the last one
         v.required = required_;
         v.ready = ready_;

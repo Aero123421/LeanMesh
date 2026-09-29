@@ -102,14 +102,14 @@ class Bench:
         assert sim.ok("route 1 0 0")["status"] == "OK"
 
     # ---- the Host ----------------------------------------------------------------------------
-    def start_host(self, crash: str | None = None) -> HostProcess:
+    def start_host(self, crash: str | None = None, perms: list[str] | None = None) -> HostProcess:
         """Fresh uvicorn on the same directory/database. `crash` = "<stage>:<function>" arms a SIGKILL of
-        the Host at that storage-transaction boundary (crash_bridge_app.py)."""
+        the Host at that storage-transaction boundary (crash_bridge_app.py). `perms`: the token's permissions."""
         from harness import native_build_dir  # noqa: PLC0415
 
         wd = self.workdir
         token = f"tok{len(self.procs)}{os.urandom(4).hex()}"
-        HostProcess.write_tokens(wd / "tokens.json", token, PERMS)
+        HostProcess.write_tokens(wd / "tokens.json", token, perms or PERMS)
         sock = wd / "api.sock"
         sock.unlink(missing_ok=True)
         env = dict(os.environ, LEANMESH_DB=str(wd / "host.db"), LEANMESH_TOKENS=str(wd / "tokens.json"),

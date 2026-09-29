@@ -11,8 +11,6 @@
 namespace lm::group {
 namespace {
 
-constexpr uint64_t k_u32_max = 0xFFFFFFFFULL;
-
 Reply reply(Status s, uint64_t op = 0) { return Reply{s, op, 0}; }
 
 template <class T> bool request_as(const Command &c, const T *&out) {
@@ -218,16 +216,14 @@ Reply Fanout::send(const lm_send_request_t &rq, ByteView payload, const delivery
         }
     }
     std::size_t open = 0;
-    bool ids_busy = false;
     for (const Op &g : ops_) {
-        ids_busy = ids_busy || (g.kind == Op::Kind::Own && g.by_ids && g.st != Op::St::Final);
         if (host != nullptr && g.kind == Op::Kind::Own && g.host && g.host_mid == host->mid) {
             return g.host_hash == host->hash ? reply(Status::Ok, g.id) : reply(Status::Conflict);
         }
         open += g.kind == Op::Kind::Own && g.st != Op::St::Final ? 1U : 0U;
     }
-    const bool as_root = k_root_capable && engine_.config().role == Role::Root;
-    if (open >= limits_for(engine_.config().role).group_operations || (!as_root && (ids_busy || k_id_slots == 0))) {
+    const bool as_root = root_origin();
+    if (open >= limits_for(engine_.config().role).group_operations) {
         return reply(Status::NoCapacity);
     }
     Op *g = alloc(Op::Kind::Own);
@@ -258,16 +254,12 @@ Reply Fanout::send(const lm_send_request_t &rq, ByteView payload, const delivery
     }
     ++stats_.started;
     if (!as_root) { // the snapshot comes from the root page by page; the send is accepted, the set is not yet known
-        for (Op &x : ops_) {
-            x.by_ids = false; // the DeviceIds of a finished operation are gone: its targets show no name
-        }
-        g->by_ids = true;
         g->st = Op::St::Fetching;
         engine_.random(MutByteView{g->req});
         request_page(*g, now);
         return reply(Status::Ok, g->id);
     }
-    Status s = engine_.groups().snapshot(g->group_id, g->revision, *g);
+    Status s = engine_.groups().snapshot(g->group_id, g->revision, *g, ids_of(*g));
     if (s == Status::Ok) {
         engine_.random(MutByteView{g->token});
         s = snapshot_hash(*g, g->hash);
@@ -315,15 +307,14 @@ bool Fanout::locate(const MessageId &m, Op *&g, std::size_t &i, unsigned &attemp
     return false;
 }
 
+bool Fanout::root_origin() const { return k_root_capable && engine_.config().role == Role::Root; }
+
 bool Fanout::device_at(const Op &g, std::size_t i, DeviceId &out) const {
-    if (g.by_ids) {
-        if (k_id_slots == 0 || i >= k_id_slots) {
-            return false; // the real ROOT image keeps no DeviceIds: it is never a member origin
-        }
-        out = ids_[i];
-        return true;
+    if (i >= k_max_targets) {
+        return false;
     }
-    return engine_.groups().device(g.t[i], out);
+    out = ids_of(g)[i];
+    return true;
 }
 
 void Fanout::settle(Op &g, std::size_t i, uint8_t outcome, uint32_t reason) {
@@ -345,7 +336,7 @@ bool Fanout::dispatch(Op &g, std::size_t i, MonoTime now) {
         settle(g, i, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::TargetGenerationChanged));
         return true;
     }
-    if (!g.by_ids && !engine_.groups().current(t)) { // latest floor, membership and assignment, just before sending
+    if (root_origin() && !engine_.groups().current(dev, t.assignment, t.membership)) { // latest floor, membership and assignment, just before sending
         settle(g, i, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::TargetGenerationChanged));
         return true;
     }
@@ -366,6 +357,9 @@ bool Fanout::dispatch(Op &g, std::size_t i, MonoTime now) {
     const delivery::MsgBuf *buf = dv.messages().get(g.msg);
     const Reply r = dv.send_child(rq, ByteView{buf->data.data(), g.len}, mid_of(g, i, t.attempt), now);
     if (r.status == Status::Ok) {
+        if (t.phase == LM_TARGET_WAIT_WAKE) {
+            t.phase = LM_TARGET_READY; // it left WAIT_WAKE: its live phase now comes from the child
+        }
         ++g.progress;
         return true;
     }
@@ -416,10 +410,33 @@ void Fanout::pump(Op &g, MonoTime now) {
     }
     const std::size_t cap = std::min(k_inflight, static_cast<std::size_t>(k_build_limits.app_messages / 2U));
     bool shortage = false;
+    MonoTime wake_at = MonoTime::never();
     for (std::size_t n = 0; n < g.total; ++n) {
         const std::size_t i = (g.cursor + n) % g.total;
-        const Target &t = g.t[i];
-        if (g.cancelled || shortage || g.live >= cap || t.live != 0 || t.phase == LM_TARGET_FINAL) {
+        Target &t = g.t[i];
+        if (g.cancelled || shortage || t.live != 0 || t.phase == LM_TARGET_FINAL) {
+            continue;
+        }
+        // A target the root knows to be asleep waits at target level: no child, no in-flight slot, so awake targets
+        // behind it are served now (WAIT_WAKE, docs/22 §4). Only the root has the schedules.
+        DeviceId dev;
+        MonoTime at;
+        if (root_origin() && device_at(g, i, dev)) {
+            const power::Power::WakeWait w = engine_.power().target_wake(dev, g.expires, now, at);
+            if (w == power::Power::WakeWait::Unreachable) {
+                settle(g, i, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::DeadlineUnreachable));
+                continue;
+            }
+            if (w == power::Power::WakeWait::Wait) {
+                if (t.phase != LM_TARGET_WAIT_WAKE) {
+                    t.phase = LM_TARGET_WAIT_WAKE;
+                    ++g.progress;
+                }
+                wake_at = earliest(wake_at, at);
+                continue;
+            }
+        }
+        if (g.live >= cap) {
             continue;
         }
         if (dispatch(g, i, now)) {
@@ -440,6 +457,7 @@ void Fanout::pump(Op &g, MonoTime now) {
     } else if (g.live != 0) {
         g.at = now + Duration::from_s(1); // a parked look, not a poll: only while a child is in flight
     }
+    g.at = earliest(g.at, wake_at); // the next target that leaves WAIT_WAKE (a real deadline, not a poll)
 }
 
 // ---- results ----
@@ -673,7 +691,7 @@ Reply Fanout::targets(Op &g, TargetsRequest &rq) {
         lm_group_target_t &o = rq.out[k];
         o = lm_group_target_t{};
         DeviceId dev;
-        const bool known = device_at(g, i, dev); // a slot given to someone else keeps the tag but not the name
+        const bool known = device_at(g, i, dev);
         std::memcpy(o.device.bytes, known ? dev.bytes.data() : DeviceId{}.bytes.data(), 32);
         o.assignment_generation = t.assignment;
         o.membership_generation = t.membership;

@@ -13,7 +13,7 @@ headerは09の18B。kind: HELLO1 / EDHOC2 / REQUEST3 / RESPONSE4 / EVENT5 / CRED
 
 ## 4. Serial method
 1 CAPABILITIES / 2 SEND / 3 GET_MESSAGE / 4 CANCEL / 5 JOIN_DECIDE / 6 INSTALL_CONTROL / 7 NODE_QUERY / 8 GROUP_SNAPSHOT / 9 HOST_STORE_ACK / 10 EVENT_ACK / 11 CHANNEL_ACTION / 12 SLEEP_WINDOW / 13 GET_REQUEST / 14 GROUP_SET。
-未知methodはUNSUPPORTED。SENDは宛先fullIdentity・MessageId・intent_hash・app_port・flags・root_term・expiry・bytesを含む。HostはrootアプリのIdentityとして送信し、勝手な他端末originは指定できない。
+16 DIAGNOSTICS（params=nil。rootの診断snapshotとfeature表を返す。Hostが要求した時だけ実行し、周期pollingは行わない）。未知methodはUNSUPPORTED。SENDは宛先fullIdentity・MessageId・intent_hash・app_port・flags・root_term・expiry・bytesを含む。HostはrootアプリのIdentityとして送信し、勝手な他端末originは指定できない。
 INSTALL_CONTROLは署名bytesの配送であり、API受理でDevice適用済みにはしない。JOIN_DECIDEはrequestの本人/credential hashを再照合。EVENT_ACKは受信通知の進捗でありHOST_STORE_ACKとは別。後者だけHost永続保存を証明する。
 
 ## 5. credits / retry

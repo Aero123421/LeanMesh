@@ -57,7 +57,7 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
             ++stats_.rx_malformed;
         } else if (c.object_kind >= member::k_obj_join_hello) {
             if (shared_.join.discovery != nullptr) {
-                shared_.join.discovery(shared_.join.ctx, rx.src, c);
+                shared_.join.discovery(shared_.join.ctx, rx.src, c, h.domain_hint);
             }
         } else {
             exchange_.on_bootstrap(rx.src, payload, now, true);
@@ -73,7 +73,10 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
         ++stats_.rx_no_identity;
         return true;
     }
-    if (member && h.domain_hint != domain_hint_of(identity_.delegation().domain)) {
+    // [S18] A member's JOIN_ONLY handshake/session with another domain's root (a transfer) carries that domain's
+    // hint: its EDHOC and CONTROL frames go on to the SID lookup, which finds only that session.
+    if (member && h.domain_hint != domain_hint_of(identity_.delegation().domain) &&
+        !(join_traffic && (exchange_.mode() == Mode::JoinInit || has_join_session()))) {
         ++stats_.rx_wrong_domain;
         return true;
     }
@@ -89,6 +92,10 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
     Neighbor *n = neighbors_.by_rx_sid(rx.src, h.link_sid, which);
     if (n == nullptr) {
         ++stats_.rx_unknown_sid; // also every frame under an SID that died with a reboot
+        return true;
+    }
+    if (member && !n->join_only && h.domain_hint != domain_hint_of(identity_.delegation().domain)) {
+        ++stats_.rx_wrong_domain; // [S18] only the JOIN_ONLY session of a transfer is of another domain
         return true;
     }
     if (!(now < which->valid_until)) {
@@ -353,9 +360,10 @@ Status LinkLayer::close_join(const DeviceId &peer) {
 void LinkLayer::revalidate(const RootTimeBound &bound, MonoTime now) {
     DeviceId over[k_max_neighbors];
     std::size_t n = 0;
+    const bool exempt = k_root_capable && shared_.engine.config().role == Role::Root; // [S18] the ledger decides
     neighbors_.for_each([&](Handle, Neighbor &nb) {
-        if (nb.join_only || !nb.cur.active) {
-            return; // a JOIN_ONLY session holds no member credential
+        if (nb.join_only || !nb.cur.active || exempt || nb.renew_only) {
+            return; // a JOIN_ONLY session holds no member credential; a renewal-only one is over by its window
         }
         switch (check_deadline(bound, nb.lease)) {
         case DeadlineCheck::After:

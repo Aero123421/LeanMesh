@@ -32,6 +32,9 @@ class IdfOwner final : public OwnerCall {
     [[nodiscard]] Reply call(const Command &cmd) override;
     // Any task or driver callback (task context, not ISR): wake the owner.
     void notify();
+    // [S19] Diagnostics: the task handle (stack high-water mark) and the time spent in step()/commands.
+    [[nodiscard]] TaskHandle_t task() const { return task_; }
+    [[nodiscard]] uint64_t busy_us() const { return busy_us_; }
 
   private:
     struct Call {
@@ -48,6 +51,7 @@ class IdfOwner final : public OwnerCall {
     QueueHandle_t queue_ = nullptr;
     volatile bool quit_ = false;
     volatile bool exited_ = false;
+    uint64_t busy_us_ = 0; // owner task only (the diagnostics command runs there, too)
     StaticTask_t tcb_{};
     StackType_t stack_[k_stack_bytes / sizeof(StackType_t)]{};
     StaticQueue_t queue_storage_{};

@@ -1450,4 +1450,101 @@ LM_TEST("R10 sim: stop with operations, an exchange job and a journal write in f
     LM_CHECK(n.dv(0).durable().live_count() <= 1u);
 }
 
+// ---- FIX4: relays check the deadline before every hand-off and take only well-formed end records ----
+LM_TEST("FIX4-D1 sim: a forwarded frame held past its deadline (scheduler hold) is never put on the air") {
+    DNet n(3);
+    n.set_time();
+    n.routes(0, 2);
+    warm_up(n, 0, 2);
+    n.eng(1).sched().hold_until(n.now(1) + Duration::from_ms(6000)); // data classes wait at the relay
+    const uint64_t fwd0 = n.dv(1).stats().rx_forward;
+    const uint64_t frames1 = n.dv(1).hop_stats().frames;
+    const auto s = n.send(0, 2, LM_RECEIVED, LM_VOLATILE, payload_of(1), 2000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.dv(1).stats().rx_forward == fwd0 + 1; }, 1500)); // queued at the relay
+    n.run_ms(500);
+    LM_CHECK_EQ(n.dv(1).hop_stats().frames, frames1); // still held
+    n.run_ms(8000);                                    // the deadline (2 s) passed, the hold (6 s) ended
+    LM_CHECK_EQ(n.dv(1).hop_stats().frames, frames1); // zero TX of the stale frame
+    LM_CHECK(n.dv(1).hop_stats().aborted >= 1u);
+    LM_CHECK_EQ(n.dv(2).stats().delivered, 1u);        // only the warm-up
+    Received m;
+    LM_CHECK(!n.pop(2, m, LM_EVENT_MESSAGE));
+}
+
+namespace {
+// A frame from `from` to next hop `hop` carrying `record` on the route to `to` (the test is the attacker).
+void inject_via(DNet &n, unsigned from, unsigned hop, unsigned to, const Bytes &record) {
+    const delivery::PathSpec ps = n.spec(from, to);
+    std::array<uint8_t, 250> plain{};
+    std::size_t rlen = 0;
+    LM_CHECK_OK(wire::encode_route(ps.header(), MutByteView{plain}, rlen));
+    std::memcpy(plain.data() + rlen, record.data(), record.size());
+    link::SealedFrame f;
+    LM_CHECK_OK(n.eng(from).link().seal(n.id(hop), wire::FrameKind::Data, ByteView{plain.data(), rlen + record.size()},
+                                        f, n.now(from)));
+    n.world.inject(n.mac(from), static_cast<uint16_t>(from), n.mac(hop), f.view());
+    n.run_ms(60);
+}
+} // namespace
+
+LM_TEST("FIX4-D2 sim: a relay refuses a full-size end record with any malformed fixed field, before reserving or ACKing") {
+    DNet n(3);
+    n.set_time();
+    n.routes(0, 2);
+    warm_up(n, 0, 2);
+    const Bytes good = craft_record(n, 0, 2, 0xE1, payload_of(5, 16), 60000);
+    struct Bad {
+        const char *what;
+        void (*mutate)(Bytes &);
+    };
+    const Bad cases[] = {
+        {"end_sid 0", [](Bytes &r) { std::memset(r.data(), 0, 4); }},
+        {"end_counter 0", [](Bytes &r) { std::memset(r.data() + 4, 0, 8); }},
+        {"app_port 65535", [](Bytes &r) { r[28] = r[29] = 0xFF; }},
+        {"DATA with app_port 0", [](Bytes &r) { r[28] = r[29] = 0; }},
+        {"record kind 0", [](Bytes &r) { r[30] = 0; }},
+        {"record kind 6", [](Bytes &r) { r[30] = 6; }},
+        {"reserved flag bits", [](Bytes &r) { r[31] = static_cast<uint8_t>(r[31] | 0x80); }},
+        {"delivery 3", [](Bytes &r) { r[31] = static_cast<uint8_t>(r[31] | 0x03); }},
+        {"plaintext_length too long", [](Bytes &r) { r[41] = static_cast<uint8_t>(r[41] + 1); }},
+        {"plaintext_length too short", [](Bytes &r) { r[41] = static_cast<uint8_t>(r[41] - 1); }},
+        {"bitmap with a wrong length", [](Bytes &r) { r[30] = 5; }},
+    };
+    for (const Bad &c : cases) {
+        Bytes r = good;
+        c.mutate(r);
+        const uint64_t fwd = n.dv(1).stats().rx_forward;
+        inject_via(n, 0, 1, 2, r);
+        std::printf("  case: %s\n", c.what);
+        LM_CHECK_EQ(n.dv(1).stats().rx_forward, fwd);                 // nothing reserved, forwarded or accepted
+    }
+    const uint64_t fwd = n.dv(1).stats().rx_forward;
+    inject_via(n, 0, 1, 2, good); // the unmodified record still passes
+    LM_CHECK(n.dv(1).stats().rx_forward >= fwd + 1); // (the receipt coming back is forwarded too)
+}
+
+LM_TEST("FIX4-D3 sim: a continuous stream of HOP_ACKs to answer cannot starve a queued message") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    const auto s = n.send(0, 1, LM_RECEIVED, LM_VOLATILE, payload_of(7), 20000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    uint64_t counter = 1'000'000;
+    uint64_t queued_acks = 0;
+    // 30 s of ACKs owed to the neighbour, refilled every millisecond so the ACK queue is never empty.
+    const bool done = n.until([&] {
+        for (int i = 0; i < 4; ++i) {
+            n.dv(0).hop().queue_ack(n.mac(1), n.id(1), ++counter, wire::HopAckStatus::Accepted, 0, n.now(0));
+            ++queued_acks;
+        }
+        n.node(0).notify();
+        return n.op(0, s.op).outcome == LM_OUTCOME_RECEIVED;
+    }, 30000);
+    LM_CHECK(done);
+    LM_CHECK(n.dv(0).hop_stats().acks_sent > 0u); // the ACKs were still served, just not without bound
+    LM_CHECK(n.dv(0).hop_stats().acks_sent < queued_acks);
+}
+
 LM_TEST_MAIN()

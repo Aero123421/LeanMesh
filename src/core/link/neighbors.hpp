@@ -52,7 +52,10 @@ struct Neighbor {
     // application DATA in either direction (SDK control, e.g. time sync and registration, passes).
     RootTime lease;
     bool lease_uncertain = false;
-    bool rotate_wanted = false; // tx record threshold reached (seal() sets it)
+    // [S18] Admitted although the lease is provably over: restricted like an unprovable one and short-lived
+    // (LinkPolicy::renew_window), so that the peer can reach its root and get its credential renewed.
+    bool renew_only = false;
+    bool rotate_wanted = false; // tx record threshold reached (seal() sets it), or our credential was renewed
     // [S8-D1] JOIN_ONLY session (docs/06 §4 membership 0): carries the join control objects only,
     // never DATA/ROUTE, never rotates, and is invisible to find_device(). One per joining device.
     bool join_only = false;

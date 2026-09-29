@@ -7,7 +7,7 @@ get_filename_component(LM_COMPONENT_REPO "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOL
 if(CMAKE_BUILD_EARLY_EXPANSION)
     # Requirement scan (script mode): declare dependencies only, generate nothing.
     idf_component_register(PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash esp_partition esp_wifi esp_event
-                  esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support)
+                  esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support app_update)
     return()
 endif()
 
@@ -38,11 +38,14 @@ idf_component_register(
     PRIV_INCLUDE_DIRS "${LM_COMPONENT_REPO}/src" "${lm_gen}" ${LM_EDHOC_PUBLIC_INCLUDE}
                       ${LM_EDHOC_PRIVATE_INCLUDE}
     PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash esp_partition esp_wifi esp_event
-                  esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support)
+                  esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support app_update)
 
 set_source_files_properties(${LM_EDHOC_SOURCES} PROPERTIES COMPILE_OPTIONS "${LM_EDHOC_OPTIONS}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_BUILD_PROFILE_${lm_profile}
                                                     ${LM_EDHOC_DEFINITIONS})
+if(CONFIG_LEANMESH_OTA)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_OTA=1)
+endif()
 if(CONFIG_LEANMESH_OBJECT_TRANSFER)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_OBJECT_TRANSFER=1)
 endif()

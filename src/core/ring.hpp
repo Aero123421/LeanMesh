@@ -80,6 +80,10 @@ template <class T, std::size_t N> class SpscRing {
         tail_.store(next(tail), std::memory_order_release);
         return true;
     }
+    // Items waiting now (diagnostics; a racing producer makes it a snapshot).
+    [[nodiscard]] uint32_t depth() const {
+        return distance(tail_.load(std::memory_order_acquire), head_.load(std::memory_order_acquire));
+    }
     // Items the producer could not enqueue (reported in diagnostics, never silently lost).
     [[nodiscard]] uint32_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
     static constexpr std::size_t capacity() { return N; }

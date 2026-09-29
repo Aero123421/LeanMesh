@@ -77,12 +77,14 @@ void IdfOwner::run() {
     Engine &engine = ctx_->engine;
     while (!quit_) {
         Call *c = nullptr;
+        const MonoTime t0 = clock_->now();
         while (xQueueReceive(queue_, &c, 0) == pdTRUE) {
             c->reply = engine.execute(*c->cmd, clock_->now());
             xSemaphoreGive(c->done);
         }
         const MonoTime now = clock_->now();
         const MonoTime next = engine.step(now);
+        busy_us_ += static_cast<uint64_t>((clock_->now() - t0).us); // wall time inside the owner's pass (S19)
         if (quit_) {
             break;
         }

@@ -81,8 +81,8 @@ constexpr Field s_sleep[] = {kId32, kU63,         kU63,         kU32,
 constexpr Field s_power_policy[] = {kId32, kU63, kU63, kId32, Bs(1, 1024)};
 constexpr Field s_commissioning[] = {kId16, kU32, kU63, kU64, kU64, U(1, 64), U(1, 3), kU63};
 constexpr Field s_handover[] = {kId16, kId32, kId32, kU63, kU63, kId32, kU32, U(0, 1)};
-constexpr Field s_group_snapshot[] = {kU32, kU63, kId16, kId32, U(0, 64), U(0, 3), kId32, kTargets};
-constexpr Field s_group_request[] = {kU32, kU63, U(0, 3), kNullId16};
+constexpr Field s_group_snapshot[] = {kU32, kU63, kId16, kId32, U(0, 64), U(0, 4), kId32, kTargets};
+constexpr Field s_group_request[] = {kU32, kU63, U(0, 4), kNullId16};
 
 struct TypeShape {
     uint8_t type;

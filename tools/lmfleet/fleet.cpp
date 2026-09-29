@@ -124,6 +124,36 @@ Bytes Fleet::sign_body_issuer_mismatch(const member::Envelope &env, ByteView dat
     return out;
 }
 
+Bytes Fleet::window(const DomainId &domain, const member::CommissioningWindow &win) {
+    std::array<uint8_t, 128> buf{};
+    CborWriter w{MutByteView{buf}};
+    w.array(8);
+    w.bytes(ByteView{win.id});
+    w.uint(win.term.value());
+    w.uint(win.expected_revision);
+    w.uint(win.not_before_ms);
+    w.uint(win.expires_ms);
+    w.uint(win.max_new_members);
+    w.uint(win.allowed_roles);
+    w.uint(win.policy_revision);
+    return sign(envelope(member::k_type_commissioning_window, domain, trust_.key_id, win.policy_revision), w.written());
+}
+
+Bytes Fleet::handover(const DomainId &domain, const member::RootHandover &h) {
+    std::array<uint8_t, 192> buf{};
+    CborWriter w{MutByteView{buf}};
+    w.array(8);
+    w.bytes(ByteView{h.id});
+    w.bytes(h.old_root.view());
+    w.bytes(h.new_root.view());
+    w.uint(h.old_generation);
+    w.uint(h.new_generation);
+    w.bytes(ByteView{h.new_delegation_hash});
+    w.uint(h.new_term.value());
+    w.uint(h.recovery_mode);
+    return sign(envelope(member::k_type_root_handover, domain, trust_.key_id, h.new_generation), w.written());
+}
+
 Kit Fleet::device(uint32_t index, const std::string &serial, uint64_t generation) {
     Kit k;
     derive_key(seed_, label_ + "/dev", index, k.scalar, k.pub);
@@ -266,9 +296,9 @@ Bytes issue_root_revoke(const Kit &root, const DomainId &domain, const DeviceId 
     return out;
 }
 
-Network::Network(uint64_t seed, const std::string &label)
-    : fleet(seed, label), root(fleet.device(1000, "root-0")) {
-    const Sha256Digest d = seeded("lmfleet-domain/" + label, seed, 0, 0);
+Network::Network(uint64_t seed, const std::string &label, const std::string &domain_label, uint32_t root_index)
+    : fleet(seed, label), root(fleet.device(root_index, "root-" + std::to_string(root_index - 1000))) {
+    const Sha256Digest d = seeded("lmfleet-domain/" + label + domain_label, seed, 0, 0);
     std::copy(d.begin(), d.begin() + 16, domain.bytes.begin());
     delegation_cose = fleet.delegation(root, domain);
 }
@@ -278,6 +308,18 @@ NodeKit Network::make_root() {
     s.address = 1;
     s.role = 2;
     return NodeKit{root, issue_member(root, domain, root, s)};
+}
+
+NodeKit Network::make_new_root(uint32_t index, uint64_t generation, uint32_t term, Bytes &delegation_out) {
+    NodeKit n;
+    n.kit = fleet.device(index, "root-" + std::to_string(index));
+    delegation_out = fleet.delegation(n.kit, domain, generation);
+    MemberSpec s;
+    s.address = 1;
+    s.role = 2;
+    s.root_term = term;
+    n.member_cose = issue_member(n.kit, domain, n.kit, s);
+    return n;
 }
 
 NodeKit Network::make_node(uint32_t index, uint16_t address, uint8_t role, const MemberSpec *override_spec) {
@@ -340,6 +382,34 @@ Status provision(sim::SimStore &store, const Network &net, const NodeKit &node, 
     job->state = 0;
     job->payload_len = static_cast<uint32_t>(len);
     return store::record_commit(store, *job);
+}
+
+Status provision_replacement_root(sim::SimStore &store, const Network &net, const NodeKit &node,
+                                  const Bytes &delegation_cose) {
+    sim::ProvisionInput in;
+    in.scalar32 = ByteView{node.kit.scalar};
+    in.device_cose = ByteView{node.kit.device_cose.data(), node.kit.device_cose.size()};
+    in.trust = net.fleet.trust();
+    in.delegation_cose = ByteView{delegation_cose.data(), delegation_cose.size()};
+    in.member_cose = ByteView{node.member_cose.data(), node.member_cose.size()};
+    return sim::provision_store(store, in);
+}
+
+Status copy_ledger(sim::SimStore &from, sim::SimStore &to) {
+    auto job = std::make_unique<store::RecordJob>();
+    for (uint32_t id = store::rec::root_ledger; id < root::k_rec_ledger_base + root::k_ledger_slots;
+         id = id == store::rec::root_ledger ? root::k_rec_ledger_base : id + 1) {
+        job->op = store::RecordJob::Op::Load;
+        job->id = static_cast<uint16_t>(id);
+        const Status st = store::record_load(from, *job);
+        if (st == Status::NotFound) {
+            continue;
+        }
+        LM_TRY(st);
+        job->op = store::RecordJob::Op::Commit;
+        LM_TRY(store::record_commit(to, *job));
+    }
+    return Status::Ok;
 }
 
 Status register_member(sim::SimStore &root_store, const NodeKit &node, uint16_t *slot) {

@@ -42,6 +42,7 @@ class IdfRadio final : public port::Radio {
     [[nodiscard]] uint32_t driver_generation() const override { return generation_; }
 
     [[nodiscard]] uint32_t rx_dropped() const { return rx_ring_.dropped(); }
+    [[nodiscard]] uint32_t rx_depth() const { return rx_ring_.depth(); } // [S19]
 
     // Driver callback bodies (public for the C trampolines in idf_radio.cpp only).
     void on_recv(const uint8_t *src, const uint8_t *dst, int8_t rssi, const uint8_t *data, int len);

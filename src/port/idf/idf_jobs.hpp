@@ -45,6 +45,7 @@ class IdfJobs final : public port::Jobs {
                                 void *arg) override;
     [[nodiscard]] bool poll(port::JobCompletion &out) override;
     void random(MutByteView out) override; // hardware RNG; no seeding path exists
+    [[nodiscard]] TaskHandle_t task() const { return task_; } // [S19] stack high-water mark
 
   private:
     struct Job {

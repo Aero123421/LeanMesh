@@ -16,11 +16,13 @@
 
 namespace lm::link {
 
-Status Exchange::start_join(const MacAddr &mac, JoinPeerOut *out, MonoTime now) {
+Status Exchange::start_join(const MacAddr &mac, JoinPeerOut *out, MonoTime now, bool transfer) {
     if (out == nullptr) {
         return Status::InvalidArgument;
     }
-    if (s_.identity.state() != member::LocalIdentity::State::Ready || s_.identity.is_member()) {
+    // [S18] A member asks another root (a transfer, docs/07 §8) or its domain's new root (a handover, docs/21 §8)
+    // for its next membership through the same JOIN_ONLY handshake; it stays a member of the old one meanwhile.
+    if (s_.identity.state() != member::LocalIdentity::State::Ready || s_.identity.is_member() != transfer) {
         return Status::AuthPending;
     }
     if (busy()) {

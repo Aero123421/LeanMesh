@@ -52,6 +52,7 @@ class SimRadio final : public port::Radio {
     void deliver(const port::RadioEvent &ev); // RX or TX-done from the medium
     void power_cut();
     [[nodiscard]] uint32_t rx_dropped() const { return ring_.dropped(); }
+    [[nodiscard]] uint32_t rx_depth() const { return ring_.depth(); } // [S19]
     [[nodiscard]] std::size_t peer_count() const { return peer_count_; }
     [[nodiscard]] std::size_t peak_peer_count() const { return peak_peers_; }
     [[nodiscard]] uint32_t tx_done_dropped() const { return done_ring_.dropped(); }

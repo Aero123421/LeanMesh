@@ -21,49 +21,94 @@ constexpr Duration k_request_wait = Duration::from_s(310); // approval timeout 3
 bool transient(Status s) { return s == Status::Busy || s == Status::NoCapacity || s == Status::RateLimited; }
 
 } // namespace
+// The object this device presents in its JoinRequest, checked against the root it is talking to before it is shown
+// to it (docs/07 §4): an AssignmentTicket (an initial one; [S18] for a member, a transfer away from its current
+// assignment) or, [S18] for a member, the fleet's RootHandover naming this root its domain's new one. A mode-0 ticket
+// must name this device's outstanding nonce, which then is the JoinRequest's (SEC-D4a). NetworkMismatch: this root is
+// not the one the object names (never shown to it).
+Status Membership::check_request_object(ByteView obj, uint64_t &assignment) {
+    const LocalIdentity &id = engine_.identity();
+    Envelope env;
+    ByteView data;
+    if (switch_ && peek_signed(obj, k_type_root_handover, env, data) == Status::Ok) {
+        RootHandover h;
+        LM_TRY(decode_handover(data, h));
+        handover_ = true;
+        if (env.domain != id.delegation().domain || h.old_root != id.delegation().root ||
+            h.old_generation != id.delegation().generation) {
+            return Status::AuthRejected; // not a handover of this device's root
+        }
+        if (h.new_root != peer_.delegation.root || h.new_delegation_hash != peer_.delegation_hash ||
+            h.new_generation != peer_.delegation.generation || h.new_generation <= h.old_generation ||
+            !(id.member().root_term < h.new_term)) {
+            return Status::NetworkMismatch; // not the new root (a term above the known one: docs/21 §8, LC09)
+        }
+        assignment = id.member().assignment.value();
+        return Status::Ok;
+    }
+    AssignmentTicket t;
+    LM_TRY(peek_signed(obj, k_type_assignment_ticket, env, data));
+    LM_TRY(decode_assignment_ticket(data, t));
+    if (t.target != peer_.delegation.domain || t.root_delegation_hash != peer_.delegation_hash) {
+        return Status::NetworkMismatch;
+    }
+    const bool source_ok = switch_ ? t.source == id.delegation().domain && t.expected_old == id.member().assignment.value()
+                                   : t.source.is_zero() && t.expected_old == 0;
+    // A mode-0 ticket names this request's nonce: the outstanding one, or the stored one of a resumed request.
+    const bool nonce_ok = t.mode != 0 || (have_prepared_ ? t.nonce == req_.nonce : nonce_valid_ && t.nonce == nonce_);
+    if (t.device != id.self() || t.fleet != id.trust().fleet || env.domain != t.target ||
+        t.new_generation <= t.expected_old || !source_ok || !nonce_ok) {
+        return Status::AuthRejected;
+    }
+    // A consumed grant/generation stays consumed (docs/07 §8, docs/21 §9; SEC-D8: consumed before the device left).
+    for (std::size_t i = 0; i < id.floors().count(); ++i) {
+        if (id.floors().at(i).device == id.self() && t.new_generation < id.floors().at(i).assignment) {
+            return Status::Revoked;
+        }
+    }
+    if (t.new_generation < id.own_floor().assignment) {
+        return Status::Revoked;
+    }
+    if (t.mode == 0 && !have_prepared_) {
+        req_.nonce = nonce_; // the JoinRequest vouches for the nonce the ticket names (the root compares them)
+        req_.known = true;
+    }
+    assignment = t.new_generation;
+    return Status::Ok;
+}
+
+// [S18] This JOIN_ONLY session reached a root the object does not name (a handover's old root, an offer of another
+// domain): it ends, and the search goes on with the next offer within its budget.
+void Membership::wrong_root(MonoTime now) {
+    release_join();
+    phase_ = JoinPhase::Discover;
+    const bool another = std::any_of(offers_.begin(), offers_.end(), [](const Offer &o) { return o.used && !o.tried; });
+    if (another && disc_.may_handshake()) {
+        choose_offer(now);
+    }
+}
+
 // Ticket loaded: check it belongs to this device and to the root we are talking to, then send the
 // JoinRequest. A ticket for another domain or root is never shown to this peer (docs/07 §4).
 void Membership::request_ready(MonoTime now) {
     const ByteView ticket{rec_->payload.data(), rec_->payload_len};
-    Envelope env;
-    ByteView data;
-    AssignmentTicket t;
-    Status st = peek_signed(ticket, k_type_assignment_ticket, env, data);
-    if (st == Status::Ok) {
-        st = decode_assignment_ticket(data, t);
-    }
-    const LocalIdentity &id = engine_.identity();
-    if (st == Status::Ok && constrain_ && peer_.delegation.domain != target_) {
-        st = Status::NetworkMismatch; // the app asked for one domain only (lm_join_request_t.constrain_target)
-    }
-    if (st == Status::Ok &&
-        (t.device != id.self() || t.fleet != id.trust().fleet || t.target != peer_.delegation.domain ||
-         t.root_delegation_hash != peer_.delegation_hash || env.domain != t.target ||
-         t.new_generation <= t.expected_old)) {
-        st = Status::AuthRejected;
-    }
-    if (st == Status::Ok && (!t.source.is_zero() || t.expected_old != 0)) {
-        st = Status::Unsupported; // transfer tickets belong to the lifecycle slice (S18)
-    }
-    if (st == Status::Ok) { // a consumed grant/generation stays consumed (docs/07 §8, docs/21 §9)
-        for (std::size_t i = 0; i < id.floors().count(); ++i) {
-            if (id.floors().at(i).device == id.self() && t.new_generation < id.floors().at(i).assignment) {
-                st = Status::Revoked;
-            }
-        }
-        if (t.new_generation < id.own_floor().assignment) {
-            st = Status::Revoked; // SEC-D8: consumed by this device before it left
-        }
+    uint64_t assignment = 0;
+    Status st = constrain_ && peer_.delegation.domain != target_ ? Status::NetworkMismatch
+                                                                 : check_request_object(ticket, assignment);
+    if (st == Status::NetworkMismatch && switch_) {
+        wrong_root(now);
+        return;
     }
     if (st != Status::Ok) {
-        finish_join(st, LM_OUTCOME_REJECTED, now);
+        finish_join(st, LM_OUTCOME_REJECTED, now); // (the app asked for one domain only: constrain_target)
         return;
     }
     if (!lend_scratch_only()) {
         retry_at_ = now + k_busy_retry; // the credential buffer is in use: try again shortly
         return;
     }
-    req_.assignment = t.new_generation;
+    const LocalIdentity &id = engine_.identity();
+    req_.assignment = assignment;
     if (!req_.known) {
         engine_.random(MutByteView{req_.nonce});
         req_.known = true;
@@ -303,7 +348,27 @@ void Membership::on_commit(ByteView data, MonoTime now) {
     }
     pipe_.acked();
     req_.signature = a.signature; // the root's ACTIVE entry is durable: this completes the stored credential
+    if (switch_) {
+        leave_old_domain(); // [S18] docs/07 §8: from B's COMMIT on, no new DATA of the old domain in or out
+    }
     activate(now);
+}
+
+// [S18] Every ordinary link session and every end session of the old domain ends; only the JOIN_ONLY session with
+// the new root stays (it carries the rest of this join). The engine restarts in the new domain once the join ends.
+void Membership::leave_old_domain() {
+    DeviceId peers[link::k_max_neighbors];
+    std::size_t n = 0;
+    engine_.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
+        if (n < link::k_max_neighbors && !nb.join_only) {
+            peers[n++] = nb.device;
+        }
+    });
+    for (std::size_t i = 0; i < n; ++i) {
+        (void)engine_.link().close(peers[i]);
+    }
+    engine_.delivery().sessions().clear();
+    engine_.delivery().invalidate_routes();
 }
 
 void Membership::activate(MonoTime now) {
@@ -339,7 +404,7 @@ void Membership::activate_loaded(Status s, MonoTime now) {
     }
     std::memcpy(rec_->payload.data() + n - k_signature_bytes, req_.signature.data(), k_signature_bytes);
     verify_input_ = stored;
-    if (start_verify(now) != Status::Ok) {
+    if (start_verify(Step::VerifyActivation) != Status::Ok) {
         finish_join(Status::Busy, LM_OUTCOME_INDETERMINATE, now);
     }
 }
@@ -398,7 +463,17 @@ void Membership::fail_and_consume(Status why, MonoTime now) {
 
 void Membership::finish_join(Status why, uint32_t outcome, MonoTime now) {
     const bool active = engine_.identity().is_member();
-    const bool connect = active && !link_resume_ && outcome != LM_OUTCOME_REJECTED;
+    // [S18] A member that switched to its new root restarts the engine there (every module drops the old domain's
+    // state: sessions, tree, plans, groups); the boot path is the one a power cut takes, so it is the tested one.
+    const bool moved = switch_ && active && peer_.known && engine_.identity().delegation().root == peer_.delegation.root;
+    const bool connect = active && !link_resume_ && outcome != LM_OUTCOME_REJECTED && !moved;
+    if (active && outcome != LM_OUTCOME_REJECTED && (moved || !switch_)) {
+        nonce_valid_ = false; // a mode-0 nonce is spent by the membership it bought
+    }
+    switch_ = handover_ = false;
+    if (moved) {
+        engine_.request_restart();
+    }
     link_resume_ = false;
     const MacAddr root_mac = pipe_.bound() ? pipe_.mac() : cand_;
     if (connect) {
@@ -441,7 +516,8 @@ void Membership::parse_activated_record(const store::RecordJob &rec) {
         Sha256Digest stored{};
         std::memcpy(stored.data(), rec.payload.data() + 32, 32);
         if (withheld_hash(engine_.identity().member_cose(), h) != Status::Ok || h != stored) {
-            return; // an older, unrelated PREPARED record: ACTIVE outranks it
+            resume_switch(rec); // [S18] a switch cut before its ACTIVE commit (else an older record: ACTIVE outranks it)
+            return;
         }
         std::memcpy(req_.id.bytes.data(), rec.payload.data(), 16);
         std::memcpy(req_.nonce.data(), rec.payload.data() + 16, 16);

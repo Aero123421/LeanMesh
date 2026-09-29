@@ -86,6 +86,13 @@ lm_status_t lm_install_control(lm_context_t *ctx, uint32_t control_type, const u
     return to_abi(r.status);
 }
 
+lm_status_t lm_transfer_nonce_get(lm_context_t *ctx, uint8_t nonce[16]) {
+    if (!valid_ctx(ctx) || nonce == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    return to_abi(call(ctx, lm::CommandKind::TransferNonce, nullptr, 0, nonce, 16).status);
+}
+
 lm_status_t lm_get_request(lm_context_t *ctx, const lm_request_id_t *id, lm_operation_t *out) {
     if (!valid_ctx(ctx) || id == nullptr || out == nullptr) {
         return to_abi(Status::InvalidArgument);

@@ -95,7 +95,7 @@ res = {"idf_commit": idf_commit, "app": f"firmware/{app}",
                 f"{app}, -Os; bytes from `idf.py size --format json2`"), "targets": {}}
 for t in targets:
     raw = open(f"{root}/{t}/size.json").read()
-    d = json.loads(raw[raw.index("{"):])
+    d = json.loads(raw[raw.index("\n{\n") + 1:])
     mem = {m["name"]: {"used": m["used"], "total": m["total"]} for m in d["layout"]}
     res["targets"][t] = {"image_total_bytes": d.get("total_size"), "memory": mem}
 json.dump(res, open(out, "w"), indent=2)

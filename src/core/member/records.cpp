@@ -165,6 +165,7 @@ void LocalIdentity::clear() {
     sec::secure_zero(MutByteView{scope_});
     has_scope_ = false;
     rec_lent_ = false;
+    delegation_behind_ = false;
 }
 
 Status LocalIdentity::adopt_member(const RootDelegation &delegation, const MemberCredential &mc,
@@ -172,10 +173,17 @@ Status LocalIdentity::adopt_member(const RootDelegation &delegation, const Membe
     if (state_ != State::Ready) {
         return Status::Conflict;
     }
-    const ByteView dc = device_cose();
-    LM_TRY(check_binding(dc_, dc, mc));
-    const std::size_t dc_len = dc.size();
-    LM_TRY(bundle_encode(dc, mc_cose, MutByteView{bundle_}, bundle_len_));
+    const std::size_t dc_len = dc_len_;
+    LM_TRY(check_binding(dc_, device_cose(), mc));
+    if (mc_cose.empty() || mc_cose.size() > k_max_member_cose) {
+        return Status::InvalidArgument; // checked before the bundle is touched: a refusal keeps the live one
+    }
+    // [S18] A member adopting a renewed credential has its DeviceCredential at the front of the bundle: it moves to
+    // the tail first, so the new bundle is never built from bytes it overwrites.
+    uint8_t *tail = bundle_.data() + k_max_bundle - dc_len;
+    std::memmove(tail, bundle_.data() + dc_off_, dc_len);
+    dc_off_ = k_max_bundle - dc_len;
+    LM_TRY(bundle_encode(ByteView{tail, dc_len}, mc_cose, MutByteView{bundle_}, bundle_len_));
     dc_len_ = dc_len;
     mc_len_ = mc_cose.size();
     dc_off_ = 1 + head_size(dc_len_);
@@ -188,13 +196,13 @@ Status LocalIdentity::adopt_member(const RootDelegation &delegation, const Membe
     return Status::Ok;
 }
 
-void LocalIdentity::drop_member(const Floors::Entry &floor) {
+void LocalIdentity::drop_member(const Floors::Entry &floor, bool revoked) {
     own_floor_.device = dc_.device;
     own_floor_.assignment = std::max(own_floor_.assignment, floor.assignment);
     own_floor_.membership = std::max(own_floor_.membership, floor.membership);
     has_member_ = false;
     has_delegation_ = false;
-    member_status_ = Status::NotFound;
+    member_status_ = revoked ? Status::Revoked : Status::NotFound; // [S18] lm_membership_get: MEMBER_REVOKED
     mc_ = MemberCredential{};
     delegation_ = RootDelegation{};
     bundle_len_ = 0; // the DeviceCredential stays where device_cose() finds it
@@ -310,6 +318,30 @@ void LocalIdentity::load_scope(port::JobEnv &env) {
     sec::secure_zero(MutByteView{rec_.payload});
 }
 
+// [S18] The membership record names another root than root_delegation: a transfer or handover committed its
+// credential and was cut before it rewrote root_delegation. The pending delegation of that switch must be fleet-signed
+// and verify the credential; anything else stays a failure (never a guess).
+Status LocalIdentity::load_pending_delegation(port::JobEnv &env, ByteView mc) {
+    std::array<uint8_t, k_max_member_cose> keep{};
+    if (mc.size() > keep.size()) {
+        return Status::RecoveryRequired;
+    }
+    std::copy(mc.begin(), mc.end(), keep.begin());
+    LM_TRY(load_record(env, store::rec::pending_delegation));
+    RootDelegation d;
+    LM_TRY(check_root_delegation(trust_, ByteView{rec_.payload.data(), rec_.payload_len}, d));
+    if constexpr (k_root_capable) {
+        std::memcpy(deleg_cose_.data(), rec_.payload.data(), rec_.payload_len);
+        deleg_cose_len_ = rec_.payload_len;
+    }
+    std::copy(keep.begin(), keep.begin() + mc.size(), rec_.payload.begin());
+    rec_.payload_len = static_cast<uint32_t>(mc.size());
+    LM_TRY(check_member_credential(d, ByteView{rec_.payload.data(), mc.size()}, mc_));
+    delegation_ = d;
+    delegation_behind_ = true;
+    return Status::Ok;
+}
+
 Status LocalIdentity::load_membership(port::JobEnv &env) {
     const ByteView dc{bundle_.data() + k_max_bundle - dc_len_, dc_len_};
     const Status st = load_record(env, store::rec::membership);
@@ -317,18 +349,25 @@ Status LocalIdentity::load_membership(port::JobEnv &env) {
         return Status::Ok;
     }
     LM_TRY(st);
-    if (rec_.state == k_membership_left && rec_.payload_len == k_left_bytes) { // SEC-D8: what the device consumed
+    if ((rec_.state == k_membership_left || rec_.state == k_membership_revoked) &&
+        rec_.payload_len == k_left_bytes) { // SEC-D8: what the device consumed
         Reader r{ByteView{rec_.payload.data(), rec_.payload_len}};
         own_floor_.device = dc_.device;
         own_floor_.assignment = r.u64be();
         own_floor_.membership = r.u64be();
+        member_status_ = rec_.state == k_membership_revoked ? Status::Revoked : Status::NotFound;
         return r.finish();
     }
     if (rec_.state != k_membership_active) {
         return Status::Ok; // PREPARED or LEAVING records are the join slice's business
     }
     const ByteView mc{rec_.payload.data(), rec_.payload_len};
-    LM_TRY(check_member_credential(delegation_, mc, mc_));
+    Status ck = check_member_credential(delegation_, mc, mc_);
+    if (ck == Status::AuthRejected || ck == Status::NetworkMismatch) {
+        LM_TRY(load_pending_delegation(env, mc)); // [S18] the cut between a transfer's two commits
+    } else {
+        LM_TRY(ck);
+    }
     LM_TRY(check_binding(dc_, dc, mc_));
     if (floors_.check(dc_.device, mc_.assignment, mc_.membership) != Status::Ok) {
         member_status_ = Status::Revoked; // valid identity, credential below the revocation floor

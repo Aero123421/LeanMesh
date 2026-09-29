@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "core/diag/diag.hpp"
 #include "core/group/group.hpp"
 #include "core/member/membership.hpp"
 #include "core/wire/cbor.hpp"
@@ -109,10 +110,91 @@ void put_feature_names(wire::CborWriter &w, uint64_t bits) {
     }
 }
 
+// [S19] A map of the values that are known: an unknown value is absent, never 0. Keys are sorted (length, bytes).
+struct Field {
+    const char *name;
+    uint64_t value;
+    bool known;
+};
+template <std::size_t N> void put_fields(wire::CborWriter &w, std::array<Field, N> f) {
+    std::sort(f.begin(), f.end(), [](const Field &a, const Field &b) {
+        const std::size_t la = std::strlen(a.name), lb = std::strlen(b.name);
+        return la != lb ? la < lb : std::strcmp(a.name, b.name) < 0;
+    });
+    w.map(static_cast<std::size_t>(std::count_if(f.begin(), f.end(), [](const Field &x) { return x.known; })));
+    for (const Field &x : f) {
+        if (x.known) {
+            w.text(ByteView{reinterpret_cast<const uint8_t *>(x.name), std::strlen(x.name)});
+            w.uint(x.value);
+        }
+    }
+}
+
+void put_text(wire::CborWriter &w, const char *s) { w.text(ByteView{reinterpret_cast<const uint8_t *>(s), std::strlen(s)}); }
+
+void put_diag(wire::CborWriter &w, const diag::Snapshot &d, const lm_capabilities_t &caps) {
+    const auto has = [&](uint64_t bit) { return (d.validity & bit) != 0; };
+    namespace v = diag::valid;
+    w.map(5); // app, sdk, driver, features, validity: sorted by length, then bytes
+    key(w, "app");
+    put_fields<5>(w, {{{"events_pending", d.events_pending, has(v::events)},
+                       {"events_lost", d.events_lost, has(v::events)},
+                       {"ops_active", d.ops_active, has(v::operations)},
+                       {"ops_uncommitted", d.ops_uncommitted, has(v::operations)},
+                       {"ops_owed", d.ops_owed, has(v::operations)}}});
+    key(w, "sdk");
+    put_fields<15>(w, {{{"root_term", d.root_term, has(v::root_term)},
+                        {"channel_epoch", d.channel_epoch, has(v::channel)},
+                        {"current_channel", d.current_channel, has(v::channel)},
+                        {"pending_channel", d.pending_channel, has(v::channel)},
+                        {"regular_peers", d.regular_peers, has(v::peers)},
+                        {"transient_peers", d.transient_peers, has(v::peers)},
+                        {"tx_depth", d.tx_depth, has(v::tx_depth)},
+                        {"radio_state", d.radio_state, true},
+                        {"tx_frames", d.tx_frames, has(v::counters)},
+                        {"rx_frames", d.rx_frames, has(v::counters)},
+                        {"link_retries", d.link_retries, has(v::counters)},
+                        {"rf_failures", d.rf_failures, has(v::counters)},
+                        {"local_busy", d.local_busy, has(v::counters)},
+                        {"mac_unknown", d.mac_unknown, has(v::counters)},
+                        {"interval_us", d.interval_us, has(v::interval)}}});
+    key(w, "driver");
+    put_fields<6>(w, {{{"reset_reason", d.reset_reason, has(v::reset_reason)},
+                       {"min_heap_bytes", d.min_heap_bytes, has(v::heap)},
+                       {"stack_free_bytes", d.stack_free_bytes, has(v::stack)},
+                       {"owner_cpu_us", d.owner_cpu_us, has(v::owner_cpu)},
+                       {"rx_ring_depth", d.rx_ring_depth, has(v::rx_ring)},
+                       {"rx_ring_dropped", d.rx_ring_dropped, has(v::rx_ring)}}});
+    key(w, "features"); // [name, built, implemented, enabled, qualified, note / null]
+    std::array<diag::Feature, diag::k_max_features> rows{};
+    const std::size_t n = diag::features(caps, rows);
+    w.array(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        w.array(6);
+        put_text(w, rows[i].name);
+        w.boolean(rows[i].built);
+        w.boolean(rows[i].implemented);
+        w.boolean(rows[i].enabled);
+        w.boolean(rows[i].qualified);
+        if (rows[i].note != nullptr) {
+            put_text(w, rows[i].note);
+        } else {
+            w.null();
+        }
+    }
+    key(w, "validity");
+    w.uint(d.validity);
+}
+
 // Ledger entry state as the Host's membership vocabulary (lm_membership state numbers); the states
-// that are not a member of the network (free, expected, aborted, blocked) are not reported.
-bool node_state(root::EntryState s, uint32_t &out) {
-    switch (s) {
+// that are not a member of the network (free, expected, aborted, blocked) are not reported. [S18] A blocked entry of a
+// former member (it consumed its assignment here) is its revocation: MEMBER_REVOKED.
+bool node_state(const root::Entry &e, uint32_t &out) {
+    if (e.state == root::EntryState::Blocked && e.assignment != 0 && e.consumed >= e.assignment) {
+        out = LM_MEMBER_REVOKED;
+        return true;
+    }
+    switch (e.state) {
     case root::EntryState::Prepared:
         out = LM_PREPARED;
         return true;
@@ -157,7 +239,7 @@ void Bridge::on_record(SerialKind kind, uint8_t lane, uint32_t frame_bytes, Byte
     wire::CborReader r{payload};
     (void)r.array(3, 3);
     const ByteView id = r.bstr(16, 16);
-    const uint64_t method = r.uint_in(1, 15);
+    const uint64_t method = r.uint_in(1, 16);
     const ByteView params = r.skip_item();
     if (kind != SerialKind::Request || r.finish() != Status::Ok) {
         ++stats_.malformed; // the Host sends nothing but well-formed REQUESTs; anything else is not answered
@@ -239,13 +321,17 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         (void)run(CommandKind::GetCapabilities, nullptr, 0, ByteView{}, &caps, sizeof(caps));
         const RootTimeBound t = engine_.delivery().root_time(usb_.now());
         const member::LocalIdentity &id = engine_.identity();
-        w.map(7);
+        w.map(10); // keys sorted by length, then bytes (the Host's decoder enforces it)
         key(w, "root");
         w.bytes(id.self().view());
+        key(w, "build"); // [S19] the four facts of docs/18 §6 are separate lists; qualified stays empty until HIL
+        put_feature_names(w, caps.build_bits);
         key(w, "domain");
         w.bytes(id.delegation().domain.view());
         key(w, "enabled");
         put_feature_names(w, caps.enabled_bits);
+        key(w, "qualified");
+        put_feature_names(w, caps.qualified_bits);
         key(w, "root_term");
         w.uint(t.valid ? t.term.value() : 0);
         key(w, "root_time");
@@ -258,8 +344,20 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         }
         key(w, "assignment");
         w.uint(id.is_member() ? id.member().assignment.value() : 0);
+        key(w, "implemented");
+        put_feature_names(w, caps.implemented_bits);
         key(w, "gateway_boot");
         w.uint(boot_);
+        break;
+    }
+    case Result::Diag: { // [S19]
+        lm_capabilities_t caps{};
+        caps.struct_size = sizeof(caps);
+        caps.abi_version = LM_ABI_VERSION;
+        (void)run(CommandKind::GetCapabilities, nullptr, 0, ByteView{}, &caps, sizeof(caps));
+        diag::Snapshot snap;
+        diag::collect(engine_, usb_.now(), snap);
+        put_diag(w, snap, caps);
         break;
     }
     case Result::Nodes: {
@@ -268,7 +366,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            n += (node_state(e.state, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
+            n += (node_state(e, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
         }
         w.map(5);
         key(w, "nodes");
@@ -276,7 +374,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            if (!node_state(e.state, st) || (p.has_filter && e.device.bytes != p.filter)) {
+            if (!node_state(e, st) || (p.has_filter && e.device.bytes != p.filter)) {
                 continue;
             }
             w.array(6);
@@ -293,7 +391,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            npw += (node_state(e.state, st) && (!p.has_filter || e.device.bytes == p.filter) &&
+            npw += (node_state(e, st) && (!p.has_filter || e.device.bytes == p.filter) &&
                     engine_.power().member_power(e.address, mp))
                        ? 1U
                        : 0U;
@@ -302,7 +400,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            if (!node_state(e.state, st) || (p.has_filter && e.device.bytes != p.filter) ||
+            if (!node_state(e, st) || (p.has_filter && e.device.bytes != p.filter) ||
                 !engine_.power().member_power(e.address, mp)) {
                 continue;
             }
@@ -526,7 +624,12 @@ Status Bridge::write_event(Slot &s, bool take, MutByteView out, std::size_t &len
             key(w, "reason");
             w.uint(ev.reason);
             key(w, "outcome");
-            w.uint(ev.reason == 0 ? LM_OUTCOME_APPLIED : LM_OUTCOME_REJECTED);
+            // SEC-D7 follow-up (S18): RECOVERY_REQUIRED and STORAGE_FAILURE leave the root's own state in question
+            // (a commit may or may not be durable): unknown, never "rejected".
+            const auto why = static_cast<Status>(ev.reason);
+            w.uint(ev.reason == 0 ? LM_OUTCOME_APPLIED
+                   : why == Status::RecoveryRequired || why == Status::StorageFailure ? LM_OUTCOME_INDETERMINATE
+                                                                                      : LM_OUTCOME_REJECTED);
             key(w, "operation");
             w.uint(ev.operation);
         }

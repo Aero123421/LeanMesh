@@ -101,6 +101,9 @@ class Channel {
     [[nodiscard]] ChannelEpoch epoch() const { return epoch_; }
     [[nodiscard]] bool have_plan() const { return phase_ != Ph::Idle; }
     [[nodiscard]] bool committed() const { return phase_ == Ph::Committed; }
+    // A plan that is prepared or committed but not yet switched, or the write of one in progress: the node has
+    // promised to be on the air and must not sleep (FIX3-D5).
+    [[nodiscard]] bool unsettled() const { return phase_ != Ph::Idle || job_ != Job::None; }
     [[nodiscard]] const Plan &plan() const { return plan_; }
     [[nodiscard]] bool loaded() const { return loaded_; }
     [[nodiscard]] const Stats &stats() const { return stats_; }
@@ -144,6 +147,7 @@ class Channel {
     void persisted(Status s, MonoTime now);
 
     // plan (participant)
+    [[nodiscard]] static bool same_plan(const Plan &a, const Plan &b);
     void on_plan(const PlanRec &rec, bool local, MonoTime now);
     void prepare(const Plan &p, bool local, MonoTime now);
     void commit(const Plan &p, bool local, MonoTime now);

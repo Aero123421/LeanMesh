@@ -128,7 +128,7 @@ class Bridge final : public BridgeHook {
     [[nodiscard]] uint64_t boot_id() const { return boot_; }
 
   private:
-    enum class Result : uint8_t { None, Snapshot, Ack, Caps, Nodes, Request, Targets };
+    enum class Result : uint8_t { None, Snapshot, Ack, Caps, Nodes, Request, Targets, Diag };
     struct Pending {
         std::array<uint8_t, 16> request_id{};
         uint8_t lane = 0;

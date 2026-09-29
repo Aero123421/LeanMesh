@@ -63,6 +63,11 @@ struct TxFrame {
     uint8_t attempts = 0;     // physical handoffs so far
     uint8_t busy_defers = 0;  // HOP_ACK BUSY answers
     uint8_t flags = 0;
+    // ---- 12 B: the end record's deadline of a FORWARDED frame (FIX4-D1). The relay cannot open the record, so it
+    // keeps the authenticated header's expiry and the route's term beside the sealed bytes and checks them before
+    // every hand-off and retry; the bytes themselves are never re-encrypted. 0 = no deadline.
+    uint64_t expires_root_ms = 0;
+    uint32_t term = 0;
     FrameBuf frame;
 
     [[nodiscard]] Handle owner() const { return Handle{owner_index, owner_gen}; }
@@ -73,7 +78,7 @@ struct TxFrame {
     [[nodiscard]] bool has(Flag f) const { return (flags & f) != 0; }
     void set(Flag f, bool on = true) { flags = static_cast<uint8_t>(on ? (flags | f) : (flags & ~f)); }
 };
-static_assert(offsetof(TxFrame, frame) == 32, "TX frame metadata is 32 bytes (P7)");
+static_assert(offsetof(TxFrame, frame) == 44, "TX frame metadata is 32 bytes (P7) + the 12 B forward deadline (FIX4-D1)");
 
 class TxPool {
   public:
@@ -133,6 +138,8 @@ class TxPool {
             f->kind = kind;
             f->cls = c;
             f->mac = mac;
+            f->expires_root_ms = 0;
+            f->term = 0;
         }
         return f;
     }

@@ -265,6 +265,13 @@ void Exchange::on_end_bind(ByteView record, const Origin &o, MonoTime now) {
 Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
     delivery::EndSessions &ss = *end_.sessions;
     const DeviceId &peer = peer_state_.dc.device;
+    // Review finding 20: the verified credential gives this address to `peer`. A session of another device at the
+    // same address is of an owner the root replaced (it left, the ledger reused its slot): it and every route
+    // learned before go.
+    if (delivery::EndSession *old = ss.find_addr(peer_state_.mc.address); old != nullptr && old->peer != peer) {
+        ss.remove(*old);
+        s_.engine.delivery().invalidate_routes();
+    }
     delivery::EndSession *slot = ss.find_peer(peer);
     if (slot == nullptr) {
         slot = &ss.acquire();
@@ -283,7 +290,7 @@ Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
     slot->tx_sid = pend_.tx_sid;
     slot->valid_until = pend_.valid_until;
     slot->peer_lease = member::lease_of(mc);
-    if (lease == DeadlineCheck::Before) {
+    if (lease == DeadlineCheck::Before && !lease_exempt()) {
         slot->valid_until = earliest(slot->valid_until, member::lease_local_end(root_time(now), slot->peer_lease, now));
     }
     pend_.wipe();
@@ -294,8 +301,8 @@ Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
 }
 
 void Exchange::revalidate_end(const RootTimeBound &bound, MonoTime now) {
-    if (end_.sessions == nullptr) {
-        return;
+    if (end_.sessions == nullptr || lease_exempt()) {
+        return; // [S18] the root's sessions follow its ledger, not the lease
     }
     end_.sessions->for_each_used([&](delivery::EndSession &s) {
         switch (check_deadline(bound, s.peer_lease)) {

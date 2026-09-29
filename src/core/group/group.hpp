@@ -4,7 +4,7 @@
 // for the Host (and for its own application), any other member for itself; the root only serves
 // signed snapshot pages and never sees a body it is not the origin of.
 //
-// Ownership: `Fanout` owns the operations (`Op`: header + 64 compact `Target`s, at most `k_ops`), the
+// Ownership: `Fanout` owns the operations (`Op`: header + 64 compact `Target`s + their DeviceIds, at most `k_ops`), the
 // payload (one message-pool buffer, never a copy per target) and the snapshots the root serves to other
 // origins (`Kind::Served`, same pool, <= 120 s). A target is a Delivery send whose MessageId is
 // (incarnation, base + attempt * total + index): the block is reserved when the operation begins, so
@@ -39,12 +39,17 @@ struct ControlBody;
 namespace lm::group {
 
 inline constexpr std::size_t k_max_targets = 64; // registry limits.members, docs/22 §1
-inline constexpr std::size_t k_page = 16;        // targets per snapshot page
+inline constexpr std::size_t k_page = 16;        // targets per page of the API (lm_group_targets, the bridge)
+// A signed snapshot page holds at most k_page rows and at most k_row_bytes of encoded rows (FIX3-D10). A row is
+// [DeviceId, assignment, membership]: 37 B with small generations (16 rows, 4 pages for 64 targets) and up to 53 B
+// with generations near 2^63 (13 rows, 5 pages), so a page and its COSE envelope (185 B) stay inside the exchange's
+// 1 KiB scratch for every legal value. The rows of page p are derived from the snapshot alone (`page_span`).
+inline constexpr std::size_t k_row_bytes = 700;
+inline constexpr std::size_t k_snap_pages = 5;
 inline constexpr std::size_t k_ops = k_build_limits.group_operations; // leaf 1, relay 1, root 4 (profiles.json)
 inline constexpr std::size_t k_inflight = 4;     // docs/22 §4; also bounded by half of the message slots
 inline constexpr uint8_t k_attempts = 4;         // dispatches per target (a parked target is dispatched again)
 inline constexpr uint64_t k_id_tag = 1ULL << 61; // operation ids (member ops use bit 62, deliveries neither)
-inline constexpr uint8_t k_no_slot = 0xFF;
 inline constexpr uint8_t k_type_snapshot = 32;
 inline constexpr uint8_t k_type_request = 33;
 inline constexpr Duration k_snapshot_life = Duration::from_s(120);
@@ -52,13 +57,9 @@ inline constexpr Duration k_fetch_rto = Duration::from_s(3);
 inline constexpr Duration k_park_after = Duration::from_s(5);
 inline constexpr Duration k_progress_gap = Duration::from_ms(500);
 inline constexpr uint8_t k_fetch_tries = 3;
-// A non-root origin keeps the DeviceIds of its one snapshot; the real root never is one (it reads them
-// from its ledger by slot), so its image has no such array.
-#if defined(LM_BUILD_PROFILE_ROOT)
-inline constexpr std::size_t k_id_slots = 0;
-#else
-inline constexpr std::size_t k_id_slots = k_max_targets;
-#endif
+// Every operation keeps the full DeviceIds of its snapshot (FIX3-D10): a target is a device and two 64 bit
+// generations, never a ledger slot plus a prefix that another device could share.
+inline constexpr std::size_t k_id_slots = k_ops * k_max_targets;
 inline constexpr std::size_t k_serve_rows = k_root_capable ? k_page : 0; // the root's sign job encodes one page
 
 // protocol/serial.cddl has only a DeviceId as the destination of SEND. A group is written as the
@@ -91,15 +92,11 @@ inline constexpr std::size_t k_serve_rows = k_root_capable ? k_page : 0; // the 
     return group_id != 0 && d == group_dest(group_id, revision);
 }
 
-// One target, 16 B. Generations are compared and stored as 32 bit (a device would need 2^32 joins to
-// exceed it; a snapshot that names a larger one is refused). `tag` is the first two bytes of the
-// DeviceId: it detects a ledger slot given to another device since the snapshot.
+// One target, 24 B (its DeviceId is in Fanout::ids_). Generations are the full u63 values of the snapshot.
 struct Target {
-    uint32_t assignment = 0;
-    uint32_t membership = 0;
-    uint16_t tag = 0;
+    uint64_t assignment = 0;
+    uint64_t membership = 0;
     uint16_t evidence = 0;      // Delivery ev:: bits of the final outcome
-    uint8_t slot = k_no_slot;   // root-origin snapshots: ledger slot
     uint8_t phase : 3;          // stored phase (Ready / WaitRoute / Final); live phases come from the child
     uint8_t attempt : 2;
     uint8_t live : 1;           // a Delivery child exists and is not final
@@ -107,20 +104,20 @@ struct Target {
     uint8_t reason = 0;         // Status
     Target() : phase(LM_TARGET_READY), attempt(0), live(0) {}
 };
-static_assert(sizeof(Target) == 16, "Target is the unit of the group RAM budget");
+static_assert(sizeof(Target) == 24, "Target is the unit of the group RAM budget");
 
 struct Op {
     enum class Kind : uint8_t { Free, Own, Served };
     enum class St : uint8_t { Fetching, Running, Final };
     Kind kind = Kind::Free;
     St st = St::Final;
-    bool by_ids = false;       // Own, origin is not the root: DeviceIds are in Fanout::ids_
     bool cancelled = false;
     bool host = false;         // sent by the Host: host_mid / host_hash make a repeat idempotent
     bool released = false;     // payload buffer given back
     bool progress_due = false;
     uint8_t total = 0;
     uint8_t got = 0;           // Fetching: targets received
+    uint8_t pages = 0;         // Fetching: signed pages accepted
     uint8_t live = 0;          // children in flight
     uint8_t cursor = 0;
     uint8_t tries = 0;         // Fetching: requests sent for the current page
@@ -222,6 +219,8 @@ class Fanout {
     static void child_hook(void *ctx, const delivery::Op &c, MonoTime now);
     static bool gate_hook(void *ctx, const delivery::Op &c, uint64_t a, uint64_t m);
     // -- snapshot.cpp: pages, fetch (origin) and serve (root) --
+    // Rows [first, first + n) of signed page `page` of the snapshot in g (n = 0: no such page).
+    static void page_span(const Op &g, unsigned page, std::size_t &first, std::size_t &n);
     void request_page(Op &g, MonoTime now);
     void fetch_failed(Op &g, uint32_t reason);
     void on_page(ByteView cose, MonoTime now);
@@ -236,7 +235,12 @@ class Fanout {
 
     Engine &engine_;
     std::array<Op, k_ops> ops_{};
-    std::array<DeviceId, k_id_slots> ids_{};
+    std::array<DeviceId, k_id_slots> ids_{}; // k_max_targets per operation, sorted: the DeviceIds behind Op::t
+    [[nodiscard]] DeviceId *ids_of(const Op &g) { return &ids_[static_cast<std::size_t>(&g - ops_.data()) * k_max_targets]; }
+    [[nodiscard]] const DeviceId *ids_of(const Op &g) const {
+        return &ids_[static_cast<std::size_t>(&g - ops_.data()) * k_max_targets];
+    }
+    [[nodiscard]] bool root_origin() const;
     // One sign/verify job at a time; its memory stays reserved until the completion is polled.
     Job job_ = Job::None;
     uint32_t job_op_ = 0;      // index of the operation the job serves
@@ -244,8 +248,8 @@ class Fanout {
     std::size_t cose_len_ = 0;
     struct Page { // what the sign job encodes: copied on the owner, read by the worker
         std::array<DeviceId, k_serve_rows> dev{};
-        std::array<uint32_t, k_serve_rows> a{};
-        std::array<uint32_t, k_serve_rows> m{};
+        std::array<uint64_t, k_serve_rows> a{};
+        std::array<uint64_t, k_serve_rows> m{};
         std::array<uint8_t, 16> req{};
         std::array<uint8_t, 16> token{};
         Sha256Digest hash{};

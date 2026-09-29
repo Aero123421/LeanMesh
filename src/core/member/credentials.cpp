@@ -180,6 +180,40 @@ Status decode_revoke(ByteView data, RevokeObject &out) {
     return Status::Ok;
 }
 
+Status decode_window(ByteView data, CommissioningWindow &out) {
+    CborReader r{data};
+    CommissioningWindow w;
+    (void)r.array(8, 8);
+    rd_nonce(r, w.id);
+    w.term = RootTerm{static_cast<uint32_t>(r.uint_in(0, k_u32_max))};
+    w.expected_revision = r.uint_in(0, k_u63_max);
+    w.not_before_ms = r.uint_in(0, UINT64_MAX);
+    w.expires_ms = r.uint_in(0, UINT64_MAX);
+    w.max_new_members = static_cast<uint8_t>(r.uint_in(1, 64));
+    w.allowed_roles = static_cast<uint8_t>(r.uint_in(1, 3));
+    w.policy_revision = r.uint_in(0, k_u63_max);
+    LM_TRY(r.finish());
+    out = w;
+    return Status::Ok;
+}
+
+Status decode_handover(ByteView data, RootHandover &out) {
+    CborReader r{data};
+    RootHandover h;
+    (void)r.array(8, 8);
+    rd_nonce(r, h.id);
+    rd_id(r, h.old_root);
+    rd_id(r, h.new_root);
+    h.old_generation = r.uint_in(0, k_u63_max);
+    h.new_generation = r.uint_in(0, k_u63_max);
+    rd_hash(r, h.new_delegation_hash);
+    h.new_term = RootTerm{static_cast<uint32_t>(r.uint_in(0, k_u32_max))};
+    h.recovery_mode = static_cast<uint8_t>(r.uint_in(0, 1));
+    LM_TRY(r.finish());
+    out = h;
+    return Status::Ok;
+}
+
 // ---- encoders ----
 Status encode_member_credential(const MemberCredential &m, MutByteView out, std::size_t &len) {
     if (!is_valid_short_addr(m.address) || m.role > 2 || m.assignment.value() > k_u63_max ||
@@ -363,25 +397,30 @@ Status check_assignment_ticket(const TrustAnchor &trust, ByteView cose, const De
     return Status::Ok;
 }
 
-Status check_expected_set(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose,
-                          ExpectedSet &out) {
+Status open_authority(const TrustAnchor &trust, const RootDelegation *delegation, uint8_t permission, ByteView cose,
+                      uint8_t type, Envelope &env, ByteView &data) {
     sec::Sign1View v;
     LM_TRY(sec::sign1_parse(cose, v));
     const sec::PublicKey *signer = nullptr;
     if (v.kid == trust.key_id) {
         signer = &trust.key;
-    } else if (delegation != nullptr && v.kid == delegation->root &&
-               (delegation->permissions & k_perm_approve) != 0) {
+    } else if (delegation != nullptr && v.kid == delegation->root && (delegation->permissions & permission) != 0) {
         signer = &delegation->key;
     } else {
         return Status::AuthRejected;
     }
-    Envelope env;
-    ByteView data;
-    LM_TRY(open_signed(cose, *signer, k_type_expected_set, env, data));
+    LM_TRY(open_signed(cose, *signer, type, env, data));
     if (signer != &trust.key && env.domain != delegation->domain) {
         return Status::NetworkMismatch;
     }
+    return Status::Ok;
+}
+
+Status check_expected_set(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose,
+                          ExpectedSet &out) {
+    Envelope env;
+    ByteView data;
+    LM_TRY(open_authority(trust, delegation, k_perm_approve, cose, k_type_expected_set, env, data));
     return decode_expected_set(data, out);
 }
 
@@ -434,27 +473,17 @@ Status Floors::check(const DeviceId &device, AssignmentGen a, MembershipGen m) c
     return Status::Ok;
 }
 
-Status apply_revoke(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose,
-                    Floors &floors, RevokeObject &out) {
-    sec::Sign1View v;
-    LM_TRY(sec::sign1_parse(cose, v));
-    const sec::PublicKey *signer = nullptr;
-    if (v.kid == trust.key_id) {
-        signer = &trust.key;
-    } else if (delegation != nullptr && v.kid == delegation->root &&
-               (delegation->permissions & k_perm_revoke) != 0) {
-        signer = &delegation->key;
-    } else {
-        return Status::AuthRejected;
-    }
+Status verify_revoke(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose, RevokeObject &out) {
     Envelope env;
     ByteView data;
-    LM_TRY(open_signed(cose, *signer, k_type_revoke, env, data));
-    if (signer != &trust.key && env.domain != delegation->domain) {
-        return Status::NetworkMismatch;
-    }
+    LM_TRY(open_authority(trust, delegation, k_perm_revoke, cose, k_type_revoke, env, data));
+    return decode_revoke(data, out);
+}
+
+Status apply_revoke(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose,
+                    Floors &floors, RevokeObject &out) {
     RevokeObject rv;
-    LM_TRY(decode_revoke(data, rv));
+    LM_TRY(verify_revoke(trust, delegation, cose, rv));
     LM_TRY(floors.raise(rv.device, rv.assignment_floor, rv.membership_floor));
     out = rv;
     return Status::Ok;

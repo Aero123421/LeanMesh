@@ -54,8 +54,8 @@ class Routes {
 
   private:
     void sync(MonoTime now);
-    [[nodiscard]] bool identify(const DeviceId &dev, ShortAddr &addr, uint32_t &gen);
-    void on_register(const DeviceId &peer, ShortAddr addr, uint32_t gen, const delivery::PathSpec &reply,
+    [[nodiscard]] bool identify(const DeviceId &dev, ShortAddr &addr, uint64_t &gen);
+    void on_register(const DeviceId &peer, ShortAddr addr, uint64_t gen, const delivery::PathSpec &reply,
                      ByteView body, MonoTime now);
     void on_ready(const DeviceId &peer, ShortAddr addr, const delivery::PathSpec &reply, ByteView body, MonoTime now);
     void on_query(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now);

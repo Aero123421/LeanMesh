@@ -1,0 +1,3056 @@
+{
+ "head": "3a195ce (dirty)",
+ "mode": "static reference map (not an execution result)",
+ "counts": {
+  "BUILD_REPORT": 1,
+  "COVERED_SOFTWARE_ONLY": 37,
+  "NOT_RUN_HARDWARE": 116,
+  "NO_SOFTWARE_EVIDENCE": 4
+ },
+ "by_required_level": {
+  "APPLICATION": {
+   "COVERED_SOFTWARE_ONLY": 1,
+   "NOT_RUN_HARDWARE": 6
+  },
+  "BUILD": {
+   "BUILD_REPORT": 1
+  },
+  "HARDWARE": {
+   "NOT_RUN_HARDWARE": 110
+  },
+  "HOST": {
+   "COVERED_SOFTWARE_ONLY": 6
+  },
+  "INTEGRATION": {
+   "COVERED_SOFTWARE_ONLY": 11,
+   "NO_SOFTWARE_EVIDENCE": 3
+  },
+  "MODEL": {
+   "COVERED_SOFTWARE_ONLY": 3
+  },
+  "UNIT": {
+   "COVERED_SOFTWARE_ONLY": 16,
+   "NO_SOFTWARE_EVIDENCE": 1
+  }
+ },
+ "references": 267,
+ "errors": [],
+ "scenarios": [
+  {
+   "id": "B01",
+   "title": "4target同一pin build",
+   "required_level": "BUILD",
+   "status": "BUILD_REPORT",
+   "hardware_evidence": null,
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "C01",
+   "title": "自動最適化正常",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C01 sim: a clearly better channel measured at every pair is adopted through the full plan",
+     "at": "tests/native/test_channel.cpp:503"
+    },
+    {
+     "class": "SIM",
+     "test": "C01 sim (automatic): two independent nodes losing frames on the home channel start the survey and the move on their own",
+     "at": "tests/native/test_channel.cpp:667"
+    },
+    {
+     "class": "SIM",
+     "test": "R01/C01-scale sim: a 21-node, 20-hop chain runs a full plan; every relay is required, READY / STORED / APPLIED come back over 20 hops",
+     "at": "tests/native/test_channel.cpp:781"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C02",
+   "title": "単一悪link",
+   "required_level": "MODEL",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C02 sim: one bad link (and BUSY at its child) does not start a channel change: the route module repairs, the channel stays",
+     "at": "tests/native/test_channel.cpp:643"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "C03",
+   "title": "READY欠落",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_channel_endpoint_mirrors_the_root_and_controls_reach_the_coordinator",
+     "at": "host/tests/e2e/test_channel_meshsim.py:113"
+    },
+    {
+     "class": "SIM",
+     "test": "C03 sim: READY of a required relay never arrives: no COMMIT, ABORT after the timeout, the denominator keeps the relay",
+     "at": "tests/native/test_channel.cpp:289"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "C04",
+   "title": "COMMIT欠落",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C04 sim: a relay never gets COMMIT; the rest moves, the result says STORED / APPLIED / RECOVERING, the stragglers find the mesh",
+     "at": "tests/native/test_channel.cpp:421"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C05",
+   "title": "COMMIT後root停電",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C05 sim: the root loses power right after COMMIT is durable; it comes back on the target channel, never on the old one",
+     "at": "tests/native/test_channel.cpp:451"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C06",
+   "title": "clock誤差超過",
+   "required_level": "MODEL",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C06 sim: a relay whose clock bound is wider than the tolerance refuses READY with TIME_UNCERTAIN; the interval holds under drift",
+     "at": "tests/native/test_channel.cpp:314"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "C07",
+   "title": "チャネルfreeze",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_channel_endpoint_mirrors_the_root_and_controls_reach_the_coordinator",
+     "at": "host/tests/e2e/test_channel_meshsim.py:112"
+    },
+    {
+     "class": "SIM",
+     "test": "test_plan_rollback_and_freeze_through_the_real_processes",
+     "at": "host/tests/e2e/test_channel_meshsim.py:39"
+    },
+    {
+     "class": "SIM",
+     "test": "C07 unit/sim: freeze stops a plan in PREPARING and never cancels a COMMITTED one; the revision is a compare-and-set",
+     "at": "tests/native/test_channel.cpp:342"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "C08",
+   "title": "candidate部分悪化",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "C08 unit: the decision needs data everywhere, the worst pair must not get worse, the total must gain 25 %",
+     "at": "tests/native/test_channel.cpp:816"
+    },
+    {
+     "class": "SIM",
+     "test": "C08 sim: a candidate that is better on average but jammed at one relay is not adopted; the worst link decides",
+     "at": "tests/native/test_channel.cpp:481"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C09",
+   "title": "sleepy取り残し",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C09/LP15 sim: a sleepy leaf misses two channel changes over 24 h; on wake it searches a bounded set and follows only the last plan",
+     "at": "tests/native/test_channel.cpp:543"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C10",
+   "title": "all-channel jam",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C10 sim: every channel jammed after a partial commit: the straggler says it is searching, the search stays inside its budget, nothing is undone",
+     "at": "tests/native/test_channel.cpp:601"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C11",
+   "title": "chainのsurvey休止",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C11 sim: without a maintenance gap a chain is not surveyed: nobody leaves its channel, the reason is stated",
+     "at": "tests/native/test_channel.cpp:519"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "C12",
+   "title": "rollback",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_plan_rollback_and_freeze_through_the_real_processes",
+     "at": "host/tests/e2e/test_channel_meshsim.py:38"
+    },
+    {
+     "class": "SIM",
+     "test": "C12 sim: the root rolls back with a higher epoch to the old channel; an old plan is never given life again",
+     "at": "tests/native/test_channel.cpp:372"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D01",
+   "title": "APPLIED非同期",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_post_message_reaches_node_and_evidence_returns",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:37"
+    },
+    {
+     "class": "SIM",
+     "test": "test_applied_over_three_hops_through_meshsim",
+     "at": "host/tests/e2e/test_delivery_meshsim.py:55"
+    },
+    {
+     "class": "SIM",
+     "test": "D01 sim 1 hop: END_RECEIVED and APP_APPLIED are separate, the application answers later",
+     "at": "tests/native/test_delivery.cpp:297"
+    },
+    {
+     "class": "SIM",
+     "test": "D01 sim 4 hops: same path through three relays",
+     "at": "tests/native/test_delivery.cpp:301"
+    },
+    {
+     "class": "SIM",
+     "test": "D01 sim: the destination has no route to the origin; receipts take the learned way back",
+     "at": "tests/native/test_delivery.cpp:303"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D02",
+   "title": "適用直後停電",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "D02 sim: destination cut after the application took a DURABLE APPLIED message: recovered flag, no exactly-once claim",
+     "at": "tests/native/test_delivery.cpp:1205"
+    },
+    {
+     "class": "SIM",
+     "test": "D02 sim: final receipt lost -> a repeated round replays the receipt, one application event",
+     "at": "tests/native/test_delivery.cpp:571"
+    },
+    {
+     "class": "SIM",
+     "test": "D02 sim: END_RECEIVED but no application result by the deadline -> INDETERMINATE, not 'not applied'",
+     "at": "tests/native/test_delivery.cpp:594"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "D03",
+   "title": "late receipt",
+   "required_level": "INTEGRATION",
+   "status": "NO_SOFTWARE_EVIDENCE",
+   "hardware_evidence": null,
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "D04",
+   "title": "cancel競合",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "D04 sim: a cancelled durable message is retired from the journal and does not come back after a restart",
+     "at": "tests/native/test_delivery.cpp:1352"
+    },
+    {
+     "class": "SIM",
+     "test": "D04 sim: three link attempts and three rounds without an answer end INDETERMINATE, never delivered",
+     "at": "tests/native/test_delivery.cpp:434"
+    },
+    {
+     "class": "SIM",
+     "test": "D04 sim: cancel before anything left is CANCELLED_NOT_SENT, after it left CANCEL_TOO_LATE",
+     "at": "tests/native/test_delivery.cpp:627"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D05",
+   "title": "latest key分離",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_latest_replaces_only_the_unsent_record_of_the_same_key",
+     "at": "host/tests/e2e/test_sched_meshsim.py:101"
+    },
+    {
+     "class": "SIM",
+     "test": "D05 sim: best effort is SUBMITTED (sent evidence only), and finished operations age out",
+     "at": "tests/native/test_delivery.cpp:868"
+    },
+    {
+     "class": "SIM",
+     "test": "D05 sim: 17 waiting sends fill the pool: NO_CAPACITY, the work never existed",
+     "at": "tests/native/test_delivery.cpp:893"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D06",
+   "title": "期限の再延長禁止",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_deadline_rules_and_cancel_through_meshsim",
+     "at": "host/tests/e2e/test_delivery_meshsim.py:81"
+    },
+    {
+     "class": "SIM",
+     "test": "D06 sim: a recovered message with a deadline waits for a clock bound and never outlives its deadline",
+     "at": "tests/native/test_delivery.cpp:1170"
+    },
+    {
+     "class": "SIM",
+     "test": "D06 sim: accept-time deadline rules (no clock, past, none only for RECEIVED+DURABLE)",
+     "at": "tests/native/test_delivery.cpp:456"
+    },
+    {
+     "class": "SIM",
+     "test": "D06 sim: a message waiting for a route is never sent after its original deadline",
+     "at": "tests/native/test_delivery.cpp:506"
+    },
+    {
+     "class": "SIM",
+     "test": "D06 sim: a path change during retries keeps the original deadline",
+     "at": "tests/native/test_delivery.cpp:525"
+    },
+    {
+     "class": "SIM",
+     "test": "D06 sim: root restart (new term) while unanswered -> INDETERMINATE, nothing is re-issued",
+     "at": "tests/native/test_delivery.cpp:548"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D07",
+   "title": "小message分割",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_512_bytes_over_five_hops_through_meshsim",
+     "at": "host/tests/e2e/test_fragment_meshsim.py:52"
+    },
+    {
+     "class": "SIM",
+     "test": "test_control_object_over_two_hops_through_meshsim",
+     "at": "host/tests/e2e/test_fragment_meshsim.py:82"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim 20 hops: 512 B in 48 B fragments, one completion, hash intact, the receipt with a result arrives",
+     "at": "tests/native/test_fragment.cpp:224"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim 40 hops: 512 B in 16 B fragments; the APP_APPLIED receipt with a result reaches the origin",
+     "at": "tests/native/test_fragment.cpp:228"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: strict_single_frame refuses what would be fragmented; the default splits it",
+     "at": "tests/native/test_fragment.cpp:232"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: a lossy last hop loses fragments; only the missing ones are repeated and the message completes once",
+     "at": "tests/native/test_fragment.cpp:243"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: best effort fragments are SUBMITTED only when the destination has every byte",
+     "at": "tests/native/test_fragment.cpp:267"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: fragments of a receipt are lost; the origin's next round makes the destination send them again",
+     "at": "tests/native/test_fragment.cpp:282"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: a transfer cut off mid-way ends INDETERMINATE at its deadline and frees every slot and buffer",
+     "at": "tests/native/test_fragment.cpp:300"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: out-of-order and duplicate fragments complete once; a transfer with a gap is dropped at its timeout",
+     "at": "tests/native/test_fragment.cpp:397"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: an expired transfer is refused with evidence and reserves nothing; a bad hash is never delivered",
+     "at": "tests/native/test_fragment.cpp:468"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: full reassembly slots answer BUSY (no loss) and never block a control object",
+     "at": "tests/native/test_fragment.cpp:488"
+    },
+    {
+     "class": "SIM",
+     "test": "D07 sim: a DURABLE 300 B message is persisted, fragmented, and confirmed only after the destination's commit",
+     "at": "tests/native/test_fragment.cpp:589"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "D08",
+   "title": "4KiB最大",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_object_needs_opt_in_and_stops_at_4096_through_meshsim",
+     "at": "host/tests/e2e/test_fragment_meshsim.py:69"
+    },
+    {
+     "class": "SIM",
+     "test": "D08 sim: DURABLE RECEIVED without a deadline: persisted, sent after the commit, retired when done",
+     "at": "tests/native/test_delivery.cpp:1019"
+    },
+    {
+     "class": "SIM",
+     "test": "D08 sim: END_RECEIVED of a DURABLE message only after the destination's journal commit",
+     "at": "tests/native/test_delivery.cpp:1040"
+    },
+    {
+     "class": "SIM",
+     "test": "D08 sim: an empty payload is a valid message",
+     "at": "tests/native/test_delivery.cpp:1369"
+    },
+    {
+     "class": "SIM",
+     "test": "D08 sim: payload capacity per destination (134 / 96 / 56) and NO_ROUTE for unknown",
+     "at": "tests/native/test_delivery.cpp:909"
+    },
+    {
+     "class": "SIM",
+     "test": "D08 sim: a 4096 B object (opt-in) is restored in bounded memory; 4097 B and a disabled build are refused",
+     "at": "tests/native/test_fragment.cpp:542"
+    },
+    {
+     "class": "SIM",
+     "test": "D08 sim: without the application's opt-in lm_send_object is UNSUPPORTED and a peer refuses an object",
+     "at": "tests/native/test_fragment.cpp:571"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "D09",
+   "title": "fragment異内容",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "D09 sim: the same offset with other bytes is CONFLICT: the transfer is void and no half message reaches the app",
+     "at": "tests/native/test_fragment.cpp:441"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D10",
+   "title": "ACK callback順",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "D10 sim: HOP_ACK arrives before the TX callback (500 ms late) and is joined to the right frame",
+     "at": "tests/native/test_delivery.cpp:346"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: a MAC failure with a HOP_ACK in hand is an RF sample, not a retransmission",
+     "at": "tests/native/test_delivery.cpp:373"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: local BUSY / NO_MEM at the radio is not RF loss and not a link attempt",
+     "at": "tests/native/test_delivery.cpp:388"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: RF loss is retried with the same bytes and delivered once",
+     "at": "tests/native/test_delivery.cpp:405"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: a receiver without buffers answers BUSY: no attempt is used, nothing is lost, events keep order",
+     "at": "tests/native/test_delivery.cpp:801"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: lm_next_event BUFFER_TOO_SMALL keeps the event, payload_bytes says how much",
+     "at": "tests/native/test_delivery.cpp:847"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: callback delay 20/100/500 ms: RX before TX-done, credit to the right frame",
+     "at": "tests/native/test_runtime_radio.cpp:146"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: callback later than the 1000 ms watchdog is never credited to the next frame",
+     "at": "tests/native/test_runtime_radio.cpp:172"
+    },
+    {
+     "class": "SIM",
+     "test": "D10 sim: failed radio re-init isolates TX, retries with backoff, then FAULT; restart heals",
+     "at": "tests/native/test_runtime_radio.cpp:199"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "D11",
+   "title": "全台fan-out",
+   "required_level": "APPLICATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_group_send_root_fans_out_and_per_target_results_reach_the_api",
+     "at": "host/tests/e2e/test_group_meshsim.py:100"
+    },
+    {
+     "class": "SIM",
+     "test": "D11 sim (small): a member that is not the root fetches the snapshot from the root and fans out",
+     "at": "tests/native/test_group.cpp:270"
+    },
+    {
+     "class": "SIM",
+     "test": "D11 GS03 sim: registry rules and a snapshot the root does not know",
+     "at": "tests/native/test_group.cpp:335"
+    },
+    {
+     "class": "SIM",
+     "test": "D11 sim: 64 targets from a member that is not the root; four pages, four in flight, one target leaves mid-way",
+     "at": "tests/native/test_group.cpp:412"
+    },
+    {
+     "class": "SIM",
+     "test": "GS02 GS03 D11 sim: the set is fixed at the start; a member that leaves is rejected, not replaced; an edit is a new revision",
+     "at": "tests/native/test_group.cpp:535"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "D12",
+   "title": "groupend秘密",
+   "required_level": "UNIT",
+   "status": "NO_SOFTWARE_EVIDENCE",
+   "hardware_evidence": null,
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "GS01",
+   "title": "origin fan-out",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_group_send_root_fans_out_and_per_target_results_reach_the_api",
+     "at": "host/tests/e2e/test_group_meshsim.py:101"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS02",
+   "title": "世代snapshot",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "GS02 GS03 D11 sim: the set is fixed at the start; a member that leaves is rejected, not replaced; an edit is a new revision",
+     "at": "tests/native/test_group.cpp:535"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS03",
+   "title": "group編集",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_cancel_keeps_sent_targets_open_and_a_late_result_updates_them",
+     "at": "host/tests/e2e/test_group_meshsim.py:156"
+    },
+    {
+     "class": "SIM",
+     "test": "D11 GS03 sim: registry rules and a snapshot the root does not know",
+     "at": "tests/native/test_group.cpp:335"
+    },
+    {
+     "class": "SIM",
+     "test": "GS02 GS03 D11 sim: the set is fixed at the start; a member that leaves is rejected, not replaced; an edit is a new revision",
+     "at": "tests/native/test_group.cpp:535"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS04",
+   "title": "mixed sleep",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "GS04 sim: awake targets are served first; a sleeping target holds a bounded mailbox, not the pool",
+     "at": "tests/native/test_power.cpp:799"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS05",
+   "title": "wake不可能",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "P03 GS05 sim: a command whose deadline is before the target's next wake is refused at once, nothing is spooled",
+     "at": "tests/native/test_power.cpp:662"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS06",
+   "title": "wake時刻不明",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "GS06 sim: an unknown wake time is never called unreachable; a finite command ends at its deadline",
+     "at": "tests/native/test_power.cpp:696"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS07",
+   "title": "cancel/late結果",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_cancel_keeps_sent_targets_open_and_a_late_result_updates_them",
+     "at": "host/tests/e2e/test_group_meshsim.py:155"
+    },
+    {
+     "class": "SIM",
+     "test": "GS07 GS10 sim: the root fans out 64 APPLIED targets, cancel mid-way keeps the sent ones open, a late APPLIED improves an unknown result",
+     "at": "tests/native/test_group.cpp:479"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS08",
+   "title": "payload単一copy",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "GS09",
+   "title": "group DURABLE再起動",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_restart_mid_operation_reconciles_by_message_id_and_never_resends",
+     "at": "host/tests/e2e/test_group_meshsim.py:201"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS10",
+   "title": "結果の総和",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_group_send_root_fans_out_and_per_target_results_reach_the_api",
+     "at": "host/tests/e2e/test_group_meshsim.py:102"
+    },
+    {
+     "class": "SIM",
+     "test": "GS07 GS10 sim: the root fans out 64 APPLIED targets, cancel mid-way keeps the sent ones open, a late APPLIED improves an unknown result",
+     "at": "tests/native/test_group.cpp:479"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS11",
+   "title": "一斉配信負荷",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "GS11 sim: targets that cannot be routed step aside (WAIT_ROUTE) and do not starve the others; the partial result is kept",
+     "at": "tests/native/test_group.cpp:584"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "GS12",
+   "title": "sleepy origin",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP03 GS12 sim: a DURABLE report is journalled before the sleep, survives a deep sleep, converges once, no false success",
+     "at": "tests/native/test_power.cpp:1053"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "H01",
+   "title": "commit後HTTP切断",
+   "required_level": "HOST",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_kill_at_the_commit_boundary_then_repost_yields_one_operation",
+     "at": "host/tests/integration/test_host_process.py:50"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "H02",
+   "title": "consumer gap",
+   "required_level": "HOST",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_stale_or_foreign_cursors_are_410_with_oldest_and_latest",
+     "at": "host/tests/integration/test_host_events.py:27"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "H03",
+   "title": "serial再接続",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_root_reset_mid_operation_ends_indeterminate",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:186"
+    },
+    {
+     "class": "SIM",
+     "test": "test_reset_and_replug_old_session_is_never_applied",
+     "at": "host/tests/e2e/test_usb_serial.py:138"
+    },
+    {
+     "class": "SIM",
+     "test": "H03-sim reset and replug: old session results are never applied",
+     "at": "tests/native/test_serial.cpp:339"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "H04",
+   "title": "Host停止",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_volatile_message_taken_by_the_bridge_is_sent_again_after_a_host_crash",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:121"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_crash_between_claim_and_send_is_never_resent",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:144"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_crash_after_send_reconciles_by_message_id",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:164"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_crash_after_join_decision_is_reconciled_by_get_request",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:264"
+    },
+    {
+     "class": "SIM",
+     "test": "test_cancel_of_an_unsent_message_is_exact",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:292"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_store_ack_names_the_assignment_of_the_message_it_releases",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:336"
+    },
+    {
+     "class": "SIM",
+     "test": "test_node_to_host_message_is_committed_before_the_root_hears_the_ack",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:82"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "H05",
+   "title": "backup巻戻し",
+   "required_level": "HOST",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_restored_older_database_quarantines_and_never_resends",
+     "at": "host/tests/integration/test_host_events.py:109"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "H06",
+   "title": "slow subscriber",
+   "required_level": "HOST",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_stalled_sse_subscriber_does_not_block_others_and_state_stays_bounded",
+     "at": "host/tests/integration/test_host_process.py:78"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "H07",
+   "title": "二重Host",
+   "required_level": "HOST",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_second_process_on_the_same_database_exits",
+     "at": "host/tests/integration/test_host_process.py:141"
+    },
+    {
+     "class": "HOST",
+     "test": "test_second_host_on_the_same_database_is_refused",
+     "at": "host/tests/integration/test_status_api.py:61"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "J01",
+   "title": "proxy Join",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "J01 sim: an unjoined device 19 hops from the root joins through the proxy chain",
+     "at": "tests/native/test_mesh.cpp:670"
+    },
+    {
+     "class": "SIM",
+     "test": "J01 sim: a tunnel record cannot capture the address of a real neighbour of the root",
+     "at": "tests/native/test_mesh.cpp:933"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "J02",
+   "title": "期待リスト更新",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "J02 policy: closed root offers nothing; preapproved refuses an unexpected device; foreign tickets never reach the root",
+     "at": "tests/native/test_join.cpp:552"
+    },
+    {
+     "class": "SIM",
+     "test": "J02 sim: a device started before its expected entry exists is not banned; the update lets it in",
+     "at": "tests/native/test_mesh.cpp:701"
+    },
+    {
+     "class": "SIM",
+     "test": "J02 sim: after the search budget the device asks again at once (no fixed ban), the update is honoured",
+     "at": "tests/native/test_mesh.cpp:724"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "J03",
+   "title": "hint false positive",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "J03 sim: a forged offer (hint false positive) costs one bounded handshake and authorises nothing",
+     "at": "tests/native/test_mesh.cpp:744"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "J04",
+   "title": "approval停止",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_external_join_is_approved_through_the_host",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:214"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_crash_after_join_decision_is_reconciled_by_get_request",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:263"
+    },
+    {
+     "class": "SIM",
+     "test": "J04 external approval: pending without a decision, no automatic approve; approve completes; timeout is retryable",
+     "at": "tests/native/test_join.cpp:514"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "J05",
+   "title": "既存member復帰",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_preapproved_join_resume_leave_without_host",
+     "at": "host/tests/e2e/test_join_meshsim.py:49"
+    },
+    {
+     "class": "SIM",
+     "test": "J05 resume: an ACTIVE member restarts, links again without approval; the ledger does not change",
+     "at": "tests/native/test_join.cpp:399"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "J06",
+   "title": "Join同ID異hash",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "J06 same request_id with other content is CONFLICT and never reserves a second address",
+     "at": "tests/native/test_join.cpp:478"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "J07",
+   "title": "Join最終ACK消失",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "J07/LC06 JOIN_ACTIVE lost: the device is ACTIVE, the root stays unconfirmed, the next link converges by request evidence",
+     "at": "tests/native/test_join.cpp:592"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "K01",
+   "title": "3表示盤対象識別",
+   "required_level": "APPLICATION",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "K02",
+   "title": "occとtr",
+   "required_level": "APPLICATION",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "K03",
+   "title": "Pico故障",
+   "required_level": "APPLICATION",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "K04",
+   "title": "8hcloud断",
+   "required_level": "APPLICATION",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "K05",
+   "title": "KG共存owner",
+   "required_level": "APPLICATION",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "K06",
+   "title": "KG参照をcore排除",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_first_party_core_has_no_application_vocabulary",
+     "at": "host/tests/unit/test_k06_core_vocabulary.py:56"
+    },
+    {
+     "class": "HOST",
+     "test": "test_the_scan_itself_catches_what_it_is_for",
+     "at": "host/tests/unit/test_k06_core_vocabulary.py:67"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "L01",
+   "title": "72h負荷/資源",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC01",
+   "title": "設置window expiry",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC02",
+   "title": "64台設置",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC03",
+   "title": "電源先行",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC04",
+   "title": "工場→倉庫→本番",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC05",
+   "title": "承認待ちsleep",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC06",
+   "title": "commit片側喪失",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "J07/LC06 JOIN_ACTIVE lost: the device is ACTIVE, the root stays unconfirmed, the next link converges by request evidence",
+     "at": "tests/native/test_join.cpp:592"
+    },
+    {
+     "class": "SIM",
+     "test": "LC06 JOIN_COMMIT lost: root ACTIVE, device only PREPARED; a repeated request (same id, same hash) converges",
+     "at": "tests/native/test_join.cpp:627"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LC07",
+   "title": "A→B旧履歴",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC08",
+   "title": "正常root交換",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC09",
+   "title": "root故障交換",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC10",
+   "title": "旧root再出現",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC11",
+   "title": "network reset",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LC12",
+   "title": "異なる利用アプリ",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LP01",
+   "title": "power role検査",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP01 sim: relay and root cannot leave ALWAYS_RX; a refused change leaves policy and radio alone",
+     "at": "tests/native/test_power.cpp:455"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP02",
+   "title": "間欠窓の実受信",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP02 sim: WINDOWED_RX cycles by itself, receives only after an authenticated poll, and is radio-off in between",
+     "at": "tests/native/test_power.cpp:739"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP03",
+   "title": "report起床→停止",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP03 GS12 sim: a DURABLE report is journalled before the sleep, survives a deep sleep, converges once, no false success",
+     "at": "tests/native/test_power.cpp:1053"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP04",
+   "title": "sleep ticket race",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "P01 LP04 sim: a frame that arrives after the ticket makes sleep_enter refuse, and nothing is dropped",
+     "at": "tests/native/test_power.cpp:500"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP05",
+   "title": "sleep veto",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP05 LP18 sim: a veto restores the node, and PM locks are released on success, failure, timeout and cancel",
+     "at": "tests/native/test_power.cpp:559"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP06",
+   "title": "圏外24h",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP06 sim: 24 h without any parent: the radio time spent searching stays inside the hourly budget, the backoff grows",
+     "at": "tests/native/test_power.cpp:1101"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP07",
+   "title": "イベントwake storm",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP07 sim: unplanned wakes beyond the daily quota get no radio, no transmission, and say what was lost",
+     "at": "tests/native/test_power.cpp:1136"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP08",
+   "title": "RAM保持session",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP08 LP09 sim: every session case of tests/power_golden.json gives the same answer in the spec model and in the engine",
+     "at": "tests/native/test_power.cpp:1261"
+    },
+    {
+     "class": "SIM",
+     "test": "LP17 LP08 sim: a light-sleeping REPORT_ONLY leaf takes no unscheduled step and keeps its sessions",
+     "at": "tests/native/test_power.cpp:429"
+    },
+    {
+     "class": "SIM",
+     "test": "LP08 sim: 1000 light-sleep wakes reuse the sessions: no EDHOC, monotone counters, a replayed poll changes nothing",
+     "at": "tests/native/test_power.cpp:895"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP09",
+   "title": "Deep/cold session",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP08 LP09 sim: every session case of tests/power_golden.json gives the same answer in the spec model and in the engine",
+     "at": "tests/native/test_power.cpp:1261"
+    },
+    {
+     "class": "SIM",
+     "test": "LP09 sim: after a deep sleep the node runs a fresh EDHOC, needs no new approval, and old SID/ciphertext are dead",
+     "at": "tests/native/test_power.cpp:946"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP10",
+   "title": "parent mailbox喪失",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP10 sim: a parent that loses its mailbox is recovered by the origin sending the same MessageId again",
+     "at": "tests/native/test_power.cpp:846"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP11",
+   "title": "20hop ACK持越し",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP11 sim: a 20-hop DURABLE report whose receipt is not back when the budget ends: original kept, same id next wake, no false success",
+     "at": "tests/native/test_power.cpp:1327"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP12",
+   "title": "leaseを跨ぐsleep",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP12 S18 sim: a lease that ran out while powered off is renewed, not restored; the membership stays",
+     "at": "tests/native/test_lifecycle.cpp:329"
+    },
+    {
+     "class": "SIM",
+     "test": "LP12 sim: sleeping past a key or authorization lifetime restores nothing; membership is never erased",
+     "at": "tests/native/test_power.cpp:985"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP13",
+   "title": "相手だけ再起動",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP13 sim: only the restarted parent's session is re-established, no other exchange",
+     "at": "tests/native/test_link.cpp:717"
+    },
+    {
+     "class": "SIM",
+     "test": "LP13 sim: only the parent restarts; the leaf makes that one session again, no Join, no other handshake",
+     "at": "tests/native/test_power.cpp:1025"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP14",
+   "title": "poll/grant loss",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP14 sim: a lost or late GRANT is asked for again with the same nonce, at most twice, window not extended",
+     "at": "tests/native/test_power.cpp:611"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP15",
+   "title": "sleepとchannel",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "C09/LP15 sim: a sleepy leaf misses two channel changes over 24 h; on wake it searches a bounded set and follows only the last plan",
+     "at": "tests/native/test_channel.cpp:543"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP16",
+   "title": "critical sleeper移行",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP16 sim: a critical receiver that sleeps defers the plan; only an explicit deferred permission lets it go on",
+     "at": "tests/native/test_channel.cpp:575"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP17",
+   "title": "予定外periodic wake",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP17 LP08 sim: a light-sleeping REPORT_ONLY leaf takes no unscheduled step and keeps its sessions",
+     "at": "tests/native/test_power.cpp:429"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP18",
+   "title": "PM lock負例",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP05 LP18 sim: a veto restores the node, and PM locks are released on success, failure, timeout and cancel",
+     "at": "tests/native/test_power.cpp:559"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "LP19",
+   "title": "sensor周辺電力",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "LP20",
+   "title": "RTC連続性不明",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "LP20 sim: without proven RTC continuity a cold boot starts with no budget left; a deep sleep with continuity keeps it",
+     "at": "tests/native/test_power.cpp:1178"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "M01",
+   "title": "A停止でB移設",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "M02",
+   "title": "A稼働でB移設",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "M03",
+   "title": "A→B→A",
+   "required_level": "INTEGRATION",
+   "status": "NO_SOFTWARE_EVIDENCE",
+   "hardware_evidence": null,
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "M04",
+   "title": "紛失機器",
+   "required_level": "INTEGRATION",
+   "status": "NO_SOFTWARE_EVIDENCE",
+   "hardware_evidence": null,
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "M05",
+   "title": "transfer途中停電",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "M06",
+   "title": "leave drain",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_preapproved_join_resume_leave_without_host",
+     "at": "host/tests/e2e/test_join_meshsim.py:50"
+    },
+    {
+     "class": "SIM",
+     "test": "M06 leave: IMMEDIATE erases membership durably; DRAIN never turns into IMMEDIATE by itself; re-join uses a new generation",
+     "at": "tests/native/test_join.cpp:427"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "M07",
+   "title": "同現場移設",
+   "required_level": "APPLICATION",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME01",
+   "title": "4SoC power比較",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME02",
+   "title": "sleep方式break-even",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME03",
+   "title": "距離の一連成功",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME04",
+   "title": "容量差分",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME05",
+   "title": "低負荷CPU",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_host_diagnostics_without_a_root_is_503_not_zeros",
+     "at": "host/tests/e2e/test_diag_meshsim.py:132"
+    },
+    {
+     "class": "SIM",
+     "test": "test_meshsim_diagnostics_queries_add_no_wakes",
+     "at": "host/tests/e2e/test_diag_meshsim.py:30"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_health_and_diagnostics_show_only_what_the_root_reports",
+     "at": "host/tests/e2e/test_diag_meshsim.py:80"
+    },
+    {
+     "class": "SIM",
+     "test": "ME05-style sim: an idle network with the channel module wakes its owners about once a minute more, never on a fixed tick",
+     "at": "tests/native/test_channel.cpp:764"
+    },
+    {
+     "class": "SIM",
+     "test": "ME05 sim: an idle node with delivery state schedules no wakes",
+     "at": "tests/native/test_delivery.cpp:1410"
+    },
+    {
+     "class": "SIM",
+     "test": "ME05 sim: diagnostics never poll - no query, no wake; a query costs at most one owner step and arms no timer",
+     "at": "tests/native/test_diag.cpp:144"
+    },
+    {
+     "class": "SIM",
+     "test": "ME05 sim: an established idle link costs zero owner wakes",
+     "at": "tests/native/test_link.cpp:903"
+    },
+    {
+     "class": "SIM",
+     "test": "ME05 sim: an idle owner takes zero wakes for an hour; a TX adds only event-driven steps",
+     "at": "tests/native/test_runtime_radio.cpp:326"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "ME06",
+   "title": "CSV計測品質",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME07",
+   "title": "故障条件energy",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "ME08",
+   "title": "低電池＋安全優先",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "O01",
+   "title": "OTA2面",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "O02",
+   "title": "OTA署名/target",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "O02 tampering: every single-byte change of a signed manifest is refused; foreign, unsigned and mistyped ones too",
+     "at": "tests/native/test_ota.cpp:164"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "O02 rollback state: the only legal order, the migration lock, and the floor moves up only at confirm",
+     "at": "tests/native/test_ota.cpp:205"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "O02 a signed manifest for this SoC and board passes; nothing else does, and no state moves",
+     "at": "tests/native/test_ota.cpp:96"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "O03",
+   "title": "schema rollback",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "O03 sim: what the boot decision does in each state the record and the bootloader can leave behind",
+     "at": "tests/native/test_ota.cpp:258"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "P01",
+   "title": "sleep ticket race",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "P01 LP04 sim: a frame that arrives after the ticket makes sleep_enter refuse, and nothing is dropped",
+     "at": "tests/native/test_power.cpp:500"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "P02",
+   "title": "sleep≠loss",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_meshsim_sleeping_leaf_wakes_only_at_its_timer",
+     "at": "host/tests/e2e/test_power_meshsim.py:19"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_power_endpoint_shows_what_the_root_was_told",
+     "at": "host/tests/e2e/test_power_meshsim.py:89"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "P03",
+   "title": "wake deadline不足",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "P03 GS05 sim: a command whose deadline is before the target's next wake is refused at once, nothing is spooled",
+     "at": "tests/native/test_power.cpp:662"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "P04",
+   "title": "圏外電池",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "POWER-after-ack",
+   "title": "durable境界 after-ack",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "POWER-after-marker",
+   "title": "durable境界 after-marker",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_power_cut_at_every_join_commit_leaves_only_allowed_states",
+     "at": "host/tests/e2e/test_join_meshsim.py:166"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "POWER-after-slot-commit",
+   "title": "durable境界 after-slot-commit",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_durable_send_survives_a_power_cut_through_meshsim",
+     "at": "host/tests/e2e/test_delivery_meshsim.py:106"
+    },
+    {
+     "class": "SIM",
+     "test": "test_power_cut_at_every_join_commit_leaves_only_allowed_states",
+     "at": "host/tests/e2e/test_join_meshsim.py:164"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "POWER-before-ack",
+   "title": "durable境界 before-ack",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "POWER-before-marker",
+   "title": "durable境界 before-marker",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_power_cut_at_every_join_commit_leaves_only_allowed_states",
+     "at": "host/tests/e2e/test_join_meshsim.py:165"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "POWER-before-slot-write",
+   "title": "durable境界 before-slot-write",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_power_cut_at_every_join_commit_leaves_only_allowed_states",
+     "at": "host/tests/e2e/test_join_meshsim.py:162"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "POWER-during-slot-write",
+   "title": "durable境界 during-slot-write",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_power_cut_at_every_join_commit_leaves_only_allowed_states",
+     "at": "host/tests/e2e/test_join_meshsim.py:163"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "Q01",
+   "title": "飢餓なし",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_principal_over_its_rate_gets_429_with_retry_after_and_others_are_unaffected",
+     "at": "host/tests/integration/test_host_limits.py:41"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "Q01 URGENT yields: after two URGENT frames in a row a ready control frame is served",
+     "at": "tests/native/test_sched.cpp:102"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "Q01 TX pool: BULK cannot fill the pool, CONTROL and borrowed buffers always find room",
+     "at": "tests/native/test_sched.cpp:132"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "Q01 DRR: URGENT, NORMAL and BULK share the air 8:4:1 when all are backlogged, none starves",
+     "at": "tests/native/test_sched.cpp:60"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "Q01 airtime bucket: a saturated link is held to 300 ms/s + burst + the urgent debt; URGENT borrows, BULK cannot",
+     "at": "tests/native/test_sched.cpp:74"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "Q01 control reserve: 20 % of every 100 ms window survives an empty bucket and a saturated data flood",
+     "at": "tests/native/test_sched.cpp:86"
+    },
+    {
+     "class": "SIM",
+     "test": "test_a_dead_neighbour_does_not_hold_up_the_traffic_to_a_live_one",
+     "at": "host/tests/e2e/test_sched_meshsim.py:136"
+    },
+    {
+     "class": "SIM",
+     "test": "test_control_progresses_under_a_data_flood_and_no_class_starves",
+     "at": "host/tests/e2e/test_sched_meshsim.py:55"
+    },
+    {
+     "class": "SIM",
+     "test": "Q01 TX pool: one dead next hop cannot pin the pool (per-peer cap), control is exempt",
+     "at": "tests/native/test_sched.cpp:176"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "Q02",
+   "title": "idempotency予算",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_a_hundred_replays_of_one_idempotency_key_are_one_operation_and_no_new_rf_work",
+     "at": "host/tests/integration/test_host_limits.py:80"
+    },
+    {
+     "class": "SIM",
+     "test": "test_post_message_reaches_node_and_evidence_returns",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:36"
+    },
+    {
+     "class": "SIM",
+     "test": "test_node_to_host_message_is_committed_before_the_root_hears_the_ack",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:83"
+    },
+    {
+     "class": "SIM",
+     "test": "Q02 device: 100 repeats of one message create one event and bounded work",
+     "at": "tests/native/test_delivery.cpp:777"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "Q03",
+   "title": "DB満杯",
+   "required_level": "HOST",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_capacity_protects_critical_events_and_rejects_with_507",
+     "at": "host/tests/integration/test_host_api.py:324"
+    },
+    {
+     "class": "HOST",
+     "test": "test_real_database_full_is_507_and_never_a_false_202",
+     "at": "host/tests/integration/test_host_api.py:367"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "R01",
+   "title": "21radio20hop強制chain",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_chain_forms_by_itself_and_carries_a_message",
+     "at": "host/tests/e2e/test_mesh_meshsim.py:18"
+    },
+    {
+     "class": "SIM",
+     "test": "R01/C01-scale sim: a 21-node, 20-hop chain runs a full plan; every relay is required, READY / STORED / APPLIED come back over 20 hops",
+     "at": "tests/native/test_channel.cpp:781"
+    },
+    {
+     "class": "SIM",
+     "test": "R01 sim: 20 hops, an APPLIED message with the 96-byte maximum, end session over the whole path",
+     "at": "tests/native/test_delivery.cpp:936"
+    },
+    {
+     "class": "SIM",
+     "test": "R01 sim: 21 nodes / 20 hops cold boot form the whole mesh by themselves",
+     "at": "tests/native/test_mesh.cpp:396"
+    },
+    {
+     "class": "SIM",
+     "test": "R01 sim: delivery across the formed mesh, both directions, no static routes",
+     "at": "tests/native/test_mesh.cpp:420"
+    },
+    {
+     "class": "SIM",
+     "test": "R01 sim (model): formation with a slow worker, 150 ms per public-key job",
+     "at": "tests/native/test_mesh.cpp:624"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "R02",
+   "title": "40hop端末間",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "R02 sim: 40 hops carry the end-session set-up, a 56-byte message and its receipt; a receipt with a result is fragmented",
+     "at": "tests/native/test_delivery.cpp:1383"
+    },
+    {
+     "class": "SIM",
+     "test": "R02 sim: 41 nodes, root in the middle, 40-hop node-to-node delivery (56 B and 512 B)",
+     "at": "tests/native/test_mesh.cpp:450"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "R03",
+   "title": "同時親選択",
+   "required_level": "MODEL",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "R03 simultaneous parent choice on old paths never closes a cycle",
+     "at": "tests/native/test_route.cpp:439"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "R03 seeded model: stale/reordered/duplicated registers keep the approved tree simple",
+     "at": "tests/native/test_route.cpp:952"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "R04",
+   "title": "重複source route",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "HOST",
+     "test": "test_r04_duplicate_source_route_codec_part",
+     "at": "host/tests/unit/test_wire_differential.py:757"
+    },
+    {
+     "class": "HOST",
+     "test": "test_r04_python_codec_rejects_duplicate_and_looping_paths",
+     "at": "host/tests/unit/test_wire_vectors.py:98"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "R04 forwarding: duplicate address, wrong peer, stale term, budget are dropped",
+     "at": "tests/native/test_route.cpp:78"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "R04 duplicate source route is rejected at the codec, however valid the AEAD would be",
+     "at": "tests/native/test_wire.cpp:219"
+    },
+    {
+     "class": "SIM",
+     "test": "R04 sim: a relay refuses a stale term and a wrong previous hop, and forwards nothing",
+     "at": "tests/native/test_delivery.cpp:956"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "R05",
+   "title": "stale source path",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "R05 sim: diamond, the relay under a pending message dies, no flood, the same id arrives on the new path",
+     "at": "tests/native/test_mesh.cpp:640"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "R06",
+   "title": "rootなし",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "R06 sim: relay failure with a spare neighbour is repaired (traffic driven), delivery resumes",
+     "at": "tests/native/test_mesh.cpp:541"
+    },
+    {
+     "class": "SIM",
+     "test": "R06 sim: idle parent loss (no traffic) is found within the hello liveness bound",
+     "at": "tests/native/test_mesh.cpp:578"
+    },
+    {
+     "class": "SIM",
+     "test": "R06 sim: without the root, established paths and sessions keep carrying; a returning root re-admits everyone",
+     "at": "tests/native/test_mesh.cpp:593"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "R07",
+   "title": "全台停電",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "R07 sim: 20 cold boots of the whole network converge again, memberships kept",
+     "at": "tests/native/test_mesh.cpp:484"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "R08",
+   "title": "peer容量とhandoff",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "R08 sim: a full neighbour table refuses the next session and evicts nobody",
+     "at": "tests/native/test_link.cpp:886"
+    },
+    {
+     "class": "SIM",
+     "test": "R08 sim: 16 regular + 3 transient + broadcast; full is explicit; classes never borrow",
+     "at": "tests/native/test_runtime_radio.cpp:58"
+    },
+    {
+     "class": "SIM",
+     "test": "R08 sim: 100 churn cycles with delayed releases leak nothing; stale handles are inert",
+     "at": "tests/native/test_runtime_radio.cpp:97"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "R09",
+   "title": "short ID再使用",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "R09 short address reuse: a departed device's address goes to another device; the old credential and session are refused",
+     "at": "tests/native/test_join.cpp:697"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "R10",
+   "title": "古いjob完了",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "R10 pool generation: stale handle cannot reach the next occupant",
+     "at": "tests/native/test_foundation.cpp:59"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "R10 job table: late completion after re-reservation is stale",
+     "at": "tests/native/test_runtime_sim.cpp:50"
+    },
+    {
+     "class": "SIM",
+     "test": "R10 sim: stop with operations, an exchange job and a journal write in flight; nothing acts on a stopped engine",
+     "at": "tests/native/test_delivery.cpp:1422"
+    },
+    {
+     "class": "SIM",
+     "test": "R10 sim: stopping both ends in the middle of a transfer releases every slot, lane and buffer",
+     "at": "tests/native/test_fragment.cpp:626"
+    },
+    {
+     "class": "SIM",
+     "test": "R10 stop while a handshake job is in flight: zombie slot, late completion cannot act",
+     "at": "tests/native/test_link.cpp:783"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c3-c3",
+   "title": "異種SoC双方向通信 c3→c3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c3-c5",
+   "title": "異種SoC双方向通信 c3→c5",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c3-c6",
+   "title": "異種SoC双方向通信 c3→c6",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c3-s3",
+   "title": "異種SoC双方向通信 c3→s3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c5-c3",
+   "title": "異種SoC双方向通信 c5→c3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c5-c5",
+   "title": "異種SoC双方向通信 c5→c5",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c5-c6",
+   "title": "異種SoC双方向通信 c5→c6",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c5-s3",
+   "title": "異種SoC双方向通信 c5→s3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c6-c3",
+   "title": "異種SoC双方向通信 c6→c3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c6-c5",
+   "title": "異種SoC双方向通信 c6→c5",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c6-c6",
+   "title": "異種SoC双方向通信 c6→c6",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-c6-s3",
+   "title": "異種SoC双方向通信 c6→s3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-s3-c3",
+   "title": "異種SoC双方向通信 s3→c3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-s3-c5",
+   "title": "異種SoC双方向通信 s3→c5",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-s3-c6",
+   "title": "異種SoC双方向通信 s3→c6",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "RF-s3-s3",
+   "title": "異種SoC双方向通信 s3→s3",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "S01",
+   "title": "EDHOC公式trace",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S01 method-0/suite-3 loopback through the job bodies: keys mirror and carry records",
+     "at": "tests/native/test_security.cpp:910"
+    },
+    {
+     "class": "SIM",
+     "test": "S01 RFC 9529 chapter 3 trace (method 3, suite 2) replays through the LeanMesh glue",
+     "at": "tests/native/test_security.cpp:760"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "S02",
+   "title": "session context混同",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S02 any change of purpose, domain, identity or generation gives other keys; cross-open fails",
+     "at": "tests/native/test_security.cpp:454"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S02 handshake with a different context on each side derives keys that cannot talk",
+     "at": "tests/native/test_security.cpp:951"
+    },
+    {
+     "class": "SIM",
+     "test": "S02 sim: end session set-up fails while the peer is unreachable, is retried, then the message goes out",
+     "at": "tests/native/test_delivery.cpp:1278"
+    },
+    {
+     "class": "SIM",
+     "test": "S02 sim: both ends open an end session at once: one session, both messages delivered",
+     "at": "tests/native/test_delivery.cpp:1298"
+    },
+    {
+     "class": "SIM",
+     "test": "S02 session context binds full identities, generations and credential hashes",
+     "at": "tests/native/test_link.cpp:182"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "S03",
+   "title": "QR複製",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "S03 sim: end session lifetime is one hour: an expired session is replaced, not reused",
+     "at": "tests/native/test_delivery.cpp:1335"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "S04",
+   "title": "packet replay",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S04 golden AES-GCM frames open with PSA; tampering is rejected",
+     "at": "tests/native/test_crypto_backend.cpp:133"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S04 open_in_place gives exactly what open() gives, in the record's own buffer",
+     "at": "tests/native/test_security.cpp:1320"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S04 record layer reproduces every golden frame byte-exact and opens it",
+     "at": "tests/native/test_security.cpp:226"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S04 replay window: duplicate, out-of-window, reorder, same counter with other payload",
+     "at": "tests/native/test_security.cpp:343"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S04 transmit counters: start at 1, never reused, never wrap, seal order enforced",
+     "at": "tests/native/test_security.cpp:414"
+    },
+    {
+     "class": "SIM",
+     "test": "S04 sim: duplicate frame, duplicate record, tampered record and conflicting id never re-apply",
+     "at": "tests/native/test_delivery.cpp:695"
+    },
+    {
+     "class": "SIM",
+     "test": "S04 link replay: duplicate is flagged and never re-applied, tampered and too-old are refused",
+     "at": "tests/native/test_link.cpp:217"
+    },
+    {
+     "class": "SIM",
+     "test": "S04 SEC-11 a malformed authentic high-counter DATA frame does not move the replay window",
+     "at": "tests/native/test_link.cpp:257"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "S05",
+   "title": "cold boot nonce",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S05 higher-generation evidence with a damaged record quarantines, never rolls back",
+     "at": "tests/native/test_store.cpp:168"
+    },
+    {
+     "class": "SIM",
+     "test": "test_link_session_and_cold_boot_through_meshsim",
+     "at": "host/tests/e2e/test_link_meshsim.py:27"
+    },
+    {
+     "class": "SIM",
+     "test": "S05 cold boot: old SID and old ciphertext are refused, fresh EDHOC gives new keys",
+     "at": "tests/native/test_link.cpp:666"
+    },
+    {
+     "class": "SIM",
+     "test": "S05 failure: SESSION_BIND lost, three attempts, no session and no early DATA, then recovery",
+     "at": "tests/native/test_link.cpp:739"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "S06",
+   "title": "失効通知未達",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [],
+   "sim_only_label": null
+  },
+  {
+   "id": "S07",
+   "title": "invalid key/cert",
+   "required_level": "UNIT",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 chain: DeviceCredential, RootDelegation and MemberCredential verify and bind",
+     "at": "tests/native/test_credentials.cpp:131"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 revocation: fleet or delegated root raise floors, never lower them, table is bounded",
+     "at": "tests/native/test_credentials.cpp:340"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 vectors: MemberCredential and RevokeObject control-data are the CDDL bytes",
+     "at": "tests/native/test_credentials.cpp:70"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 handshake: no single-byte flip, truncation or extension of m1..m4 completes",
+     "at": "tests/native/test_security.cpp:1066"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 invalid points, scalars, lengths and signatures are always rejected",
+     "at": "tests/native/test_security.cpp:557"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 CCS: one canonical encoding, DeviceId derived from the key, strict parse",
+     "at": "tests/native/test_security.cpp:640"
+    },
+    {
+     "class": "NATIVE_UNIT",
+     "test": "S07 handshake refuses unknown peers, invalid ephemerals, critical EAD, self and bad CCS",
+     "at": "tests/native/test_security.cpp:989"
+    },
+    {
+     "class": "SIM",
+     "test": "test_unprovisioned_node_cannot_link_and_bad_commands_fail",
+     "at": "host/tests/e2e/test_link_meshsim.py:65"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 ticket and expected set: signer, bindings and generation gain are checked",
+     "at": "tests/native/test_credentials.cpp:186"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 DeviceCredential negatives: signature, signer, key point, ids, hashes, generation, shape",
+     "at": "tests/native/test_credentials.cpp:249"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 delegation and member negatives: signer, permission, domain, binding",
+     "at": "tests/native/test_credentials.cpp:302"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 sim: a peer below the revocation floor gets no end session and no application frame",
+     "at": "tests/native/test_delivery.cpp:1318"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 wire: credentials of a rogue issuer are refused, no session, no fallback",
+     "at": "tests/native/test_link.cpp:405"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 wire: valid fleet, forged member credential (not root signed) is refused",
+     "at": "tests/native/test_link.cpp:427"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 low generation: a credential below the revocation floor is refused by the peer",
+     "at": "tests/native/test_link.cpp:444"
+    },
+    {
+     "class": "SIM",
+     "test": "S07 wire S18: an expired lease gets a restricted renewal-only link, a provable one a full link",
+     "at": "tests/native/test_link.cpp:469"
+    }
+   ],
+   "sim_only_label": null
+  },
+  {
+   "id": "S08",
+   "title": "認証CPU飽和",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "S08 sim: two initiators at one responder share the single handshake slot",
+     "at": "tests/native/test_link.cpp:311"
+    },
+    {
+     "class": "SIM",
+     "test": "S08 sim: a replayed CredI holds the single slot for 4 s at most and costs no rate gate",
+     "at": "tests/native/test_link.cpp:360"
+    },
+    {
+     "class": "SIM",
+     "test": "S08 sim: a second full handshake with the same peer within 30 s is refused at message_1",
+     "at": "tests/native/test_link.cpp:387"
+    },
+    {
+     "class": "SIM",
+     "test": "S08 sim: under a join storm the owner keeps delivering, queues stay bounded, joins are refused or serialised",
+     "at": "tests/native/test_sched.cpp:239"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "S09",
+   "title": "USB偽相手",
+   "required_level": "HARDWARE",
+   "status": "NOT_RUN_HARDWARE",
+   "hardware_evidence": "NOT_RUN",
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "test_ping_credits_and_reserved_control_lane",
+     "at": "host/tests/e2e/test_usb_serial.py:111"
+    },
+    {
+     "class": "SIM",
+     "test": "test_fake_host_and_unpaired_host_are_refused",
+     "at": "host/tests/e2e/test_usb_serial.py:176"
+    },
+    {
+     "class": "SIM",
+     "test": "test_fake_root_never_becomes_active",
+     "at": "host/tests/e2e/test_usb_serial.py:202"
+    },
+    {
+     "class": "SIM",
+     "test": "test_host_process_reaches_active_and_status_root_connected",
+     "at": "host/tests/e2e/test_usb_serial.py:86"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim COBS round trip, resync and cap",
+     "at": "tests/native/test_serial.cpp:185"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim HELLO -> EDHOC purpose 3 -> ACTIVE, PING keeps it, session ids and credits",
+     "at": "tests/native/test_serial.cpp:236"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim credits: data window 16, reserved control lane, no double count",
+     "at": "tests/native/test_serial.cpp:265"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim 8230 B frame accepted, 8193 B payload refused, corruption and noise resync",
+     "at": "tests/native/test_serial.cpp:299"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim fake root is refused by the Host (foreign fleet, foreign domain) and a control run connects",
+     "at": "tests/native/test_serial.cpp:489"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim fake host is refused by the root (unpaired, foreign fleet, no pairing record)",
+     "at": "tests/native/test_serial.cpp:534"
+    }
+   ],
+   "sim_only_label": "sim"
+  },
+  {
+   "id": "S10",
+   "title": "鍵rotation",
+   "required_level": "INTEGRATION",
+   "status": "COVERED_SOFTWARE_ONLY",
+   "hardware_evidence": null,
+   "software_evidence": [
+    {
+     "class": "SIM",
+     "test": "S10 rotation: lower DeviceId rotates at 50 min, old session receives a bounded grace only",
+     "at": "tests/native/test_link.cpp:801"
+    },
+    {
+     "class": "SIM",
+     "test": "S10 rotation with lost exchange keeps the old session until the new one is bound, hard limit 1 h",
+     "at": "tests/native/test_link.cpp:828"
+    },
+    {
+     "class": "SIM",
+     "test": "S10 rotation by record count: threshold reached, fresh EDHOC, no loss",
+     "at": "tests/native/test_link.cpp:864"
+    }
+   ],
+   "sim_only_label": null
+  }
+ ],
+ "features": [
+  {
+   "name": "SMALL_MESSAGE",
+   "scenarios": [
+    "D01",
+    "D03",
+    "D04",
+    "D06"
+   ],
+   "implemented": true,
+   "software_evidence_for": 3,
+   "of": 4,
+   "host_tested": false,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "OBJECT_4K",
+   "scenarios": [
+    "D07",
+    "D08",
+    "D09"
+   ],
+   "implemented": true,
+   "software_evidence_for": 3,
+   "of": 3,
+   "host_tested": true,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "GROUP_FANOUT_V2",
+   "scenarios": [
+    "GS01",
+    "GS02",
+    "GS03",
+    "GS07",
+    "GS10",
+    "D11",
+    "D12"
+   ],
+   "implemented": true,
+   "software_evidence_for": 6,
+   "of": 7,
+   "host_tested": false,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "POWER_REPORT_ONLY",
+   "scenarios": [
+    "LP03",
+    "LP04",
+    "LP05"
+   ],
+   "implemented": true,
+   "software_evidence_for": 3,
+   "of": 3,
+   "host_tested": true,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "POWER_WINDOWED_RX",
+   "scenarios": [
+    "LP13",
+    "LP14",
+    "LP17"
+   ],
+   "implemented": true,
+   "software_evidence_for": 3,
+   "of": 3,
+   "host_tested": true,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "RAM_SESSION_RETAIN",
+   "scenarios": [
+    "LP08",
+    "LP09"
+   ],
+   "implemented": true,
+   "software_evidence_for": 2,
+   "of": 2,
+   "host_tested": true,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "AUTO_CHANNEL",
+   "scenarios": [
+    "C02",
+    "C03",
+    "C06",
+    "C07",
+    "C12"
+   ],
+   "implemented": false,
+   "software_evidence_for": 5,
+   "of": 5,
+   "host_tested": true,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "SIGNED_TRANSFER",
+   "scenarios": [
+    "M03",
+    "M04"
+   ],
+   "implemented": false,
+   "software_evidence_for": 0,
+   "of": 2,
+   "host_tested": false,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "COMMISSIONING_WINDOW",
+   "scenarios": [
+    "LC01",
+    "LC03"
+   ],
+   "implemented": false,
+   "software_evidence_for": 0,
+   "of": 2,
+   "host_tested": false,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "ROOT_HANDOVER",
+   "scenarios": [
+    "LC08",
+    "LC10"
+   ],
+   "implemented": false,
+   "software_evidence_for": 0,
+   "of": 2,
+   "host_tested": false,
+   "hardware_tested": false,
+   "qualified": false
+  },
+  {
+   "name": "RTC_SECURE_RESUME_RESERVED",
+   "scenarios": [
+    "LP20"
+   ],
+   "implemented": false,
+   "software_evidence_for": 1,
+   "of": 1,
+   "host_tested": true,
+   "hardware_tested": false,
+   "qualified": false
+  }
+ ]
+}

@@ -907,4 +907,125 @@ LM_TEST("LP15b sim: a battery node's search is limited per wake episode and star
     LM_CHECK(n.chan(1).stats().scan_dwells > dwells); // the new episode searches again
 }
 
+// ---- external review FIX3 (gpt-5.6-sol on 3596820) ---------------------------------------------------------------------
+
+// FIX3-D6: a plan is what its whole canonical body says, not what its id says.
+LM_TEST("FIX3-13 sim: PREPARE / COMMIT / ABORT with the id of the held plan but another channel, epoch or time is a conflict") {
+    CNet n(3);
+    form(n);
+    channel::Channel &c = n.chan(1);
+    channel::Plan p;
+    n.eng(1).random(MutByteView{p.id.bytes});
+    p.term = n.eng(1).identity().member().root_term;
+    p.epoch = ChannelEpoch{c.epoch().value() + 1};
+    p.old_ch = n.radio(1);
+    p.new_ch = 11;
+    p.switch_root_ms = n.at_ms() + 3'600'000;
+    p.max_err_ms = 2000;
+    p.settle_ms = 60000;
+    p.policy_rev = 4;
+    p.participants[0] = 0x77;
+    auto send = [&](channel::Phase ph, const channel::Plan &q) {
+        LM_CHECK(n.until([&] { return !c.job_pending(); }, 2000, 5));
+        channel::PlanRec r;
+        r.phase = ph;
+        r.plan = q;
+        LM_CHECK_OK(c.local_plan(r, n.now(1)));
+        LM_CHECK(n.until([&] { return !c.job_pending(); }, 2000, 5));
+    };
+    auto altered = [&](unsigned how) {
+        channel::Plan q = p;
+        q.new_ch = how == 0 ? 12 : q.new_ch;
+        q.switch_root_ms += how == 1 ? 1000 : 0;
+        q.epoch = ChannelEpoch{q.epoch.value() + (how == 2 ? 1U : 0U)};
+        q.participants[0] = how == 3 ? 0x78 : q.participants[0];
+        return q;
+    };
+    send(channel::Phase::Prepare, p);
+    LM_CHECK(c.have_plan() && !c.committed());
+    // A repeated PREPARE with the same id and other contents is refused; the held plan is untouched.
+    for (unsigned how = 0; how < 4; ++how) {
+        const uint32_t refused = c.stats().refused;
+        send(channel::Phase::Prepare, altered(how));
+        LM_CHECK_EQ(c.stats().refused, refused + 1U);
+        LM_CHECK(c.have_plan() && !c.committed());
+        LM_CHECK_EQ(c.plan().new_ch, 11);
+    }
+    // A COMMIT that only shares the id is refused: nothing becomes COMMITTED, nothing is persisted.
+    for (unsigned how = 0; how < 4; ++how) {
+        const uint32_t refused = c.stats().refused;
+        const uint32_t committed = c.stats().committed;
+        send(channel::Phase::Commit, altered(how));
+        LM_CHECK_EQ(c.stats().refused, refused + 1U);
+        LM_CHECK_EQ(c.stats().committed, committed);
+        LM_CHECK(!c.committed());
+        LM_CHECK_EQ(c.plan().new_ch, 11);
+        LM_CHECK(c.plan().switch_root_ms == p.switch_root_ms);
+    }
+    // An ABORT that only shares the id does not abort.
+    for (unsigned how = 0; how < 4; ++how) {
+        send(channel::Phase::Abort, altered(how));
+        LM_CHECK(c.have_plan());
+        LM_CHECK_EQ(c.plan().new_ch, 11);
+    }
+    // The real COMMIT is accepted; a repeat with other contents is a conflict, the stored plan does not change.
+    send(channel::Phase::Commit, p);
+    LM_CHECK(c.committed());
+    LM_CHECK_EQ(c.stats().committed, 1u);
+    for (unsigned how = 0; how < 4; ++how) {
+        const uint32_t refused = c.stats().refused;
+        send(channel::Phase::Commit, altered(how));
+        LM_CHECK_EQ(c.stats().refused, refused + 1U);
+        LM_CHECK(c.committed());
+        LM_CHECK_EQ(c.plan().new_ch, 11);
+        LM_CHECK(c.plan().switch_root_ms == p.switch_root_ms);
+    }
+    LM_CHECK_EQ(c.stats().committed, 1u);
+}
+
+// FIX3-D7: the plan's participants are the devices of the snapshot, not "whoever answers at that address".
+LM_TEST("FIX3-8 sim: the device that takes over a required address after the snapshot is not that participant") {
+    CNet n(3);
+    form(n);
+    // Node 2 (address 3) is the snapshot's participant; the ledger names a stand-in for it when the plan is made
+    // (the participant "departed") and node 2 - a different device - sits at that address when the rounds run.
+    auto &entry = const_cast<root::Entry &>(n.eng(0).ledger().entry(1));
+    LM_CHECK(entry.address.value() == 3);
+    const DeviceId real = entry.device;
+    DeviceId departed = real;
+    departed.bytes[31] ^= 0x5A;
+    entry.device = departed;
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    entry.device = real; // the new occupant
+    n.poke();
+    n.run_ms(60'000);
+    auto v = n.view();
+    LM_CHECK((v.required & n.mask({2})) != 0);       // still in the denominator
+    LM_CHECK((v.ready & n.mask({2})) == 0);          // a stranger's READY does not count for it
+    LM_CHECK_EQ(n.chan(2).stats().prepared, 0u);     // and it was never told to prepare
+    LM_CHECK(!n.chan(2).have_plan());
+    n.run_ms(100'000);
+    LM_CHECK(n.view().state != CState::Committed && n.view().state != CState::Switching);
+    LM_CHECK_EQ(n.radio(2), 6);
+}
+
+// FIX3-D8: pacing limits are debt that survives a restart; unknown elapsed time refills nothing.
+LM_TEST("FIX3-14 sim: cooldown and the daily change count survive a root restart") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.view().state == CState::Monitor && n.view().why == Why::Moved; }, 500'000, 50));
+    n.run_ms(5000);
+    LM_CHECK_EQ(n.view().changes_24h, 1u);
+    const uint32_t left = n.view().cooldown_left_ms;
+    LM_CHECK(left > 3'000'000u); // one hour, minus what has passed
+    n.cut_and_boot(0, 30'000);
+    LM_CHECK(n.until([&] { return n.chan(0).loaded(); }, 30'000, 20));
+    n.run_ms(2000);
+    LM_CHECK_EQ(n.view().changes_24h, 1u);           // the change count is not reset by the restart
+    LM_CHECK(n.view().cooldown_left_ms > 3'000'000u); // neither is the cooldown (the time the power was off is not counted)
+    LM_CHECK(n.view().cooldown_left_ms <= left);
+}
+
 LM_TEST_MAIN()

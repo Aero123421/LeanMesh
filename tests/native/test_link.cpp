@@ -165,8 +165,9 @@ LM_TEST("S5 link session: EDHOC purpose 1 + SESSION_BIND between two ACTIVE node
     LM_CHECK_EQ(n.lnk(0).stats().hs_completed, 1u);
     LM_CHECK_EQ(n.lnk(1).stats().hs_completed, 1u);
     LM_CHECK(!n.lnk(0).exchange().busy() && !n.lnk(1).exchange().busy());
-    // No root time exists yet: the link comes first and the lease is checked once time is known.
-    LM_CHECK(n.lnk(0).stats().cred_time_uncertain >= 1u);
+    // No root time exists yet: the link comes first and the lease is checked once time is known (node 1; the root
+    // admits by its ledger and does not count leases, S18-D1).
+    LM_CHECK(n.lnk(1).stats().cred_time_uncertain >= 1u);
     LM_CHECK_OK(n.send(1, 0, {1, 2, 3}));
     n.run_ms(50);
     LM_CHECK_OK(n.send(0, 1, {9, 8, 7, 6}));
@@ -463,23 +464,28 @@ LM_TEST("S07 low generation: a credential below the revocation floor is refused 
     LM_CHECK(n.eng(1).identity().member_status() == Status::Revoked);
 }
 
-LM_TEST("S07 wire: an expired lease is refused once root time is known, uncertainty is not") {
-    Net n(2);
+// S18-D2: a link whose peer lease is provably over exists only to get that peer renewed: restricted like an
+// unprovable lease (no application DATA) and ended after LinkPolicy::renew_window. An end session is refused.
+LM_TEST("S07 wire S18: an expired lease gets a restricted renewal-only link, a provable one a full link") {
+    Net n(3);
     RootTimeBound t;
     t.valid = true;
     t.term = RootTerm{1};
     t.earliest_ms = t.latest_ms = 0xFFFFFFFFFFFFULL; // past the credentials' lease
-    n.eng(0).set_root_time(t, n.now(0)); // the node's estimate (the link layer reads it through delivery)
-    LM_CHECK_OK(n.connect(1, 0));
+    n.eng(2).set_root_time(t, n.now(2)); // the node's estimate (the link layer reads it through delivery)
+    LM_CHECK_OK(n.connect(1, 2));
     n.run_ms(6000);
-    LM_CHECK(!n.session(0, 1));
-    LM_CHECK(n.lnk(0).stats().cred_rejected >= 1u);
+    LM_CHECK(n.paired(2, 1));
+    LM_CHECK(n.nb(2, 1)->renew_only && n.nb(2, 1)->lease_uncertain);
+    LM_CHECK_EQ(n.lnk(2).stats().renew_only, 1u);
+    n.run_s(115);
+    LM_CHECK(!n.session(2, 1)); // the renewal window (120 s from the handshake) is over
     t.earliest_ms = t.latest_ms = 1000; // provably before the lease
-    n.eng(0).set_root_time(t, n.now(0));
-    n.run_s(31); // the per-peer handshake gate
-    LM_CHECK_OK(n.connect(1, 0));
+    n.eng(2).set_root_time(t, n.now(2));
+    LM_CHECK_OK(n.connect(2, 1)); // (node 1 still holds its side: it never knew the time)
     n.run_ms(3000);
-    LM_CHECK(n.paired(0, 1));
+    LM_CHECK(n.paired(2, 1));
+    LM_CHECK(!n.nb(2, 1)->renew_only && !n.nb(2, 1)->lease_uncertain);
 }
 
 // ---- SEC-D3: a session is authorised only while its peer's credential lease is ----
@@ -493,17 +499,20 @@ RootTimeBound root_at(uint64_t ms) {
     return t;
 }
 
-// Node 1's credential expires at root time `lease_ms`; the root (node 0) lists it as usual.
+// Node 1's credential expires at root time `lease_ms`; the root (node 0) lists it as usual. The lease is judged by
+// node 2, an ordinary member (the root admits by its ledger, S18-D1).
 void short_lease(Net &n, uint64_t lease_ms) {
     fleet::MemberSpec s;
     s.address = 2;
     s.role = 1;
     s.lease_expires_root_ms = lease_ms;
     n.kits[1] = n.net.make_node(1, 2, 1, &s);
-    LM_CHECK_OK(fleet::provision(n.node(0).store, n.net, n.kits[0]));
-    LM_CHECK_OK(fleet::provision(n.node(1).store, n.net, n.kits[1]));
-    n.boot(0);
-    n.boot(1);
+    for (uint16_t i = 0; i < 3; ++i) {
+        LM_CHECK_OK(fleet::provision(n.node(i).store, n.net, n.kits[i]));
+    }
+    for (uint16_t i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
     n.run_ms(20);
 }
 
@@ -534,59 +543,75 @@ Bytes app_data(uint16_t origin, uint16_t final, uint16_t app_port) {
 } // namespace
 
 LM_TEST("SEC-3 a session admitted while root time was unknown ends once the time proves the peer's lease over") {
-    Net n(2, 11, false);
+    Net n(3, 11, false);
     short_lease(n, 5'000'000);
-    LM_CHECK_OK(n.connect(1, 0));
+    LM_CHECK_OK(n.connect(1, 2));
     n.run_ms(3000);
-    LM_CHECK(n.paired(0, 1)); // nobody could tell the lease: admitted, restricted
-    n.eng(0).set_root_time(root_at(6'000'000), n.now(0));
-    n.world.node(0).notify();
+    LM_CHECK(n.paired(2, 1)); // nobody could tell the lease: admitted, restricted
+    n.eng(2).set_root_time(root_at(6'000'000), n.now(2));
+    n.world.node(2).notify();
     n.run_ms(10);
-    LM_CHECK(!n.session(0, 1)); // the lease is provably over: the session is gone at once
-    LM_CHECK(n.lnk(0).stats().sessions_lease_expired >= 1u);
+    LM_CHECK(!n.session(2, 1)); // the lease is provably over: the session is gone at once
+    LM_CHECK(n.lnk(2).stats().sessions_lease_expired >= 1u);
 }
 
 LM_TEST("SEC-3 a session admitted with a provable lease ends with the lease, not with the key lifetime") {
-    Net n(2, 12, false);
+    Net n(3, 12, false);
     short_lease(n, 5'000'000);
-    n.eng(0).set_root_time(root_at(4'990'000), n.now(0)); // 10 s of lease left
+    n.eng(2).set_root_time(root_at(4'990'000), n.now(2)); // 10 s of lease left
+    LM_CHECK_OK(n.connect(1, 2));
+    n.run_ms(3000);
+    LM_CHECK(n.paired(2, 1));
+    n.run_ms(9000);
+    LM_CHECK(!n.session(2, 1));
+}
+
+// S18-D1: the root's own sessions follow its ledger (SEC-D2), not the peer's lease: an expired lease neither restricts
+// nor ends them; a ledger change (leave, revocation) does.
+LM_TEST("SEC-3 S18 the root's sessions are admitted by its ledger, not capped by the peer's lease") {
+    Net n(3, 14, false);
+    short_lease(n, 5'000'000);
+    n.eng(0).set_root_time(root_at(6'000'000), n.now(0)); // node 1's lease is provably over at the root
     LM_CHECK_OK(n.connect(1, 0));
     n.run_ms(3000);
     LM_CHECK(n.paired(0, 1));
-    n.run_ms(9000);
-    LM_CHECK(!n.session(0, 1));
+    LM_CHECK(!n.nb(0, 1)->lease_uncertain && !n.nb(0, 1)->renew_only);
+    n.eng(0).set_root_time(root_at(6'100'000), n.now(0));
+    n.run_ms(10);
+    LM_CHECK(n.session(0, 1));
+    LM_CHECK_EQ(n.lnk(0).stats().sessions_lease_expired, 0u);
 }
 
 LM_TEST("SEC-3 a time-uncertain session carries no application DATA either way; SDK control passes; time lifts it") {
-    Net n(2, 13);
-    LM_CHECK_OK(n.connect(1, 0));
+    Net n(3, 13);
+    LM_CHECK_OK(n.connect(1, 2));
     n.run_ms(3000);
-    LM_CHECK(n.paired(0, 1));
-    n.eng(1).set_root_time(root_at(1'000'000), n.now(1)); // node 1 can tell node 0's lease, node 0 cannot tell its
-    const Bytes app = app_data(2, 1, 100);
-    const Bytes ctl = app_data(2, 1, 0);
+    LM_CHECK(n.paired(2, 1));
+    n.eng(1).set_root_time(root_at(1'000'000), n.now(1)); // node 1 can tell node 2's lease, node 2 cannot tell its
+    const Bytes app = app_data(2, 3, 100);
+    const Bytes ctl = app_data(2, 3, 0);
     link::SealedFrame f;
-    // Node 0 sends nothing of the application to a peer whose authorisation it cannot prove.
-    LM_CHECK(n.lnk(0).seal(n.id(1), wire::FrameKind::Data, ByteView{app_data(1, 2, 100).data(), app.size()}, f,
-                           n.now(0)) == Status::TimeUncertain);
+    // Node 2 sends nothing of the application to a peer whose authorisation it cannot prove.
+    LM_CHECK(n.lnk(2).seal(n.id(1), wire::FrameKind::Data, ByteView{app_data(3, 2, 100).data(), app.size()}, f,
+                           n.now(2)) == Status::TimeUncertain);
     // What node 1 sends: application DATA arrives flagged (the engine answers BUSY), SDK control plainly.
-    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{app.data(), app.size()}, f, n.now(1)));
-    n.inject(1, 0, f);
-    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{ctl.data(), ctl.size()}, f, n.now(1)));
-    n.inject(1, 0, f);
+    LM_CHECK_OK(n.lnk(1).seal(n.id(2), wire::FrameKind::Data, ByteView{app.data(), app.size()}, f, n.now(1)));
+    n.inject(1, 2, f);
+    LM_CHECK_OK(n.lnk(1).seal(n.id(2), wire::FrameKind::Data, ByteView{ctl.data(), ctl.size()}, f, n.now(1)));
+    n.inject(1, 2, f);
     n.run_ms(20);
-    LM_CHECK_EQ(n.sinks[0].got.size(), 2u);
-    if (n.sinks[0].got.size() == 2) {
-        LM_CHECK(n.sinks[0].restricted[0] && !n.sinks[0].restricted[1]);
+    LM_CHECK_EQ(n.sinks[2].got.size(), 2u);
+    if (n.sinks[2].got.size() == 2) {
+        LM_CHECK(n.sinks[2].restricted[0] && !n.sinks[2].restricted[1]);
     }
-    // Once node 0 knows the time and the lease holds, the restriction is gone.
-    n.eng(0).set_root_time(root_at(1'000'000), n.now(0));
-    LM_CHECK_OK(n.lnk(0).seal(n.id(1), wire::FrameKind::Data, ByteView{app_data(1, 2, 100).data(), app.size()}, f,
-                              n.now(0)));
-    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{app.data(), app.size()}, f, n.now(1)));
-    n.inject(1, 0, f);
+    // Once node 2 knows the time and the lease holds, the restriction is gone.
+    n.eng(2).set_root_time(root_at(1'000'000), n.now(2));
+    LM_CHECK_OK(n.lnk(2).seal(n.id(1), wire::FrameKind::Data, ByteView{app_data(3, 2, 100).data(), app.size()}, f,
+                              n.now(2)));
+    LM_CHECK_OK(n.lnk(1).seal(n.id(2), wire::FrameKind::Data, ByteView{app.data(), app.size()}, f, n.now(1)));
+    n.inject(1, 2, f);
     n.run_ms(20);
-    LM_CHECK(n.sinks[0].got.size() == 3u && !n.sinks[0].restricted.back());
+    LM_CHECK(n.sinks[2].got.size() == 3u && !n.sinks[2].restricted.back());
 }
 
 // SEC-D2: the root's ledger decides every Link session, so a root whose ledger is not loaded can decide none. That is

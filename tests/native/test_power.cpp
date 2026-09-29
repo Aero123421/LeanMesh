@@ -5,6 +5,7 @@
 // MODEL of awake time (SYNTHETIC), never a current, a charge or an energy, and no electrical quantity is measured.
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -62,12 +63,13 @@ struct Spec {
 
 // Node 0 is the root (address 1), node i has address i + 1. Links are a chain unless the test rewires them.
 struct PNet {
-    explicit PNet(std::vector<Spec> specs, uint64_t seed = 61, uint32_t job_latency_us = 2000)
+    explicit PNet(std::vector<Spec> specs, uint64_t seed = 61, uint32_t job_latency_us = 2000, bool channel_module = false)
         : n(static_cast<unsigned>(specs.size())), net(seed), world(WorldOptions{seed, 0}) {
         for (unsigned i = 0; i < n; ++i) {
             NodeOptions o;
             o.role = i == 0 ? Role::Root : specs[i].role;
             o.mesh = true;
+            o.channel = channel_module;
             (void)world.add_node(o);
             node(i).jobs.latency_us = job_latency_us;
             if (i == 0) {
@@ -999,9 +1001,9 @@ LM_TEST("LP12 sim: sleeping past a key or authorization lifetime restores nothin
     mem.abi_version = LM_ABI_VERSION;
     LM_CHECK_EQ(lm_membership_get(n.ctx(2), &mem), LM_STATUS_OK);
     LM_CHECK_EQ(mem.state, static_cast<uint32_t>(LM_ACTIVE));
-    // (b) authorization (MemberCredential lease) of 20 min, 30 min asleep: nothing is restored, the fresh check
-    // fails on the expired lease, the membership record stays ACTIVE (docs/20 §7). Renewing the credential is
-    // outside this slice: the node stays out of the mesh until it is renewed.
+    // (b) authorization (MemberCredential lease) of 20 min, 30 min asleep: nothing is restored. The relay admits the
+    // node only to be renewed (restricted, short: S18-D2), the root renews it by its ledger, and the renewed
+    // credential - never the old lease - brings it back; the membership record stays ACTIVE (docs/20 §7, LP12).
     PNet m({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf, 1'200'000}});
     m.form();
     m.apply_policy(2, report_long());
@@ -1011,9 +1013,11 @@ LM_TEST("LP12 sim: sleeping past a key or authorization lifetime restores nothin
     m.run_ms(30 * 60'000 + 500);
     LM_CHECK(life_b > 0 && life_b < 30 * 60'000);
     LM_CHECK(m.eng(2).power().last_session_path() == pw::SessionPath::FreshEdhoc);
-    m.run_ms(60'000);
-    LM_CHECK(!m.ready(2));
-    LM_CHECK(m.eng(1).link().stats().cred_rejected + m.eng(1).link().stats().cred_time_uncertain >= 1u);
+    LM_CHECK(m.until([&] {
+        return m.ready(2) && m.eng(2).identity().member().lease_expires_root_ms > m.root_ms();
+    }, 120'000));
+    LM_CHECK(m.eng(1).link().stats().renew_only >= 1u);
+    LM_CHECK(m.eng(2).membership().stats().renewals >= 1u);
     LM_CHECK_EQ(lm_membership_get(m.ctx(2), &mem), LM_STATUS_OK);
     LM_CHECK_EQ(mem.state, static_cast<uint32_t>(LM_ACTIVE));
 }
@@ -1369,6 +1373,201 @@ LM_TEST("LP11 sim: a 20-hop DURABLE report whose receipt is not back when the bu
     LM_CHECK(got == body);
     LM_CHECK(!n.pop_message(0, got));
     std::printf("  LP11-sim: 21 nodes / 20 hops; radio-on model of the leaf before its first sleep: %llu ms (SYNTHETIC)\n", static_cast<unsigned long long>(on_before / 1000));
+}
+
+// ---- external review FIX3 (gpt-5.6-sol on 3596820) ---------------------------------------------------------------------
+
+// FIX3-D1: extra_event_radio_ms_per_day is milliseconds and the bucket counts microseconds.
+LM_TEST("FIX3-3 sim: 120 s of unplanned radio time exhaust extra_event_radio_ms_per_day = 120000") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    pw::Policy pol = report_long();
+    pol.extra_wakes_per_day = 32;
+    pol.extra_radio_ms_per_day = 120000;
+    n.apply_policy(2, pol);
+    n.app_cycle(2, 60'000, n.world.now_us() + 25ULL * 3'600'000'000ULL); // a day of ordinary life: every bucket is refilled
+    n.set_time();
+    n.wake_up(2);
+    LM_CHECK(n.ready(2));
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_EXTERNAL, 0, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+    n.run_ms(300);
+    n.node(2).wake_external();
+    n.run_ms(300);
+    LM_CHECK(!n.asleep(2)); // the first unplanned wake is inside the quota
+    n.run_ms(125'000);      // 125 s of radio time in an unplanned episode
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_EXTERNAL, 0, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+    n.run_ms(300);
+    n.node(2).wake_external();
+    n.run_ms(300);
+    LM_CHECK(n.asleep(2)); // 120 000 ms are used up: the radio stays off (before the fix the limit was ~33 h)
+    LM_CHECK_EQ(n.snap(2).last_reason, static_cast<uint32_t>(pw::kWakeDenied));
+}
+
+// FIX3-D2: a cold boot has no continuity: every bucket is used up against the STORED policy's limits.
+LM_TEST("FIX3-4 sim: a cold boot with stored limits above the defaults starts with nothing left") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    pw::Policy pol = report_long(); // 3 600 000 ms/h offline: far above the 60 000 of the ALWAYS_RX defaults
+    pol.extra_wakes_per_day = 100;
+    pol.extra_radio_ms_per_day = 3'600'000;
+    n.apply_policy(2, pol);
+    n.app_cycle(2, 10'000, n.world.now_us() + 120'000'000ULL); // ordinary cycles: the parent's state is settled
+    n.wake_up(2);
+    LM_CHECK(n.until([&] { return n.ready(2); }, 30'000));
+    n.node(2).pm.clear_retained();
+    n.node(2).power_cut();
+    n.node(2).store.power_restore();
+    n.boot(2);
+    n.set_time_at(2);
+    n.run_ms(300); // the stored policy is loaded; the node has only just started to search
+    LM_CHECK_EQ(n.policy_of(2).offline_radio_ms_per_hour, 3'600'000u);
+    LM_CHECK(n.snap(2).offline_budget_remaining_ms < 1000u); // used up (plus this boot's episode), not 3 540 000
+    LM_CHECK(n.until([&] { return n.ready(2); }, 60'000)); // the boot episode still finds its parent
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_EXTERNAL, 0, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+    n.run_ms(300);
+    n.node(2).wake_external();
+    n.run_ms(300);
+    LM_CHECK(n.asleep(2)); // no wake credit after a power cut: 100 wakes/day would have allowed it against the defaults
+    LM_CHECK_EQ(n.snap(2).last_reason, static_cast<uint32_t>(pw::kWakeDenied));
+}
+
+// FIX3-D3: a driver that cannot be stopped is not asleep.
+LM_TEST("FIX3-6 sim: a radio driver that will not stop means no sleep: locks kept, ticket spent, the port never sleeps") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    n.apply_policy(2, report_long());
+    const auto p = n.prepare(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 30'000, LM_PENDING_SAVE_AND_SLEEP);
+    LM_CHECK_EQ(p.st, LM_STATUS_OK);
+    lm_sleep_ticket_t t{};
+    LM_CHECK_EQ(n.get_ticket(2, p, t), LM_STATUS_OK);
+    n.node(2).radio.stop_fault_count = 1;
+    LM_CHECK(lm_sleep_enter(n.ctx(2), &t) != LM_STATUS_OK);
+    n.run_ms(50);
+    LM_CHECK_EQ(n.node(2).pm.sleep_calls(), 0u);                       // pm->sleep() was never called
+    LM_CHECK((n.node(2).pm.locks() & port::pm_lock::episode) != 0);    // the locks were not released
+    LM_CHECK(n.snap(2).state != static_cast<uint32_t>(LM_POWER_SLEEPING));
+    LM_CHECK_EQ(lm_sleep_enter(n.ctx(2), &t), LM_STATUS_SLEEP_TICKET_STALE); // the ticket is spent
+}
+
+// FIX3-D5: PREPARED / COMMITTED but not switched: the node has promised to be on the air.
+LM_TEST("FIX3-7 sim: an unsettled channel plan vetoes the sleep ticket; a settled one does not") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}}, 61, 2000, true);
+    n.form();
+    LM_CHECK(n.until([&] { return n.eng(0).chan().loaded() && n.eng(2).chan().stats().time_updates > 0; }, 60'000, 20));
+    LM_CHECK_OK(n.eng(0).coordinator().plan_to(11, n.now(0)));
+    n.node(0).notify();
+    LM_CHECK(n.until([&] { return n.eng(1).chan().have_plan(); }, 20'000, 20));
+    n.apply_policy(2, report_long()); // its episode polls the parent, which then hands over the PREPARE it holds
+    LM_CHECK(n.until([&] { return n.eng(2).chan().have_plan(); }, 20'000, 20));
+    // READY was sent: the node sleeping now would be stranded before COMMIT.
+    uint32_t reason = 0;
+    for (unsigned k = 0; k < 3 && reason != static_cast<uint32_t>(LM_STATUS_POWER_BUDGET_EXHAUSTED); ++k) {
+        const auto p = n.prepare(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 30'000, LM_PENDING_SAVE_AND_SLEEP, 1000);
+        LM_CHECK_EQ(p.st, LM_STATUS_OK);
+        LM_CHECK(n.until([&] { return n.op(2, p.op).phase == 3; }, 3000, 5));
+        reason = n.op(2, p.op).reason;
+        LM_CHECK(reason != 0); // never a ticket while the plan is unsettled (a stale ticket is a veto too, but only a transient one)
+    }
+    LM_CHECK_EQ(reason, static_cast<uint32_t>(LM_STATUS_POWER_BUDGET_EXHAUSTED));
+    LM_CHECK(!n.asleep(2));
+    // ... and the plan runs to its end; then sleeping is allowed again.
+    LM_CHECK(n.until([&] { return !n.eng(2).chan().have_plan() && n.eng(2).chan().current() == 11; }, 400'000, 100));
+    n.set_time();
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 30'000, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+}
+
+// FIX3-D4: the lock level the port confirms is what counts, not what was asked.
+LM_TEST("FIX3-15 sim: a PM lock the port could not take blocks new work and is asked for again; one it could not release blocks a light sleep") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    n.apply_policy(2, report_long());
+    // Acquire fails at the wake: the episode is unlocked, so new sends are refused (fail closed) until it is confirmed.
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 5000, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+    n.node(2).pm.take_fail = port::pm_lock::episode;
+    n.wake_up(2, 20'000);
+    LM_CHECK((n.node(2).pm.locks() & port::pm_lock::episode) == 0);
+    LM_CHECK(n.eng(2).power().stats().lock_faults >= 1u);
+    LM_CHECK_EQ(n.send(2, 0, LM_RECEIVED, payload_of(3)).st, LM_STATUS_BUSY);
+    n.node(2).pm.take_fail = 0;
+    n.run_ms(600); // the retry is a timer of its own, not a side effect of some other event
+    LM_CHECK((n.node(2).pm.locks() & port::pm_lock::episode) != 0);
+    LM_CHECK_EQ(n.send(2, 0, LM_RECEIVED, payload_of(4)).st, LM_STATUS_OK);
+    // Release fails: a LIGHT sleep would keep the CPU up while the node claims to sleep - refused, node stays running.
+    n.run_ms(2000);
+    n.node(2).pm.drop_fail = port::pm_lock::episode;
+    const uint64_t sleeps = n.node(2).pm.sleep_calls();
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 5000, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_BUSY);
+    LM_CHECK(!n.asleep(2));
+    LM_CHECK(n.eng(2).radio_state() == RadioState::Running);
+    n.node(2).pm.drop_fail = 0;
+    n.run_ms(600);
+    LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 5000, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+    LM_CHECK_EQ(n.node(2).pm.sleep_calls(), sleeps + 1U);
+}
+
+// FIX3-D9: WAIT_WAKE is a target-level state: sleeping targets take no in-flight slot.
+LM_TEST("FIX3-9 sim: 4 sleeping and 4 awake group targets: the awake ones finish, the sleepers show WAIT_WAKE and hold no slot") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Relay}, Spec{Role::Relay}, Spec{Role::Relay}, Spec{Role::Leaf}, Spec{Role::Leaf},
+            Spec{Role::Leaf}, Spec{Role::Leaf}});
+    n.star();
+    n.form();
+    for (unsigned i = 5; i < 9; ++i) {
+        n.apply_policy(i, k_report);
+    }
+    n.run_ms(1000);
+    for (unsigned i = 5; i < 9; ++i) { // the four leaves tell the root when they wake (in ~60 s) and sleep
+        LM_CHECK_EQ(n.sleep_now(i, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 60'000, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+    }
+    n.run_ms(1000);
+    std::vector<lm_device_id_t> ids(8);
+    for (unsigned k = 0; k < 8; ++k) {
+        std::memcpy(ids[k].bytes, n.id(k + 1).bytes.data(), 32);
+    }
+    lm_operation_id_t setop = 0;
+    LM_CHECK_EQ(lm_group_set(n.ctx(0), 5, 0, ids.data(), ids.size(), &setop), LM_STATUS_OK);
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_GROUP;
+    rq.destination.group_id = 5;
+    rq.destination.group_revision = 1;
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_VOLATILE;
+    rq.priority = LM_PRIORITY_NORMAL;
+    rq.queue_mode = LM_FIFO;
+    rq.root_term = 1;
+    rq.expires_root_ms = n.root_ms() + 300'000;
+    const Bytes body = payload_of(9);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, body.data(), body.size(), &op), LM_STATUS_OK);
+    n.node(0).notify();
+    auto progress = [&] {
+        lm_group_progress_t g{};
+        g.struct_size = sizeof(g);
+        g.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_group_progress(n.ctx(0), op, &g), LM_STATUS_OK);
+        return g;
+    };
+    LM_CHECK(n.until([&] { return progress().received == 4; }, 15'000, 20)); // the four awake targets, long before any wake
+    const lm_group_progress_t g = progress();
+    LM_CHECK_EQ(g.pending, 4u);
+    std::array<lm_group_target_t, 16> page{};
+    size_t written = 0;
+    uint32_t total = 0;
+    LM_CHECK_EQ(lm_group_targets(n.ctx(0), op, g.snapshot_token, 0, page.data(), page.size(), &written, &total), LM_STATUS_OK);
+    unsigned waiting = 0;
+    for (size_t k = 0; k < written; ++k) {
+        waiting += page[k].outcome == LM_OUTCOME_PENDING && page[k].phase == LM_TARGET_WAIT_WAKE ? 1U : 0U;
+    }
+    LM_CHECK_EQ(waiting, 4u);
+    for (std::size_t k = 0; k < lm::group::k_ops; ++k) {
+        if (n.eng(0).group().op_at(k)->id == op) {
+            LM_CHECK_EQ(n.eng(0).group().op_at(k)->live, 0u); // no delivery child, no slot
+        }
+    }
+    // The wake: the sleepers are served too, nobody twice.
+    LM_CHECK(n.until([&] { return progress().received == 8; }, 200'000, 100));
 }
 
 LM_TEST_MAIN()

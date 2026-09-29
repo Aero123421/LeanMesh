@@ -62,12 +62,13 @@ class Topology {
     Topology(ShortAddr root_addr, RootTerm term) : root_addr_(root_addr), term_(term) {}
 
     // Ledger side (via the route service). admit: the address is an Active member of membership
-    // generation `gen` (low 32 bits, a change detector and not an identity); idempotent for the same
+    // generation `gen` (the full u63 membership generation: a change detector, not an identity; review finding 18:
+    // 32 bits let g and g + 2^32 alias); idempotent for the same
     // generation, another generation resets the slot; InvalidArgument for the root address or an
     // invalid one, NoCapacity when the table is full. reset: the address now means another membership
     // generation: its approved link and its direct children's links are void, the slot stays
     // admitted. remove: the member is gone.
-    [[nodiscard]] Status admit(ShortAddr addr, uint32_t gen = 0);
+    [[nodiscard]] Status admit(ShortAddr addr, uint64_t gen = 0);
     // Re-initialises in place (no whole-table temporary on the owner stack): root address, term.
     void init(ShortAddr root_addr, RootTerm term);
     [[nodiscard]] Status reset(ShortAddr addr);
@@ -131,12 +132,12 @@ class Topology {
         bool has_seq = false;
         uint8_t parent = k_none;
         uint8_t pending_parent = k_none;
+        uint16_t addr = 0;
         uint32_t revision = 0;
         uint32_t pending_revision = 0;
         uint32_t pending_parent_revision = 0;
         uint32_t last_seq = 0;
-        uint16_t addr = 0;
-        uint32_t gen = 0;
+        uint64_t gen = 0;
         uint64_t lease_expires_ms = 0;
         uint64_t pending_expires_ms = 0;
     };

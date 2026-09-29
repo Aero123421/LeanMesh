@@ -218,6 +218,7 @@ void Channel::persisted(Status s, MonoTime now) {
     }
     engine_.identity().return_record();
     rec_ = nullptr;
+    engine_.power().note_state_change();
     if (a == After::Prepared) {
         ++stats_.prepared;
         reply(plan_, Evidence::Prepared, Status::Ok, after_local_, now);
@@ -233,8 +234,17 @@ void Channel::persisted(Status s, MonoTime now) {
 }
 
 // ---- plan (participant) -----------------------------------------------------------------------------
+// The plan named by a repeated record must be the very plan held, field by field: the same id with another channel,
+// epoch or time is a different plan and is refused (FIX3-D6). Equal fields = equal canonical hash.
+bool Channel::same_plan(const Plan &a, const Plan &b) {
+    return a.id == b.id && a.term == b.term && a.epoch == b.epoch && a.old_ch == b.old_ch && a.new_ch == b.new_ch &&
+           a.switch_root_ms == b.switch_root_ms && a.max_err_ms == b.max_err_ms && a.settle_ms == b.settle_ms &&
+           a.policy_rev == b.policy_rev && a.participants == b.participants;
+}
+
 void Channel::on_plan(const PlanRec &rec, bool local, MonoTime now) {
     after_local_ = local;
+    engine_.power().note_state_change(); // a sleep ticket in hand no longer describes this node
     switch (rec.phase) {
     case Phase::Prepare:
         prepare(rec.plan, local, now);
@@ -244,6 +254,11 @@ void Channel::on_plan(const PlanRec &rec, bool local, MonoTime now) {
         break;
     case Phase::Abort:
         if (phase_ == Ph::Prepared && plan_.id == rec.plan.id) { // a committed plan cannot be aborted
+            if (!same_plan(plan_, rec.plan)) {
+                ++stats_.refused;
+                reply(rec.plan, Evidence::Refused, Status::Conflict, local, now);
+                break;
+            }
             Snap s;
             s.cur = cur_;
             s.epoch = epoch_;
@@ -279,8 +294,12 @@ void Channel::prepare(const Plan &p, bool local, MonoTime now) {
     } else if (p.term != term()) {
         why = Status::NetworkMismatch;
     } else if (phase_ == Ph::Prepared && plan_.id == p.id) {
-        reply(p, Evidence::Prepared, Status::Ok, local, now); // the receipt again: it is durable already
-        return;
+        if (!same_plan(plan_, p)) {
+            why = Status::Conflict; // the id of the held plan with other contents
+        } else {
+            reply(p, Evidence::Prepared, Status::Ok, local, now); // the receipt again: it is durable already
+            return;
+        }
     } else if (p.epoch <= epoch_) {
         why = Status::Conflict; // an old plan is never given life again
     } else if (phase_ == Ph::Committed) {
@@ -310,15 +329,18 @@ void Channel::prepare(const Plan &p, bool local, MonoTime now) {
 
 void Channel::commit(const Plan &p, bool local, MonoTime now) {
     Status why = Status::Ok;
-    const bool prepared = phase_ == Ph::Prepared && plan_.id == p.id;
+    const bool held = phase_ != Ph::Idle && plan_.id == p.id;
+    const bool prepared = held && phase_ == Ph::Prepared && same_plan(plan_, p);
     if (faulted_) {
         why = Status::RecoveryRequired;
     } else if (p.term != term()) {
         why = Status::NetworkMismatch;
+    } else if (held && !same_plan(plan_, p)) {
+        why = Status::Conflict; // same id, other channel / epoch / time: never matched by the id alone
     } else if (phase_ == Ph::Committed && plan_.id == p.id) {
         reply(p, Evidence::Stored, Status::Ok, local, now); // repeated COMMIT: stored already
         return;
-    } else if (phase_ == Ph::Idle && epoch_ == p.epoch && cur_ == p.new_ch) {
+    } else if (phase_ == Ph::Idle && epoch_ == p.epoch && cur_ == p.new_ch && (plan_.id != p.id || same_plan(plan_, p))) {
         reply(p, Evidence::Applied, Status::Ok, local, now); // this plan is done here
         return;
     } else if (p.epoch <= epoch_ || phase_ == Ph::Committed) {
@@ -380,6 +402,7 @@ void Channel::switch_step(MonoTime now) {
         cur_ = plan_.new_ch;
         epoch_ = plan_.epoch;
         phase_ = Ph::Idle;
+        engine_.power().note_state_change();
         ++stats_.switched;
         dirty_ = true;
         sw_ = Sw::Release;

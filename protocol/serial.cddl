@@ -3,9 +3,10 @@ u64 = 0..18446744073709551615
 u32 = 0..4294967295
 id16 = bstr .size 16
 id32 = bstr .size 32
-request = [request-id: id16, method: 1..15, params: request-params]
+request = [request-id: id16, method: 1..16, params: request-params]
 request-params = nil / send / get-message / cancel / join-decide / install /
  node-query / group-query / host-ack / event-ack / channel-action / sleep-window / get-request / group-set / group-targets
+ ; 16 DIAGNOSTICS takes nil (the root's own health, on request only)
 send = [destination: id32, message: id16, intent-hash: id32,
  app-port: 1..65534, flags: 0..31, root-term: u32, expires: u64,
  object-transfer: bool, payload: bstr .size (0..4096)]

@@ -321,6 +321,7 @@ def test_restart_after_claim_reconciles_and_never_resends(tmp_path: Path) -> Non
         assert h2.db(lambda c: c.execute("SELECT state FROM outbox").fetchone()[0]) == "DONE"
 
 
+@pytest.mark.scenario("Q03")
 def test_capacity_protects_critical_events_and_rejects_with_507(tmp_path: Path) -> None:
     """Q03: protected un-ACKed events fill the journal; new admissions get 507, nothing is deleted."""
     with running(make_settings(tmp_path, max_events=12)) as h:
@@ -363,6 +364,7 @@ def test_noncritical_events_are_compacted_into_an_inline_gap(tmp_path: Path) -> 
         assert any(x["kind"] == "EVENT_GAP" for x in events)
 
 
+@pytest.mark.scenario("Q03")
 def test_real_database_full_is_507_and_never_a_false_202(tmp_path: Path) -> None:
     """SQLITE_FULL for real (page limit): every 202 has its rows, every failure is a clean 507."""
     with running(make_settings(tmp_path, max_page_count=64, free_reserve_bytes=0)) as h:

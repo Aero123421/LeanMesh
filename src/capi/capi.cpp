@@ -167,4 +167,15 @@ lm_status_t lm_get_capabilities(lm_context_t *ctx, lm_capabilities_t *out) {
     return to_abi(lm::capi::run(ctx, lm::CommandKind::GetCapabilities, out, sizeof(*out)));
 }
 
+lm_status_t lm_diagnostics_get(lm_context_t *ctx, lm_diagnostics_t *out) { // [SLICE:S19]
+    if (!lm::capi::valid_ctx(ctx) || out == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status s = lm::capi::check_abi(out->struct_size, out->abi_version, sizeof(*out));
+    if (s != Status::Ok) {
+        return to_abi(s);
+    }
+    return to_abi(lm::capi::run(ctx, lm::CommandKind::DiagnosticsGet, out, sizeof(*out)));
+}
+
 } // extern "C"

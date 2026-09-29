@@ -102,7 +102,12 @@ LM_TEST("capabilities through the owner call report what is implemented and noth
     caps.abi_version = LM_ABI_VERSION;
     LM_CHECK_EQ(lm_get_capabilities(fx.world.node(0).ctx(), &caps), LM_STATUS_OK);
     LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_GROUP_FANOUT_V2, LM_FEATURE_GROUP_FANOUT_V2); // S15
-    LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_OBJECT_4K, 0u);   // still nothing that is not built
+    // S19: what is implemented is reported. Small messages exist everywhere; the 4 KiB lane is built into the bench
+    // (S12) but this node's config leaves it disabled; the reserved RTC resume is neither implemented nor enabled.
+    LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_SMALL_MESSAGE, LM_FEATURE_SMALL_MESSAGE);
+    LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_OBJECT_4K, LM_FEATURE_OBJECT_4K);
+    LM_CHECK_EQ(caps.enabled_bits & LM_FEATURE_OBJECT_4K, 0u);
+    LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_RTC_SECURE_RESUME_RESERVED, 0u);
     LM_CHECK_EQ(caps.qualified_bits, 0u);                            // nothing is qualified by software
     LM_CHECK_EQ(caps.max_root_depth, 20u);
     LM_CHECK_EQ(caps.max_path_hops, 40u);

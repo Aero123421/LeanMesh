@@ -10,8 +10,12 @@
 //             (S14-D2). Beyond the entitlement CONTROL competes like the other classes.
 //   tokens    one airtime bucket for everything that is sent (data, control, retries, HOP_ACKs):
 //             refill 300 ms/s, burst 600 ms. URGENT and CONTROL may borrow up to the urgent debt
-//             (100 ms, repaid by the refill). Sending is never gated for a HOP_ACK (it frees the
-//             sender's buffer) or for the control reserve: they are charged, so the debt shows.
+//             (100 ms, repaid by the refill). The control reserve is never gated by the bucket: it is
+//             charged, so the debt shows. Direct (not queued) sends - HOP_ACKs, handshake, join, power,
+//             mesh - are admitted by admit_direct() (FIX4-D3): they spend the same 20 % window entitlement, and
+//             beyond it the bucket may go down to -k_direct_debt_us for them and no further, so a continuous
+//             stream of them is held to the allowance plus the refill rate instead of only being clamped.
+//             HopTx additionally caps consecutive HOP_ACKs while a queued frame that may go waits.
 //
 // The airtime of a frame is an estimate (PHY bits at the assumed rate plus a per-frame overhead);
 // the overhead constants are unmeasured defaults until the RF qualification measures them.
@@ -59,6 +63,9 @@ inline constexpr int64_t k_reserve_percent = 20;
 inline constexpr unsigned k_urgent_run = 2;
 inline constexpr int64_t k_burst_us = static_cast<int64_t>(gen::defaults::scheduler::airtime_burst_ms) * 1000;
 inline constexpr int64_t k_urgent_debt_us = static_cast<int64_t>(gen::defaults::scheduler::urgent_debt_ms) * 1000;
+// Emergency allowance of direct sends (HOP_ACK, handshake, join, power, mesh): the bucket may go this deep for them,
+// Scheduler::charge() never lets it go deeper. Beyond it they wait for the refill (FIX4-D3).
+inline constexpr int64_t k_direct_debt_us = k_burst_us;
 inline constexpr int64_t k_rate_ms_per_s = static_cast<int64_t>(gen::defaults::scheduler::airtime_ms_per_second);
 
 struct ClassStats {
@@ -72,7 +79,8 @@ struct Stats {
     uint32_t reserve_picks = 0;   // CONTROL taken ahead of the DRR order (20 % window entitlement)
     uint32_t urgent_yields = 0;   // CONTROL looked at after two URGENT frames in a row
     uint32_t token_waits = 0;     // a ready frame waited for airtime tokens
-    uint64_t ack_charged_us = 0;  // HOP_ACK/handshake airtime charged without gating
+    uint64_t ack_charged_us = 0;  // HOP_ACK/handshake (direct) airtime charged
+    uint32_t direct_refused = 0;  // direct sends held back by the bucket (FIX4-D3)
 };
 
 class Scheduler {
@@ -87,9 +95,14 @@ class Scheduler {
     // deficit); HOP_ACKs and handshake frames are charged with queued = false (never gated).
     void charge(Class c, std::size_t bytes, MonoTime now, bool queued);
     void note_refused(Class c) { ++stats_.cls[static_cast<std::size_t>(c)].refused; }
+    // FIX4-D3: admission of a direct send of `bytes`: true inside the CONTROL window entitlement, else while the
+    // bucket stays above -k_direct_debt_us after it. False = local shortage (the caller waits until direct_wake()), never RF loss.
+    [[nodiscard]] bool admit_direct(std::size_t bytes, MonoTime now);
+    [[nodiscard]] MonoTime direct_wake(std::size_t bytes, MonoTime now);
     // [S17] Planned off-channel time (channel switch guard, survey visit): no frame of a data class is
     // picked before `t`; CONTROL keeps flowing. The queued frames wait, they are not lost or aborted.
     void hold_until(MonoTime t) { hold_until_ = t; }
+    [[nodiscard]] bool held(MonoTime now) const { return now < hold_until_; }
     [[nodiscard]] const Stats &stats() const { return stats_; }
     [[nodiscard]] int64_t tokens_us(MonoTime now);
 

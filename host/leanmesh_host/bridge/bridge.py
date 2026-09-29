@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..api.errors import ApiError
 from ..db import mirror, ops, outbox, startup
 from ..events import journal
 from ..events.hub import Hub
@@ -37,6 +38,7 @@ from ..settings import Settings
 from ..wire import WireError, cbor_decode, cbor_encode
 from ..wire.control import decode_cose_sign1, decode_control_body
 from . import channel as chan_status
+from . import diag as diag_status
 from . import power as power_status
 from . import groups, mapping
 from .mapping import status_name
@@ -45,6 +47,7 @@ log = logging.getLogger(__name__)
 
 M_CAPABILITIES, M_SEND, M_GET_MESSAGE, M_CANCEL, M_JOIN_DECIDE, M_INSTALL = 1, 2, 3, 4, 5, 6
 M_NODE_QUERY, M_HOST_STORE_ACK, M_EVENT_ACK, M_CHANNEL, M_GET_REQUEST, M_GROUP_SET = 7, 9, 10, 11, 13, 14
+M_DIAGNOSTICS = 16
 EV_MESSAGE, EV_OPERATION, EV_MEMBERSHIP, EV_GAP, EV_FAULT = 2, 3, 4, 7, 8
 EV_GROUP_PROGRESS = groups.EV_GROUP_PROGRESS
 EV_CHANNEL = chan_status.EV_CHANNEL
@@ -56,6 +59,7 @@ POLL_MAX_S = 30.0          # ... doubling while nothing new happens; events and 
 CAPS_MAX_AGE_S = 5.0       # root clock estimate used for UTC deadlines is refreshed when older
 EVENT_QUEUE = 256          # bounded hand-over from the serial thread; overflow is re-sent by the root
 POLL_BATCH = 16
+DIAG_MIN_INTERVAL_S = 1.0  # one DIAGNOSTICS exchange per second at most, however many clients ask (S19)
 RECONCILE_RETRY_S = 2.0    # pause before an unfinished reconciliation is tried again
 JOIN_WAIT_S = 180.0        # a JOIN_DECIDE the root accepted must show durable ledger state within this time
 LEDGER_PREPARED = 2        # root EntryState: Prepared (reserved and stored); 3 Active .. 6 Blocked also imply an entry
@@ -75,6 +79,7 @@ class RootInfo:
     term: int
     time_ms: tuple[int, int] | None  # (earliest, latest) root ms at `fetched`
     fetched: float = field(default_factory=time.monotonic)
+    lists: dict[str, frozenset[str]] = field(default_factory=dict)  # docs/18 §6: build, implemented, qualified (S19)
 
     def root_now_lo(self) -> int | None:
         """Lower bound of the root clock now (never later than the truth: deadlines derived from it
@@ -82,6 +87,12 @@ class RootInfo:
         if self.time_ms is None:
             return None
         return self.time_ms[0] + int((time.monotonic() - self.fetched) * 1000)
+
+    def root_now_hi(self) -> int | None:
+        """Upper bound of the root clock now (a report is never judged younger than it is)."""
+        if self.time_ms is None:
+            return None
+        return self.time_ms[1] + int((time.monotonic() - self.fetched) * 1000)
 
 
 @dataclass
@@ -125,6 +136,8 @@ class Bridge:
         self._opnum: dict[bytes, int] = {}     # Host operation -> root operation number (this boot)
         self.groups = groups.Groups()          # group operations of this boot and their per-target mirror
         self._cancel_taken: set[bytes] = set()  # operations whose CANCEL the root accepted (idempotent: not repeated)
+        self._diag: tuple[float, dict[str, Any], int] | None = None  # (at, body, serial generation) of the last DIAGNOSTICS
+        self._diag_lock = asyncio.Lock()
 
     # ---- wiring ------------------------------------------------------------------------------
     def attach(self, link: SerialLink) -> None:
@@ -221,7 +234,8 @@ class Bridge:
         m = cbor_decode(res.result)
         t = m["root_time"]
         return RootInfo(m["domain"], m["root"], m["assignment"], m["gateway_boot"],
-                        frozenset(m["enabled"]), m["root_term"], (t[0], t[1]) if t else None)
+                        frozenset(m["enabled"]), m["root_term"], (t[0], t[1]) if t else None,
+                        lists={k: frozenset(m.get(k, ())) for k in ("build", "implemented", "qualified")})
 
     async def _session_up(self, link: SerialLink) -> None:
         info = await self._caps(link)
@@ -246,7 +260,7 @@ class Bridge:
         if not await self.hub.write(register):
             log.error("another root claims domain %s: the bridge stays down", info.domain.hex())
             return
-        self.hub.set_root(True, info.enabled)
+        self.hub.set_root(True, info.enabled, info.lists)
         await self._refresh_nodes()
         self._need_reconcile = True
         self.ready = True
@@ -453,6 +467,9 @@ class Bridge:
                 self._accepted(conn, plan, snap)
             elif status in mapping.TRANSIENT:
                 self._later(conn, plan.op, plan.attempts, status_name(status))
+            elif plan.typ != "MESSAGE" and status in mapping.UNKNOWN_STATE:  # SEC-D7: the root cannot vouch for it
+                self._finish(conn, plan.op, "INDETERMINATE", "UNKNOWN", "ROOT_OUTCOME_UNKNOWN", status_name(status),
+                             observer=info.root)
             else:
                 terminal = "EXPIRED" if status == mapping.EXPIRED else "REJECTED"
                 self._finish(conn, plan.op, "REJECTED", "SELF_REPORTED", "ROOT_REFUSED", status_name(status),
@@ -638,10 +655,41 @@ class Bridge:
 
             await self.hub.write(apply_cancel)
 
+    # ---- diagnostics (S19) -------------------------------------------------------------------
+    async def diagnostics(self) -> dict[str, Any]:
+        """One DIAGNOSTICS exchange for the client requests of a second: concurrent and repeated asks share it (the
+        root answers on request only, and no client can turn that into polling load). Nothing calls this on a timer."""
+        link = self.link
+        if link is None or not link.connected or not self.ready:
+            raise ApiError(503, "ROOT_UNAVAILABLE", "no authenticated root session")
+        now = time.monotonic()
+        cached = self._diag
+        if cached is not None and cached[2] == self._gen and now - cached[0] < DIAG_MIN_INTERVAL_S:
+            return {**cached[1], "age_ms": int((now - cached[0]) * 1000)}
+        async with self._diag_lock:  # concurrent askers wait for the one exchange and then read its answer
+            now = time.monotonic()
+            cached = self._diag
+            if cached is not None and cached[2] == self._gen and now - cached[0] < DIAG_MIN_INTERVAL_S:
+                return {**cached[1], "age_ms": int((now - cached[0]) * 1000)}
+            try:
+                res = await link.request(M_DIAGNOSTICS, None)
+            except (SessionChanged, SessionGone, SerialBusy, TimeoutError) as exc:
+                raise ApiError(503, "ROOT_UNAVAILABLE", f"root did not answer ({exc.__class__.__name__})") from exc
+            if res.status != mapping.OK or res.result is None:
+                raise ApiError(503, "UNSUPPORTED" if res.status == mapping.UNSUPPORTED else "ROOT_UNAVAILABLE",
+                               f"root answered DIAGNOSTICS with {status_name(res.status)}")
+            body = diag_status.diagnostics(cbor_decode(res.result))
+            self._diag = (time.monotonic(), body, self._gen)
+            return {**body, "age_ms": 0}
+
     # ---- nodes -------------------------------------------------------------------------------
     async def _refresh_nodes(self) -> None:
         link, info = self.link, self.info
         assert link is not None and info is not None
+        if info.time_ms is None or time.monotonic() - info.fetched > CAPS_MAX_AGE_S:
+            fresh = await self._caps(link)  # the root clock ages the power reports it relays (power_state)
+            if fresh is not None and fresh.boot == info.boot:
+                self.info = info = fresh
         res = await link.request(M_NODE_QUERY, [None])
         if res.status != mapping.OK or res.result is None:
             return
@@ -656,8 +704,10 @@ class Bridge:
                                    membership_generation=mg, membership=mapping.MEMBERSHIP.get(state, "UNKNOWN"),
                                    connectivity="UNKNOWN", confirmed=bool(confirmed),
                                    short_address=address or None)
+            hi = info.root_now_hi()
+            offset = hi - now_ms() if hi is not None else None
             for row in m.get("power", []):  # S16: schedule hints the members reported to the root
-                policy, snap = power_status.snapshot(row)
+                policy, snap = power_status.snapshot(row, offset)
                 mirror.put_power(conn, info.domain, bytes(row[0]), policy, snap)
             waiting = {bytes(r[0]) for r in conn.execute(
                 "SELECT id FROM lifecycle_requests WHERE domain=? AND state='PENDING_APPROVAL'", (info.domain,))}
@@ -763,10 +813,9 @@ class Bridge:
                 return
             host_op = self._ctl_ops.pop(int(m["operation"]), None) if "operation" in m else None
             if host_op is not None:  # the end of an accepted control operation (root-local, SELF_REPORTED)
-                ok = int(m["outcome"]) == 2
-                self._finish(conn, host_op, "APPLIED" if ok else "REJECTED", "SELF_REPORTED",
-                             "ROOT_APPLIED" if ok else "ROOT_REFUSED",
-                             status_name(int(m["reason"])), observer=info.root)
+                outcome, kind = mapping.control_outcome(int(m["outcome"]), int(m["reason"]))
+                self._finish(conn, host_op, outcome, "SELF_REPORTED" if outcome != "INDETERMINATE" else "UNKNOWN",
+                             kind, status_name(int(m["reason"])), observer=info.root)
 
         await self.hub.write(apply_event)
 

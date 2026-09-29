@@ -45,6 +45,23 @@ Proxy::Entry *Proxy::find(const MacAddr &mac) {
 }
 
 Proxy::Entry *Proxy::add(const MacAddr &mac, MonoTime now) {
+    if (now < next_start_) {
+        return nullptr; // one unauthenticated start per gap for all sources: the joiner's retransmission comes again
+    }
+    Entry *victim = nullptr; // a full table gives its oldest unproven slot (never a tunnel the root answered)
+    for (Entry &e : table_) {
+        if (!e.used) {
+            victim = nullptr;
+            break;
+        }
+        if (!e.proven && (victim == nullptr || e.born < victim->born) && !(out_.active && out_.mac == e.mac)) {
+            victim = &e;
+        }
+    }
+    if (victim != nullptr) {
+        free_entry(*victim);
+    }
+    next_start_ = now + k_proxy_start_gap;
     for (Entry &e : table_) {
         if (!e.used) {
             e = Entry{};
@@ -53,7 +70,7 @@ Proxy::Entry *Proxy::add(const MacAddr &mac, MonoTime now) {
             }
             e.used = true;
             e.mac = mac;
-            e.last = now;
+            e.last = e.born = now;
             return &e;
         }
     }
@@ -69,7 +86,7 @@ void Proxy::free_entry(Entry &e) {
 
 void Proxy::on_timer(MonoTime now) {
     for (Entry &e : table_) {
-        if (e.used && now - e.last >= k_proxy_idle) {
+        if (e.used && now >= e.expiry()) {
             free_entry(e);
         }
     }
@@ -90,7 +107,7 @@ MonoTime Proxy::deadline() const {
     MonoTime d = earliest(retry_at_, outcome_at_);
     for (const Entry &e : table_) {
         if (e.used) {
-            d = earliest(d, e.last + k_proxy_idle);
+            d = earliest(d, e.expiry());
         }
     }
     return d;
@@ -309,6 +326,8 @@ void Proxy::on_record(const delivery::PathSpec &reply, ByteView plain, MonoTime 
     e->last = now;
     if (is_root()) {
         e->proxy_addr = reply.dest.value();
+    } else {
+        e->proven = true; // a downlink record for this joiner came from the root over authenticated links
     }
     if (c.offset == 0) {
         if (in_.ready || (in_.active && in_.mac != mac)) {
@@ -364,6 +383,8 @@ Status Proxy::transmit(const MacAddr &mac, ByteView frame, uint32_t tag, MonoTim
     if (out_.active) {
         return Status::Busy; // one frame in the pipe: the caller's retry timer asks again
     }
+    e->proven = true; // the root's own join machinery answers this joiner
+    e->last = now;
     start_out(mac, frame, e->proxy_addr, tag, now, true);
     return Status::Ok;
 }

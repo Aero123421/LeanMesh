@@ -2,7 +2,12 @@
 """Budget report (docs/16): sizeof per profile, fixed RAM against the profile targets and
 first-party SLOC per module. A report, not a gate: it exits non-zero only when it cannot measure.
 
-  scripts/budget_report.py [--native-build DIR] [--idf-build DIR]... [--json FILE]
+  scripts/budget_report.py [--native-build DIR] [--idf-build DIR]... [--idf-root DIR] [--out-dir DIR]
+
+--idf-root      a LEANMESH_BUILD_ROOT: every example_node[-RELAY|-ROOT]/<soc> in it is measured (all four SoCs
+                give the per-SoC tables and the B01 build evidence). --out-dir writes budget-report.{json,md}
+                (build-records/ is the committed copy). Targets are the ADR-002 revised ones (TARGETS below).
+--crypto-log    output of `test_security "measure: worker stack"`; without it the test binary in --native-build runs.
 
 --native-build  native CMake build containing tools/budget_probe (default $LEANMESH_NATIVE_BUILD or
                 ~/.cache/leanmesh/native); sizes are `nm -S` of the lm_budget_probe_* libraries.
@@ -22,6 +27,7 @@ Vendor heap (PSA, Wi-Fi) and the crypto peak are NOT included (docs/16 lists the
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -37,18 +43,28 @@ PROFILES = ("leaf", "relay", "root")
 PROBE = REPO / "tools" / "budget_probe" / "probe.cpp"
 SYMBOL = re.compile(r"^[0-9a-fA-F]+\s+([0-9a-fA-F]+)\s+[BbDdCc]\s+lm_probe__(\w+)$")
 
-# docs/16 budget sets. "sdk" = first-party C/C++ compiled into the firmware (core + security + store
-# + capi + root/serial + port/idf): the 16,000 SLOC line.
+# docs/16 budget sets. "sdk" = first-party C/C++ compiled into the firmware, split into core (src/core,
+# security, store, capi), idf (src/port/idf), root (src/root) and serial (src/serial). Native-only ports,
+# tools, tests and vendor sources are separate columns and never in the SDK denominator.
 SLOC_MODULES = (
-    ("src/core", "sdk", False),  # top-level core files only; subdirectories are listed below
-    *((f"src/core/{m}", "sdk", True) for m in (
+    ("src/core", "core", False),  # top-level core files only; subdirectories are listed below
+    *((f"src/core/{m}", "core", True) for m in (
         "wire", "radio", "link", "member", "route", "delivery", "sched", "group", "channel",
-        "power", "diag")),
-    *((f"src/{m}", "sdk", True)
-      for m in ("security", "store", "capi", "root", "serial", "port/idf")),
+        "power", "diag", "ota")),
+    *((f"src/{m}", "core", True) for m in ("security", "store", "capi")),
+    ("src/port/idf", "idf", True), ("src/root", "root", True), ("src/serial", "serial", True),
     ("src/port/sim", "native-only", True), ("src/hostnative", "native-only", True),
     ("tools", "tools", True), ("tests/native", "tests", True),
+    ("third_party", "vendor", True),
 )
+SDK_PARTS = ("core", "idf", "root", "serial")
+# Revised targets (decisions/ADR-002, docs/16 "実装時の改訂"); config/profiles.json still carries the
+# original docs/16 RAM numbers and is a spec file, so the revised ones live here.
+TARGETS = {"ram": {"leaf": 48 * 1024, "relay": 56 * 1024, "root": 160 * 1024},
+           "flash": 256 * 1024, "flash_review": 320 * 1024, "sdk_sloc": 28000, "python_host": 6000,
+           "crypto_peak": 24 * 1024}
+SOCS = ("esp32s3", "esp32c3", "esp32c5", "esp32c6")
+APPS = {"leaf": "example_node", "relay": "example_node-RELAY", "root": "example_node-ROOT"}
 C_SUFFIXES = {".c", ".h", ".cpp", ".hpp"}
 
 
@@ -103,8 +119,9 @@ def sloc_report() -> dict:
     groups: dict[str, int] = {}
     for m in modules.values():
         groups[m["group"]] = groups.get(m["group"], 0) + m["sloc"]
+    groups["sdk (core+idf+root+serial)"] = sum(groups.get(g, 0) for g in SDK_PARTS)
     return {"modules": modules, "groups": groups, "python": py,
-            "budget": {"sdk_c_cpp": 16000, "python_host": 6000}}
+            "budget": {"sdk_c_cpp": TARGETS["sdk_sloc"], "python_host": TARGETS["python_host"]}}
 
 
 def nm_sizes(nm: str, obj: Path) -> dict[str, int]:
@@ -187,17 +204,19 @@ def idf_build_info(build: Path) -> dict:
         lib = next((v for k, v in archives if k.endswith("libleanmesh.a")), None)
         if lib is not None:
             mem = lib["memory_types"]
-            dram = mem.get("DRAM", {}).get("sections", {})
+            # The memory type holding .dram0.* is called DRAM (C3), DIRAM (S3, C6) or HP SRAM (C5): find it by its sections.
+            dram = next((m["sections"] for m in mem.values() if ".dram0.bss" in m["sections"]), {})
+            code = sum(m["sections"].get(".flash.text", {}).get("size", 0) for m in mem.values())
+            data = sum(m["size"] for k, m in mem.items() if k.startswith("Flash")) - code
             info["static"] = {"dram_bss": dram.get(".dram0.bss", {}).get("size", 0),
                               "dram_data": dram.get(".dram0.data", {}).get("size", 0),
-                              "flash_code": mem.get("Flash Code", {}).get("size", 0),
-                              "flash_data": mem.get("Flash Data", {}).get("size", 0)}
+                              "flash_code": code, "flash_data": data}
         break
     size = build / "size.json"
     base = REPO / "build-records" / "T01-baseline-size.json"
     if size.is_file() and base.is_file() and info["target"]:
         raw = size.read_text()
-        info["image_bytes"] = json.loads(raw[raw.index("{"):]).get("total_size")
+        info["image_bytes"] = json.loads(raw[raw.index("\n{\n") + 1:]).get("total_size")
         base_targets = json.loads(base.read_text())["targets"]
         info["baseline_image_bytes"] = base_targets.get(info["target"], {}).get("image_total_bytes")
     return info
@@ -211,11 +230,11 @@ def constant(path: str, name: str) -> int:
 
 
 def fixed_ram(sizes: dict[str, dict[str, int]], builds: list[dict]) -> dict[str, dict]:
+    """Fixed RAM per profile for one SoC (or the native estimate when `builds` is empty)."""
     owner = constant("src/port/idf/idf_owner.hpp", "k_stack_bytes")
     worker = constant("src/port/idf/idf_jobs.hpp", "k_stack_bytes")
     usb_stack = constant("src/serial/idf_serial.cpp", "k_task_stack_bytes")
     usb_ring = constant("src/serial/idf_serial.cpp", "k_rx_ring_bytes")
-    targets = json.loads((REPO / "config" / "profiles.json").read_text())["profiles"]
     res = {}
     for p in PROFILES:
         s = sizes[p]
@@ -224,7 +243,7 @@ def fixed_ram(sizes: dict[str, dict[str, int]], builds: list[dict]) -> dict[str,
         if mapped:
             st = mapped["static"]
             items["libleanmesh.a static DRAM (map)"] = st["dram_bss"] + st["dram_data"]
-            basis = f"map of {mapped['build']}"
+            basis = f"link map of {Path(mapped['build']).parent.name}/{mapped['target']}"
         else:
             items["owner task stack"] = owner
             items["worker task stack"] = worker
@@ -234,9 +253,59 @@ def fixed_ram(sizes: dict[str, dict[str, int]], builds: list[dict]) -> dict[str,
                 items["USB task stack + byte ring"] = usb_stack + usb_ring
             basis = "estimate (sizeof + stack/ring constants)"
         total = sum(items.values())
-        res[p] = {"items": items, "total": total, "target": targets[p]["ram_target_bytes"],
-                  "basis": basis}
+        res[p] = {"items": items, "total": total, "target": TARGETS["ram"][p], "basis": basis,
+                  "verdict": "OK" if total <= TARGETS["ram"][p] else "OVER"}
     return res
+
+
+def flash_verdict(diff: int | None) -> str:
+    if diff is None:
+        return "unknown"
+    return "OK" if diff <= TARGETS["flash"] else \
+        "OVER" if diff <= TARGETS["flash_review"] else "OVER-REVIEW-LINE"
+
+
+def discover(root: Path) -> list[Path]:
+    """<root>/example_node[-RELAY|-ROOT]/<soc> for every SoC that was built (has compile_commands.json)."""
+    found = [root / app / soc for soc in SOCS for app in APPS.values()]
+    return [d for d in found if (d / "compile_commands.json").is_file()]
+
+
+def crypto_peak(log: Path | None, native: Path) -> dict:
+    """Worker stack and PSA heap peak of one handshake, parsed from the native test's [measure] lines."""
+    text = log.read_text() if log else ""
+    source = str(log) if log else None
+    exe = native / "tests" / "native" / "test_security"
+    if not text and exe.is_file():
+        r = subprocess.run([str(exe), "measure: worker stack and PSA heap peak"], capture_output=True, text=True)
+        text, source = r.stdout, "tests/native/test_security (run now)"
+    stack = re.search(r"\[measure\] worker stack peak[^:]*: (\d+) bytes", text)
+    heap = re.search(r"\[measure\] PSA heap peak[^:]*: (\d+) bytes", text)
+    if stack and heap:
+        st, hp = int(stack.group(1)), int(heap.group(1))
+        return {"basis": f"measured natively (x86-64 software model), {source}", "worker_stack": st,
+                "psa_heap": hp, "total": st + hp}
+    return {"basis": "recorded in ADR-002, not re-measured", "worker_stack": 4840, "psa_heap": 4992,
+            "total": 4840 + 4992}
+
+
+def b01(builds: list[dict]) -> dict:
+    """4-target same-pin build evidence (scenario B01, build part only)."""
+    pin = json.loads((REPO / "config/dependencies.json").read_text())["esp_idf"]["commit"]
+    idf_path = Path(os.environ.get("IDF_PATH", str(Path.home() / "esp/esp-idf-v6.0.3")))
+    head = subprocess.run(["git", "-C", str(idf_path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    per = {}
+    for soc in SOCS:
+        have = {b["profile"]: b for b in builds if b["target"] == soc}
+        gens = {b["profile"]: hashlib.sha256(g.read_bytes()).hexdigest()[:16] for b in have.values()
+                for g in [Path(b["build"]) / "esp-idf/leanmesh/lm_generated/gen/registry.hpp"] if g.is_file()}
+        per[soc] = {"built": sorted(have), "registry_hpp": gens}
+    hashes = {h for v in per.values() for h in v["registry_hpp"].values()}
+    return {"all_built": all("leaf" in v["built"] and "root" in v["built"] for v in per.values()),
+            "idf_pin": pin, "idf_checkout": head or "unknown (IDF_PATH not a git tree)",
+            "same_pin": head == pin, "per_soc": per, "generated_constants_identical": len(hashes) <= 1 and bool(hashes),
+            "cannot_show": "that unsupported APIs return UNSUPPORTED instead of a fake success (review + tests do), "
+                           "runtime heap peaks, or that the images run on the SoC"}
 
 
 def print_sizes(title: str, sizes: dict[str, dict[str, int]]) -> None:
@@ -255,63 +324,112 @@ def print_sizes(title: str, sizes: dict[str, dict[str, int]]) -> None:
         print(f"{label:62} {row[0]:8} {row[1]:8} {row[2]:8}")
 
 
+def head_info() -> dict:
+    def g(*a):
+        return subprocess.run(["git", "-C", str(REPO), *a], capture_output=True, text=True).stdout.strip()
+    return {"head": g("rev-parse", "--short", "HEAD"), "dirty": bool(g("status", "--porcelain"))}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     default_native = os.environ.get("LEANMESH_NATIVE_BUILD",
                                     str(Path.home() / ".cache/leanmesh/native"))
     ap.add_argument("--native-build", type=Path, default=Path(default_native))
     ap.add_argument("--idf-build", type=Path, action="append", default=[])
+    ap.add_argument("--idf-root", type=Path, help="a LEANMESH_BUILD_ROOT: every example_node[-RELAY|-ROOT]/<soc> in it")
+    ap.add_argument("--crypto-log", type=Path, help="output of test_security 'measure: worker stack' (else run from --native-build)")
     ap.add_argument("--json", type=Path)
+    ap.add_argument("--out-dir", type=Path, help="write budget-report.json and budget-report.md here")
     a = ap.parse_args()
 
-    report: dict = {"native": native_sizes(a.native_build)}
-    builds = [idf_build_info(b) for b in a.idf_build]
+    idf_dirs = list(a.idf_build) + (discover(a.idf_root) if a.idf_root else [])
+    report: dict = {"native": native_sizes(a.native_build), **head_info(), "command": " ".join(sys.argv)}
+    builds = sorted((idf_build_info(b) for b in idf_dirs), key=lambda b: (b["target"] or "", b["profile"] or ""))
     if report["native"] is None and not builds:
         sys.exit(f"{a.native_build}: no lm_budget_probe_* libraries (build the native tree) "
-                 "and no --idf-build given")
+                 "and no --idf-build/--idf-root given")
+    report["tools"] = {"python": sys.version.split()[0], "gcc": subprocess.run(
+        ["c++", "--version"], capture_output=True, text=True).stdout.splitlines()[0]}
+    report["fixed_ram"] = {}
     if builds:
-        report["idf"] = {"sizes": idf_sizes(a.idf_build[0]), "builds": builds}
-    basis = report["idf"]["sizes"] if builds else report["native"]
-    report["fixed_ram"] = fixed_ram(basis, builds)
-    report["sloc"] = sloc_report()
-
-    print("# LeanMesh budget report (docs/16; a report, not a gate)")
-    if report["native"] is not None:
-        print_sizes("native x86-64", report["native"])
-    if builds:
-        print_sizes(f"SoC compiler of {a.idf_build[0]}", report["idf"]["sizes"])
-        print("\n## IDF builds\n")
+        report["idf"] = {"sizes": {}, "builds": builds}
+        for soc in sorted({b["target"] for b in builds}):
+            mine = [b for b in builds if b["target"] == soc]
+            report["idf"]["sizes"][soc] = idf_sizes(Path(mine[0]["build"]))
+            report["fixed_ram"][soc] = fixed_ram(report["idf"]["sizes"][soc], mine)
         for b in builds:
-            st = b["static"]
-            line = f"{b['target']} {b['profile']}: "
-            line += (f"libleanmesh.a DRAM .bss {st['dram_bss']} + .data {st['dram_data']} B, "
-                     f"flash code {st['flash_code']} + data {st['flash_data']} B"
-                     if st else "no map data")
-            if b["image_bytes"] and b["baseline_image_bytes"]:
-                d = b["image_bytes"] - b["baseline_image_bytes"]
-                line += (f"; image {b['image_bytes']} B = baseline "
-                         f"{b['baseline_image_bytes']} B {d:+d} B")
-            print(line)
-    print("\n## fixed RAM vs target (workspace + static; excludes vendor heap and crypto peak)\n")
-    for p in PROFILES:
-        f = report["fixed_ram"][p]
-        print(f"{p.upper():5} total {f['total']:7} B  target {f['target']:6} B  "
-              f"({f['total'] - f['target']:+d} B)  [{f['basis']}]")
-        for k, v in f["items"].items():
-            print(f"        {k:40} {v:7}")
-    s = report["sloc"]
-    print("\n## first-party SLOC (non-blank, non-comment)\n")
-    for rel, m in s["modules"].items():
-        print(f"{rel:28} {m['group']:12} {m['sloc']:6}")
-    for g, n in s["groups"].items():
-        line = f" (budget {s['budget']['sdk_c_cpp']})" if g == "sdk" else ""
-        print(f"total {g:22} {n:6}{line}")
-    for k, n in s["python"].items():
-        line = f" (budget {s['budget']['python_host']})" if k.startswith("host (") else ""
-        print(f"python {k:21} {n:6}{line}")
+            d = b["image_bytes"] - b["baseline_image_bytes"] if b["image_bytes"] and b["baseline_image_bytes"] else None
+            b["image_diff"], b["flash_verdict"] = d, flash_verdict(d)
+        report["missing_socs"] = [s for s in SOCS if s not in report["idf"]["sizes"]]
+        report["b01"] = b01(builds)
+    if report["native"] is not None:
+        report["fixed_ram"]["native-estimate"] = fixed_ram(report["native"], [])
+    report["crypto"] = crypto_peak(a.crypto_log, a.native_build)
+    report["crypto"]["verdict"] = "OK" if report["crypto"]["total"] <= TARGETS["crypto_peak"] else "OVER"
+    report["sloc"] = sloc_report()
+    report["sloc"]["verdict"] = "OK" if report["sloc"]["groups"]["sdk (core+idf+root+serial)"] <= TARGETS["sdk_sloc"] else "OVER"
+    report["targets"] = TARGETS
+    text = render(report, a)
+    print(text)
     if a.json:
-        a.json.write_text(json.dumps(report, indent=2) + "\n")
+        a.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    if a.out_dir:
+        a.out_dir.mkdir(parents=True, exist_ok=True)
+        (a.out_dir / "budget-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        (a.out_dir / "budget-report.md").write_text(text + "\n")
     return 0
+
+
+def render(r: dict, a) -> str:
+    """Markdown; tables only carry measured numbers or say 'unknown'."""
+    T = TARGETS
+    L = ["# LeanMesh budget report (docs/16 + ADR-002 revised targets; a report, not a gate)", "",
+         f"Commit `{r['head']}`{' (working tree dirty)' if r['dirty'] else ''}; python {r['tools']['python']}, {r['tools']['gcc']}.",
+         f"Command: `{r['command']}`", "",
+         "Software measurements only: sizeof from the compiler, static DRAM from the link map, image diff against",
+         "`build-records/T01-baseline-size.json`. No heap, stack, CPU or current was measured on a SoC.", ""]
+    if r.get("missing_socs"):
+        L += [f"**This run lacks builds for: {', '.join(r['missing_socs'])}.**", ""]
+    L += ["## Fixed RAM (workspace + static DRAM of libleanmesh.a) vs revised targets", "",
+          "| SoC | profile | fixed RAM B | target B | over B | verdict | basis |", "|---|---|---:|---:|---:|---|---|"]
+    for soc, profs in r["fixed_ram"].items():
+        for p in PROFILES:
+            f = profs[p]
+            L.append(f"| {soc} | {p.upper()} | {f['total']} | {f['target']} | {f['total'] - f['target']:+d} | {f['verdict']} | {f['basis']} |")
+    L += ["", "## Flash: image minus empty IDF + ESP-NOW baseline (target 256 KiB, review line 320 KiB)", "",
+          "| SoC | profile | image B | baseline B | diff B | verdict | libleanmesh.a DRAM bss+data B | flash code+data B |",
+          "|---|---|---:|---:|---:|---|---:|---:|"]
+    for b in r.get("idf", {}).get("builds", []):
+        st = b["static"] or {}
+        L.append(f"| {b['target']} | {(b['profile'] or '?').upper()} | {b['image_bytes']} | {b['baseline_image_bytes']} | "
+                 f"{b['image_diff']} | {b['flash_verdict']} | {st.get('dram_bss', 0) + st.get('dram_data', 0) if st else 'n/a'} | "
+                 f"{st.get('flash_code', 0) + st.get('flash_data', 0) if st else 'n/a'} |")
+    c = r["crypto"]
+    L += ["", "## Crypto peak (target <= 24 KiB, separate from fixed RAM)", "",
+          f"worker stack {c['worker_stack']} B + PSA heap {c['psa_heap']} B = {c['total']} B ({c['verdict']}); {c['basis']}.", ""]
+    s = r["sloc"]
+    L += ["## First-party SLOC (non-blank, non-comment)", "", "| group | SLOC | budget |", "|---|---:|---|"]
+    for g, n in s["groups"].items():
+        bud = f"{T['sdk_sloc']} ({s['verdict']})" if g.startswith("sdk") else ""
+        L.append(f"| {g} | {n} | {bud} |")
+    for k, n in s["python"].items():
+        L.append(f"| python {k} | {n} | {T['python_host'] if k.startswith('host (') else ''} |")
+    L += ["", "| module | group | SLOC |", "|---|---|---:|"] + [f"| {k} | {m['group']} | {m['sloc']} |" for k, m in s["modules"].items()]
+    if "b01" in r:
+        b = r["b01"]
+        L += ["", "## B01 build evidence (4 targets, one pin)", "",
+              f"IDF pin {b['idf_pin']}; checkout {b['idf_checkout']}; same pin: {b['same_pin']}; "
+              f"all four SoCs built LEAF and ROOT: {b['all_built']}; generated registry.hpp identical across builds: "
+              f"{b['generated_constants_identical']}.", "", "| SoC | profiles built | registry.hpp hash |", "|---|---|---|"]
+        L += [f"| {soc} | {', '.join(v['built']) or 'none'} | {', '.join(sorted(set(v['registry_hpp'].values()))) or 'n/a'} |"
+              for soc, v in b["per_soc"].items()]
+        L += ["", f"Cannot show: {b['cannot_show']}."]
+    sizes = r["native"] or next(iter(r["idf"]["sizes"].values()))
+    L += ["", "## sizeof per profile (" + ("native x86-64" if r["native"] else "SoC compiler") + ")", "",
+          "| object | LEAF | RELAY | ROOT |", "|---|---:|---:|---:|"]
+    L += [f"| {n.replace('__', '.')} | {sizes['leaf'].get(n, 0)} | {sizes['relay'].get(n, 0)} | {sizes['root'].get(n, 0)} |"
+          for n in sorted(sizes["leaf"])]
+    return "\n".join(L)
 
 
 if __name__ == "__main__":

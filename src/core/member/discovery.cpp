@@ -78,6 +78,17 @@ void Discovery::wake(MonoTime now, uint16_t jitter_ms) {
     begin(now, jitter_ms, false, budget_, auto_resume_);
 }
 
+bool Discovery::hint(MonoTime now) {
+    if (now < hint_at_) {
+        return false;
+    }
+    hint_at_ = now + k_hint_gap;
+    if (phase_ == Phase::Backoff) {
+        begin(now, 0, false, budget_, auto_resume_); // backoff_ is kept: the next exhaustion waits longer as before
+    }
+    return true;
+}
+
 Discovery::Act Discovery::poll(MonoTime now) {
     switch (phase_) {
     case Phase::Idle:

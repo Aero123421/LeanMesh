@@ -522,6 +522,19 @@ LM_TEST("topology: address reuse, invalid address and full table") {
     LM_CHECK_OK(full.admit(ShortAddr{900}));
 }
 
+// External review finding 18 (S18): the membership generation is 64 bit end to end. g and g + 2^32 are different
+// generations at a reused address: a 32-bit tag let the old approval survive the new generation.
+LM_TEST("REV-18 topology: generations 2^32 apart do not alias at a reused address") {
+    Topology t{ShortAddr{k_root_addr}, RootTerm{1}};
+    const uint64_t g = 7;
+    LM_CHECK_OK(t.admit(ShortAddr{addr_of(0)}, g));
+    LM_CHECK_OK(attach(t, 0, k_root_addr, 1, 0, true));
+    RouteGrant path;
+    LM_CHECK_OK(t.path_from_root(ShortAddr{addr_of(0)}, 0, path));
+    LM_CHECK_OK(t.admit(ShortAddr{addr_of(0)}, g + (uint64_t{1} << 32))); // the address means another generation
+    LM_CHECK(t.path_from_root(ShortAddr{addr_of(0)}, 0, path) == Status::NoRoute); // its old approval is void
+}
+
 // ---- R03 seeded model ----------------------------------------------------------------------
 
 namespace {

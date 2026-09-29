@@ -44,6 +44,9 @@ NVS内部のcopy、page overhead、書込み増幅、GC、brownout挙動はIDF�
 ## Flash書込みと中継の実時間
 Flash I/Oをworkerへ移しても、SoC/IDFのflash-cache停止や割込み制約が無線処理へ影響しないとは限らない。IRAM配置、watchdog、最長NVS commit、erase時間とTX callbackの遅延を全4SoCで測る。dirty recordを必要時だけまとめてcommitするが、DURABLE成功をcommit前に返さない。lifecycle/safety receiptの保存と高頻度telemetryを同じ無制限logへ入れない。SDK外のFlash writerとの調停もアプリ統合条件として明記する。
 
-## spec0.2の追加record
+## lifecycle record（S18）とprovisioning
+追加record: `root_handover`（17、自rootを退役させたRootHandoverそのもの。存在すれば起動後も入会/session受理をしない）、`pending_delegation`（18、transfer/handover先のRootDelegation。新MemberCredentialのcommit後にroot_delegationへ移す。二つのcommitの間の電源断は、membershipを検証できるpending側で起動し書き直す）、`commissioning_window`（19、window_id16 + そのwindowで予約した数u8。予約entryのcommit前に数える。電源断は数え過ぎにしかならない）。membership recordのstate 5はrevocation通知による離脱tombstone（LEFTと同じfloor、状態はMEMBER_REVOKED）。
+provisioningが書くrecord: 全Device＝boot_incarnation（最初）、identity、fleet_trust、root_delegation、必要ならmembership（ACTIVE credential）、revocation_floors、discovery_scope。新規networkのrootだけが空ledgerのmanifest（root_ledger: domain、used slot、expected進捗）を書き、既存memberの一覧はそのentryとして同じ手順で書く。交換用rootは自分のdelegation（上位generation）とcredential（上位term）だけを持ち、ledgerは検証済みbackupから復元する。backupが無いrootはRECOVERY_REQUIREDで止まり、空ledgerで再開しない。rootの自credentialのleaseは自rootが時刻基準なので遠い将来でよい（rootは自身のleaseで他者を認可しない）。
+
 power policy/scheduleは既存sealed recordのtyped objectとして保存し、別の汎用設定DBをNodeへ足さない。毎poll/packetでNVS書込みを行わない。group DURABLEはpayload1copy・immutable snapshot・target ID割当・進捗を一つの有界operation journalにまとめる。mid-commit sleep禁止。
 Host既存DBへの導入はadditive schema migrationで`node_power/group_targets`を追加し、旧consumerを止めずphaseごとに有効化する。本ZIPのschema.sqlを既存製品DBへそのまま再実行しない。

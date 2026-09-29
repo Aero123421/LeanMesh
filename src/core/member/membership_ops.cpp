@@ -22,9 +22,6 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
     if (a.mode > LM_JOIN_TRANSFER_CANDIDATE) {
         return Status::InvalidArgument;
     }
-    if (a.mode == LM_JOIN_TRANSFER_CANDIDATE) {
-        return Status::Unsupported; // signed replacement is the lifecycle slice's (docs/07 §8)
-    }
     const LocalIdentity &id = engine_.identity();
     if (id.state() != LocalIdentity::State::Ready) {
         return id.state() == LocalIdentity::State::Failed ? Status::RecoveryRequired : Status::AuthPending;
@@ -37,7 +34,27 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
     }
     const Duration budget = a.search_budget_ms == 0 ? k_default_budget
                                                     : Duration::from_ms(std::min<uint32_t>(a.search_budget_ms, 30000));
-    if (id.is_member()) {
+    switch_ = handover_ = false;
+    if (id.is_member() && a.mode == LM_JOIN_TRANSFER_CANDIDATE) {
+        // [S18] The member keeps its membership while it asks the root its installed object names (a transfer ticket:
+        // another domain's root; a RootHandover: its domain's new root) for the next one (docs/07 §8, docs/21 §8).
+        if (a.request.is_zero()) {
+            return Status::InvalidArgument;
+        }
+        if (have_prepared_ && (confirm_pending_ || a.request != req_.id)) {
+            // An acknowledgement still owed first; a switch cut after its PREPARED commit is asked about by its id.
+            return confirm_pending_ ? Status::Busy : Status::Conflict;
+        }
+        if (!have_prepared_ && !lend_record_only()) {
+            return Status::Busy; // the installed object is read first (where to look)
+        }
+        if (!have_prepared_) {
+            req_ = Request{};
+            req_.id = a.request;
+        }
+        switch_ = true;
+        handover_ = have_prepared_ && switch_domain_ == id.delegation().domain;
+    } else if (id.is_member()) {
         if (a.mode != LM_JOIN_RESUME) {
             return Status::Conflict; // already ACTIVE: nothing to join
         }
@@ -47,6 +64,8 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
             req_.id = a.request;
         }
         link_resume_ = true;
+    } else if (a.mode == LM_JOIN_TRANSFER_CANDIDATE) {
+        return Status::NotFound; // no membership to transfer: a device without one joins (LM_JOIN_NEW)
     } else {
         if (a.request.is_zero()) {
             return Status::InvalidArgument;
@@ -68,12 +87,28 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
     req_.operation = operation;
     req_.outcome = LM_OUTCOME_PENDING;
     req_.reason = Status::Ok;
-    ++stats_.joins_started;
-    begin_discovery(now);
-    disc_.clear_suppress();
     not_expected_ = 0;
     budget_default_ = a.search_budget_ms == 0;
     search_deadline_ = now + budget;
+    if (switch_ && !have_prepared_) {
+        // [S18] A transfer looks for its ticket's target domain, a handover for its own domain's new root: the
+        // installed object is read before the search starts (switch_peeked).
+        phase_ = JoinPhase::LoadTicket;
+        if (start_flash(Step::SwitchPeek, store::RecordJob::Op::Load, k_rec_assignment_ticket, 0, 0, now) !=
+            Status::Ok) {
+            engine_.identity().return_record();
+            rec_ = nullptr;
+            switch_ = false;
+            phase_ = JoinPhase::Idle;
+            return Status::Busy;
+        }
+        ++stats_.joins_started;
+        emit_state(0);
+        return Status::Ok;
+    }
+    ++stats_.joins_started;
+    begin_discovery(now);
+    disc_.clear_suppress();
     emit_state(0);
     return Status::Ok;
 }
@@ -84,7 +119,7 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
     if (id.state() != LocalIdentity::State::Ready) {
         return Status::AuthPending;
     }
-    if (id.is_member() || have_prepared_) {
+    if (have_prepared_) {
         return Status::Conflict;
     }
     if (phase_ != JoinPhase::Idle || job_in_flight_ || rec_ != nullptr) {
@@ -95,21 +130,30 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
     }
     Envelope env;
     ByteView data;
-    AssignmentTicket t;
-    LM_TRY(peek_signed(cose, k_type_assignment_ticket, env, data));
-    LM_TRY(decode_assignment_ticket(data, t));
-    // Structure and addressee only: the fleet signature is verified by whoever acts on the ticket
-    // (the root when it is presented); a wrong ticket costs this device its own join, nothing more.
-    if (t.device != id.self() || t.fleet != id.trust().fleet) {
-        return Status::AuthRejected;
-    }
-    // SEC-D4a: mode 0 binds the ticket to a fresh nonce this device issued, and no API hands that nonce to the
-    // fleet yet; accepting one would accept a replayed ticket. Mode 1 (a one-time grant) is consumed by generation.
-    if (t.mode != 1) {
-        return Status::Unsupported;
-    }
-    if (t.new_generation < id.own_floor().assignment) {
-        return Status::Revoked; // SEC-D8: this generation was consumed before the device left
+    if (peek_signed(cose, k_type_root_handover, env, data) == Status::Ok) {
+        RootHandover h; // [S18] kept like a ticket: what authorises this member's next membership (docs/21 §8)
+        LM_TRY(decode_handover(data, h));
+        if (!id.is_member() || env.domain != id.delegation().domain || h.old_root != id.delegation().root ||
+            h.old_generation != id.delegation().generation) {
+            return Status::AuthRejected; // not a handover of this device's root
+        }
+    } else {
+        AssignmentTicket t;
+        LM_TRY(peek_signed(cose, k_type_assignment_ticket, env, data));
+        LM_TRY(decode_assignment_ticket(data, t));
+        // Structure and addressee only: the fleet signature is verified by whoever acts on the ticket
+        // (the root when it is presented); a wrong ticket costs this device its own join, nothing more.
+        if (t.device != id.self() || t.fleet != id.trust().fleet ||
+            (id.is_member() && (t.source != id.delegation().domain || t.expected_old != id.member().assignment.value()))) {
+            return Status::AuthRejected; // [S18] a member installs only a transfer away from its current assignment
+        }
+        // SEC-D4a / S18: mode 0 names a fresh nonce this device issued (transfer_nonce); any other is a replay.
+        if (t.mode == 0 && (!nonce_valid_ || t.nonce != nonce_)) {
+            return Status::AuthRejected;
+        }
+        if (t.new_generation < id.own_floor().assignment) {
+            return Status::Revoked; // SEC-D8: this generation was consumed before the device left
+        }
     }
     if (!lend_record_only()) {
         return Status::Busy;
@@ -360,8 +404,9 @@ void Membership::leave_commit(MonoTime now) {
     if (!leave_prepared_only_) {
         // SEC-D8: one atomic commit ends the membership AND records what it consumed (the generations below the
         // floor). No room in the revocation-floor table is needed, so nothing can be dropped for lack of it.
-        leave_assignment_ = id.member().assignment.value();
-        leave_membership_ = id.member().membership.value();
+        // [S18] A revocation's erasure keeps the floors the RevokeObject named (never lower than the own one).
+        leave_assignment_ = std::max(id.member().assignment.value() + 1, revoked_ ? revoke_af_ : 0) - 1;
+        leave_membership_ = std::max(id.member().membership.value() + 1, revoked_ ? revoke_mf_ : 0) - 1;
         Writer w{MutByteView{rec_->payload}};
         w.u64be(leave_assignment_ + 1);
         w.u64be(leave_membership_ + 1);
@@ -371,7 +416,7 @@ void Membership::leave_commit(MonoTime now) {
                           ? start_flash(Step::LeaveCommit, store::RecordJob::Op::Commit,
                                         store::rec::membership_prepared, k_prepared_consumed, 0, now)
                           : start_flash(Step::LeaveCommit, store::RecordJob::Op::Commit, store::rec::membership,
-                                        k_membership_left, len, now);
+                                        revoked_ ? k_membership_revoked : k_membership_left, len, now);
     if (st != Status::Ok) {
         leave_finish(st, LM_OUTCOME_INDETERMINATE, now);
     }
@@ -400,7 +445,7 @@ void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
         (void)engine_.link().close(peers[i]);
     }
     // Fleet identity stays; the floor records what this device consumed (SEC-D8).
-    id.drop_member(Floors::Entry{id.self(), leave_assignment_ + 1, leave_membership_ + 1});
+    id.drop_member(Floors::Entry{id.self(), leave_assignment_ + 1, leave_membership_ + 1}, revoked_);
     have_prepared_ = false;
     leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
 }
@@ -418,6 +463,7 @@ void Membership::leave_finish(Status why, uint32_t outcome, MonoTime now) {
     leave_ = LeavePhase::Idle;
     leave_tx_wait_ = leave_deadline_ = MonoTime::never();
     leave_tx_inflight_ = false;
+    revoked_ = false;
     req_.reason = why;
     engine_.emit_event(LM_EVENT_OPERATION, static_cast<uint32_t>(why), leave_op_, nullptr);
     engine_.emit_event(LM_EVENT_MEMBERSHIP, static_cast<uint32_t>(why), leave_op_, nullptr);

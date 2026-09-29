@@ -456,6 +456,48 @@ LM_TEST("D11 sim: 64 targets from a member that is not the root; four pages, fou
     LM_CHECK_EQ(n.eng(0).delivery().stats().rx_data, 0ull);
 }
 
+// FIX3-D10: generations are full u63 values and a target is a whole DeviceId, at the root and at a member origin.
+LM_TEST("FIX3-17 sim: a snapshot with generations near 2^63 is served in signed pages, fetched whole and hashed over the full values") {
+    GNet n(tree(4, 44)); // root, 4 relays, 44 leaves: 48 members = four signed pages (13 rows fit a page at this size)
+    n.form();
+    for (unsigned i = 1; i < n.n; ++i) { // the root's ledger names generations far beyond 2^32 (worst case for the row size)
+        auto &e = const_cast<root::Entry &>(n.eng(0).ledger().entry(i - 1));
+        e.assignment = (1ULL << 62) + i;
+        e.membership = k_u63_max - i;
+    }
+    n.group_set(9, 0, range(1, 49));
+    // (a) a member origin fetches the signed pages
+    const auto s = n.send(2, 9, 1, LM_RECEIVED, Bytes(30, 5), 200'000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.progress(2, s.op).total == 48; }, 90'000));
+    LM_CHECK_EQ(n.eng(0).group().stats().pages_served, 4ull);
+    LM_CHECK_EQ(n.eng(2).group().stats().pages_fetched, 4ull);
+    const lm_group_progress_t p = n.progress(2, s.op);
+    const auto t = n.targets(2, s.op);
+    LM_CHECK_EQ(t.size(), 48u);
+    for (const auto &x : t) {
+        unsigned who = 0;
+        for (unsigned i = 1; i < n.n; ++i) {
+            who = std::memcmp(n.id(i).bytes.data(), x.device.bytes, 32) == 0 ? i : who;
+        }
+        LM_CHECK(who != 0);
+        LM_CHECK_EQ(x.assignment_generation, (1ULL << 62) + who);
+        LM_CHECK_EQ(x.membership_generation, k_u63_max - who);
+    }
+    const Sha256Digest h = expected_hash(n, 2, 9, 1, p.snapshot_token, t);
+    LM_CHECK(std::memcmp(h.data(), p.snapshot_hash, 32) == 0);
+    // (b) the root as origin: the same set, no UNSUPPORTED, the same values
+    const auto r = n.send(0, 9, 1, LM_RECEIVED, Bytes(30, 6), 200'000);
+    LM_CHECK_EQ(r.st, LM_STATUS_OK);
+    const auto rt = n.targets(0, r.op);
+    LM_CHECK_EQ(rt.size(), 48u);
+    for (std::size_t k = 0; k < rt.size(); ++k) {
+        LM_CHECK(std::memcmp(rt[k].device.bytes, t[k].device.bytes, 32) == 0);
+        LM_CHECK_EQ(rt[k].assignment_generation, t[k].assignment_generation);
+        LM_CHECK_EQ(rt[k].membership_generation, t[k].membership_generation);
+    }
+}
+
 namespace {
 // One step of every application: takes each message and reports it APPLIED (a device that does its job).
 void apps_apply(GNet &n, const std::set<unsigned> &slow = {}) {

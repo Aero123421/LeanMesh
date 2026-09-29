@@ -5,10 +5,6 @@
 #include "core/engine.hpp"
 
 namespace lm::root {
-namespace {
-constexpr uint64_t k_u32_max = 0xFFFFFFFFULL;
-}
-
 Status Groups::set(const group::SetRequest &rq) {
     Ledger &led = engine_.ledger();
     if (engine_.config().role != Role::Root) {
@@ -61,7 +57,7 @@ Status Groups::set(const group::SetRequest &rq) {
     return Status::Ok;
 }
 
-Status Groups::snapshot(uint32_t group_id, uint64_t revision, group::Op &out) const {
+Status Groups::snapshot(uint32_t group_id, uint64_t revision, group::Op &out, DeviceId *ids) const {
     const Group *g = nullptr;
     for (const Group &x : groups_) {
         g = x.id == group_id && x.id != 0 ? &x : g;
@@ -76,38 +72,26 @@ Status Groups::snapshot(uint32_t group_id, uint64_t revision, group::Op &out) co
     out.total = g->count;
     for (std::size_t i = 0; i < g->count; ++i) { // insertion sort by DeviceId: the snapshot is sorted
         const Entry &e = led.entry(g->slot[i]);
-        if (e.assignment > k_u32_max || e.membership > k_u32_max) {
-            return Status::Unsupported;
+        if (e.state == EntryState::Free) {
+            return Status::NotFound; // the slot holds no device any more: nothing to name (a left member stays, and is rejected at dispatch)
         }
         group::Target t;
-        t.slot = g->slot[i];
-        t.tag = static_cast<uint16_t>(e.device.bytes[0] << 8U | e.device.bytes[1]);
-        t.assignment = static_cast<uint32_t>(e.assignment);
-        t.membership = static_cast<uint32_t>(e.membership);
+        t.assignment = e.assignment;
+        t.membership = e.membership;
         std::size_t j = i;
-        for (; j > 0 && e.device < led.entry(out.t[j - 1].slot).device; --j) {
+        for (; j > 0 && e.device < ids[j - 1]; --j) {
             out.t[j] = out.t[j - 1];
+            ids[j] = ids[j - 1];
         }
         out.t[j] = t;
+        ids[j] = e.device;
     }
     return Status::Ok;
 }
 
-bool Groups::device(const group::Target &t, DeviceId &out) const {
-    if (t.slot >= k_ledger_slots) {
-        return false;
-    }
-    const Entry &e = engine_.ledger().entry(t.slot);
-    out = e.device;
-    return e.state != EntryState::Free && t.tag == static_cast<uint16_t>(e.device.bytes[0] << 8U | e.device.bytes[1]);
-}
-
-bool Groups::current(const group::Target &t) const {
-    if (t.slot >= k_ledger_slots) {
-        return false;
-    }
-    const Entry &e = engine_.ledger().entry(t.slot);
-    return e.state == EntryState::Active && e.assignment == t.assignment && e.membership == t.membership;
+bool Groups::current(const DeviceId &d, uint64_t assignment, uint64_t membership) const {
+    const Entry *e = engine_.ledger().find(d);
+    return e != nullptr && e->state == EntryState::Active && e->assignment == assignment && e->membership == membership;
 }
 
 bool Groups::allowed(const DeviceId &d) const {

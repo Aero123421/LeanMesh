@@ -189,6 +189,10 @@ void Ledger::on_request(Txn &t, ByteView data, const member::JoinObjectHeader &h
         return;
     }
     Entry *e = find_mut(t.device);
+    if (retired_) {
+        refuse(t, Status::RecoveryRequired, now); // [S18] a root the fleet replaced issues nothing
+        return;
+    }
     if (e != nullptr && e->request == t.request && e->state != EntryState::Expected &&
         e->state != EntryState::Blocked && e->state != EntryState::Free) {
         // The same request_id again (docs/07 §4): one reservation, one prepare hash, one content.
@@ -199,7 +203,10 @@ void Ledger::on_request(Txn &t, ByteView data, const member::JoinObjectHeader &h
         answer_repeat(t, *e, now);
         return;
     }
-    if (e != nullptr && (e->state == EntryState::Prepared || e->state == EntryState::Active)) {
+    // [S18] An ACTIVE entry may be superseded by the device's transfer back here (A->B->A: a fleet ticket whose new
+    // generation is above it, docs/07 §8) or re-issued under a RootHandover; the ticket check decides which.
+    const bool supersede = e != nullptr && e->state == EntryState::Active;
+    if (e != nullptr && (e->state == EntryState::Prepared || e->state == EntryState::Active) && !supersede) {
         if (e->state == EntryState::Prepared && e->recovered) {
             // The old reservation's deadline is unknown after a restart and is never extended: abort it now
             // (durably, when the shared memory is free); this request asks again once it is gone.
@@ -216,6 +223,8 @@ void Ledger::on_request(Txn &t, ByteView data, const member::JoinObjectHeader &h
     vargs_.device = t.device;
     vargs_.dc_hash = t.dc_hash;
     vargs_.ticket_cose = t.ticket_cose;
+    vargs_.nonce = d.nonce;
+    vargs_.term = id.member().root_term;
     vargs_.out = TicketInfo{};
     if (sec::sha256(id.delegation_cose(), vargs_.delegation_hash) != Status::Ok) {
         refuse(t, Status::RecoveryRequired, now);
@@ -245,11 +254,29 @@ void Ledger::verified(Txn &t, Status s, MonoTime now) {
 void Ledger::decide_policy(Txn &t, MonoTime now) {
     const Entry *e = find(t.device);
     Status v = Status::Ok;
-    if (e != nullptr && e->state == EntryState::Blocked) {
+    const bool window = mode_ != JoinMode::Preapproved && window_open(now); // [S18] docs/21 §2
+    const bool preapproved = mode_ == JoinMode::Preapproved || window;
+    if (t.ticket.kind == 2) { // [S18] re-issue under a RootHandover: exactly this ledger's ACTIVE member (or one whose
+                              // re-issue was aborted: it still holds the assignment it consumed here)
+        const bool member = e != nullptr && (e->state == EntryState::Active ||
+                                             (e->state == EntryState::Aborted && e->assignment != 0 &&
+                                              e->consumed >= e->assignment));
+        if (!member) {
+            v = e == nullptr ? Status::NotFound : Status::Conflict;
+        }
+        t.ticket.new_generation = e != nullptr ? e->assignment : 0;
+    } else if (e != nullptr && e->state == EntryState::Active && (t.ticket.kind != 1 || t.ticket.new_generation <= e->assignment)) {
+        v = Status::Conflict; // [S18] only a transfer back with a higher generation supersedes an ACTIVE entry
+    } else if (e != nullptr && e->state == EntryState::Blocked) {
         v = Status::Revoked;
     } else if (e != nullptr && t.ticket.new_generation <= e->consumed) {
         v = Status::Conflict; // SEC-D4: that generation was made ACTIVE here already: a consumed grant
-    } else if (mode_ == JoinMode::Preapproved) {
+    } else if (mode_ == JoinMode::Closed && !window) {
+        // [S18] A CLOSED root admits inside a commissioning window only (authenticated in it, decided after it).
+        v = window_set_ ? Status::Expired : Status::AuthRejected;
+    } else if (window && ((window_.allowed_roles >> t.role) & 1U) == 0) {
+        v = Status::RoleNotAllowed; // the window admits other roles only
+    } else if (preapproved) {
         if (e == nullptr || e->state != EntryState::Expected) {
             v = Status::NotFound; // NOT_EXPECTED (docs/07 §3): a hint, not a permanent verdict; a former member
                                   // needs a new expected entry as well
@@ -267,7 +294,8 @@ void Ledger::decide_policy(Txn &t, MonoTime now) {
         refuse(t, v, now);
         return;
     }
-    if (mode_ == JoinMode::Preapproved) {
+    if (preapproved || t.ticket.kind == 2) { // a handover re-issue needs no new approval: the member is ACTIVE here
+        t.windowed = window && t.ticket.kind != 2;
         start_prepare(t, now);
         return;
     }
@@ -325,7 +353,7 @@ Status Ledger::pick_slot(const DeviceId &device, std::size_t &slot) const {
     const member::Floors &f = engine_.identity().floors();
     for (std::size_t i = 0; i < entries_.size(); ++i) {
         const Entry &e = entries_[i];
-        if ((e.state == EntryState::Left || e.state == EntryState::Aborted) &&
+        if ((e.state == EntryState::Left || e.state == EntryState::Aborted || e.state == EntryState::Blocked) &&
             f.check(e.device, AssignmentGen{e.assignment}, MembershipGen{e.membership}) == Status::Revoked) {
             slot = i;
             return Status::Ok;
@@ -336,6 +364,10 @@ Status Ledger::pick_slot(const DeviceId &device, std::size_t &slot) const {
 
 void Ledger::start_prepare(Txn &t, MonoTime now) {
     const int idx = txn_index(&t);
+    if (t.windowed && !window_open(now)) {
+        refuse(t, Status::Expired, now); // [S18] authenticated before the window closed, approved after: refused
+        return;
+    }
     std::size_t slot = 0;
     const Status ps = pick_slot(t.device, slot);
     if (ps != Status::Ok) {
@@ -402,10 +434,46 @@ void Ledger::prepare_signed(Txn &t, Status s, MonoTime now) {
         return;
     }
     t.state = TxnState::Preparing;
+    if (t.windowed) {
+        // [S18] docs/21 §2: the window's budget counts durable reservations. The count is committed first (a cut
+        // between the two commits over-counts, never under-counts), and checked again (joins run in parallel).
+        if (!window_open(now)) {
+            refuse(t, Status::Expired, now);
+        } else if (commit_window(Step::WindowReserve, static_cast<uint8_t>(window_used_ + 1), txn_index(&t)) !=
+                   Status::Ok) {
+            refuse(t, Status::Busy, now);
+        }
+        return;
+    }
     if (commit_entry(Step::CommitPrepared, t.slot, EntryState::Prepared, false,
                      ByteView{scratch_.data() + k_cose_off, t.cose_len}, txn_index(&t)) != Status::Ok) {
         refuse(t, Status::Busy, now);
     }
+}
+
+void Ledger::window_reserved(Txn &t, Status s, MonoTime now) {
+    if (s != Status::Ok) {
+        refuse(t, Status::RecoveryRequired, now); // counted or not: no reservation, never more than the budget
+        return;
+    }
+    window_rec_id_ = window_.id;
+    window_rec_used_ = ++window_used_;
+    ++stats_.window_admitted;
+    if (commit_entry(Step::CommitPrepared, t.slot, EntryState::Prepared, false,
+                     ByteView{scratch_.data() + k_cose_off, t.cose_len}, txn_index(&t)) != Status::Ok) {
+        refuse(t, Status::Busy, now);
+    }
+}
+
+Status Ledger::commit_window(Step step, uint8_t used, int holder) {
+    std::copy(window_.id.begin(), window_.id.end(), rec_->payload.begin());
+    rec_->payload[16] = used;
+    rec_->op = store::RecordJob::Op::Commit;
+    rec_->id = store::rec::commissioning_window;
+    rec_->state = 0;
+    rec_->payload_len = 17;
+    job_txn_ = holder;
+    return submit(step, JobClass::Flash, &store::record_job, rec_);
 }
 
 void Ledger::prepare_committed(Txn &t, Status s, MonoTime now) {
@@ -414,7 +482,7 @@ void Ledger::prepare_committed(Txn &t, Status s, MonoTime now) {
         return;
     }
     job_entry_.reserved_until = now + k_reservation;
-    entries_[t.slot] = job_entry_;
+    set_entry(t.slot, job_entry_);
     mark_used(t.slot); // entry first, then its manifest bit (SEC-D5)
     if (man_dirty_ && maint_retry_.is_never()) {
         maint_retry_ = now + k_busy_retry; // committed once this join gives the record memory back

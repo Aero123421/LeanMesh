@@ -13,7 +13,7 @@ namespace lm::idf {
 
 class IdfPm final : public port::Pm {
   public:
-    void set_locks(uint8_t mask) override;
+    [[nodiscard]] uint8_t set_locks(uint8_t mask) override;
     port::WakeInfo boot_info() override;
     void retain(ByteView state) override;
     [[nodiscard]] port::SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, port::WakeInfo &woke) override;
