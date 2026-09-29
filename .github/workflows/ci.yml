@@ -51,7 +51,8 @@ jobs:
           ctest --test-dir "$LEANMESH_NATIVE_BUILD" --output-on-failure
       - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
       - name: host pytest (unit, integration, E2E against meshsim)
-        run: "$LEANMESH_VENV/bin/python" -m pytest -v
+        run: |
+          "$LEANMESH_VENV/bin/python" -m pytest -v
 
   idf-targets:
     name: IDF build ${{ matrix.target }} (baseline, example_node, crypto_link_check)
