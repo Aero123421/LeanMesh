@@ -15,7 +15,7 @@
 | 対象 | 状態 | 内容 |
 |---|---|---|
 | libedhoc `library/core/classic/edhoc_classic_message_{2,3,4}.c` | **適用済み** (`third_party/patches/libedhoc-2.3.2-exact-input-consumption.patch`) | CBOR decode後の消費長が入力長と一致しなければ `EDHOC_ERROR_CBOR_FAILURE`。適用後のblob idはRouteLoom 77b5792のvendored版と一致(b1ba890.., f84231d.., 48ac46c..)。 |
-| zcbor `src/zcbor_encode.c` | **未適用** | RouteLoomは長さ0のmemmoveでnullを渡さないguardを入れている(`input->len != 0 &&`)。本タスクの要求外、consumerも未実装のため適用せず記録のみ。T03でlibedhocをlinkするとき再判断。 |
+| zcbor `src/zcbor_encode.c` | **未適用** (T03判断: 適用しない) | RouteLoomは長さ0のmemmoveでnullを渡さないguardを入れている(`input->len != 0 &&`)。T03でlibedhocを実際に駆動した結果、空のexternal_aad(`edhoc_cipher_derive`→`str_encode`)で`memmove(dst, NULL, 0)`が起き、UBSanの`nonnull-attribute`が報告する。対応する4 SoCのlibcでは無害でpin/blob検証を崩さないため未patchのまま、sanitizerビルドのvendor sourceだけ`-fno-sanitize=nonnull-attribute`で抑止(`cmake/lm_edhoc.cmake`)。first-partyのsanitize出力は抑止しない。 |
 
 ## 3. 開発環境(製品imageに入らない)
 | 名称 | 版 | license(確認元) | 備考 |

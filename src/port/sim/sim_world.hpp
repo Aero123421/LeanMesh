@@ -29,6 +29,25 @@ struct LinkParams {
     uint32_t delay_us = 1000;       // propagation + receiver driver latency
 };
 
+// Bounded event trace (off by default). It records what the medium did, so a failing scenario can
+// be explained from the trace instead of re-run with printf (docs/18 §2).
+enum class TraceKind : uint8_t {
+    Tx,     // node transmitted: a = destination node (0xFFFF broadcast/unknown), b = token sequence
+    Rx,     // frame delivered to node: a = source node
+    Lost,   // frame dropped by the medium at node: a = reason (1 loss, 2 no link/channel/off)
+    TxDone, // TX-done callback delivered: a = TxResult, b = token sequence
+    Inject, // frame injected by the bench: a = via node
+};
+
+struct TraceEntry {
+    uint64_t at_us = 0;
+    uint16_t node = 0;
+    TraceKind kind = TraceKind::Tx;
+    uint16_t len = 0;
+    uint32_t a = 0;
+    uint32_t b = 0;
+};
+
 struct WorldOptions {
     uint64_t seed = 1;
     uint32_t tx_callback_delay_us = 0; // extra delay before the TX-done callback
@@ -71,6 +90,12 @@ class World {
     void schedule_job_completion(uint16_t node, uint64_t at_us, uint32_t node_epoch,
                                  uint16_t table_index, uint32_t job_id, port::JobFn fn, void *arg);
     uint64_t random_u64() { return rng_(); }
+
+    // Trace: capacity 0 disables it. When full the oldest entries are overwritten (counted).
+    void trace_enable(std::size_t capacity);
+    [[nodiscard]] std::vector<TraceEntry> trace() const; // oldest first
+    [[nodiscard]] uint64_t trace_overwritten() const { return trace_overwritten_; }
+    void trace_add(TraceKind kind, uint16_t node, std::size_t len, uint32_t a, uint32_t b);
     [[nodiscard]] int find_node_by_mac(const MacAddr &mac) const;
 
   private:
@@ -105,6 +130,10 @@ class World {
     std::vector<std::unique_ptr<SimNode>> nodes_;
     std::vector<LinkParams> links_; // n*n, symmetric
     std::priority_queue<Event, std::vector<Event>, Later> events_;
+    std::vector<TraceEntry> trace_;
+    std::size_t trace_capacity_ = 0;
+    std::size_t trace_head_ = 0; // next slot to write once the ring is full
+    uint64_t trace_overwritten_ = 0;
 };
 
 } // namespace lm::sim

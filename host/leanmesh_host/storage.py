@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import fcntl
+import logging
 import os
 import queue
 import sqlite3
@@ -20,12 +21,17 @@ from pathlib import Path
 from typing import TypeVar
 
 T = TypeVar("T")
+log = logging.getLogger(__name__)
 
 _SENTINEL = object()
 
 
 class StorageBusy(RuntimeError):
     """The storage queue is full; the request was not accepted."""
+
+
+class StorageFull(RuntimeError):
+    """SQLite reported SQLITE_FULL (disk or page budget). The transaction was rolled back."""
 
 
 class StorageFault(RuntimeError):
@@ -36,7 +42,9 @@ class StorageFault(RuntimeError):
 
 
 class StorageThread:
-    def __init__(self, db_path: Path, schema_path: Path, max_queue: int = 256) -> None:
+    def __init__(self, db_path: Path, schema_path: Path, max_queue: int = 256,
+                 max_page_count: int | None = None) -> None:
+        self._max_page_count = max_page_count
         self._db_path = db_path
         self._schema_path = schema_path
         self._queue: queue.Queue[object] = queue.Queue(maxsize=max_queue)
@@ -45,6 +53,15 @@ class StorageThread:
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
         self.journal_id: bytes = b""
+        # Runs on the storage thread right after COMMIT (never inside a transaction).
+        self.after_commit: Callable[[sqlite3.Connection], None] | None = None
+        # Test seam: hook(stage, fn_name) with stage "before_commit"/"after_commit". Crash tests
+        # use it to kill the process at a transaction boundary; production leaves it None.
+        self.fault_hook: Callable[[str, str], None] | None = None
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
 
     # ---- lifecycle -------------------------------------------------------------------------
     def start(self) -> None:
@@ -87,6 +104,8 @@ class StorageThread:
     def _run(self) -> None:
         try:
             conn = _open(self._db_path, self._schema_path)
+            if self._max_page_count is not None:
+                conn.execute(f"PRAGMA max_page_count={int(self._max_page_count)}")
             self.journal_id = _journal_id(conn)
         except (sqlite3.Error, StorageFault, OSError) as exc:
             self._start_error = exc
@@ -101,16 +120,7 @@ class StorageThread:
                 fn, fut = item  # type: ignore[misc]
                 if not fut.set_running_or_notify_cancel():
                     continue
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    result = fn(conn)
-                    conn.execute("COMMIT")
-                except BaseException as exc:  # the transaction must end either way
-                    if conn.in_transaction:
-                        conn.execute("ROLLBACK")
-                    fut.set_exception(exc)
-                else:
-                    fut.set_result(result)
+                self._run_one(conn, fn, fut)
         finally:
             # Safe checkpoint on shutdown (docs/11 §6); failures are left to the next start.
             try:
@@ -118,10 +128,45 @@ class StorageThread:
             finally:
                 conn.close()
 
+    def _run_one(self, conn: sqlite3.Connection, fn: Callable[[sqlite3.Connection], T],
+                 fut: concurrent.futures.Future[T]) -> None:
+        """One transaction: BEGIN IMMEDIATE, fn, COMMIT. The future completes only after COMMIT."""
+        name = getattr(fn, "__name__", "")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            result = fn(conn)
+            if self.fault_hook:
+                self.fault_hook("before_commit", name)
+            conn.execute("COMMIT")
+        except BaseException as exc:  # the transaction must end either way
+            _rollback(conn)
+            full = isinstance(exc, sqlite3.Error) and (
+                getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_FULL)
+            fut.set_exception(StorageFull(str(exc)) if full else exc)
+            return
+        if self.fault_hook:
+            self.fault_hook("after_commit", name)
+        if self.after_commit:
+            try:
+                self.after_commit(conn)
+            except (sqlite3.Error, OSError) as exc:
+                # The rollback floor is a best-effort sidecar; the commit itself is durable.
+                log.warning("post-commit hook failed: %s", exc)
+        fut.set_result(result)
+
     def _release_lock(self) -> None:
         if self._lock_fd is not None:
             os.close(self._lock_fd)
             self._lock_fd = None
+
+
+def _rollback(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            conn.close()  # cannot end the transaction: fail the thread rather than continue dirty
+            raise
 
 
 def _acquire_singleton_lock(db_path: Path) -> int:

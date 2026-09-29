@@ -6,7 +6,8 @@ get_filename_component(LM_COMPONENT_REPO "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOL
 
 if(CMAKE_BUILD_EARLY_EXPANSION)
     # Requirement scan (script mode): declare dependencies only, generate nothing.
-    idf_component_register(PRIV_REQUIRES mbedtls esp_timer esp_system)
+    idf_component_register(PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash esp_partition esp_wifi esp_event
+                  esp_netif freertos)
     return()
 endif()
 
@@ -36,7 +37,8 @@ idf_component_register(
     INCLUDE_DIRS "${LM_COMPONENT_REPO}/api"
     PRIV_INCLUDE_DIRS "${LM_COMPONENT_REPO}/src" "${lm_gen}" ${LM_EDHOC_PUBLIC_INCLUDE}
                       ${LM_EDHOC_PRIVATE_INCLUDE}
-    PRIV_REQUIRES mbedtls esp_timer esp_system)
+    PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash esp_partition esp_wifi esp_event
+                  esp_netif freertos)
 
 set_source_files_properties(${LM_EDHOC_SOURCES} PROPERTIES COMPILE_OPTIONS "${LM_EDHOC_OPTIONS}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_BUILD_PROFILE_${lm_profile}

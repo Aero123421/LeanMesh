@@ -19,6 +19,15 @@ class Settings:
     tokens_path: Path
     schema_path: Path
     serial_device: str | None = None
+    # Capacity (docs/11 §7). Tests shrink these to reach the limits with a few requests.
+    max_events: int = 1_000_000
+    event_margin: int = 1000  # progress events of already accepted operations may exceed max_events
+    max_open_operations: int = 4096
+    max_db_bytes: int = 1 << 30
+    free_reserve_bytes: int = 128 << 20
+    event_retention_ms: int = 7 * 24 * 3600 * 1000  # acknowledged events are kept this long
+    max_page_count: int | None = None  # SQLite hard page limit (real SQLITE_FULL in tests)
+    max_subscribers: int = 64  # long-poll waiters + SSE streams
 
     @staticmethod
     def from_env() -> Settings:

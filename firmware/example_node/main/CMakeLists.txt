@@ -1,1 +1,1 @@
-idf_component_register(SRCS "main.c" REQUIRES esp_wifi esp_netif esp_event nvs_flash leanmesh)
+idf_component_register(SRCS "main.c" REQUIRES nvs_flash log heap leanmesh)

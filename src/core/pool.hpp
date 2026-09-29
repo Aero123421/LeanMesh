@@ -64,6 +64,10 @@ template <class T, std::size_t N> class Pool {
     [[nodiscard]] bool valid(Handle h) const {
         return h.index < N && used_[h.index] && generation_[h.index] == h.generation;
     }
+    // Handle that would address slot i right now; get() of it is nullptr while the slot is free.
+    [[nodiscard]] Handle handle_at(std::size_t i) const {
+        return Handle{static_cast<uint16_t>(i), generation_[i]};
+    }
     [[nodiscard]] std::size_t in_use() const { return in_use_; }
     static constexpr std::size_t capacity() { return N; }
 

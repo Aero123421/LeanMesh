@@ -81,6 +81,37 @@ uint64_t World::airtime_us(std::size_t bytes) {
 
 bool World::lost(uint16_t permille) { return permille > 0 && (rng_() % 1000U) < permille; }
 
+void World::trace_enable(std::size_t capacity) {
+    trace_.clear();
+    trace_.shrink_to_fit();
+    trace_capacity_ = capacity;
+    trace_head_ = 0;
+    trace_overwritten_ = 0;
+    trace_.reserve(capacity);
+}
+
+void World::trace_add(TraceKind kind, uint16_t node, std::size_t len, uint32_t a, uint32_t b) {
+    if (trace_capacity_ == 0) {
+        return;
+    }
+    const TraceEntry e{now_us_, node, kind, static_cast<uint16_t>(len), a, b};
+    if (trace_.size() < trace_capacity_) {
+        trace_.push_back(e);
+        return;
+    }
+    trace_[trace_head_] = e;
+    trace_head_ = (trace_head_ + 1) % trace_capacity_;
+    ++trace_overwritten_;
+}
+
+std::vector<TraceEntry> World::trace() const {
+    std::vector<TraceEntry> out(trace_.begin() + static_cast<std::ptrdiff_t>(trace_head_),
+                                trace_.end());
+    out.insert(out.end(), trace_.begin(),
+               trace_.begin() + static_cast<std::ptrdiff_t>(trace_head_));
+    return out;
+}
+
 void World::push(Event ev) {
     ev.seq = seq_++;
     events_.push(ev);
@@ -102,6 +133,9 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
         rx.radio.rx.bytes[i] = frame[i];
     }
 
+    const int dst_node = dst.is_broadcast() ? -1 : find_node_by_mac(dst);
+    trace_add(TraceKind::Tx, from, frame.size(), dst_node < 0 ? 0xFFFFU : static_cast<uint32_t>(dst_node),
+              token.sequence);
     bool acked = dst.is_broadcast(); // ESP-NOW broadcast completes without a MAC ACK
     for (uint16_t j = 0; j < nodes_.size(); ++j) {
         if (j == from) {
@@ -114,7 +148,12 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
         }
         const LinkParams &lp = link(from, j);
         if (!lp.up || !r.powered() || !r.radio.receiving() ||
-            r.radio.channel() != sender.radio.channel() || lost(lp.loss_permille)) {
+            r.radio.channel() != sender.radio.channel()) {
+            trace_add(TraceKind::Lost, j, frame.size(), 2, token.sequence);
+            continue;
+        }
+        if (lost(lp.loss_permille)) {
+            trace_add(TraceKind::Lost, j, frame.size(), 1, token.sequence);
             continue;
         }
         rx.node = j;
@@ -130,8 +169,8 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
     done.kind = EventKind::TxDone;
     done.node = from;
     done.node_epoch = sender.epoch();
-    done.at_us =
-        now_us_ + air + (dst.is_broadcast() ? 0 : k_mac_ack_us) + opts_.tx_callback_delay_us;
+    done.at_us = now_us_ + air + (dst.is_broadcast() ? 0 : k_mac_ack_us) +
+                 opts_.tx_callback_delay_us + sender.radio.tx_callback_delay_us;
     done.radio.kind = port::RadioEvent::Kind::TxDone;
     done.radio.done.token = token;
     done.radio.done.result = acked ? port::TxResult::MacAcked : port::TxResult::MacFailed;
@@ -149,6 +188,7 @@ void World::inject(const MacAddr &from_mac, uint16_t via, const MacAddr &dst, By
     for (std::size_t i = 0; i < rx.radio.rx.len; ++i) {
         rx.radio.rx.bytes[i] = frame[i];
     }
+    trace_add(TraceKind::Inject, via, rx.radio.rx.len, via, 0);
     for (uint16_t j = 0; j < nodes_.size(); ++j) {
         if (j != via && (dst.is_broadcast() || nodes_[j]->radio.mac() == dst) && link(via, j).up) {
             rx.node = j;
@@ -213,6 +253,7 @@ void World::dispatch(const Event &ev) {
         if (!n.powered()) {
             return;
         }
+        trace_add(TraceKind::Rx, ev.node, ev.radio.rx.len, static_cast<uint32_t>(find_node_by_mac(ev.radio.rx.src)), 0);
         port::RadioEvent re = ev.radio;
         re.rx.at = n.clock.now();
         n.radio.deliver(re);
@@ -223,6 +264,7 @@ void World::dispatch(const Event &ev) {
         if (!n.powered() || n.epoch() != ev.node_epoch) {
             return;
         }
+        trace_add(TraceKind::TxDone, ev.node, 0, static_cast<uint32_t>(ev.radio.done.result), ev.radio.done.token.sequence);
         port::RadioEvent re = ev.radio;
         re.done.at = n.clock.now();
         n.radio.deliver(re);

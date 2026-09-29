@@ -15,8 +15,19 @@ namespace lm::sim {
 
 class World;
 
+// SIMULATION ONLY: an "approved" profile without any compliance record. Firmware refuses to start
+// the radio until a real deployment approval exists (Kconfig, docs/03 §3).
+inline port::RfProfile sim_rf_profile(uint8_t channel = 6) {
+    port::RfProfile p;
+    p.deployment_approved = true;
+    p.channel = channel;
+    p.allowed_channels_mask = static_cast<uint16_t>((1U << 1) | (1U << 6) | (1U << 11));
+    return p;
+}
+
 struct NodeOptions {
     Role role = Role::Leaf;
+    port::RfProfile rf = sim_rf_profile();
     int32_t clock_drift_ppm = 0;
     StoreGeometry store;
     bool object_transfer_enabled = false;

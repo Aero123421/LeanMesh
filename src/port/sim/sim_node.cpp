@@ -33,7 +33,7 @@ Status SimNode::boot() {
     void *at = workspace_.get() + (aligned - base);
     clock.on_boot(world_.now_us());
     jobs.set_epoch(epoch_);
-    LM_TRY(capi::init_context(at, ws.bytes, &cfg, Ports{clock, radio, jobs}, owner_call, &ctx_));
+    LM_TRY(capi::init_context(at, ws.bytes, &cfg, Ports{clock, radio, jobs}, owner_call, opts_.rf, &ctx_));
     notify();
     return Status::Ok;
 }

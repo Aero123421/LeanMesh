@@ -1,14 +1,14 @@
 /*
  * LeanMesh SDK-linked sample (docs/16 "SDKをlinkした同一サンプル").
- * Same radio bring-up as firmware/baseline_espnow, then the public C API. Only entry points that
- * are implemented in this build are called; the sample grows as slices land (lm_init/lm_start
- * replace the manual bring-up once the IDF port owns the radio).
+ * The SDK's IDF port now owns the radio bring-up that firmware/baseline_espnow does by hand
+ * (netif, Wi-Fi STA, ESP-NOW LR250, callbacks). The sample keeps NVS init, then calls the public C
+ * API: lm_init (builds the context, starts the owner and worker tasks, no RF), lm_start (radio up).
+ *
+ * Only entry points implemented in this build are called. With the default Kconfig the RF profile
+ * is NOT approved, so lm_start reports RF_PROFILE_UNAPPROVED and the radio stays off (docs/03 §3).
  */
-#include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_netif.h"
-#include "esp_now.h"
-#include "esp_wifi.h"
 #include "leanmesh.h"
 #include "nvs_flash.h"
 
@@ -20,15 +20,9 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(err);
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_now_init());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "default nvs partition unavailable: %s", esp_err_to_name(err));
+    }
 
     lm_config_t config;
     lm_workspace_size_t ws;
@@ -42,4 +36,24 @@ void app_main(void) {
     }
     ESP_LOGI(TAG, "leanmesh workspace: %u bytes, align %u", (unsigned)ws.bytes,
              (unsigned)ws.alignment);
+    void *workspace = heap_caps_aligned_alloc(ws.alignment, ws.bytes, MALLOC_CAP_INTERNAL);
+    if (workspace == NULL) {
+        ESP_LOGE(TAG, "workspace allocation failed");
+        return;
+    }
+    lm_context_t *ctx = NULL;
+    st = lm_init(workspace, ws.bytes, &config, &ctx);
+    if (st != LM_STATUS_OK) {
+        ESP_LOGE(TAG, "lm_init failed: %u", (unsigned)st);
+        return;
+    }
+    st = lm_start(ctx);
+    if (st != LM_STATUS_OK) {
+        ESP_LOGE(TAG, "lm_start refused: %u (13 = RF profile unapproved)", (unsigned)st);
+        return;
+    }
+    lm_event_t ev = {.struct_size = sizeof ev, .abi_version = LM_ABI_VERSION};
+    if (lm_next_event(ctx, &ev, NULL, 0, NULL) == LM_STATUS_OK) {
+        ESP_LOGI(TAG, "event kind %u", (unsigned)ev.kind);
+    }
 }

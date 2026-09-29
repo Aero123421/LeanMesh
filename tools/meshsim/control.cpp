@@ -10,10 +10,6 @@
 
 namespace meshsim {
 
-namespace {
-
-using Args = std::vector<std::string>;
-
 std::string error(const std::string &msg) { return "{\"ok\":false,\"error\":\"" + msg + "\"}"; }
 
 bool parse_u64(const std::string &s, uint64_t &out) {
@@ -33,6 +29,8 @@ bool parse_node(Sim &sim, const std::string &s, uint16_t &out) {
     out = static_cast<uint16_t>(v);
     return true;
 }
+
+namespace {
 
 std::string cmd_status(Sim &sim, const Args &) {
     char buf[256];
@@ -68,17 +66,28 @@ std::string cmd_node(Sim &sim, const Args &a) {
     if (e != nullptr) {
         s = e->stats();
     }
-    char buf[512];
+    lm::TxStats tx{};
+    const char *radio_state = "off";
+    if (e != nullptr) {
+        tx = e->tx().stats();
+        static const char *const k_names[] = {"stopped", "running", "recovering", "faulted"};
+        radio_state = k_names[static_cast<unsigned>(e->radio_state())];
+    }
+    char buf[1024];
     std::snprintf(
         buf, sizeof buf,
         "{\"ok\":true,\"node\":%u,\"powered\":%s,\"epoch\":%u,\"role\":%u,\"steps\":%" PRIu64
         ",\"commands\":%" PRIu64 ",\"rx_frames\":%" PRIu64 ",\"rx_unhandled\":%" PRIu64
         ",\"tx_done_unmatched\":%" PRIu64 ",\"stale_job_completions\":%" PRIu64
-        ",\"radio_on\":%s,\"radio_rx_dropped\":%u,\"store_slot_writes\":%" PRIu64 "}",
+        ",\"radio_on\":%s,\"radio_rx_dropped\":%u,\"store_slot_writes\":%" PRIu64
+        ",\"radio_state\":\"%s\",\"radio_restarts\":%" PRIu64 ",\"tx_started\":%" PRIu64
+        ",\"tx_mac_acked\":%" PRIu64 ",\"tx_rf_failed\":%" PRIu64 ",\"tx_unknown\":%" PRIu64
+        ",\"tx_local_refused\":%" PRIu64 ",\"peers\":%zu}",
         i, n.powered() ? "true" : "false", n.epoch(), static_cast<unsigned>(n.options().role),
         s.steps, s.commands, s.rx_frames, s.rx_unhandled, s.tx_done_unmatched,
         s.stale_job_completions, n.radio.receiving() ? "true" : "false", n.radio.rx_dropped(),
-        n.store.slot_writes());
+        n.store.slot_writes(), radio_state, s.radio_restarts, tx.started, tx.mac_acked,
+        tx.rf_failed, tx.unknown, tx.local_refused, n.radio.peer_count());
     return buf;
 }
 
@@ -158,6 +167,8 @@ struct Entry {
 const Entry k_commands[] = {
     {"status", cmd_status},       {"run", cmd_run},   {"node", cmd_node},     {"link", cmd_link},
     {"power-cut", cmd_power_cut}, {"boot", cmd_boot}, {"serial", cmd_serial}, {"quit", cmd_quit},
+    {"start", cmd_start},         {"stop", cmd_stop}, {"inject", cmd_inject}, {"rawtx", cmd_rawtx},
+    {"cb-delay", cmd_cb_delay},   {"trace", cmd_trace},
 };
 
 } // namespace

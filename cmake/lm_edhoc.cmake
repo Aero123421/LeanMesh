@@ -22,16 +22,17 @@ function(lm_edhoc_collect config_dir)
     if(NOT EXISTS "${LM_EDHOC_ROOT}/cmake/sources.cmake")
         message(FATAL_ERROR "libedhoc checkout incomplete; run scripts/third_party.sh setup")
     endif()
-    # LeanMesh configuration. Buffer limits stay at upstream values until T03 sizes them for
-    # suite 3 and measures worker stack (docs/16 crypto scratch budget).
+    # LeanMesh configuration, sized for suite 3 (T03): P-256 x-only G_X/G_Y are 32 B and the only
+    # MAC-sized buffer is the SHA-256 transcript hash. Two suite slots exist only so the RFC 9529
+    # trace (SUITES_I = [6, 2]) can be replayed in tests; the product offers suite 3 alone.
     set(CONFIG_LIBEDHOC_ENABLE 1)
     set(CONFIG_LIBEDHOC_KEY_ID_LEN 4)                 # psa_key_id_t handle
-    set(CONFIG_LIBEDHOC_MAX_NR_OF_CIPHER_SUITES 1)    # suite 3 only
+    set(CONFIG_LIBEDHOC_MAX_NR_OF_CIPHER_SUITES 2)    # product: suite 3 only (see above)
     set(CONFIG_LIBEDHOC_MAX_NR_OF_METHODS 1)          # method 0 only
     set(CONFIG_LIBEDHOC_MAX_LEN_OF_CONN_ID 7)
-    set(CONFIG_LIBEDHOC_MAX_LEN_OF_KEM_ENCAPSULATION_KEY 800)
-    set(CONFIG_LIBEDHOC_MAX_LEN_OF_KEM_CIPHERTEXT 768)
-    set(CONFIG_LIBEDHOC_MAX_LEN_OF_MAC 64)
+    set(CONFIG_LIBEDHOC_MAX_LEN_OF_KEM_ENCAPSULATION_KEY 32)
+    set(CONFIG_LIBEDHOC_MAX_LEN_OF_KEM_CIPHERTEXT 32)
+    set(CONFIG_LIBEDHOC_MAX_LEN_OF_MAC 32)
     set(CONFIG_LIBEDHOC_MAX_NR_OF_EAD_TOKENS 3)
     set(CONFIG_LIBEDHOC_MAX_LEN_OF_CRED_KEY_ID 32)    # kid = full DeviceId (docs/06 §4)
     set(CONFIG_LIBEDHOC_MAX_NR_OF_CERTS_IN_X509_CHAIN 1)
@@ -51,5 +52,12 @@ function(lm_edhoc_collect config_dir)
                                  "${LIBEDHOC_BACKEND_MEM_INCLUDE_DIR}" "${LIBEDHOC_BACKEND_LOG_INCLUDE_DIR}"
                                  "${LIBEDHOC_ZCBOR_INCLUDE_DIR}" PARENT_SCOPE)
     set(LM_EDHOC_DEFINITIONS ${LIBEDHOC_ZCBOR_COMPILE_DEFINITIONS} PARENT_SCOPE)
-    set(LM_EDHOC_OPTIONS -fno-strict-aliasing -Wno-error PARENT_SCOPE)
+    set(_lm_edhoc_options -fno-strict-aliasing -Wno-error)
+    if(LM_SANITIZE)
+        # zcbor's str_encode() calls memmove(dst, NULL, 0) for an empty external_aad. Benign on the
+        # supported libcs and left unpatched (THIRD-PARTY-LICENSES.md, T03 decision); silenced for
+        # vendor code only so that sanitizer output of first-party code stays meaningful.
+        list(APPEND _lm_edhoc_options -fno-sanitize=nonnull-attribute)
+    endif()
+    set(LM_EDHOC_OPTIONS ${_lm_edhoc_options} PARENT_SCOPE)
 endfunction()

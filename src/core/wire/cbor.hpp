@@ -2,7 +2,7 @@
 // definite lengths only, no floats. Maps must be written with keys already in bytewise
 // lexicographic order of their encodings; the writer does not reorder. Errors are sticky
 // (NoCapacity on overflow). The strict decoder (duplicate keys, ordering, trailing bytes, UTF-8,
-// depth) belongs to the wire slice and lives next to this file.
+// depth) is in cbor_reader.hpp.
 #pragma once
 
 #include <cstddef>
@@ -37,11 +37,15 @@ class CborWriter {
         head(3, utf8.size());
         w_.bytes(utf8);
     }
+    // Head of a byte string of length n; the n content bytes follow via raw() or the caller.
+    void bytes_head(std::size_t n) { head(2, n); }
     void array(std::size_t n) { head(4, n); }
     void map(std::size_t n) { head(5, n); }
     void tag(uint64_t t) { head(6, t); }
     void boolean(bool v) { w_.u8(v ? 0xF5 : 0xF4); }
     void null() { w_.u8(0xF6); }
+    // Appends an already-encoded deterministic item (caller-validated).
+    void raw(ByteView encoded) { w_.bytes(encoded); }
 
     [[nodiscard]] Status finish() const { return w_.finish(); }
     [[nodiscard]] ByteView written() const { return w_.written(); }

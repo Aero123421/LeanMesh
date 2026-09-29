@@ -34,6 +34,7 @@ namespace lm::capi {
 // Platform-independent construction used by lm_init (IDF) and by meshsim/native tests, which
 // supply their own ports and owner-call mechanism.
 [[nodiscard]] Status init_context(void *workspace, std::size_t bytes, const lm_config_t *config,
-                                  Ports ports, OwnerCall &owner_call, lm_context_t **out);
+                                  Ports ports, OwnerCall &owner_call, const port::RfProfile &rf,
+                                  lm_context_t **out);
 
 } // namespace lm::capi

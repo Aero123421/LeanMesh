@@ -16,4 +16,32 @@ menu "LeanMesh"
             bool "root"
     endchoice
 
+    menu "RF profile (docs/03 section 3)"
+        config LEANMESH_RF_DEPLOYMENT_APPROVED
+            bool "RF profile has a recorded deployment approval"
+            default n
+            help
+                lm_start refuses to bring the radio up (RF_PROFILE_UNAPPROVED) unless this is set
+                by a product build that holds a compliance record for country, board, antenna
+                and channel set. Setting the country code is not a compliance statement.
+
+        config LEANMESH_RF_COUNTRY
+            string "Country code (2 letters)"
+            default "JP"
+
+        config LEANMESH_RF_CHANNEL
+            int "Initial channel (1..13)"
+            range 1 13
+            default 1
+
+        config LEANMESH_RF_ALLOWED_CHANNELS_MASK
+            hex "Allowed channels, bit c = channel c"
+            default 0x3FFE
+
+        config LEANMESH_RF_TX_POWER_QDBM
+            int "Maximum TX power in quarter dBm (8..84)"
+            range 8 84
+            default 40
+    endmenu
+
 endmenu

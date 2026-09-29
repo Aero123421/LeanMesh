@@ -13,6 +13,9 @@
 
 static const char *TAG = "lm_crypto_check";
 
+/* src/security/link_check.cpp: keys, COSE, full EDHOC handshake and records through the job bodies. */
+extern int lm_security_link_check(void);
+
 static int sha256_abc(void) {
     static const uint8_t expect[32] = {0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
                                        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
@@ -48,6 +51,7 @@ void app_main(void) {
     const int init = psa_crypto_init() == PSA_SUCCESS ? 0 : -1;
     const int sha = init == 0 ? sha256_abc() : -1;
     const int edhoc = edhoc_init_deinit();
-    ESP_LOGI(TAG, "psa_init=%d sha256_kat=%d edhoc_ctx=%d (context %u bytes)", init, sha, edhoc,
-             (unsigned)edhoc_context_size());
+    const int security = init == 0 ? lm_security_link_check() : -1;
+    ESP_LOGI(TAG, "psa_init=%d sha256_kat=%d edhoc_ctx=%d (context %u bytes) security_loopback=%d", init,
+             sha, edhoc, (unsigned)edhoc_context_size(), security);
 }

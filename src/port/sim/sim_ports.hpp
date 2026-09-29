@@ -53,6 +53,18 @@ class SimRadio final : public port::Radio {
     void power_cut();
     [[nodiscard]] uint32_t rx_dropped() const { return ring_.dropped(); }
     [[nodiscard]] std::size_t peer_count() const { return peer_count_; }
+    [[nodiscard]] std::size_t peak_peer_count() const { return peak_peers_; }
+    [[nodiscard]] uint32_t tx_done_dropped() const { return done_ring_.dropped(); }
+
+    // --- fault injection (test bench only) ---
+    // Extra delay before this node's TX-done callback (models a slow Wi-Fi task, docs/03 §4).
+    uint32_t tx_callback_delay_us = 0;
+    // The next `tx_fault_count` transmit() calls fail locally with `tx_fault` (Busy = driver BUSY,
+    // NoCapacity = NO_MEM). No frame leaves the node and no TX-done follows: never RF loss.
+    Status tx_fault = Status::Busy;
+    uint32_t tx_fault_count = 0;
+    // The next `start_fault_count` start() calls fail (driver re-initialisation problems).
+    uint32_t start_fault_count = 0;
 
   private:
     [[nodiscard]] bool has_peer(const MacAddr &mac) const;
@@ -67,7 +79,11 @@ class SimRadio final : public port::Radio {
     uint32_t driver_generation_ = 1;
     std::array<MacAddr, k_max_peers> peers_{};
     std::size_t peer_count_ = 0;
-    SpscRing<port::RadioEvent, k_rx_ring> ring_;
+    std::size_t peak_peers_ = 0;
+    // Like the IDF port: RX frames and the (single) TX completion travel in separate rings so a
+    // burst of RX can never push the TX-done out.
+    SpscRing<port::RadioRx, k_rx_ring> ring_;
+    SpscRing<port::RadioTxDone, 2> done_ring_;
 };
 
 class SimJobs final : public port::Jobs {

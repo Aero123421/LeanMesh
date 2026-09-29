@@ -51,7 +51,7 @@ Status validate_config(const lm_config_t *config) {
 }
 
 Status init_context(void *workspace, std::size_t bytes, const lm_config_t *config, Ports ports,
-                    OwnerCall &owner_call, lm_context_t **out) {
+                    OwnerCall &owner_call, const port::RfProfile &rf, lm_context_t **out) {
     if (workspace == nullptr || out == nullptr) {
         return Status::InvalidArgument;
     }
@@ -64,6 +64,7 @@ Status init_context(void *workspace, std::size_t bytes, const lm_config_t *confi
     cfg.role = static_cast<Role>(config->role);
     cfg.object_transfer_enabled = config->object_transfer_enabled != 0;
     cfg.application_event_slots = config->application_event_slots;
+    cfg.rf = rf;
     *out = new (workspace) lm_context(cfg, ports, owner_call);
     return Status::Ok;
 }
@@ -101,6 +102,49 @@ lm_status_t lm_workspace_required(const lm_config_t *config, lm_workspace_size_t
     out->bytes = sizeof(lm_context);
     out->alignment = alignof(lm_context);
     return to_abi(Status::Ok);
+}
+
+// lm_init lives in the platform port (src/port/idf): it owns the tasks the context runs on.
+
+lm_status_t lm_start(lm_context_t *ctx) {
+    if (!lm::capi::valid_ctx(ctx)) {
+        return to_abi(Status::InvalidArgument);
+    }
+    return to_abi(lm::capi::run(ctx, lm::CommandKind::Start, nullptr, 0));
+}
+
+// Decision: without pending operations stop completes inside the call; *operation is then 0,
+// which is not a valid operation id (delivery slices return a real drain operation).
+lm_status_t lm_stop(lm_context_t *ctx, uint32_t /*drain_ms*/, lm_operation_id_t *operation) {
+    if (!lm::capi::valid_ctx(ctx)) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status s = lm::capi::run(ctx, lm::CommandKind::Stop, nullptr, 0);
+    if (s == Status::Ok && operation != nullptr) {
+        *operation = 0;
+    }
+    return to_abi(s);
+}
+
+// Payload-carrying events arrive with the delivery slice; until then payload_bytes is always 0.
+lm_status_t lm_next_event(lm_context_t *ctx, lm_event_t *out, uint8_t * /*payload*/,
+                          size_t /*capacity*/, size_t *required) {
+    if (!lm::capi::valid_ctx(ctx) || out == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status a = lm::capi::check_abi(out->struct_size, out->abi_version, sizeof(*out));
+    if (a != Status::Ok) {
+        return to_abi(a);
+    }
+    lm_event_t ev{};
+    const Status s = lm::capi::run(ctx, lm::CommandKind::NextEvent, &ev, sizeof(ev));
+    if (s == Status::Ok) {
+        *out = ev;
+        if (required != nullptr) {
+            *required = ev.payload_bytes;
+        }
+    }
+    return to_abi(s);
 }
 
 lm_status_t lm_get_capabilities(lm_context_t *ctx, lm_capabilities_t *out) {

@@ -38,6 +38,11 @@ struct Fixture {
     World world;
 };
 
+// Token of the sender's current driver instance (radio.start() bumps the generation).
+port::TxToken tok(Fixture &fx, uint32_t seq, uint16_t node = 0) {
+    return port::TxToken{fx.world.node(node).radio.driver_generation(), seq};
+}
+
 std::array<uint8_t, 8> frame() { return {'L', 'M', 1, 1, 0, 0, 0, 0}; }
 
 } // namespace
@@ -118,10 +123,10 @@ LM_TEST("unicast reaches the addressed neighbour through the owner RX path") {
     const auto f = frame();
     LM_CHECK_OK(fx.world.node(0).radio.add_peer(fx.world.node(1).radio.mac()));
     LM_CHECK_OK(fx.world.node(0).radio.transmit(fx.world.node(1).radio.mac(), ByteView{f},
-                                                port::TxToken{1, 1}));
+                                                tok(fx, 1)));
     // One physical TX in flight.
     LM_CHECK(fx.world.node(0).radio.transmit(fx.world.node(1).radio.mac(), ByteView{f},
-                                             port::TxToken{1, 2}) == Status::Busy);
+                                             tok(fx, 2)) == Status::Busy);
     fx.world.run_until(100'000);
     LM_CHECK_EQ(fx.stats(1).rx_frames, 1u);
     LM_CHECK_EQ(fx.stats(2).rx_frames, 0u);         // not addressed
@@ -133,13 +138,13 @@ LM_TEST("allowlist topology: no link, no delivery; broadcast reaches linked neig
     const auto f = frame();
     LM_CHECK_OK(fx.world.node(1).radio.add_peer(MacAddr::broadcast()));
     LM_CHECK_OK(
-        fx.world.node(1).radio.transmit(MacAddr::broadcast(), ByteView{f}, port::TxToken{1, 1}));
+        fx.world.node(1).radio.transmit(MacAddr::broadcast(), ByteView{f}, tok(fx, 1, 1)));
     fx.world.run_until(100'000);
     LM_CHECK_EQ(fx.stats(0).rx_frames, 1u);
     LM_CHECK_EQ(fx.stats(2).rx_frames, 1u);
     LM_CHECK_OK(fx.world.node(0).radio.add_peer(fx.world.node(2).radio.mac()));
     LM_CHECK_OK(fx.world.node(0).radio.transmit(fx.world.node(2).radio.mac(), ByteView{f},
-                                                port::TxToken{1, 2}));
+                                                tok(fx, 2)));
     fx.world.run_until(200'000);
     LM_CHECK_EQ(fx.stats(2).rx_frames, 1u); // 0 and 2 are not neighbours in the chain
 }
@@ -150,7 +155,7 @@ LM_TEST("channel mismatch and radio off are not delivered") {
     LM_CHECK_OK(fx.world.node(1).radio.set_channel(11));
     LM_CHECK_OK(fx.world.node(0).radio.add_peer(fx.world.node(1).radio.mac()));
     LM_CHECK_OK(fx.world.node(0).radio.transmit(fx.world.node(1).radio.mac(), ByteView{f},
-                                                port::TxToken{1, 1}));
+                                                tok(fx, 1)));
     fx.world.run_until(100'000);
     LM_CHECK_EQ(fx.stats(1).rx_frames, 0u);
     LM_CHECK(fx.world.node(1).radio.set_channel(13) == Status::InvalidArgument); // not allowed
@@ -198,13 +203,13 @@ LM_TEST("loss and MAC-ACK loss are separate outcomes") {
     fx.world.set_link(0, 1, lp);
     LM_CHECK_OK(fx.world.node(0).radio.add_peer(fx.world.node(1).radio.mac()));
     LM_CHECK_OK(fx.world.node(0).radio.transmit(fx.world.node(1).radio.mac(), ByteView{f},
-                                                port::TxToken{1, 1}));
+                                                tok(fx, 1)));
     fx.world.run_until(100'000);
     LM_CHECK_EQ(fx.stats(1).rx_frames, 1u);
     lp.loss_permille = 1000;
     fx.world.set_link(0, 1, lp);
     LM_CHECK_OK(fx.world.node(0).radio.transmit(fx.world.node(1).radio.mac(), ByteView{f},
-                                                port::TxToken{1, 2}));
+                                                tok(fx, 2)));
     fx.world.run_until(200'000);
     LM_CHECK_EQ(fx.stats(1).rx_frames, 1u);
 }

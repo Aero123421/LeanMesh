@@ -17,6 +17,7 @@ namespace lm {
 enum class CommandKind : uint8_t {
     Start,
     Stop,
+    Destroy, // lm_destroy precondition: Ok only when stopped
     Send,
     SendObject,
     GetOperation,

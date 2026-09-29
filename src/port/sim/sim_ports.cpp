@@ -15,6 +15,10 @@ MonoTime SimClock::now() const {
 
 // ---- SimRadio ----------------------------------------------------------------------------------
 Status SimRadio::start(const port::RfProfile &profile) {
+    if (start_fault_count > 0) {
+        --start_fault_count;
+        return Status::RecoveryRequired;
+    }
     if (!profile.deployment_approved) {
         return Status::RfProfileUnapproved;
     }
@@ -26,12 +30,15 @@ Status SimRadio::start(const port::RfProfile &profile) {
     channel_ = profile.channel;
     ++driver_generation_; // a fresh driver instance: older callbacks never match
     tx_in_flight_ = false;
+    peer_count_ = 0; // a driver (re)initialisation starts with an empty peer table
     on_ = true;
     return Status::Ok;
 }
 
 Status SimRadio::stop() {
     on_ = false;
+    tx_in_flight_ = false;
+    peer_count_ = 0;
     return Status::Ok;
 }
 
@@ -53,6 +60,9 @@ bool SimRadio::has_peer(const MacAddr &mac) const {
 }
 
 Status SimRadio::add_peer(const MacAddr &mac) {
+    if (!on_) {
+        return Status::Conflict; // ESP_ERR_ESPNOW_NOT_INIT
+    }
     if (has_peer(mac)) {
         return Status::Ok;
     }
@@ -60,6 +70,7 @@ Status SimRadio::add_peer(const MacAddr &mac) {
         return Status::NoCapacity;
     }
     peers_[peer_count_++] = mac;
+    peak_peers_ = peak_peers_ > peer_count_ ? peak_peers_ : peer_count_;
     return Status::Ok;
 }
 
@@ -78,6 +89,10 @@ Status SimRadio::transmit(const MacAddr &dst, ByteView frame, port::TxToken toke
     if (!on_ || frame.empty() || frame.size() > port::k_max_frame_bytes) {
         return Status::InvalidArgument;
     }
+    if (tx_fault_count > 0) {
+        --tx_fault_count;
+        return tx_fault;
+    }
     if (tx_in_flight_) {
         return Status::Busy;
     }
@@ -89,15 +104,29 @@ Status SimRadio::transmit(const MacAddr &dst, ByteView frame, port::TxToken toke
     return Status::Ok;
 }
 
-bool SimRadio::poll(port::RadioEvent &out) { return ring_.pop(out); }
+bool SimRadio::poll(port::RadioEvent &out) {
+    if (done_ring_.pop(out.done)) {
+        out.kind = port::RadioEvent::Kind::TxDone;
+        return true;
+    }
+    if (ring_.pop(out.rx)) {
+        out.kind = port::RadioEvent::Kind::Rx;
+        return true;
+    }
+    return false;
+}
 
 void SimRadio::deliver(const port::RadioEvent &ev) {
     if (ev.kind == port::RadioEvent::Kind::TxDone) {
-        tx_in_flight_ = false;
-    } else if (!on_) {
-        return;
+        // A callback of an older driver instance still reaches the owner (worst case) but must not
+        // clear the in-flight state of the current one.
+        if (ev.done.token.driver_generation == driver_generation_) {
+            tx_in_flight_ = false;
+        }
+        (void)done_ring_.push(ev.done);
+    } else if (on_) {
+        (void)ring_.push(ev.rx); // overflow is counted by the ring (rx_dropped)
     }
-    (void)ring_.push(ev); // overflow is counted by the ring (rx_dropped)
 }
 
 void SimRadio::power_cut() {
@@ -105,8 +134,11 @@ void SimRadio::power_cut() {
     tx_in_flight_ = false;
     peer_count_ = 0;
     ++driver_generation_;
-    port::RadioEvent ev;
-    while (ring_.pop(ev)) {
+    port::RadioRx rx;
+    while (ring_.pop(rx)) {
+    }
+    port::RadioTxDone done;
+    while (done_ring_.pop(done)) {
     }
 }
 

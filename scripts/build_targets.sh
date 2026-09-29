@@ -60,7 +60,13 @@ for app in "${apps[@]}"; do
   done
 
   case "$app" in
-    baseline_espnow) out="$repo/build-records/T01-baseline-size.json" ;;
+    # The committed record is only rewritten by a full 4-target run; partial runs stay in $root.
+    baseline_espnow)
+      if [ "${targets[*]}" = "esp32s3 esp32c3 esp32c5 esp32c6" ]; then
+        out="$repo/build-records/T01-baseline-size.json"
+      else
+        out="$root/$app-size.json"
+      fi ;;
     *) out="$root/$app-size.json" ;;
   esac
   python3 - "$root/$app" "$out" "$head" "$app" "${targets[@]}" <<'PY'

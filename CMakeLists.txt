@@ -53,7 +53,7 @@ target_compile_definitions(lm_edhoc PRIVATE ${LM_EDHOC_DEFINITIONS})
 target_compile_options(lm_edhoc PRIVATE ${LM_EDHOC_OPTIONS})
 
 # ---- first-party SDK (same sources as the IDF component) ----
-set(LM_CXX_WARNINGS -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Werror)
+set(LM_CXX_WARNINGS -Wall -Wextra -Wshadow $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor> -Werror)
 add_library(lm_sdk STATIC ${LM_COMMON_SOURCES} ${LM_ROOT_SOURCES})
 target_include_directories(lm_sdk PUBLIC "${LM_REPO_ROOT}/api" "${LM_REPO_ROOT}/src" "${LM_GEN_DIR}")
 target_compile_definitions(lm_sdk PUBLIC LM_BUILD_PROFILE_SIM)
@@ -65,9 +65,17 @@ add_library(lm_sim STATIC ${LM_PORT_SIM_SOURCES})
 target_compile_options(lm_sim PRIVATE ${LM_CXX_WARNINGS} -fno-exceptions -fno-rtti)
 target_link_libraries(lm_sim PUBLIC lm_sdk)
 
-add_executable(meshsim tools/meshsim/main.cpp tools/meshsim/control.cpp tools/meshsim/pty.cpp)
+# One source per line: slices append their cmd_<slice>.cpp here.
+add_executable(meshsim
+    tools/meshsim/main.cpp
+    tools/meshsim/control.cpp
+    tools/meshsim/cmd_runtime.cpp
+    tools/meshsim/topology.cpp
+    tools/meshsim/pty.cpp)
 target_compile_options(meshsim PRIVATE ${LM_CXX_WARNINGS})
 target_link_libraries(meshsim PRIVATE lm_sim)
+
+add_subdirectory(tools/lmtool) # codec CLI for differential wire tests
 
 if(LM_BUILD_TESTS)
     enable_testing()

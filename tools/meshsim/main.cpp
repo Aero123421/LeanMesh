@@ -2,7 +2,7 @@
 // The root (node 0) serial port is a pty so the real FastAPI host can drive it end to end.
 // SIMULATION ONLY: results are protocol evidence, never RF/range/power/hardware evidence.
 //
-//   meshsim [--nodes N] [--topology chain|full|none] [--clock virtual|realtime] [--seed S]
+//   meshsim [--nodes N] [--topology chain|full|none] [--topology-file F] [--clock virtual|realtime] [--seed S]
 //           [--serial-pty] [--no-boot]
 #include <poll.h>
 #include <unistd.h>
@@ -26,13 +26,14 @@ struct Options {
     uint64_t seed = 1;
     bool serial_pty = false;
     bool boot = true;
+    std::string topology_file; // links on top of --topology (usually with `none`)
 };
 
 int usage() {
     std::fprintf(
         stderr,
-        "usage: meshsim [--nodes N] [--topology chain|full|none] [--clock virtual|realtime]\n"
-        "               [--seed S] [--serial-pty] [--no-boot]\n");
+        "usage: meshsim [--nodes N] [--topology chain|full|none] [--topology-file F]\n"
+        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--no-boot]\n");
     return 2;
 }
 
@@ -44,6 +45,8 @@ bool parse(int argc, char **argv, Options &o) {
             o.nodes = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 10));
         } else if (a == "--topology" && has_value) {
             o.topology = argv[++i];
+        } else if (a == "--topology-file" && has_value) {
+            o.topology_file = argv[++i];
         } else if (a == "--clock" && has_value) {
             const std::string v = argv[++i];
             if (v != "virtual" && v != "realtime") {
@@ -95,6 +98,13 @@ int main(int argc, char **argv) {
         world.make_chain();
     } else if (opt.topology == "full") {
         world.make_full();
+    }
+    if (!opt.topology_file.empty()) {
+        std::string err;
+        if (!meshsim::load_topology(world, opt.topology_file, err)) {
+            std::fprintf(stderr, "meshsim: %s\n", err.c_str());
+            return 1;
+        }
     }
     meshsim::Pty pty;
     if (opt.serial_pty && !pty.open()) {
