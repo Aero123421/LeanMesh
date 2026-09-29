@@ -10,7 +10,17 @@ bool live(const SessionKeys &s, MonoTime now) { return s.active && now < s.valid
 Neighbor *Neighbors::find_device(const DeviceId &d) {
     Neighbor *found = nullptr;
     table_.for_each([&](Handle, Neighbor &n) {
-        if (n.device == d) {
+        if (n.device == d && !n.join_only) {
+            found = &n;
+        }
+    });
+    return found;
+}
+
+Neighbor *Neighbors::find_join(const DeviceId &d) {
+    Neighbor *found = nullptr;
+    table_.for_each([&](Handle, Neighbor &n) {
+        if (n.device == d && n.join_only) {
             found = &n;
         }
     });
@@ -24,7 +34,7 @@ const Neighbor *Neighbors::find_device(const DeviceId &d) const {
 Neighbor *Neighbors::find_mac(const MacAddr &m) {
     Neighbor *found = nullptr;
     table_.for_each([&](Handle, Neighbor &n) {
-        if (n.mac == m) {
+        if (n.mac == m && !n.join_only) {
             found = &n;
         }
     });

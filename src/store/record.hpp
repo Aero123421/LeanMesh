@@ -83,6 +83,9 @@ struct RecordJob {
 [[nodiscard]] Status record_job(port::JobEnv &env, void *arg);
 
 // Boot incarnation: persisted (durable Ok) before the caller may use it (docs/12 §1, AGENTS.md).
+// A missing record is a virgin device only while no identity record exists. Provisioning MUST
+// commit rec::boot_incarnation (payload u64be(0)) before rec::identity; if the counter is missing
+// on a provisioned device the advance returns RecoveryRequired instead of restarting at 1.
 struct BootJob {
     RecordJob rec;
     uint64_t incarnation = 0; // out: new value, valid only when the job status is Ok

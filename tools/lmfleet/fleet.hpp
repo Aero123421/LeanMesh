@@ -57,6 +57,9 @@ class Fleet {
                  const Bytes &delegation_cose, uint64_t expected_old, uint64_t new_generation);
     // Generic signed object (negative tests build malformed ones with it).
     Bytes sign(const member::Envelope &env, ByteView data);
+    // Negative tests: body says `env.issuer`, the COSE kid is the fleet's real key id (sign1_create
+    // itself refuses a kid that is not the signer's, so this is the only way to build the lie).
+    Bytes sign_body_issuer_mismatch(const member::Envelope &env, ByteView data);
 
     // Deterministic key pair for (seed, label, index); retries until the scalar is valid.
     static void derive_key(uint64_t seed, const std::string &label, uint32_t index,

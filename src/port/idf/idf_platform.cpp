@@ -11,6 +11,9 @@
 #include "port/idf/idf_radio.hpp"
 #include "port/idf/idf_store.hpp"
 #include "sdkconfig.h"
+#ifdef LM_BUILD_PROFILE_ROOT
+#include "serial/idf_serial.hpp"
+#endif
 
 namespace lm::idf {
 
@@ -69,6 +72,14 @@ lm_status_t lm_init(void *workspace, size_t bytes, const lm_config_t *config,
         g_ctx = nullptr;
         return to_abi(s);
     }
+#ifdef LM_BUILD_PROFILE_ROOT
+    if (config->role == static_cast<uint32_t>(Role::Root)) {
+        // [SLICE:S10] The root's USB serial port. Attached before the owner task exists (the engine
+        // hook is not synchronised). Failure leaves the mesh running with the USB link down, which
+        // the Host sees as root_connected=false; it is not turned into success anywhere.
+        (void)serial::idf_root_serial_start(g_ctx->engine, g_platform.owner);
+    }
+#endif
     s = g_platform.jobs.start();
     if (s == Status::Ok) {
         s = g_platform.owner.start(g_ctx, g_platform.clock);
@@ -77,6 +88,9 @@ lm_status_t lm_init(void *workspace, size_t bytes, const lm_config_t *config,
         }
     }
     if (s != Status::Ok) {
+#ifdef LM_BUILD_PROFILE_ROOT
+        serial::idf_root_serial_stop(); // [SLICE:S10]
+#endif
         g_ctx->~lm_context();
         g_ctx = nullptr;
         return to_abi(s);
@@ -99,6 +113,9 @@ lm_status_t lm_destroy(lm_context_t *ctx) {
     }
     g_platform.owner.stop();
     g_platform.jobs.stop();
+#ifdef LM_BUILD_PROFILE_ROOT
+    serial::idf_root_serial_stop(); // [SLICE:S10] before the engine it is attached to goes away
+#endif
     g_ctx->~lm_context();
     g_ctx = nullptr;
     return to_abi(Status::Ok);

@@ -10,7 +10,11 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <type_traits>
+#include <utility>
 #include <vector>
+
+#include <psa/crypto.h>
 
 #include "core/codec.hpp"
 #include "core/jobs.hpp"
@@ -26,6 +30,37 @@
 
 extern "C" int lm_test_rfc9529_chapter3(char *why, size_t why_cap);
 extern "C" int lm_security_link_check(void); // the on-target gate app runs the same function
+
+// ---- PSA fault injection (linker --wrap, tests/native/CMakeLists.txt) --------------------------------
+// A failed destroy does NOT call the real function (the key stays live, like a driver fault); the id
+// is remembered so the test can release it afterwards and the heap baseline holds.
+extern "C" {
+psa_status_t __real_psa_destroy_key(psa_key_id_t);
+psa_status_t __real_psa_hash_update(psa_hash_operation_t *, const uint8_t *, size_t);
+}
+namespace {
+int g_destroy_failures = 0;
+bool g_hash_update_fails = false;
+std::vector<psa_key_id_t> g_stuck_ids;
+void release_stuck() {
+    g_destroy_failures = 0;
+    for (psa_key_id_t id : g_stuck_ids) {
+        (void)__real_psa_destroy_key(id);
+    }
+    g_stuck_ids.clear();
+}
+} // namespace
+extern "C" psa_status_t __wrap_psa_destroy_key(psa_key_id_t id) {
+    if (g_destroy_failures > 0) {
+        --g_destroy_failures;
+        g_stuck_ids.push_back(id);
+        return PSA_ERROR_HARDWARE_FAILURE;
+    }
+    return __real_psa_destroy_key(id);
+}
+extern "C" psa_status_t __wrap_psa_hash_update(psa_hash_operation_t *op, const uint8_t *in, size_t n) {
+    return g_hash_update_fails ? PSA_ERROR_HARDWARE_FAILURE : __real_psa_hash_update(op, in, n);
+}
 
 // ---- heap accounting (linker --wrap) ---------------------------------------------------------------
 // Counts every allocation of the process, which during a handshake is PSA's key slots and bignum
@@ -147,8 +182,8 @@ void make_pair(const Bytes &seed, const SessionContext &ctx, Purpose purpose, Re
     RecordKeys ka, kb;
     LM_CHECK_OK(derive_record_keys(view(seed), h, purpose, true, ka));
     LM_CHECK_OK(derive_record_keys(view(seed), h, purpose, false, kb));
-    a.install(ka);
-    b.install(kb);
+    LM_CHECK_OK(a.install(std::move(ka)));
+    LM_CHECK_OK(b.install(std::move(kb)));
 }
 
 SessionContext base_context() {
@@ -216,13 +251,13 @@ LM_TEST("S04 record layer reproduces every golden frame byte-exact and opens it"
         const Bytes link_seed = hex(f.link_exporter_test_seed_hex);
         const Bytes end_seed = hex(f.end_exporter_test_seed_hex);
         LM_CHECK_OK(derive_record_keys(view(link_seed), link_h, Purpose::Link, true, k));
-        link_tx.install(k);
+        LM_CHECK_OK(link_tx.install(std::move(k)));
         LM_CHECK_OK(derive_record_keys(view(link_seed), link_h, Purpose::Link, false, k));
-        link_rx.install(k);
+        LM_CHECK_OK(link_rx.install(std::move(k)));
         LM_CHECK_OK(derive_record_keys(view(end_seed), end_h, Purpose::End, true, k));
-        end_tx.install(k);
+        LM_CHECK_OK(end_tx.install(std::move(k)));
         LM_CHECK_OK(derive_record_keys(view(end_seed), end_h, Purpose::End, false, k));
-        end_rx.install(k);
+        LM_CHECK_OK(end_rx.install(std::move(k)));
 
         // Open both layers.
         LM_CHECK_EQ(packet.size(), 250u);
@@ -287,7 +322,7 @@ LM_TEST("S04 record layer reproduces every golden frame byte-exact and opens it"
         const Bytes link_ct(packet.begin() + 24, packet.end());
         RecordSession fresh_rx;
         LM_CHECK_OK(derive_record_keys(view(link_seed), link_h, Purpose::Link, false, k));
-        fresh_rx.install(k);
+        LM_CHECK_OK(fresh_rx.install(std::move(k)));
         LM_CHECK(open_bytes(fresh_rx, link_counter, view(bad_aad), link_ct, plain, verdict) ==
                  Status::AuthRejected);
         Sha256Digest other = link_h;
@@ -445,7 +480,7 @@ LM_TEST("S02 any change of purpose, domain, identity or generation gives other k
     RecordKeys base_keys;
     LM_CHECK_OK(derive_record_keys(view(seed), base_h, base.purpose, true, base_keys));
     RecordSession sender;
-    sender.install(base_keys);
+    LM_CHECK_OK(sender.install(std::move(base_keys)));
     const Bytes aad = {0};
     uint64_t c = 0;
     const Bytes ct = seal_bytes(sender, view(aad), Bytes(8, 1), c);
@@ -456,7 +491,7 @@ LM_TEST("S02 any change of purpose, domain, identity or generation gives other k
         RecordKeys k;
         LM_CHECK_OK(derive_record_keys(view(seed), h, v.purpose, false, k));
         RecordSession rx;
-        rx.install(k);
+        LM_CHECK_OK(rx.install(std::move(k)));
         Bytes pt;
         ReplayVerdict verdict{};
         LM_CHECK(open_bytes(rx, 1, view(aad), ct, pt, verdict) == Status::AuthRejected);
@@ -474,8 +509,10 @@ LM_TEST("S02 any change of purpose, domain, identity or generation gives other k
     // A different seed (other handshake) never yields the same keys either.
     RecordKeys other;
     LM_CHECK_OK(derive_record_keys(view(Bytes(32, 0x78)), base_h, base.purpose, true, other));
-    LM_CHECK(other.tx.key != base_keys.tx.key && other.tx.prefix != base_keys.tx.prefix);
-    LM_CHECK(base_keys.tx.key != base_keys.rx.key); // direction separation
+    RecordKeys again;
+    LM_CHECK_OK(derive_record_keys(view(seed), base_h, base.purpose, true, again));
+    LM_CHECK(other.tx.key != again.tx.key && other.tx.prefix != again.tx.prefix);
+    LM_CHECK(other.tx.key != other.rx.key); // direction separation
     LM_CHECK(derive_record_keys(view(Bytes(31, 0)), base_h, base.purpose, true, other) ==
              Status::InvalidArgument);
 }
@@ -697,9 +734,10 @@ LM_TEST("COSE_Sign1: golden object verifies; own objects round-trip; malformed o
     // A kid can not be paired with another key: a signature by b claiming a's kid does not verify.
     Bytes forged(200);
     std::size_t flen = 0;
-    LM_CHECK_OK(sign1_create(b.key, a.id, view(Bytes(4, 1)), MutByteView{forged.data(), forged.size()}, flen));
-    forged.resize(flen);
-    LM_CHECK(sign1_verify(a.pub, view(forged), out) == Status::AuthRejected);
+    LM_CHECK(sign1_create(b.key, a.id, view(Bytes(4, 1)), MutByteView{forged.data(), forged.size()}, flen) ==
+             Status::InvalidArgument); // FIX1-23: the signer cannot claim another identity
+    LM_CHECK(sign1_create(a.key, b.id, view(Bytes(4, 1)), MutByteView{forged.data(), forged.size()}, flen) ==
+             Status::InvalidArgument);
     // Non-shortest payload head (58 03 instead of 43) is a structure error, not a valid alias.
     Bytes small(128);
     std::size_t slen = 0;
@@ -802,13 +840,13 @@ RunResult run_handshake(Worker &w, HandshakeSlot &I, HandshakeSlot &R, const Ide
     const ByteView ia_ccs = ia.ccs_view();
     LM_CHECK_OK(I.begin(HsRole::Initiator, ia.key, ia_ccs, initiator_peers ? initiator_peers : &rb_ccs, 1));
     LM_CHECK_OK(R.begin(HsRole::Responder, rb.key, rb_ccs, responder_peers ? responder_peers : &ia_ccs, 1));
-    auto fail = [&](int step, Status st) {
+    auto fail = [&](int step, Status st) -> RunResult {
         res.failed_step = step;
         res.status = st;
         (void)I.cancel();
         (void)R.cancel();
         LM_CHECK(I.idle() && R.idle());
-        return res;
+        return std::move(res);
     };
     auto bytes_of = [](ByteView v) { return Bytes(v.begin(), v.end()); };
 
@@ -877,7 +915,7 @@ LM_TEST("S01 method-0/suite-3 loopback through the job bodies: keys mirror and c
     Worker w;
     HandshakeSlot I, R;
     const SessionContext ctx = pair_context(a, b);
-    const RunResult r = run_handshake(w, I, R, a, b, ctx, ctx, Mutation{});
+    RunResult r = run_handshake(w, I, R, a, b, ctx, ctx, Mutation{});
     LM_CHECK(r.completed);
     LM_CHECK(r.msgs[1].size() < 64 && r.msgs[2].size() < 160 && r.msgs[3].size() < 160 &&
              r.msgs[4].size() < 32); // every message fits the bootstrap carrier budget
@@ -885,9 +923,11 @@ LM_TEST("S01 method-0/suite-3 loopback through the job bodies: keys mirror and c
     LM_CHECK(r.init_keys.tx.key == r.resp_keys.rx.key && r.init_keys.tx.prefix == r.resp_keys.rx.prefix);
     LM_CHECK(r.init_keys.rx.key == r.resp_keys.tx.key && r.init_keys.rx.prefix == r.resp_keys.tx.prefix);
     LM_CHECK(r.init_keys.tx.key != r.init_keys.rx.key);
+    const auto first_tx = r.init_keys.tx.key; // install() zeroes the moved-from keys
+    const auto first_rx = r.init_keys.rx.key;
     RecordSession si, sr;
-    si.install(r.init_keys);
-    sr.install(r.resp_keys);
+    LM_CHECK_OK(si.install(std::move(r.init_keys)));
+    LM_CHECK_OK(sr.install(std::move(r.resp_keys)));
     Sha256Digest h{};
     LM_CHECK_OK(context_hash(ctx, h));
     const Bytes aad(h.begin(), h.end());
@@ -904,7 +944,7 @@ LM_TEST("S01 method-0/suite-3 loopback through the job bodies: keys mirror and c
     // A second handshake between the same pair (fresh ephemerals) never repeats keys.
     const RunResult r2 = run_handshake(w, I, R, a, b, ctx, ctx, Mutation{});
     LM_CHECK(r2.completed);
-    LM_CHECK(r2.init_keys.tx.key != r.init_keys.tx.key && r2.init_keys.rx.key != r.init_keys.rx.key);
+    LM_CHECK(r2.init_keys.tx.key != first_tx && r2.init_keys.rx.key != first_rx);
     LM_CHECK(r2.msgs[1] != r.msgs[1]);
 }
 
@@ -918,12 +958,12 @@ LM_TEST("S02 handshake with a different context on each side derives keys that c
     SessionContext ci = pair_context(a, b);
     SessionContext cr = ci;
     cr.domain.bytes[3] ^= 1U;
-    const RunResult r = run_handshake(w, I, R, a, b, ci, cr, Mutation{});
+    RunResult r = run_handshake(w, I, R, a, b, ci, cr, Mutation{});
     LM_CHECK(r.completed); // EDHOC itself succeeds; the LM context is what separates the keys
     LM_CHECK(r.init_keys.tx.key != r.resp_keys.rx.key);
     RecordSession si, sr;
-    si.install(r.init_keys);
-    sr.install(r.resp_keys);
+    LM_CHECK_OK(si.install(std::move(r.init_keys)));
+    LM_CHECK_OK(sr.install(std::move(r.resp_keys)));
     const Bytes aad = {0};
     uint64_t c = 0;
     const Bytes ct = seal_bytes(si, view(aad), Bytes(5, 1), c);
@@ -1168,6 +1208,184 @@ LM_TEST("handshake slot: order, zeroisation, cancel while a job is in flight, PS
     LM_CHECK_OK(R3.take_keys(peer_keys));
     LM_CHECK(peer_keys.rx.key == taken.tx.key);
     LM_CHECK_HEAP_EQ(g_live, baseline);
+}
+
+// ================================ FIX1 regressions ==============================================
+
+static_assert(!std::is_copy_constructible_v<RecordSession> && !std::is_copy_assignable_v<RecordSession>,
+              "FIX1-1: a copied session would fork the TX counter (AES-GCM nonce reuse)");
+static_assert(!std::is_copy_constructible_v<RecordKeys> && !std::is_copy_assignable_v<RecordKeys>,
+              "FIX1-19: key sets are move-only");
+static_assert(std::is_nothrow_move_constructible_v<RecordSession> && std::is_nothrow_move_assignable_v<RecordSession>,
+              "sessions move between neighbour slots");
+
+LM_TEST("FIX1-2 install refuses an active session: counters and replay window survive, wipe re-arms") {
+    LM_CHECK_OK(crypto_init());
+    const Bytes seed(32, 0x41);
+    RecordSession a, b;
+    Sha256Digest h{};
+    make_pair(seed, base_context(), Purpose::Link, a, b, h);
+    const Bytes aad = {7};
+    uint64_t c = 0;
+    const Bytes ct1 = seal_bytes(a, view(aad), Bytes(4, 1), c);
+    Bytes pt;
+    ReplayVerdict v{};
+    LM_CHECK_OK(open_bytes(b, c, view(aad), ct1, pt, v));
+    b.accept(c);
+    // Same keys again into the live sessions: refused, nothing is reset.
+    RecordKeys again;
+    LM_CHECK_OK(derive_record_keys(view(seed), h, Purpose::Link, true, again));
+    LM_CHECK(a.install(std::move(again)) == Status::Conflict);
+    LM_CHECK_EQ(a.tx_used(), 1u);
+    LM_CHECK_OK(a.next_counter(c));
+    LM_CHECK_EQ(c, 2u); // the counter continued: counter 1 is never sealed twice under this key
+    RecordKeys rx_again;
+    LM_CHECK_OK(derive_record_keys(view(seed), h, Purpose::Link, false, rx_again));
+    LM_CHECK(b.install(std::move(rx_again)) == Status::Conflict);
+    LM_CHECK(b.window().highest() == 1u);
+    LM_CHECK(open_bytes(b, 1, view(aad), ct1, pt, v) == Status::Replay); // still a duplicate
+    LM_CHECK(v == ReplayVerdict::Duplicate);
+    // After wipe() the object may take keys of a NEW context.
+    a.wipe();
+    RecordKeys fresh;
+    LM_CHECK_OK(derive_record_keys(view(Bytes(32, 0x42)), h, Purpose::Link, true, fresh));
+    LM_CHECK_OK(a.install(std::move(fresh)));
+    LM_CHECK_EQ(a.tx_used(), 0u);
+}
+
+LM_TEST("FIX1-1/19 moving a session transfers counter and window; the source is wiped; keys zeroise") {
+    LM_CHECK_OK(crypto_init());
+    const Bytes seed(32, 0x43);
+    RecordSession a, b;
+    Sha256Digest h{};
+    make_pair(seed, base_context(), Purpose::Link, a, b, h);
+    uint64_t c = 0;
+    const Bytes aad = {1};
+    (void)seal_bytes(a, view(aad), Bytes(3, 1), c);
+    RecordSession moved(std::move(a));
+    LM_CHECK(!a.active() && moved.active());
+    LM_CHECK_OK(moved.next_counter(c));
+    LM_CHECK_EQ(c, 2u); // continues where the source stopped
+    LM_CHECK(a.next_counter(c) == Status::RecoveryRequired);
+    RecordSession assigned;
+    assigned = std::move(moved);
+    LM_CHECK(!moved.active() && assigned.tx_used() == 2u);
+
+    // The key container itself: a moved-from set is zero, and the destructor zeroises.
+    RecordKeys src;
+    LM_CHECK_OK(derive_record_keys(view(seed), h, Purpose::Link, true, src));
+    RecordKeys dst(std::move(src));
+    const std::array<uint8_t, 16> zero{};
+    LM_CHECK(src.tx.key == zero && src.rx.key == zero);
+    LM_CHECK(dst.tx.key != zero);
+    alignas(RecordKeys) uint8_t storage[sizeof(RecordKeys)];
+    auto *k = new (storage) RecordKeys();
+    LM_CHECK_OK(derive_record_keys(view(seed), h, Purpose::Link, true, *k));
+    LM_CHECK(k->tx.key != zero);
+    k->~RecordKeys();
+    bool all_zero = true;
+    for (uint8_t byte : storage) {
+        all_zero = all_zero && byte == 0;
+    }
+    LM_CHECK(all_zero); // the destructor wiped the key material
+}
+
+LM_TEST("FIX1-21 a key that cannot be destroyed fails seal/open instead of reporting success") {
+    LM_CHECK_OK(crypto_init());
+    const Bytes seed(32, 0x44);
+    RecordSession a, b;
+    Sha256Digest h{};
+    make_pair(seed, base_context(), Purpose::Link, a, b, h);
+    const Bytes aad = {2};
+    uint64_t c = 0;
+    LM_CHECK_OK(a.next_counter(c));
+    Bytes out(4 + 16, 0xEE);
+    g_destroy_failures = 2; // the one-shot key refuses to go, also on the retry
+    LM_CHECK(a.seal(c, view(aad), view(Bytes(4, 9)), MutByteView{out.data(), out.size()}) ==
+             Status::RecoveryRequired);
+    LM_CHECK(out == Bytes(out.size(), 0)); // no ciphertext leaves a session with a live key
+    release_stuck();
+    const Bytes good = seal_bytes(a, view(aad), Bytes(4, 9), c);
+    Bytes pt(4, 0xEE);
+    std::size_t len = 0;
+    ReplayVerdict v{};
+    g_destroy_failures = 2;
+    LM_CHECK(b.open(c, view(aad), view(good), MutByteView{pt.data(), pt.size()}, len, v) ==
+             Status::RecoveryRequired);
+    LM_CHECK(pt == Bytes(4, 0));
+    release_stuck();
+    LM_CHECK_OK(open_bytes(b, c, view(aad), good, pt, v)); // healthy again
+}
+
+LM_TEST("FIX1-20 handshake teardown that cannot free a PSA key keeps the handle and retries") {
+    LM_CHECK_OK(crypto_init());
+    Identity a, b;
+    make_identity(a, "node-a");
+    make_identity(b, "node-b");
+    Worker w;
+    HandshakeSlot I, R;
+    const SessionContext ctx = pair_context(a, b);
+    LM_CHECK(run_handshake(w, I, R, a, b, ctx, ctx, Mutation{}).completed);
+    const std::size_t baseline = g_live;
+    const ByteView peer_b[1] = {b.ccs_view()};
+    LM_CHECK_OK(I.begin(HsRole::Initiator, a.key, a.ccs_view(), peer_b, 1));
+    LM_CHECK_OK(w.run(I, HsStep::M1Compose)); // an ephemeral private key now sits in a PSA slot
+    g_destroy_failures = 1000;                // persistent driver fault
+    LM_CHECK(I.cancel() == Status::RecoveryRequired);
+    LM_CHECK(I.teardown_failed() && !I.idle());
+    LM_CHECK(I.begin(HsRole::Initiator, a.key, a.ccs_view(), peer_b, 1) == Status::RecoveryRequired);
+    LM_CHECK(k_heap_accounting ? g_live > baseline : true); // the slot really is still allocated
+    g_destroy_failures = 0;                                   // the fault clears
+    LM_CHECK_OK(I.begin(HsRole::Initiator, a.key, a.ccs_view(), peer_b, 1)); // retry freed it
+    LM_CHECK(!I.teardown_failed());
+    LM_CHECK(I.cancel() == Status::Ok);
+    release_stuck();
+    LM_CHECK_HEAP_EQ(g_live, baseline);
+    // A single transient failure is absorbed by the retry inside the same teardown.
+    LM_CHECK_OK(I.begin(HsRole::Initiator, a.key, a.ccs_view(), peer_b, 1));
+    LM_CHECK_OK(w.run(I, HsStep::M1Compose));
+    g_destroy_failures = 1;
+    LM_CHECK(I.cancel() == Status::Ok && I.idle());
+    release_stuck();
+    LM_CHECK_HEAP_EQ(g_live, baseline);
+}
+
+LM_TEST("FIX1-22 a local PSA hash failure is a local fault, not the peer's rejection") {
+    LM_CHECK_OK(crypto_init());
+    Identity a, b;
+    make_identity(a, "node-a");
+    make_identity(b, "node-b");
+    Worker w;
+    HandshakeSlot I, R;
+    const ByteView peer_a[1] = {a.ccs_view()};
+    const ByteView peer_b[1] = {b.ccs_view()};
+    // The failure is injected into each step in turn (msg 1..4, both roles): a local hash fault may
+    // surface as NoCapacity/RecoveryRequired, but never as the peer failing authentication.
+    for (int fail_at = 0; fail_at < 8; ++fail_at) {
+        LM_CHECK_OK(I.begin(HsRole::Initiator, a.key, a.ccs_view(), peer_b, 1));
+        LM_CHECK_OK(R.begin(HsRole::Responder, b.key, b.ccs_view(), peer_a, 1));
+        Status st = Status::Ok;
+        int n = 0;
+        auto step = [&](HandshakeSlot &slot, HsStep s, ByteView in = ByteView{}) {
+            if (st != Status::Ok) {
+                return;
+            }
+            g_hash_update_fails = n++ == fail_at;
+            st = w.run(slot, s, in);
+            g_hash_update_fails = false;
+        };
+        step(I, HsStep::M1Compose);
+        step(R, HsStep::M1Process, I.output());
+        step(R, HsStep::M2Compose);
+        step(I, HsStep::M2Process, R.output());
+        step(I, HsStep::M3Compose);
+        step(R, HsStep::M3Process, I.output());
+        step(R, HsStep::M4Compose);
+        step(I, HsStep::M4Process, R.output());
+        LM_CHECK(st != Status::AuthRejected);
+        (void)I.cancel();
+        (void)R.cancel();
+    }
 }
 
 // ================================ resource measurement ==========================================

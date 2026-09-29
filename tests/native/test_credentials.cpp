@@ -295,7 +295,7 @@ LM_TEST("S07 DeviceCredential negatives: signature, signer, key point, ids, hash
     // Envelope issuer that differs from the COSE kid.
     Envelope liar = env;
     liar.issuer.bytes[0] ^= 1;
-    LM_CHECK(check_device_credential(e.trust(), view(e.net.fleet.sign(liar, view(encode_dc_data(good)))), dc) ==
+    LM_CHECK(check_device_credential(e.trust(), view(e.net.fleet.sign_body_issuer_mismatch(liar, view(encode_dc_data(good)))), dc) ==
              Status::AuthRejected);
 }
 

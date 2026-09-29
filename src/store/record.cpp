@@ -102,13 +102,16 @@ MarkerInfo parse_marker(ByteView blob, uint16_t id, uint8_t slot) {
     return m;
 }
 
-// NotFound and garbage are "no marker"; only a real read error is reported (fail closed).
-Status read_marker(port::Store &store, uint16_t id, uint8_t slot, MarkerInfo &out) {
+// Only NotFound is "empty". Garbage that fits is "no valid marker"; data that does not even fit
+// the buffer is present-but-corrupt (`oversize`) and quarantines the record (FIX1-D10). A real
+// read error is reported as StorageFailure (fail closed).
+Status read_marker(port::Store &store, uint16_t id, uint8_t slot, MarkerInfo &out, bool &oversize) {
     std::array<uint8_t, k_marker_bytes> buf{};
     std::size_t len = 0;
     const Status st = store.slot_read(id | k_marker_flag, slot, buf, len);
     if (st == Status::NotFound || st == Status::BufferTooSmall) {
         out = MarkerInfo{};
+        oversize = oversize || st == Status::BufferTooSmall;
         return Status::Ok;
     }
     if (st != Status::Ok) {
@@ -118,15 +121,18 @@ Status read_marker(port::Store &store, uint16_t id, uint8_t slot, MarkerInfo &ou
     return Status::Ok;
 }
 
-// Reads one slot into job.scratch. `io_error` is set for a real read error (not for an empty or
-// garbage slot).
-SlotInfo read_slot(port::Store &store, uint16_t id, uint8_t slot, RecordJob &job, bool &io_error) {
+// Reads one slot into job.scratch. `io_error` is set for a real read error, `oversize` for data
+// larger than any valid blob (present but corrupt); an empty or garbage slot sets neither.
+SlotInfo read_slot(port::Store &store, uint16_t id, uint8_t slot, RecordJob &job, bool &io_error,
+                   bool &oversize) {
     std::size_t len = 0;
     const Status st = store.slot_read(id, slot, job.scratch, len);
     if (st == Status::Ok) {
         return parse_record(ByteView{job.scratch.data(), len});
     }
-    if (st != Status::NotFound && st != Status::BufferTooSmall) {
+    if (st == Status::BufferTooSmall) {
+        oversize = true;
+    } else if (st != Status::NotFound) {
         io_error = true;
     }
     return SlotInfo{};
@@ -140,12 +146,13 @@ bool marker_matches(const SlotInfo &s, const MarkerInfo &m) {
 Status inspect(port::Store &store, uint16_t id, RecordJob &job, View &view) {
     view = View{};
     bool io_error = false;
+    bool oversize = false;
     bool committed[2] = {false, false};
     SlotInfo slots[2];
     MarkerInfo markers[2];
     for (uint8_t s = 0; s < 2; ++s) {
-        slots[s] = read_slot(store, id, s, job, io_error);
-        LM_TRY(read_marker(store, id, s, markers[s]));
+        slots[s] = read_slot(store, id, s, job, io_error, oversize);
+        LM_TRY(read_marker(store, id, s, markers[s], oversize));
         committed[s] = marker_matches(slots[s], markers[s]);
         if (committed[s] && (!view.have || slots[s].gen > view.info.gen)) {
             view.have = true;
@@ -162,6 +169,9 @@ Status inspect(port::Store &store, uint16_t id, RecordJob &job, View &view) {
             view.evidence = markers[s].gen > view.evidence ? markers[s].gen : view.evidence;
         }
     }
+    // An oversized slot or marker may have been a newer generation: an older committed record must
+    // not silently win, and "never committed" would be a lie.
+    view.quarantined = view.quarantined || oversize;
     if (view.quarantined) {
         return Status::RecoveryRequired;
     }
@@ -169,6 +179,16 @@ Status inspect(port::Store &store, uint16_t id, RecordJob &job, View &view) {
         return io_error ? Status::StorageFailure : Status::NotFound;
     }
     return Status::Ok;
+}
+
+// Re-targets a job without building a second ~1 KiB RecordJob on the worker stack.
+void reset_job(RecordJob &j, uint16_t id) {
+    j.op = RecordJob::Op::Load;
+    j.id = id;
+    j.state = 0;
+    j.payload_len = 0;
+    j.generation = 0;
+    j.evidence = 0;
 }
 
 bool id_ok(uint16_t id) { return id != 0 && id < k_marker_flag; }
@@ -185,7 +205,7 @@ Status commit_impl(port::Store &store, RecordJob &job, bool recover) {
         base = v.info.gen;
         target = static_cast<uint8_t>(1 - v.slot);
     } else if (cur == Status::RecoveryRequired && recover) {
-        base = v.evidence;
+        base = v.evidence > v.info.gen || !v.have ? v.evidence : v.info.gen;
         target = v.have ? static_cast<uint8_t>(1 - v.slot) : 0;
     } else if (cur != Status::NotFound) {
         return cur;
@@ -247,7 +267,8 @@ Status record_load(port::Store &store, RecordJob &job) {
     }
     // The last slot read may be the other one; read the winner again into the scratch.
     bool io_error = false;
-    const SlotInfo again = read_slot(store, job.id, v.slot, job, io_error);
+    bool oversize = false;
+    const SlotInfo again = read_slot(store, job.id, v.slot, job, io_error, oversize);
     if (!again.valid || again.gen != v.info.gen || again.hash != v.info.hash) {
         return Status::StorageFailure;
     }
@@ -285,7 +306,17 @@ Status boot_incarnation_advance(port::Store &store, BootJob &job) {
         if (r.finish() != Status::Ok) {
             return Status::RecoveryRequired; // committed but malformed: do not guess
         }
-    } else if (st != Status::NotFound) {
+    } else if (st == Status::NotFound) {
+        // Virgin only if the device was never provisioned. Provisioning commits this record (value
+        // 0) before the identity; an identity without a counter means the counter was lost, and
+        // starting again at 1 would reuse MessageId space (FIX1-D9).
+        reset_job(job.rec, rec::identity);
+        const Status idst = record_load(store, job.rec);
+        reset_job(job.rec, rec::boot_incarnation);
+        if (idst != Status::NotFound) {
+            return idst == Status::StorageFailure ? idst : Status::RecoveryRequired;
+        }
+    } else {
         return st;
     }
     if (current == UINT64_MAX) {

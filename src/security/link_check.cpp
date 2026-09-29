@@ -88,8 +88,8 @@ Status loopback() {
     // Record round trip and a COSE object signed by the initiator's key.
     RecordSession tx;
     RecordSession rx;
-    tx.install(ki);
-    rx.install(kr);
+    LM_TRY(tx.install(std::move(ki)));
+    LM_TRY(rx.install(std::move(kr)));
     Sha256Digest h{};
     LM_TRY(context_hash(ctx, h));
     uint64_t counter = 0;

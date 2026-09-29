@@ -199,6 +199,66 @@ LM_TEST("read error is not unprovisioned; empty store is NotFound") {
     LM_CHECK(load(s).st == Status::Ok);
 }
 
+LM_TEST("FIX1-10 an oversized slot or marker is corruption, never 'absent' or 'unprovisioned'") {
+    const std::vector<uint8_t> huge(k_max_blob + 1, 0x5A);
+    // Empty store + an oversized slot: not NotFound (which would let a device look virgin).
+    {
+        SimStore s(small_geometry());
+        LM_CHECK_OK(s.slot_write(rec::membership, 0, ByteView{huge.data(), huge.size()}));
+        LM_CHECK(load(s).st == Status::RecoveryRequired);
+    }
+    // A committed older record must not win over an oversized (possibly newer) slot.
+    for (const uint16_t id_flag : {uint16_t{0}, k_marker_flag}) {
+        SimStore s(small_geometry());
+        LM_CHECK_OK(commit_fill(s, 1));
+        LM_CHECK_OK(commit_fill(s, 2)); // generation 2 lives in slot 1
+        LM_CHECK_OK(s.slot_erase(rec::membership | id_flag, 1));
+        LM_CHECK_OK(s.slot_write(rec::membership | id_flag, 1, ByteView{huge.data(), huge.size()}));
+        const Loaded l = load(s);
+        LM_CHECK(l.st == Status::RecoveryRequired); // not Ok(gen 1) and not NotFound
+        // A fleet-verified recovery may then move forward, above the surviving generation.
+        set_payload(9, 8);
+        job().op = RecordJob::Op::Recover;
+        LM_CHECK_OK(record_recover(s, job()));
+        LM_CHECK(job().generation > 1);
+        LM_CHECK_EQ(load(s).fill, 9);
+    }
+}
+
+LM_TEST("FIX1-9 a provisioned device that lost its boot counter is RecoveryRequired, not incarnation 1") {
+    static BootJob b;
+    SimStore s(small_geometry());
+    // Virgin store: no identity, no counter -> the first incarnation is 1.
+    b = BootJob{};
+    LM_CHECK_OK(boot_incarnation_advance(s, b));
+    LM_CHECK_EQ(b.incarnation, 1);
+    // Provisioned (counter floor, then identity) and running: counter 2, 3.
+    SimStore p(small_geometry());
+    RecordJob &j = job();
+    j = RecordJob{};
+    j.id = rec::boot_incarnation;
+    j.payload_len = 8; // u64be(0), the provisioning floor
+    LM_CHECK_OK(record_commit(p, j));
+    j = RecordJob{};
+    j.id = rec::identity;
+    j.payload_len = 4;
+    LM_CHECK_OK(record_commit(p, j));
+    b = BootJob{};
+    LM_CHECK_OK(boot_incarnation_advance(p, b));
+    LM_CHECK_EQ(b.incarnation, 1);
+    b = BootJob{};
+    LM_CHECK_OK(boot_incarnation_advance(p, b));
+    LM_CHECK_EQ(b.incarnation, 2);
+    // Partial store loss: both counter slots and markers vanish, the identity stays.
+    for (uint8_t slot = 0; slot < 2; ++slot) {
+        LM_CHECK_OK(p.slot_erase(rec::boot_incarnation, slot));
+        LM_CHECK_OK(p.slot_erase(rec::boot_incarnation | k_marker_flag, slot));
+    }
+    b = BootJob{};
+    LM_CHECK(boot_incarnation_advance(p, b) == Status::RecoveryRequired);
+    LM_CHECK_EQ(b.incarnation, 0); // nothing was handed out
+}
+
 LM_TEST("record argument limits") {
     SimStore s(small_geometry());
     set_payload(1, k_max_payload);
@@ -469,6 +529,34 @@ LM_TEST("journal full returns NO_CAPACITY and never drops an ACKed entry") {
     LM_CHECK(run_batch(s, j3, {Op{JournalOp::Kind::Put, 5, std::vector<uint8_t>(513, 1)}}) ==
              Status::PayloadTooLarge);
     LM_CHECK_EQ(s.mutating_ops(), ops);
+}
+
+LM_TEST("FIX1-11 reclaim refuses to re-seal a live entry that decayed after open(); source is kept") {
+    SimStore s(small_geometry()); // 6 x 1 KiB segments
+    static std::array<JournalLive, 8> idx;
+    Journal j(idx.data(), idx.size());
+    LM_CHECK_OK(j.open(s));
+    const std::vector<uint8_t> victim(100, 0x11);
+    LM_CHECK_OK(run_batch(s, j, {Op{JournalOp::Kind::Put, 1, victim}}));
+    // Flash decay of the live entry's payload after open(): the CRC no longer matches.
+    uint32_t victim_at = 0;
+    for (std::size_t i = 0; i < j.live_count(); ++i) {
+        if (j.live_at(i).id == 1) {
+            victim_at = j.live_at(i).offset;
+        }
+    }
+    s.corrupt_journal_byte(victim_at + k_journal_header + 7, 0x01);
+    // Keep writing other data until the head wraps around to reclaim the victim's segment.
+    Status st = Status::Ok;
+    for (int n = 0; n < 40 && st == Status::Ok; ++n) {
+        st = run_batch(s, j, {Op{JournalOp::Kind::Put, 2, std::vector<uint8_t>(500, static_cast<uint8_t>(n))}});
+    }
+    LM_CHECK(st == Status::StorageFailure); // reclaim noticed; it did not "launder" the entry
+    // The corrupt source segment was not erased, and the decay is still visible, never valid data.
+    std::vector<uint8_t> out(600);
+    std::size_t len = 0;
+    LM_CHECK(j.read(s, 1, MutByteView{out.data(), out.size()}, len) == Status::StorageFailure);
+    LM_CHECK(s.journal_erases() < 6); // the victim's segment survives for repair/inspection
 }
 
 LM_TEST("journal live table limit is NO_CAPACITY (durable pending bound)") {

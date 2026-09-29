@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include "core/wire/cbor.hpp"
+#include "core/wire/control.hpp"
+#include "security/cose_sign1.hpp"
 #include "port/sim/sim_provision.hpp"
 #include "security/crypto.hpp"
 
@@ -92,6 +94,30 @@ Bytes Fleet::sign_with(const std::array<uint8_t, 32> &scalar, const DeviceId &ki
 
 Bytes Fleet::sign(const member::Envelope &env, ByteView data) {
     return sign_with(scalar_, trust_.key_id, env, data);
+}
+
+Bytes Fleet::sign_body_issuer_mismatch(const member::Envelope &env, ByteView data) {
+    wire::ControlBody b;
+    b.type = env.type;
+    b.request_id = env.request.bytes;
+    b.domain = env.domain.bytes;
+    b.revision = env.revision;
+    b.issuer = env.issuer.bytes;
+    b.data = data;
+    std::array<uint8_t, member::k_max_bundle> body{};
+    std::size_t body_len = 0;
+    sec::KeyHandle h;
+    if (wire::encode_control_body(b, MutByteView{body}, body_len) != Status::Ok ||
+        sec::import_signing_key(ByteView{scalar_}, h) != Status::Ok) {
+        return {};
+    }
+    Bytes out(member::k_max_bundle);
+    std::size_t len = 0;
+    const Status st = sec::sign1_create(h, trust_.key_id, ByteView{body.data(), body_len},
+                                        MutByteView{out.data(), out.size()}, len);
+    sec::destroy_key(h);
+    out.resize(st == Status::Ok ? len : 0);
+    return out;
 }
 
 Kit Fleet::device(uint32_t index, const std::string &serial, uint64_t generation) {

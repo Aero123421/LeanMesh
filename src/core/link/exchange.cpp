@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include "core/engine.hpp"
 #include "core/wire/cbor.hpp"
@@ -115,6 +116,9 @@ void Exchange::abort(Status why) {
     if (phase_ != Phase::Linger) {
         ++s_.stats.hs_failed;
         last_failure_ = why;
+        if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && initiator_)) && s_.join.exchange_failed != nullptr) {
+            s_.join.exchange_failed(s_.join.ctx, why); // [S8] the joiner learns the attempt is over
+        }
     }
     if (peer_transient_ && !peer_.is_none()) {
         (void)s_.engine.release_peer(peer_);
@@ -133,6 +137,7 @@ void Exchange::abort(Status why) {
         phase_ = Phase::Zombie;
     } else {
         phase_ = Phase::Idle;
+        mode_ = Mode::Link;
     }
 }
 
@@ -162,6 +167,9 @@ Status Exchange::job_entry(port::JobEnv &env, void *arg) {
 }
 
 Status Exchange::verify_body(Exchange &x) {
+    if (x.mode_ != Mode::Link) {
+        return verify_join_body(x);
+    }
     member::Bundle b;
     LM_TRY(member::bundle_parse(ByteView{x.rx_.data(), x.rx_len_}, b));
     PeerState &p = x.peer_state_;
@@ -207,6 +215,7 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
         job_ = Job::None;
         cancelled_ = false;
         phase_ = Phase::Idle;
+        mode_ = Mode::Link;
         return;
     }
     if (slot != handle_ || job_ == Job::None) {
@@ -234,10 +243,32 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
 void Exchange::after_verify(MonoTime now) {
     const member::MemberCredential &mc = peer_state_.mc;
     Status st = Status::Ok;
+    if (mode_ != Mode::Link) {
+        // [S8] JOIN_ONLY: no member credentials exist yet, so no floors/lease checks here; the
+        // ledger decides on the JoinRequest (ticket, expected entry, revocation, capacity).
+        if (mode_ == Mode::JoinInit) {
+            join_out_->known = true;
+            start_hs_initiator(now);
+            return;
+        }
+        st = build_join_response();
+        if (st != Status::Ok) {
+            abort(st);
+            return;
+        }
+        phase_ = Phase::SendCred;
+        send_object(Tx::Cred, ObjKind::CredR, false);
+        pump(now);
+        return;
+    }
     if (peer_state_.dc.device == s_.identity.self()) {
         st = Status::AuthRejected; // a device does not link to itself
     } else {
         st = s_.identity.floors().check(peer_state_.dc.device, mc.assignment, mc.membership);
+    }
+    if (st == Status::Ok && !initiator_ && s_.join.link_admit != nullptr &&
+        !s_.join.link_admit(s_.join.ctx, peer_state_.dc.device, mc)) {
+        st = Status::Revoked; // [S8] root ledger: not ACTIVE with this membership generation
     }
     if (st == Status::Ok) {
         switch (member::check_lease(mc, s_.root_time)) {
@@ -279,6 +310,9 @@ void Exchange::start_hs_initiator(MonoTime /*now*/) {
 
 Status Exchange::make_context(sec::SessionContext &ctx) const {
     const member::LocalIdentity &id = s_.identity;
+    if (mode_ != Mode::Link) {
+        return make_join_context(ctx);
+    }
     Sha256Digest self_hash{};
     LM_TRY(sec::sha256(id.member_cose(), self_hash));
     ctx.purpose = sec::Purpose::Link;
@@ -392,13 +426,14 @@ void Exchange::finish_keys(MonoTime now) {
     sec::RecordKeys keys;
     Status st = hs_.take_keys(keys);
     if (st == Status::Ok) {
-        pend_.rec.install(keys);
-        sec::secure_zero(MutByteView{reinterpret_cast<uint8_t *>(&keys), sizeof keys});
-        pend_.ctx_hash = ctx_hash_;
-        pend_.born = now;
-        pend_.valid_until = now + s_.policy.key_lifetime;
-        pend_.active = true;
-        st = alloc_sid(pend_.rx_sid);
+        st = pend_.rec.install(std::move(keys)); // one-shot: Conflict if pend_ still holds a session
+        if (st == Status::Ok) {
+            pend_.ctx_hash = ctx_hash_;
+            pend_.born = now;
+            pend_.valid_until = now + s_.policy.key_lifetime;
+            pend_.active = true;
+            st = alloc_sid(pend_.rx_sid);
+        }
     }
     if (st == Status::Ok && initiator_) {
         s_.engine.random(MutByteView{bind_nonce_});
@@ -425,8 +460,7 @@ Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce)
     w.bytes(ByteView{nonce});
     LM_TRY(w.finish());
     SealedFrame f;
-    LM_TRY(seal_frame(k, wire::FrameKind::Edhoc, domain_hint_of(s_.identity.delegation().domain),
-                      k.rx_sid, w.written(), f));
+    LM_TRY(seal_frame(k, wire::FrameKind::Edhoc, hint(), k.rx_sid, w.written(), f));
     std::memcpy(last_.data(), f.bytes.data(), f.len);
     last_len_ = f.len;
     return Status::Ok;
@@ -459,7 +493,7 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
     if (phase_ == Phase::Linger && !initiator_) {
         // A bind retransmission: the peer did not see our ACK. Answer with the same bytes.
         Neighbor *n = s_.neighbors.by_tx_sid(src, h.link_sid);
-        if (n == nullptr) {
+        if (n == nullptr || n->join_only != (mode_ != Mode::Link)) {
             return false;
         }
         Opened op;
@@ -491,7 +525,7 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
     pend_.rec.accept(h.link_counter);
     pend_.tx_sid = sid;
     peer_sid_ = sid;
-    Status is = install_session(now);
+    Status is = mode_ == Mode::Link ? install_session(now) : install_join_session(now);
     if (is != Status::Ok) {
         abort(is);
         return true;
@@ -501,7 +535,7 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
         finish_idle();
         return true;
     }
-    Neighbor *n = s_.neighbors.find_device(peer_state_.dc.device);
+    Neighbor *n = installed();
     is = n != nullptr ? seal_bind(n->cur, nonce) : Status::RecoveryRequired;
     if (is != Status::Ok) {
         // The session exists on our side; the peer will retry and fail its own attempts.
@@ -559,13 +593,16 @@ Status Exchange::install_session(MonoTime now) {
     n->role = peer_state_.mc.role;
     n->prev.wipe();
     if (n->cur.active) {
-        n->prev = n->cur;
+        n->prev = std::move(n->cur);
         n->prev.valid_until = earliest(n->prev.valid_until, now + s_.policy.prev_grace);
         ++s_.stats.sessions_replaced;
     }
-    n->cur = pend_;
+    n->cur = std::move(pend_);
     pend_.wipe();
     n->rotate_wanted = false;
+    if (s_.join.link_up != nullptr) {
+        s_.join.link_up(s_.join.ctx, n->device, n->role); // [S8] e.g. the root confirmation still owed
+    }
     return Status::Ok;
 }
 
@@ -577,6 +614,7 @@ void Exchange::finish_idle() {
     deadline_ = MonoTime::never();
     rx_len_ = 0;
     phase_ = Phase::Idle;
+    mode_ = Mode::Link;
 }
 
 } // namespace lm::link

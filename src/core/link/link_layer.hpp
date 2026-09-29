@@ -29,7 +29,7 @@ using RxSink = void (*)(void *ctx, const RxInfo &info, ByteView plain);
 class LinkLayer {
   public:
     LinkLayer(Engine &engine, member::LocalIdentity &identity)
-        : identity_(identity), shared_{engine, policy_, stats_, neighbors_, identity, gate_, {}},
+        : identity_(identity), shared_{engine, policy_, stats_, neighbors_, identity, gate_, {}, {}},
           exchange_(shared_) {}
 
     // ---- owner wiring (Engine calls these) ----
@@ -40,6 +40,7 @@ class LinkLayer {
     void on_timer(MonoTime now);
     [[nodiscard]] MonoTime deadline() const;
     void stop(); // radio stop: exchange aborted, sessions wiped, peers released
+    // [S8] an unjoined device may receive the frames of its own JOIN_ONLY handshake/session.
 
     // ---- services for other modules ----
     // Opens a session with the neighbour at `mac` (initiator). Conflict when a live session exists
@@ -51,6 +52,20 @@ class LinkLayer {
                               SealedFrame &out, MonoTime now);
     // Closes every session with `peer` (revocation, leave). No message is sent.
     [[nodiscard]] Status close(const DeviceId &peer);
+
+    // ---- [S8] JOIN_ONLY sessions (docs/07 §4) ----
+    // Seals one join control object (frame kind CONTROL) for the JOIN_ONLY session of `peer`. Only
+    // this call can use such a session; seal() never sees it. `domain_hint` is the target domain the
+    // joiner learned from the root's delegation. AuthPending: no session. Expired: session over.
+    [[nodiscard]] Status seal_join(const DeviceId &peer, uint32_t domain_hint, ByteView plain,
+                                   SealedFrame &out, MonoTime now);
+    // Ends the JOIN_ONLY session of `peer` (join done/failed): keys wiped, transient peer released.
+    [[nodiscard]] Status close_join(const DeviceId &peer);
+    [[nodiscard]] JoinHooks &join_hooks() { return shared_.join; }
+    // A finished admission (JOIN_ONLY handshake, then ACTIVE) and the first ordinary handshake with the
+    // same peer are one admission, not two full handshakes in 30 s (decision S8-D6).
+    void forget_handshake_gate(const MacAddr &mac) { gate_.forget(mac); }
+    [[nodiscard]] Exchange &exchange() { return exchange_; }
 
     void set_sink(RxSink sink, void *ctx) {
         sink_ = sink;

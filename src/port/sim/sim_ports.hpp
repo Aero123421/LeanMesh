@@ -65,6 +65,9 @@ class SimRadio final : public port::Radio {
     uint32_t tx_fault_count = 0;
     // The next `start_fault_count` start() calls fail (driver re-initialisation problems).
     uint32_t start_fault_count = 0;
+    // The next `stop_fault_count` stop() calls fail and leave the driver running (esp_now_deinit
+    // error): callbacks may still be live.
+    uint32_t stop_fault_count = 0;
 
   private:
     [[nodiscard]] bool has_peer(const MacAddr &mac) const;

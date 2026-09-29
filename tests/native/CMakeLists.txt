@@ -25,6 +25,8 @@ lm_add_test(test_route SOURCES test_route.cpp LABELS "unit;integration;route;sce
 lm_add_test(test_security SOURCES test_security.cpp edhoc_rfc9529.c LABELS "unit;integration;crypto;scenario")
 target_include_directories(test_security PRIVATE
     "${LM_REPO_ROOT}/third_party/libedhoc/tests/host/rfc9529/support")
+# Fault injection (FIX1): psa_destroy_key / psa_hash_update failures are injected through the wrap.
+target_link_options(test_security PRIVATE -Wl,--wrap=psa_destroy_key -Wl,--wrap=psa_hash_update)
 if(NOT LM_SANITIZE)
     target_compile_definitions(test_security PRIVATE LM_TEST_HEAP_WRAP=1)
     target_link_options(test_security PRIVATE
@@ -36,3 +38,13 @@ lm_add_test(test_link SOURCES test_link.cpp LABELS "integration;sim;link;scenari
 target_link_libraries(test_link PRIVATE lm_fleet)
 lm_add_test(test_credentials SOURCES test_credentials.cpp LABELS "unit;link;scenario")
 target_link_libraries(test_credentials PRIVATE lm_fleet)
+# USB-SERIAL slice (S10): the real root adapter against the Host's native helper (host_usb.cpp is compiled
+# into the test: same sources as libleanmesh_host).
+lm_add_test(test_serial SOURCES test_serial.cpp ${LM_REPO_ROOT}/src/hostnative/host_usb.cpp LABELS "integration;sim;serial;scenario")
+target_link_libraries(test_serial PRIVATE lm_fleet)
+# DELIVERY slice (S9): end sessions, E2E records, receipts, dedup, deadlines, journal (sim network).
+lm_add_test(test_delivery SOURCES test_delivery.cpp LABELS "integration;sim;delivery;scenario")
+target_link_libraries(test_delivery PRIVATE lm_fleet)
+# JOIN slice (S8): Join/resume/leave over the simulated medium, power-cut sweep over every join record commit.
+lm_add_test(test_join SOURCES test_join.cpp LABELS "integration;sim;join;scenario")
+target_link_libraries(test_join PRIVATE lm_fleet)

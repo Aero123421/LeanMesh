@@ -72,6 +72,25 @@ LM_TEST("R10 pool generation: stale handle cannot reach the next occupant") {
     LM_CHECK(pool.acquire().is_none()); // full: caller reports NO_CAPACITY
 }
 
+LM_TEST("FIX1-25 pool slot with an exhausted generation is retired, an ancient handle never revalidates") {
+    Pool<int, 2> pool;
+    pool.seed_generation_for_test(0, UINT32_MAX - 1);
+    const Handle old = pool.acquire(); // slot 0, generation UINT32_MAX - 1
+    LM_CHECK_EQ(old.index, 0u);
+    LM_CHECK(pool.release(old));
+    const Handle last = pool.acquire(); // generation UINT32_MAX: the final use of slot 0
+    LM_CHECK_EQ(last.index, 0u);
+    LM_CHECK_EQ(last.generation, UINT32_MAX);
+    LM_CHECK(pool.release(last));
+    LM_CHECK(pool.retired(0));
+    LM_CHECK(pool.get(last) == nullptr && pool.get(old) == nullptr);
+    // A wrapped generation (1) would have matched a handle from 4e9 releases ago; slot 0 is gone.
+    const Handle next = pool.acquire();
+    LM_CHECK_EQ(next.index, 1u);
+    LM_CHECK(pool.acquire().is_none()); // capacity shrank by one instead of reusing slot 0
+    LM_CHECK(pool.get(Handle{0, 1}) == nullptr);
+}
+
 LM_TEST("bounded queue refuses when full") {
     BoundedQueue<int, 2> q;
     LM_CHECK(q.push(1));

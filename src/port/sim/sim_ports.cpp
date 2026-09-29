@@ -36,6 +36,10 @@ Status SimRadio::start(const port::RfProfile &profile) {
 }
 
 Status SimRadio::stop() {
+    if (stop_fault_count > 0) {
+        --stop_fault_count;
+        return Status::RecoveryRequired;
+    }
     on_ = false;
     tx_in_flight_ = false;
     peer_count_ = 0;

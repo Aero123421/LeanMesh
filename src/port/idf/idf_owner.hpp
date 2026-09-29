@@ -3,8 +3,10 @@
 // One task runs Engine::step() and every command. It sleeps until the earliest deadline the engine
 // reports, or until a notification (radio callback, job completion, command). There is no fixed
 // tick: an idle owner is blocked indefinitely. Application tasks reach the owner through a bounded
-// queue of stack-resident call records (Busy when full) and wait on their own notification index 1,
-// so the app task's regular notifications are untouched.
+// queue of stack-resident call records (Busy when full). Each call waits on its own stack-resident
+// binary semaphore, so no FreeRTOS notification index is consumed (the notification array size is
+// a build option) and a stray application notification cannot end the wait while the owner still
+// holds a pointer to the caller's stack (FIX1-D3).
 #pragma once
 
 #include "capi/context.hpp"
@@ -12,6 +14,7 @@
 #include "core/ports.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace lm::idf {
@@ -34,7 +37,7 @@ class IdfOwner final : public OwnerCall {
     struct Call {
         const Command *cmd;
         Reply reply;
-        TaskHandle_t caller;
+        SemaphoreHandle_t done;
     };
     static void task_entry(void *self);
     void run();

@@ -30,10 +30,11 @@ def host_process(tmp_path: Path) -> Iterator[Callable[..., HostProcess]]:
     """Factory: host_process(serial=None, permissions=[...]) starts uvicorn on a Unix socket."""
     started: list[HostProcess] = []
 
-    def start(serial: str | None = None, permissions: list[str] | None = None) -> HostProcess:
+    def start(serial: str | None = None, permissions: list[str] | None = None,
+              usb_kit: Path | None = None) -> HostProcess:
         workdir = tmp_path / f"host{len(started)}"
         workdir.mkdir()
-        host = HostProcess.start(workdir, serial=serial, permissions=permissions)
+        host = HostProcess.start(workdir, serial=serial, permissions=permissions, usb_kit=usb_kit)
         started.append(host)
         return host
 

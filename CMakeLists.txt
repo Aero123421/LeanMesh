@@ -71,10 +71,23 @@ add_executable(meshsim
     tools/meshsim/control.cpp
     tools/meshsim/cmd_runtime.cpp
     tools/meshsim/cmd_provision.cpp
+    tools/meshsim/cmd_serial.cpp
+    tools/meshsim/cmd_join.cpp
+    tools/meshsim/cmd_delivery.cpp
     tools/meshsim/topology.cpp
     tools/meshsim/pty.cpp)
 target_compile_options(meshsim PRIVATE ${LM_CXX_WARNINGS})
 target_link_libraries(meshsim PRIVATE lm_sim lm_fleet)
+
+# ---- Host native helper (S10): the USB serial session for the Python Host (ctypes) ----
+# Same security/serial sources as the firmware; no first-party code is duplicated in Python.
+add_library(leanmesh_host SHARED
+    src/hostnative/host_usb.cpp
+    src/hostnative/lmh_api.cpp
+    src/port/sim/assert_sim.cpp)
+target_compile_options(leanmesh_host PRIVATE ${LM_CXX_WARNINGS} -fno-exceptions -fno-rtti -fvisibility=hidden)
+target_link_libraries(leanmesh_host PRIVATE lm_sdk)
+set_target_properties(leanmesh_host PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
 add_subdirectory(tools/lmtool) # codec CLI for differential wire tests
 add_subdirectory(tools/lmfleet) # TEST-ONLY fleet issuer (never linked into firmware)

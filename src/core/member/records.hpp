@@ -18,6 +18,8 @@
 #include "core/member/credentials.hpp"
 #include "core/pool.hpp"
 #include "core/ports.hpp"
+#include "core/profile.hpp"
+#include "security/crypto.hpp"
 #include "store/record.hpp"
 
 namespace lm {
@@ -76,6 +78,31 @@ class LocalIdentity {
     // CBOR [DeviceCredential COSE, MemberCredential COSE], what a link exchange sends.
     [[nodiscard]] ByteView bundle() const { return ByteView{bundle_.data(), bundle_len_}; }
 
+    // ---- [S8] membership changes at runtime (join commit, leave) ----
+    // The verbatim RootDelegation COSE a root hands to joiners. Root-capable builds only; empty
+    // elsewhere (a relay forwards join traffic without ever answering a handshake).
+    [[nodiscard]] ByteView delegation_cose() const { return ByteView{deleg_cose_.data(), deleg_cose_len_}; }
+    // A committed ACTIVE MemberCredential becomes the live one (the caller verified the chain and
+    // persisted it). Conflict unless the identity is Ready.
+    [[nodiscard]] Status adopt_member(const RootDelegation &delegation, const MemberCredential &mc,
+                                      ByteView mc_cose);
+    // Logical erase of the domain membership (leave): identity, trust and floors stay.
+    void drop_member();
+    // Borrow of the record I/O memory (docs/IMPLEMENTATION.md §13: no per-feature buffers). Null while
+    // the boot load owns it or another module holds it. The lender returns it after the job's
+    // completion was polled.
+    [[nodiscard]] store::RecordJob *lend_record() {
+        if (job_in_flight_ || rec_lent_) {
+            return nullptr;
+        }
+        rec_lent_ = true;
+        return &rec_;
+    }
+    void return_record() {
+        sec::secure_zero(MutByteView{rec_.payload});
+        rec_lent_ = false;
+    }
+
   private:
     static Status load_job(port::JobEnv &env, void *arg);
     [[nodiscard]] Status run_load(port::JobEnv &env);
@@ -89,6 +116,7 @@ class LocalIdentity {
     bool unprovisioned_ = false;
     bool has_delegation_ = false;
     bool has_member_ = false;
+    bool rec_lent_ = false;
     Status load_status_ = Status::Ok;
     Status member_status_ = Status::NotFound;
     Handle slot_;
@@ -104,6 +132,8 @@ class LocalIdentity {
     std::array<uint8_t, k_max_bundle> bundle_{};
     std::size_t bundle_len_ = 0;
     std::size_t dc_off_ = 0, dc_len_ = 0, mc_off_ = 0, mc_len_ = 0;
+    std::array<uint8_t, k_root_capable ? k_max_delegation_cose : 1> deleg_cose_{};
+    std::size_t deleg_cose_len_ = 0;
     store::RecordJob rec_;                            // the job's I/O memory
 };
 

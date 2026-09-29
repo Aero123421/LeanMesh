@@ -144,7 +144,8 @@ Status IdfRadio::start(const port::RfProfile &profile) {
         return Status::RecoveryRequired;
     }
     if (esp_now_register_recv_cb(recv_cb) != ESP_OK || esp_now_register_send_cb(send_cb) != ESP_OK) {
-        (void)esp_now_deinit();
+        // A failed deinit leaves ESP-NOW up: remember it so stop() retries and destroy is refused.
+        now_ready_ = esp_now_deinit() != ESP_OK;
         return Status::RecoveryRequired;
     }
     now_ready_ = true;
@@ -161,13 +162,18 @@ Status IdfRadio::stop() {
     if (overdue) {
         esp_restart(); // callback drain cannot be proven: controlled reboot (docs/03 §4)
     }
+    // Only a successful deinit proves the callbacks are gone. On failure the port stays "ready"
+    // (callbacks possibly live) so a second stop() retries instead of reporting success, and the
+    // engine refuses lm_destroy (FIX1-D5).
+    if (esp_now_deinit() != ESP_OK) {
+        return Status::RecoveryRequired;
+    }
     now_ready_ = false;
-    const esp_err_t e = esp_now_deinit();
-    // Callbacks stop with deinit; anything still queued is discarded by the generation check.
+    // Anything still queued is discarded by the generation check.
     port::RadioRx rx;
     while (rx_ring_.pop(rx)) {
     }
-    return e == ESP_OK ? Status::Ok : Status::RecoveryRequired;
+    return Status::Ok;
 }
 
 Status IdfRadio::set_channel(uint8_t channel) {

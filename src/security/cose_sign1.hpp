@@ -25,7 +25,8 @@ struct Sign1View {
     ByteView signature;
 };
 
-// Signs `payload` with the key of `signer` (kid = its DeviceId). out receives the tagged object.
+// Signs `payload` with `key`. `kid` must equal the DeviceId of that key (InvalidArgument otherwise).
+// out receives the tagged object.
 [[nodiscard]] Status sign1_create(KeyHandle key, const DeviceId &kid, ByteView payload,
                                   MutByteView out, std::size_t &len);
 // Strict structural parse, no signature check: lets the caller look up the issuer for `kid` first.

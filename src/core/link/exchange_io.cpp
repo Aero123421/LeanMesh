@@ -20,7 +20,7 @@ bool same_id(const std::array<uint8_t, 16> &a, const std::array<uint8_t, 16> &b)
 } // namespace
 
 // ---- receive: bootstrap carrier ----
-void Exchange::on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now) {
+void Exchange::on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now, bool via_join) {
     wire::BootstrapCarrier c;
     if (wire::decode_bootstrap(carrier, c) != Status::Ok) {
         ++s_.stats.rx_malformed;
@@ -28,15 +28,19 @@ void Exchange::on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now) 
     }
     switch (static_cast<ObjKind>(c.object_kind)) {
     case ObjKind::CredI:
-        on_cred(src, c, ObjKind::CredI, now);
+        on_cred(src, c, ObjKind::CredI, now, via_join);
         break;
     case ObjKind::CredR:
-        on_cred(src, c, ObjKind::CredR, now);
+        on_cred(src, c, ObjKind::CredR, now, via_join);
         break;
     case ObjKind::Msg1:
     case ObjKind::Msg2:
     case ObjKind::Msg3:
     case ObjKind::Msg4:
+        if (phase_ != Phase::Idle && (mode_ != Mode::Link) != via_join) {
+            ++s_.stats.hs_busy_drop; // a link carrier during a join exchange or the reverse
+            break;
+        }
         on_msg(src, c, static_cast<ObjKind>(c.object_kind), now);
         break;
     default:
@@ -45,7 +49,12 @@ void Exchange::on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now) 
     }
 }
 
-void Exchange::on_cred(const MacAddr &src, const wire::BootstrapCarrier &c, ObjKind kind, MonoTime now) {
+void Exchange::on_cred(const MacAddr &src, const wire::BootstrapCarrier &c, ObjKind kind, MonoTime now,
+                       bool via_join) {
+    if (lent_) {
+        ++s_.stats.hs_busy_drop; // the credential buffer is borrowed by a join module
+        return;
+    }
     if (phase_ == Phase::Linger && !(src == mac_ && kind == ObjKind::CredI && same_id(c.exchange_id, xid_))) {
         finish_idle(); // a new exchange takes the slot from a lingering responder
     }
@@ -53,20 +62,30 @@ void Exchange::on_cred(const MacAddr &src, const wire::BootstrapCarrier &c, ObjK
         if (kind != ObjKind::CredI || c.offset != 0) {
             return;
         }
+        if (via_join) {
+            // [S8] Only the root answers, only while policy and a join slot allow it, and never for
+            // a MAC that already is an ordinary neighbour (a live member does not need to join).
+            if (s_.join.responder_open == nullptr || !s_.join.responder_open(s_.join.ctx) ||
+                s_.neighbors.find_mac(src) != nullptr || !s_.identity.is_member()) {
+                ++s_.stats.hs_busy_drop;
+                return;
+            }
+        }
         if (begin_common(src, false, now) != Status::Ok) {
             ++s_.stats.hs_busy_drop; // no transient peer slot: a local shortage
             return;
         }
+        mode_ = via_join ? Mode::JoinResp : Mode::Link;
         xid_ = c.exchange_id;
     } else {
-        if (src != mac_ || phase_ == Phase::Zombie) {
+        if (src != mac_ || phase_ == Phase::Zombie || (mode_ != Mode::Link) != via_join) {
             ++s_.stats.hs_busy_drop;
             return;
         }
         const bool normal = initiator_ && phase_ == Phase::SendCred && kind == ObjKind::CredR &&
                             same_id(c.exchange_id, xid_);
-        const bool glare = initiator_ && phase_ == Phase::SendCred && kind == ObjKind::CredI &&
-                           !same_id(c.exchange_id, xid_);
+        const bool glare = mode_ == Mode::Link && initiator_ && phase_ == Phase::SendCred &&
+                           kind == ObjKind::CredI && !same_id(c.exchange_id, xid_);
         const bool receiving = !initiator_ && phase_ == Phase::AwaitMsg &&
                                expect_ == ObjKind::CredI && kind == ObjKind::CredI &&
                                same_id(c.exchange_id, xid_);
@@ -201,8 +220,8 @@ Status Exchange::build_plain(ObjKind kind, uint16_t total, uint16_t offset, Byte
     c.body = body;
     LM_TRY(wire::encode_bootstrap(c, MutByteView{carrier}, clen));
     wire::LinkHeader h;
-    h.kind = wire::FrameKind::Edhoc;
-    h.domain_hint = domain_hint_of(s_.identity.delegation().domain);
+    h.kind = mode_ == Mode::Link ? wire::FrameKind::Edhoc : wire::FrameKind::JoinProxy;
+    h.domain_hint = hint();
     h.body_length = static_cast<uint16_t>(clen);
     h.encrypted = false;
     if (out.size() < wire::k_link_header_bytes + clen) {

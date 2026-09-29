@@ -154,7 +154,7 @@ static int ecdh_pair(void *uc, psa_key_id_t *out, uint8_t x_out[P256_X_LEN]) {
 	st = psa_export_public_key(k, pt, sizeof pt, &len);
 	if (st != PSA_SUCCESS || len != sizeof pt) {
 		note(uc, st);
-		(void)psa_destroy_key(k);
+		note(uc, psa_destroy_key(k));
 		return EDHOC_ERROR_EPHEMERAL_KEY_EXCHANGE_FAILURE;
 	}
 	memcpy(x_out, pt + 1, P256_X_LEN); /* EDHOC carries x only */
@@ -183,12 +183,22 @@ static int ecdh(void *uc, psa_key_id_t priv, const uint8_t *peer_x, size_t peer_
 
 /* ---- struct edhoc_crypto ---------------------------------------------------------------------- */
 static int c_destroy_key(void *uc, void *key_id) {
-	(void)uc;
 	const psa_key_id_t k = key_load(key_id);
 	if (k == PSA_KEY_ID_NULL) {
 		return EDHOC_SUCCESS;
 	}
-	return psa_destroy_key(k) == PSA_SUCCESS ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
+	const psa_status_t st = psa_destroy_key(k);
+	note(uc, st);
+	if (st != PSA_SUCCESS) {
+		/* libedhoc zeroises the handle after a failed destroy: remember it for the retry in
+		 * lm_edhoc_session_destroy(), or the secret slot would be leaked for good. */
+		struct lm_edhoc_crypto_ctx *c = uc;
+		if (c->stuck_count < LM_EDHOC_STUCK_KEYS) {
+			c->stuck_keys[c->stuck_count++] = k;
+		}
+		return EDHOC_ERROR_CRYPTO_FAILURE;
+	}
+	return EDHOC_SUCCESS;
 }
 
 static int c_generate_key_pair(void *uc, void *decaps, uint8_t *encaps, size_t cap, size_t *len) {
@@ -218,7 +228,7 @@ static int c_encapsulate(void *uc, const uint8_t *encaps, size_t encaps_len, voi
 	}
 	rc = ecdh(uc, k, encaps, encaps_len, secret);
 	if (rc != EDHOC_SUCCESS) {
-		(void)psa_destroy_key(k);
+		note(uc, psa_destroy_key(k));
 		return EDHOC_ERROR_EPHEMERAL_KEY_EXCHANGE_FAILURE;
 	}
 	key_store(decaps, k);
@@ -269,9 +279,10 @@ static int c_verify(void *uc, const uint8_t *pub, size_t pub_len, const uint8_t 
 	}
 	const psa_status_t st =
 		psa_verify_message(k, PSA_ALG_ECDSA(PSA_ALG_SHA_256), in, in_len, sig, sig_len);
-	(void)psa_destroy_key(k);
+	const psa_status_t d = psa_destroy_key(k);
+	note(uc, d); /* a public-key slot that cannot be freed is a local leak, not a peer failure */
 	note(uc, st);
-	return st == PSA_SUCCESS ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
+	return (st == PSA_SUCCESS && d == PSA_SUCCESS) ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
 }
 
 static int c_extract(void *uc, const void *ikm, const uint8_t *salt, size_t salt_len, void *prk) {
@@ -424,17 +435,24 @@ static int c_hash_init(void *uc, void **op) {
 static int c_hash_update(void *uc, void *op, const uint8_t *in, size_t len) {
 	unsigned i;
 	psa_hash_operation_t *h = hash_slot(uc, op, &i);
-	return (h != NULL && psa_hash_update(h, in, len) == PSA_SUCCESS) ? EDHOC_SUCCESS
-									  : EDHOC_ERROR_CRYPTO_FAILURE;
+	if (h == NULL) {
+		note(uc, PSA_ERROR_BAD_STATE); /* an unknown operation is our bug, not the peer's */
+		return EDHOC_ERROR_CRYPTO_FAILURE;
+	}
+	const psa_status_t st = psa_hash_update(h, in, len);
+	note(uc, st); /* every local PSA failure is recorded, or it would read as a peer rejection */
+	return st == PSA_SUCCESS ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
 }
 
 static int c_hash_finish(void *uc, void *op, uint8_t *hash, size_t cap, size_t *len) {
 	unsigned i;
 	psa_hash_operation_t *h = hash_slot(uc, op, &i);
 	if (h == NULL) {
+		note(uc, PSA_ERROR_BAD_STATE);
 		return EDHOC_ERROR_CRYPTO_FAILURE;
 	}
 	const psa_status_t st = psa_hash_finish(h, hash, cap, len);
+	note(uc, st);
 	psa_hash_abort(h);
 	((struct lm_edhoc_crypto_ctx *)uc)->hash_ops_busy &= ~(1U << i);
 	return st == PSA_SUCCESS ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
@@ -444,6 +462,7 @@ static int c_hash_abort(void *uc, void *op) {
 	unsigned i;
 	psa_hash_operation_t *h = hash_slot(uc, op, &i);
 	if (h == NULL) {
+		note(uc, PSA_ERROR_BAD_STATE);
 		return EDHOC_ERROR_CRYPTO_FAILURE;
 	}
 	psa_hash_abort(h);
@@ -644,12 +663,33 @@ int lm_edhoc_session_export(struct lm_edhoc_session *s, const uint8_t *ctx_hash,
 
 size_t lm_edhoc_context_size(void) { return edhoc_context_size(); }
 
-void lm_edhoc_session_destroy(struct lm_edhoc_session *s) {
+int lm_edhoc_session_destroy(struct lm_edhoc_session *s) {
 	if (s == NULL) {
-		return;
+		return 0;
+	}
+	int rc = 0;
+	/* deinit stops at the first handle it cannot destroy (our destroy_key stashes it); the next
+	 * call carries on with the remaining slots, so loop a bounded number of times. */
+	for (unsigned i = 0; s->initialised && i <= LM_EDHOC_STUCK_KEYS; ++i) {
+		rc = edhoc_context_deinit(ectx(s));
+		if (rc == EDHOC_SUCCESS) {
+			s->initialised = 0; /* the context was wiped; it must not be deinitialised twice */
+			break;
+		}
 	}
 	if (s->initialised) {
-		(void)edhoc_context_deinit(ectx(s)); /* destroys every slot handle libedhoc still holds */
+		return rc != 0 ? rc : LM_EDHOC_ERR_STUCK;
+	}
+	unsigned kept = 0;
+	for (unsigned i = 0; i < s->crypto.stuck_count; ++i) {
+		const psa_status_t d = psa_destroy_key(s->crypto.stuck_keys[i]);
+		if (d != PSA_SUCCESS && d != PSA_ERROR_INVALID_HANDLE) {
+			s->crypto.stuck_keys[kept++] = s->crypto.stuck_keys[i];
+		}
+	}
+	s->crypto.stuck_count = (uint8_t)kept;
+	if (kept != 0) {
+		return LM_EDHOC_ERR_STUCK; /* session (and the stuck handles) kept: call again later */
 	}
 	for (unsigned i = 0; i < LM_EDHOC_HASH_OPS; ++i) {
 		if ((s->crypto.hash_ops_busy & (1U << i)) != 0) {
@@ -657,4 +697,5 @@ void lm_edhoc_session_destroy(struct lm_edhoc_session *s) {
 		}
 	}
 	wipe(s, sizeof *s);
+	return 0;
 }

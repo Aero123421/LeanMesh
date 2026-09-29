@@ -17,6 +17,17 @@
 //                                           identity records into the node's store (before `start`)
 //   link-connect <node> <peer>              open a link session (EDHOC purpose 1) to a neighbour
 //   link-status <node>                      identity state, neighbours/sessions, exchange phase
+//   join-mode / grant / join / leave / membership / ledger / events / store-cut / store-fired /
+//   store-restore                           the join slice (cmd_join.cpp): ticket + expected entry, lm_join,
+//                                           lm_leave, membership state, root ledger, power-cut injection
+//   serial-kit <path> [index]               TEST-ONLY: write the Host kit of fleet device 2000+index
+//   serial-pair <node> [index]              seal the paired-host record (device 2000+index) on the root
+//   serial-status                           root USB session state and counters
+//   serial-drop                             simulate a USB detach/replug (root drops its session)
+//   serial-reset                            reset the root MCU: power-cut + boot + start (new boot id)
+//   route / root-time / send / op / msg-next / msg-report / msg-cancel / delivery   the delivery slice
+//                                           (cmd_delivery.cpp): static route, root clock, lm_send, operation
+//                                           state, next message + application result, counters
 //   quit
 // Stdout carries only protocol lines; diagnostics go to stderr.
 #pragma once
@@ -25,7 +36,12 @@
 #include <string>
 #include <vector>
 
+#include "fleet.hpp"
 #include "port/sim/sim_world.hpp"
+
+namespace lm::fleet {
+class Network;
+}
 #include "pty.hpp"
 
 namespace meshsim {
@@ -58,6 +74,41 @@ std::string cmd_trace(Sim &sim, const Args &a);
 std::string cmd_provision(Sim &sim, const Args &a);
 std::string cmd_link_connect(Sim &sim, const Args &a);
 std::string cmd_link_status(Sim &sim, const Args &a);
+// The process-wide test fleet (created by the first use); the serial commands mint Host kits from it.
+lm::fleet::Network &network(Sim &sim);
+
+// Commands of the USB serial slice (cmd_serial.cpp). serial_sync() attaches the root's serial
+// adapter to node 0 after every (re)boot; it runs before every command.
+std::string cmd_serial_kit(Sim &sim, const Args &a);
+std::string cmd_serial_pair(Sim &sim, const Args &a);
+std::string cmd_serial_status(Sim &sim, const Args &a);
+std::string cmd_serial_drop(Sim &sim, const Args &a);
+std::string cmd_serial_reset(Sim &sim, const Args &a);
+void serial_sync(Sim &sim);
+void serial_on_rx(Sim &sim, const uint8_t *data, std::size_t len);
+
+// Commands of the join slice (cmd_join.cpp).
+std::string cmd_join_mode(Sim &sim, const Args &a);
+std::string cmd_grant(Sim &sim, const Args &a);
+std::string cmd_join(Sim &sim, const Args &a);
+std::string cmd_leave(Sim &sim, const Args &a);
+std::string cmd_membership(Sim &sim, const Args &a);
+std::string cmd_ledger(Sim &sim, const Args &a);
+std::string cmd_events(Sim &sim, const Args &a);
+std::string cmd_store_cut(Sim &sim, const Args &a);
+std::string cmd_store_restore(Sim &sim, const Args &a);
+std::string cmd_store_fired(Sim &sim, const Args &a);
+lm::fleet::Network &fleet_network(Sim &sim);
+
+// Commands of the delivery slice (cmd_delivery.cpp).
+std::string cmd_route(Sim &sim, const Args &a);
+std::string cmd_root_time(Sim &sim, const Args &a);
+std::string cmd_send(Sim &sim, const Args &a);
+std::string cmd_op(Sim &sim, const Args &a);
+std::string cmd_msg_next(Sim &sim, const Args &a);
+std::string cmd_msg_report(Sim &sim, const Args &a);
+std::string cmd_msg_cancel(Sim &sim, const Args &a);
+std::string cmd_delivery(Sim &sim, const Args &a);
 
 // --topology-file: one `link <a> <b> [loss_permille] [delay_ms] [ack_loss_permille]` per line,
 // `#` starts a comment. False with `err` set on the first bad line (nothing is half-applied).

@@ -157,6 +157,42 @@ void LocalIdentity::clear() {
     ccs_len_ = 0;
     bundle_len_ = 0;
     dc_off_ = dc_len_ = mc_off_ = mc_len_ = 0;
+    sec::secure_zero(MutByteView{deleg_cose_});
+    deleg_cose_len_ = 0;
+    rec_lent_ = false;
+}
+
+Status LocalIdentity::adopt_member(const RootDelegation &delegation, const MemberCredential &mc,
+                                   ByteView mc_cose) {
+    if (state_ != State::Ready) {
+        return Status::Conflict;
+    }
+    const ByteView dc = device_cose();
+    LM_TRY(check_binding(dc_, dc, mc));
+    const std::size_t dc_len = dc.size();
+    LM_TRY(bundle_encode(dc, mc_cose, MutByteView{bundle_}, bundle_len_));
+    dc_len_ = dc_len;
+    mc_len_ = mc_cose.size();
+    dc_off_ = 1 + head_size(dc_len_);
+    mc_off_ = dc_off_ + dc_len_ + head_size(mc_len_);
+    delegation_ = delegation;
+    has_delegation_ = true;
+    mc_ = mc;
+    has_member_ = true;
+    member_status_ = Status::Ok;
+    return Status::Ok;
+}
+
+void LocalIdentity::drop_member() {
+    has_member_ = false;
+    has_delegation_ = false;
+    member_status_ = Status::NotFound;
+    mc_ = MemberCredential{};
+    delegation_ = RootDelegation{};
+    bundle_len_ = 0; // the DeviceCredential stays where device_cose() finds it
+    mc_len_ = 0;
+    sec::secure_zero(MutByteView{deleg_cose_});
+    deleg_cose_len_ = 0;
 }
 
 Status LocalIdentity::load_job(port::JobEnv &env, void *arg) {
@@ -222,6 +258,10 @@ Status LocalIdentity::run_load(port::JobEnv &env) {
     LM_TRY(st);
     LM_TRY(check_root_delegation(trust_, ByteView{rec_.payload.data(), rec_.payload_len}, delegation_));
     has_delegation_ = true;
+    if constexpr (k_root_capable) {
+        std::memcpy(deleg_cose_.data(), rec_.payload.data(), rec_.payload_len); // <= k_max_delegation_cose
+        deleg_cose_len_ = rec_.payload_len;
+    }
     return load_membership(env);
 }
 

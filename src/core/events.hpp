@@ -43,6 +43,16 @@ template <std::size_t N> class AppEventQueue {
         return ring_.pop(out);
     }
 
+    // The event pop() would return next, without consuming it ([SLICE:S9]: the caller checks the
+    // payload capacity first, BufferTooSmall must not consume the event). Like pop(), it reports
+    // a pending GAP once the queue is empty.
+    [[nodiscard]] const lm_event_t *peek() {
+        if (ring_.empty() && lost_ > 0) {
+            push_gap();
+        }
+        return ring_.front();
+    }
+
     [[nodiscard]] uint64_t lost() const { return lost_; }
 
   private:

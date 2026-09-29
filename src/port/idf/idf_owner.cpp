@@ -25,6 +25,12 @@ void IdfOwner::stop() {
     while (!exited_) {
         vTaskDelay(1); // lm_destroy is a blocking app call; the owner exits within one pass
     }
+    // Calls queued after the owner's last pass would leave their callers blocked forever.
+    Call *late = nullptr;
+    while (xQueueReceive(queue_, &late, 0) == pdTRUE) {
+        late->reply = Reply{Status::InvalidArgument, 0, 0};
+        xSemaphoreGive(late->done);
+    }
     vQueueDelete(queue_);
     queue_ = nullptr;
     task_ = nullptr;
@@ -43,14 +49,22 @@ Reply IdfOwner::call(const Command &cmd) {
     if (xTaskGetCurrentTaskHandle() == task_) {
         return ctx_->engine.execute(cmd, clock_->now()); // no self-deadlock from owner context
     }
-    Call c{&cmd, Reply{}, xTaskGetCurrentTaskHandle()};
+    StaticSemaphore_t sem_storage;
+    Call c{&cmd, Reply{}, xSemaphoreCreateBinaryStatic(&sem_storage)};
+    if (c.done == nullptr) {
+        return Reply{Status::NoCapacity, 0, 0};
+    }
     Call *p = &c;
     if (xQueueSend(queue_, &p, 0) != pdTRUE) {
+        vSemaphoreDelete(c.done);
         return Reply{Status::Busy, 0, 0}; // bounded intake: the command does not exist
     }
     notify();
-    // The owner never blocks (docs/02 §2), so the reply always comes. `c` lives on this stack.
-    (void)ulTaskNotifyTakeIndexed(1, pdTRUE, portMAX_DELAY);
+    // The owner never blocks (docs/02 §2), so the reply always comes. `c` lives on this stack and
+    // only this semaphore, given exactly once per call, releases it.
+    while (xSemaphoreTake(c.done, portMAX_DELAY) != pdTRUE) {
+    }
+    vSemaphoreDelete(c.done);
     return c.reply;
 }
 
@@ -65,7 +79,7 @@ void IdfOwner::run() {
         Call *c = nullptr;
         while (xQueueReceive(queue_, &c, 0) == pdTRUE) {
             c->reply = engine.execute(*c->cmd, clock_->now());
-            xTaskNotifyGiveIndexed(c->caller, 1);
+            xSemaphoreGive(c->done);
         }
         const MonoTime now = clock_->now();
         const MonoTime next = engine.step(now);

@@ -30,12 +30,18 @@ extern "C" {
 #define LM_EDHOC_ERR_SIZE (-1001)  /* context storage too small for this libedhoc build */
 #define LM_EDHOC_ERR_PEER (-1002)  /* received kid is not one of the candidate credentials */
 
+#define LM_EDHOC_ERR_STUCK (-1003) /* a PSA key slot could not be destroyed yet: retry the destroy */
+
 #define LM_EDHOC_HASH_OPS 4
+#define LM_EDHOC_STUCK_KEYS 8 /* >= the number of key slots libedhoc holds at once */
 /* First member of every user context passed to the crypto vtable (never NULL). */
 struct lm_edhoc_crypto_ctx {
 	uint8_t aead_tag_len;          /* 16 for suite 3 */
 	int32_t fault;                 /* first non-peer PSA/mpi failure (out of memory, ...), 0 = none */
 	uint32_t hash_ops_busy;        /* bit i: hash_ops[i] is live */
+	uint32_t stuck_keys[LM_EDHOC_STUCK_KEYS]; /* handles psa_destroy_key refused (libedhoc forgets
+						   * a handle whose destroy failed; we keep it here) */
+	uint8_t stuck_count;
 	uint64_t hash_ops[LM_EDHOC_HASH_OPS][32]; /* psa_hash_operation_t storage */
 };
 void lm_edhoc_crypto_ctx_init(struct lm_edhoc_crypto_ctx *c, uint8_t aead_tag_len);
@@ -88,8 +94,10 @@ int lm_edhoc_session_export(struct lm_edhoc_session *s, const uint8_t *ctx_hash,
 			    uint8_t *seed, size_t seed_len);
 /* sizeof(struct edhoc_context) of this libedhoc build (for RAM reports). */
 size_t lm_edhoc_context_size(void);
-/* Destroys every PSA handle held by libedhoc and wipes the whole session (secrets included). */
-void lm_edhoc_session_destroy(struct lm_edhoc_session *s);
+/* Destroys every PSA handle held by libedhoc and wipes the whole session (secrets included).
+ * Returns 0, or the libedhoc code when a handle could not be destroyed: the session is then left
+ * intact (handles kept) and the call may be repeated. */
+int lm_edhoc_session_destroy(struct lm_edhoc_session *s);
 
 #ifdef __cplusplus
 }

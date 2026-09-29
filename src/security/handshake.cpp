@@ -1,6 +1,7 @@
 #include "security/handshake.hpp"
 
 #include <cstring>
+#include <utility>
 
 #include "core/codec.hpp"
 #include "security/crypto.hpp"
@@ -71,6 +72,9 @@ void copy_id(DeviceId &dst, const DeviceId &src) { dst = src; }
 
 Status HandshakeSlot::begin(HsRole role, KeyHandle local_key, ByteView local_ccs,
                             const ByteView *peer_ccs, std::size_t peer_count) {
+    if (state_ == State::Failed && !in_flight_) {
+        LM_TRY(wipe()); // retry the teardown that failed before; never build on leaked handles
+    }
     if (state_ != State::Idle || in_flight_) {
         return Status::Busy;
     }
@@ -200,8 +204,11 @@ Status HandshakeSlot::run() {
         }
         secure_zero(MutByteView{seed.data(), seed.size()});
         // The EDHOC state (PRKs, ephemeral keys) is not needed any more: destroy it here, on the
-        // worker, before the owner ever sees the result.
-        lm_edhoc_session_destroy(&session_);
+        // worker, before the owner ever sees the result. A handle that cannot be destroyed fails
+        // the export (keys are dropped in complete()) and complete() retries the teardown.
+        if (lm_edhoc_session_destroy(&session_) != 0) {
+            return Status::RecoveryRequired;
+        }
         session_ready_ = false;
         return st;
     }
@@ -213,12 +220,11 @@ Status HandshakeSlot::complete(Status job_status) {
     in_flight_ = false;
     armed_ = HsStep::None;
     if (cancelled_) {
-        wipe();
-        return Status::Conflict;
+        return wipe() == Status::Ok ? Status::Conflict : Status::RecoveryRequired;
     }
     if (job_status != Status::Ok) {
-        wipe();
-        return job_status;
+        const Status w = wipe();
+        return w == Status::Ok ? job_status : w;
     }
     const bool init = role_ == HsRole::Initiator;
     switch (done) {
@@ -230,8 +236,8 @@ Status HandshakeSlot::complete(Status job_status) {
     case HsStep::M3Process: {
         const int idx = session_.matched_peer;
         if (idx < 0 || static_cast<std::size_t>(idx) >= peer_count_) {
-            wipe();
-            return Status::AuthRejected; // a handshake that authenticated nobody
+            const Status w = wipe();
+            return w == Status::Ok ? Status::AuthRejected : w; // authenticated nobody
         }
         peer_index_ = static_cast<std::size_t>(idx);
         copy_id(peer_device_, peer_ids_[peer_index_]);
@@ -248,9 +254,10 @@ Status HandshakeSlot::complete(Status job_status) {
         keys_ready_ = true;
         expected_ = HsStep::None;
         break;
-    default:
-        wipe();
-        return Status::Conflict;
+    default: {
+        const Status w = wipe();
+        return w == Status::Ok ? Status::Conflict : w;
+    }
     }
     return Status::Ok;
 }
@@ -260,8 +267,7 @@ Status HandshakeSlot::cancel() {
         cancelled_ = true;
         return Status::Busy;
     }
-    wipe();
-    return Status::Ok;
+    return wipe();
 }
 
 Status HandshakeSlot::set_context(const SessionContext &ctx) {
@@ -285,17 +291,17 @@ Status HandshakeSlot::take_keys(RecordKeys &out) {
     if (!keys_ready_ || in_flight_) {
         return Status::Conflict;
     }
-    out = keys_;
-    wipe();
+    out = std::move(keys_); // the slot's copy is zeroed by the move
+    // The keys are ours now. A teardown failure stays visible through teardown_failed() and blocks
+    // the next begin() until the handles were destroyed.
+    (void)wipe();
     return Status::Ok;
 }
 
-void HandshakeSlot::wipe() {
-    lm_edhoc_session_destroy(&session_); // also wipes when init never ran
-    for (DirectionKey *k : {&keys_.tx, &keys_.rx}) {
-        secure_zero(MutByteView{k->key.data(), k->key.size()});
-        secure_zero(MutByteView{k->prefix.data(), k->prefix.size()});
-    }
+Status HandshakeSlot::wipe() {
+    // Also wipes when init never ran. On failure the session (and its handles) stays for a retry.
+    const bool destroyed = lm_edhoc_session_destroy(&session_) == 0;
+    keys_.wipe();
     secure_zero(MutByteView{in_.data(), in_.size()});
     secure_zero(MutByteView{out_.data(), out_.size()});
     local_key_ = KeyHandle{};
@@ -314,6 +320,12 @@ void HandshakeSlot::wipe() {
     ctx_set_ = false;
     keys_ready_ = false;
     peer_index_ = 0;
+    if (!destroyed) {
+        state_ = State::Failed;
+        session_ready_ = true;
+        return Status::RecoveryRequired;
+    }
+    return Status::Ok;
 }
 
 } // namespace lm::sec

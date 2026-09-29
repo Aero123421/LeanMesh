@@ -126,10 +126,11 @@ lm_status_t lm_stop(lm_context_t *ctx, uint32_t /*drain_ms*/, lm_operation_id_t 
     return to_abi(s);
 }
 
-// Payload-carrying events arrive with the delivery slice; until then payload_bytes is always 0.
-lm_status_t lm_next_event(lm_context_t *ctx, lm_event_t *out, uint8_t * /*payload*/,
-                          size_t /*capacity*/, size_t *required) {
-    if (!lm::capi::valid_ctx(ctx) || out == nullptr) {
+// MESSAGE events carry their payload; an OPERATION event carries the application result (<= 32 B).
+// BUFFER_TOO_SMALL leaves the event queued and reports the required size (docs/10 §2).
+lm_status_t lm_next_event(lm_context_t *ctx, lm_event_t *out, uint8_t *payload, size_t capacity,
+                          size_t *required) {
+    if (!lm::capi::valid_ctx(ctx) || out == nullptr || (payload == nullptr && capacity != 0)) {
         return to_abi(Status::InvalidArgument);
     }
     const Status a = lm::capi::check_abi(out->struct_size, out->abi_version, sizeof(*out));
@@ -137,14 +138,19 @@ lm_status_t lm_next_event(lm_context_t *ctx, lm_event_t *out, uint8_t * /*payloa
         return to_abi(a);
     }
     lm_event_t ev{};
-    const Status s = lm::capi::run(ctx, lm::CommandKind::NextEvent, &ev, sizeof(ev));
-    if (s == Status::Ok) {
+    lm::Command cmd;
+    cmd.kind = lm::CommandKind::NextEvent;
+    cmd.response = &ev;
+    cmd.response_size = sizeof(ev);
+    cmd.response_payload = lm::MutByteView{payload, capacity};
+    const lm::Reply r = ctx->owner.call(cmd);
+    if (r.status == Status::Ok) {
         *out = ev;
-        if (required != nullptr) {
-            *required = ev.payload_bytes;
-        }
     }
-    return to_abi(s);
+    if ((r.status == Status::Ok || r.status == Status::BufferTooSmall) && required != nullptr) {
+        *required = r.required_bytes;
+    }
+    return to_abi(r.status);
 }
 
 lm_status_t lm_get_capabilities(lm_context_t *ctx, lm_capabilities_t *out) {

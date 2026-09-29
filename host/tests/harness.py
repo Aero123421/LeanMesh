@@ -124,7 +124,7 @@ class HostProcess:
 
     @staticmethod
     def start(workdir: Path, serial: str | None = None, timeout_s: float = 20.0,
-              permissions: list[str] | None = None) -> HostProcess:
+              permissions: list[str] | None = None, usb_kit: Path | None = None) -> HostProcess:
         token = secrets.token_hex(16)
         tokens = workdir / "tokens.json"
         HostProcess.write_tokens(tokens, token, permissions or ["READ"])
@@ -133,6 +133,9 @@ class HostProcess:
         env = dict(os.environ, LEANMESH_DB=str(db), LEANMESH_TOKENS=str(tokens))
         if serial:
             env["LEANMESH_SERIAL"] = serial
+        if usb_kit:
+            env["LEANMESH_USB_KIT"] = str(usb_kit)
+            env.setdefault("LEANMESH_NATIVE_BUILD", str(native_build_dir()))
         proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "leanmesh_host.main:app", "--uds", str(sock),
              "--workers", "1", "--app-dir", str(HOST_DIR), "--log-level", "warning"],

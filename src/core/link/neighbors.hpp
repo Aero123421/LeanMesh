@@ -49,14 +49,21 @@ struct Neighbor {
     SessionKeys cur;
     SessionKeys prev;
     bool rotate_wanted = false; // tx record threshold reached (seal() sets it)
+    // [S8-D1] JOIN_ONLY session (docs/06 §4 membership 0): carries the join control objects only,
+    // never DATA/ROUTE, never rotates, and is invisible to find_device(). One per joining device.
+    bool join_only = false;
 };
 
 class Neighbors {
   public:
     using Table = Pool<Neighbor, k_max_neighbors>;
 
+    // Ordinary link neighbours only: a JOIN_ONLY entry of the same device is not returned.
     [[nodiscard]] Neighbor *find_device(const DeviceId &d);
     [[nodiscard]] const Neighbor *find_device(const DeviceId &d) const;
+    // [S8-D1] The JOIN_ONLY entry of `d` (nullptr when none).
+    [[nodiscard]] Neighbor *find_join(const DeviceId &d);
+    // Ordinary link neighbours only (JOIN_ONLY entries are looked up by SID / find_join()).
     [[nodiscard]] Neighbor *find_mac(const MacAddr &m);
     // The neighbour at `mac` that has a session (cur or prev) whose rx SID is `sid`.
     [[nodiscard]] Neighbor *by_rx_sid(const MacAddr &mac, uint32_t sid, SessionKeys *&which);

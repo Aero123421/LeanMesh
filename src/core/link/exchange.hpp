@@ -21,6 +21,7 @@
 #include "core/jobs.hpp"
 #include "core/link/neighbors.hpp"
 #include "core/link/seal.hpp"
+#include "core/member/join_wire.hpp"
 #include "core/member/records.hpp"
 #include "core/radio/tx_manager.hpp"
 #include "core/wire/frame.hpp"
@@ -43,6 +44,7 @@ struct LinkPolicy {
     Duration exchange_deadline = Duration::from_s(30);  // registry session_binding.timeout_ms
     Duration rto = Duration::from_ms(1000);
     uint8_t max_attempts = 3;                           // registry session_binding.max_attempts
+    Duration join_session_life = Duration::from_s(420); // [S8-D1] JOIN_ONLY: approval 300 s + prepared 120 s
 };
 
 struct LinkStats {
@@ -93,6 +95,33 @@ class RateGate {
     std::array<Entry, 4> entries_{};
 };
 
+// [S8] Extension points of the join/membership slice (docs/07 §4). All owner-side, all optional:
+// a null function means "not a root / no join support in this build" and the link layer behaves
+// exactly as before. `ctx` is the module the Engine wired in.
+struct RxInfo;
+struct JoinHooks {
+    void *ctx = nullptr;
+    // Root: may a JOIN_PROXY handshake from an unjoined device start now (policy + a free slot)?
+    bool (*responder_open)(void *ctx) = nullptr;
+    // Root: a link handshake with an ACTIVE-credential member: does the ledger still list it as
+    // ACTIVE with exactly this membership generation? (Left/revoked devices are refused.)
+    bool (*link_admit)(void *ctx, const DeviceId &device, const member::MemberCredential &mc) = nullptr;
+    // The JOIN_ONLY session exists (both roles). `peer_bundle` (joiner: [DC, RootDelegation] as the
+    // root sent it) aliases the exchange scratch and is valid only during the call.
+    // `peer_dc_hash` = SHA-256 of the peer's DeviceCredential COSE (bound into the session context).
+    void (*session_up)(void *ctx, bool initiator, const MacAddr &mac, const DeviceId &peer,
+                       ByteView peer_bundle, const Sha256Digest &peer_dc_hash) = nullptr;
+    // The joiner's exchange ended without a session (why != Ok).
+    void (*exchange_failed)(void *ctx, Status why) = nullptr;
+    // JOIN_PROXY carriers that are not an exchange object (hello / offer discovery).
+    void (*discovery)(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c) = nullptr;
+    // Authenticated CONTROL frame of a JOIN_ONLY session / of an ordinary link session.
+    void (*join_control)(void *ctx, const RxInfo &info, ByteView plain) = nullptr;
+    bool (*link_control)(void *ctx, const RxInfo &info, ByteView plain) = nullptr;
+    // An ordinary link session with `peer` was installed (fresh or rotated).
+    void (*link_up)(void *ctx, const DeviceId &peer, uint8_t role) = nullptr;
+};
+
 // What the exchange needs from its layer: all owner-side and outliving the exchange.
 struct LinkShared {
     Engine &engine;
@@ -102,10 +131,23 @@ struct LinkShared {
     member::LocalIdentity &identity;
     RateGate &gate;
     RootTimeBound root_time; // fed by the time slice; invalid means "unknown" (S5-D5)
+    JoinHooks join;          // [S8]
+};
+
+// [S8] What a joiner learns from the root during the credential swap (written by the verify job,
+// read by the owner after its completion). Owned by the membership module.
+struct JoinPeerOut {
+    member::RootDelegation delegation;
+    Sha256Digest delegation_hash{};
+    bool known = false;
 };
 
 enum class ObjKind : uint8_t { CredI = 1, CredR = 2, Msg1 = 3, Msg2 = 4, Msg3 = 5, Msg4 = 6 };
 enum class Phase : uint8_t { Idle, SendCred, Verify, Hs, AwaitMsg, AwaitBind, Linger, Zombie };
+// [S8-D1] Link = ordinary purpose-1 session (frames of kind EDHOC). JoinInit/JoinResp = the JOIN_ONLY
+// handshake of an unjoined device with the root (carriers of kind JOIN_PROXY, docs/IMPLEMENTATION D3).
+// One exchange slot, one HandshakeSlot: joins borrow the link exchange instead of adding a second.
+enum class Mode : uint8_t { Link, JoinInit, JoinResp };
 
 class Exchange {
   public:
@@ -118,8 +160,19 @@ class Exchange {
     // RateLimited (< 30 s since the last full handshake with this MAC), NoCapacity (peer table).
     [[nodiscard]] Status start_initiator(const MacAddr &mac, MonoTime now);
 
-    // Owner, SID-0 EDHOC-kind frame body (bootstrap carrier).
-    void on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now);
+    // [S8] Joiner (identity Ready, not a member): JOIN_ONLY handshake with the root at `mac`.
+    // `out` receives the root's verified delegation; it must outlive the exchange (zombie rule).
+    // AuthPending: not Ready / already a member. Busy/RateLimited/NoCapacity as start_initiator().
+    [[nodiscard]] Status start_join(const MacAddr &mac, JoinPeerOut *out, MonoTime now);
+    // [S8] The 1024 B credential buffer doubles as the join modules' reassembly/object buffer while
+    // the exchange is idle. While lent the exchange counts as busy (a link handshake gets Busy, an
+    // incoming CredI is dropped: local shortage, never RF loss). Empty view when busy.
+    [[nodiscard]] MutByteView lend_scratch();
+    void return_scratch() { lent_ = false; }
+    [[nodiscard]] Mode mode() const { return mode_; }
+
+    // Owner, SID-0 bootstrap carrier body (EDHOC kind for links, JOIN_PROXY kind for joins).
+    void on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now, bool via_join = false);
     // Owner, encrypted EDHOC-kind frame (SESSION_BIND / ACK). True when the exchange consumed it.
     [[nodiscard]] bool on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, ByteView frame,
                                      MonoTime now);
@@ -132,7 +185,7 @@ class Exchange {
 
     // The slot is taken. A lingering responder (only keeping its ACK for bind retransmits) is free:
     // a new exchange replaces it and forgets the cached ACK.
-    [[nodiscard]] bool busy() const { return phase_ != Phase::Idle && phase_ != Phase::Linger; }
+    [[nodiscard]] bool busy() const { return (phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_; }
     [[nodiscard]] Phase phase() const { return phase_; }
     [[nodiscard]] bool initiator() const { return initiator_; }
     [[nodiscard]] Status last_failure() const { return last_failure_; }
@@ -159,12 +212,17 @@ class Exchange {
     };
 
     [[nodiscard]] Status begin_common(const MacAddr &mac, bool initiator, MonoTime now);
+    [[nodiscard]] uint32_t hint() const;
+    [[nodiscard]] Neighbor *installed();
+    [[nodiscard]] Status install_join_session(MonoTime now);
+    [[nodiscard]] Status build_join_response();
     void abort(Status why);
     void peer_state_reset();
     void finish_idle();
     void wipe();
 
-    void on_cred(const MacAddr &src, const wire::BootstrapCarrier &c, ObjKind kind, MonoTime now);
+    void on_cred(const MacAddr &src, const wire::BootstrapCarrier &c, ObjKind kind, MonoTime now,
+                 bool via_join);
     void on_msg(const MacAddr &src, const wire::BootstrapCarrier &c, ObjKind kind, MonoTime now);
     void cred_complete(ObjKind kind, MonoTime now);
     void switch_to_responder();
@@ -177,6 +235,8 @@ class Exchange {
     void finish_keys(MonoTime now);
     static Status job_entry(port::JobEnv &env, void *arg);
     static Status verify_body(Exchange &x);
+    static Status verify_join_body(Exchange &x);
+    [[nodiscard]] Status make_join_context(sec::SessionContext &ctx) const;
 
     [[nodiscard]] Status make_context(sec::SessionContext &ctx) const;
     [[nodiscard]] Status alloc_sid(uint32_t &sid);
@@ -191,10 +251,24 @@ class Exchange {
     [[nodiscard]] Status build_plain(ObjKind kind, uint16_t total, uint16_t offset, ByteView body,
                                      MutByteView out, std::size_t &len) const;
     [[nodiscard]] Status build_cred_fragment(MutByteView out, std::size_t &len) const;
-    [[nodiscard]] ByteView own_bundle() const { return s_.identity.bundle(); }
+    [[nodiscard]] ByteView own_bundle() const {
+        switch (mode_) {
+        case Mode::JoinInit:
+            return s_.identity.device_cose(); // CredI of a joiner is its DeviceCredential alone
+        case Mode::JoinResp:
+            return ByteView{rx_.data(), own_len_}; // [DC, RootDelegation], built after verify
+        case Mode::Link:
+            break;
+        }
+        return s_.identity.bundle();
+    }
 
     LinkShared &s_;
     Phase phase_ = Phase::Idle;
+    Mode mode_ = Mode::Link;
+    bool lent_ = false;           // rx_ is borrowed by a join module
+    JoinPeerOut *join_out_ = nullptr;
+    std::size_t own_len_ = 0;     // JoinResp: length of the bundle staged in rx_
     bool initiator_ = false;
     MacAddr mac_;
     PeerHandle peer_;

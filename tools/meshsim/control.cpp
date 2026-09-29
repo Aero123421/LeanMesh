@@ -170,11 +170,20 @@ const Entry k_commands[] = {
     {"start", cmd_start},         {"stop", cmd_stop}, {"inject", cmd_inject}, {"rawtx", cmd_rawtx},
     {"cb-delay", cmd_cb_delay},   {"trace", cmd_trace},
     {"provision", cmd_provision}, {"link-connect", cmd_link_connect}, {"link-status", cmd_link_status},
+    {"serial-kit", cmd_serial_kit}, {"serial-pair", cmd_serial_pair}, {"serial-status", cmd_serial_status},
+    {"serial-drop", cmd_serial_drop}, {"serial-reset", cmd_serial_reset},
+    {"join-mode", cmd_join_mode}, {"grant", cmd_grant}, {"join", cmd_join}, {"leave", cmd_leave},
+    {"membership", cmd_membership}, {"ledger", cmd_ledger}, {"events", cmd_events},
+    {"store-cut", cmd_store_cut}, {"store-restore", cmd_store_restore}, {"store-fired", cmd_store_fired},
+    {"route", cmd_route}, {"root-time", cmd_root_time}, {"send", cmd_send}, {"op", cmd_op},
+    {"msg-next", cmd_msg_next}, {"msg-report", cmd_msg_report}, {"msg-cancel", cmd_msg_cancel},
+    {"delivery", cmd_delivery},
 };
 
 } // namespace
 
 std::string execute(Sim &sim, const std::string &line) {
+    serial_sync(sim); // [SLICE:S10] node 0 may have been rebooted since the last command
     std::istringstream in(line);
     Args args;
     for (std::string tok; in >> tok;) {
@@ -191,9 +200,9 @@ std::string execute(Sim &sim, const std::string &line) {
     return error("unknown command");
 }
 
-void on_serial_rx(Sim &sim, const uint8_t * /*data*/, std::size_t len) {
-    // [SLICE:S10 USB-SERIAL] hand the bytes to the root serial transport. Counted only until then.
+void on_serial_rx(Sim &sim, const uint8_t *data, std::size_t len) {
     sim.world.node(0).serial.rx_bytes += len;
+    serial_on_rx(sim, data, len); // [SLICE:S10] the root's USB serial adapter
 }
 
 } // namespace meshsim

@@ -55,7 +55,7 @@ class HandshakeSlot {
     HandshakeSlot() = default;
     HandshakeSlot(const HandshakeSlot &) = delete;
     HandshakeSlot &operator=(const HandshakeSlot &) = delete;
-    ~HandshakeSlot() { wipe(); }
+    ~HandshakeSlot() { (void)wipe(); }
 
     // Owner. Copies the inputs; parsing and validation run in the first job. `local_key` is a PSA
     // handle the caller created (import_signing_key) and keeps owning; it must outlive the
@@ -99,10 +99,15 @@ class HandshakeSlot {
     [[nodiscard]] Status set_context(const SessionContext &ctx);
     [[nodiscard]] const Sha256Digest &context_hash() const { return ctx_hash_; }
 
-    // Owner, after Export completed: moves the derived keys out and wipes the slot.
+    // Owner, after Export completed: moves the derived keys out (the slot's copy is zeroed) and
+    // wipes the slot.
     [[nodiscard]] Status take_keys(RecordKeys &out);
 
     [[nodiscard]] bool idle() const { return state_ == State::Idle; }
+    // True when the EDHOC state could not be destroyed (a PSA key slot could not be freed). The
+    // slot keeps the handles and refuses begin() with RecoveryRequired until cancel() or begin()
+    // manages to destroy them; a caller that sees it persist must recover the crypto backend.
+    [[nodiscard]] bool teardown_failed() const { return state_ == State::Failed; }
     [[nodiscard]] bool in_flight() const { return in_flight_; }
     [[nodiscard]] HsStep expected_step() const { return expected_; }
     [[nodiscard]] int last_rc() const { return last_rc_; }
@@ -113,7 +118,9 @@ class HandshakeSlot {
 
     Status run();
     Status init_session();
-    void wipe();
+    // Destroys the EDHOC state and clears everything. RecoveryRequired (state Failed, session
+    // kept for a retry) when a PSA handle could not be destroyed.
+    Status wipe();
 
     State state_ = State::Idle;
     HsRole role_ = HsRole::Initiator;

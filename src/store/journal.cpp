@@ -212,6 +212,14 @@ Status Journal::reclaim(port::Store &store, uint32_t seg) {
             return Status::NoCapacity;
         }
         LM_TRY(store.journal_read(e.offset, MutByteView{buf_.data(), journal_entry_bytes(e.len)}));
+        // The source is trusted only after it matches the live index and its CRC: flash that rotted
+        // after open() must not be re-sealed as valid. Fail with the source segment untouched.
+        const Header src = parse_header(ByteView{buf_.data(), k_journal_header}, seg_bytes_);
+        if (!src.valid || src.kind != 1 || src.id != e.id || src.seq != e.seq || src.len != e.len ||
+            src.crc != entry_crc(ByteView{buf_.data(), 16},
+                                 ByteView{buf_.data() + k_journal_header, e.len})) {
+            return Status::StorageFailure;
+        }
         Writer w(MutByteView{buf_.data(), k_journal_header});
         w.u16be(k_magic);
         w.u8(1);

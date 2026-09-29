@@ -48,9 +48,27 @@ struct DirectionKey {
     std::array<uint8_t, 4> prefix{};
 };
 
+// Move-only secret material with a zeroising destructor: keys travel handshake -> session by
+// move, leaving the source zeroed, so no stray plaintext copy survives (FIX1-D1/D19). Copying a
+// key set would let two sessions share one TX counter space (AES-GCM nonce reuse).
 struct RecordKeys {
     DirectionKey tx;
     DirectionKey rx;
+
+    RecordKeys() = default;
+    RecordKeys(const RecordKeys &) = delete;
+    RecordKeys &operator=(const RecordKeys &) = delete;
+    RecordKeys(RecordKeys &&o) noexcept : tx(o.tx), rx(o.rx) { o.wipe(); }
+    RecordKeys &operator=(RecordKeys &&o) noexcept {
+        if (this != &o) {
+            tx = o.tx;
+            rx = o.rx;
+            o.wipe();
+        }
+        return *this;
+    }
+    ~RecordKeys() { wipe(); }
+    void wipe();
 };
 
 // seed = EDHOC_Exporter(40000, ctx_hash, 32). PRK = HKDF-Extract(salt = ctx_hash, seed);
@@ -95,10 +113,27 @@ constexpr std::size_t k_end_aad_bytes = 7 + 32 + 4 + 42;
 [[nodiscard]] Status end_aad(const Sha256Digest &ctx_hash, RootTerm root_term, ByteView header42,
                              std::array<uint8_t, k_end_aad_bytes> &out);
 
+// Owns one key set and its TX counter / replay window. Move-only: a copy would fork the counter
+// (nonce reuse) and the replay window. A moved-from session is wiped and inactive.
 class RecordSession {
   public:
-    // Installs fresh keys: counters restart at 1, the replay window is empty.
-    void install(const RecordKeys &keys);
+    RecordSession() = default;
+    RecordSession(const RecordSession &) = delete;
+    RecordSession &operator=(const RecordSession &) = delete;
+    RecordSession(RecordSession &&o) noexcept { take(o); }
+    RecordSession &operator=(RecordSession &&o) noexcept {
+        if (this != &o) {
+            wipe();
+            take(o);
+        }
+        return *this;
+    }
+    ~RecordSession() { wipe(); }
+
+    // Takes ownership of freshly derived keys (zeroing `keys`): counters start at 1, the window is
+    // empty. Conflict while the session is active: keys are one-shot and tied to one EDHOC
+    // context, so wipe() (or a new session object) is required first, never a silent counter reset.
+    [[nodiscard]] Status install(RecordKeys &&keys);
     // Zeroises keys and state. Idempotent.
     void wipe();
     [[nodiscard]] bool active() const { return active_; }
@@ -130,6 +165,8 @@ class RecordSession {
     [[nodiscard]] const ReplayWindow &window() const { return window_; }
 
   private:
+    void take(RecordSession &o);
+
     RecordKeys keys_{};
     ReplayWindow window_;
     uint64_t tx_reserved_ = 0;

@@ -288,6 +288,23 @@ LM_TEST("lm_start needs an approved RF profile; start twice conflicts; stop is i
     LM_CHECK(fx.eng(0).transmit(fx.mac(0), ByteView{}, 0, fx.now(0)) == Status::Conflict);
 }
 
+LM_TEST("FIX1-5 failed driver teardown is a fault: not Stopped, destroy refused, stop retries") {
+    Fixture fx(1);
+    lm_context_t *ctx = fx.world.node(0).ctx();
+    fx.radio(0).stop_fault_count = 1;
+    LM_CHECK_EQ(lm_stop(ctx, 0, nullptr), LM_STATUS_RECOVERY_REQUIRED);
+    LM_CHECK(fx.eng(0).radio_state() == RadioState::Faulted);
+    LM_CHECK(fx.radio(0).receiving()); // the driver really is still up
+    Command destroy;
+    destroy.kind = CommandKind::Destroy;
+    LM_CHECK(fx.eng(0).execute(destroy, fx.now(0)).status == Status::Busy);
+    LM_CHECK_EQ(lm_start(ctx), LM_STATUS_CONFLICT); // no restart over a live driver
+    LM_CHECK_EQ(lm_stop(ctx, 0, nullptr), LM_STATUS_OK); // the retry tears it down
+    LM_CHECK(fx.eng(0).radio_state() == RadioState::Stopped);
+    LM_CHECK(!fx.radio(0).receiving());
+    LM_CHECK(fx.eng(0).execute(destroy, fx.now(0)).status == Status::Ok);
+}
+
 LM_TEST("power cut: the radio and every TX record are gone after boot; nothing is inherited") {
     Fixture fx(2);
     fx.radio(0).tx_callback_delay_us = 300'000;

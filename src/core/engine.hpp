@@ -12,15 +12,19 @@
 #include <cstdint>
 
 #include "core/command.hpp"
+#include "core/delivery/delivery.hpp"
 #include "core/events.hpp"
 #include "core/jobs.hpp"
 #include "core/link/link_layer.hpp"
+#include "core/member/membership.hpp"
 #include "core/member/records.hpp"
 #include "core/ports.hpp"
 #include "core/profile.hpp"
 #include "core/radio/peer_registry.hpp"
 #include "core/radio/tx_manager.hpp"
+#include "core/serial_hook.hpp"
 #include "core/time.hpp"
+#include "root/ledger.hpp"
 
 namespace lm {
 
@@ -106,6 +110,22 @@ class Engine {
     // [SLICE:S5] identity and link layer.
     member::LocalIdentity &identity() { return ident_; }
     link::LinkLayer &link() { return link_; }
+    // [SLICE:S9] end-to-end delivery (sessions, receipts, journal) and the app event queue.
+    delivery::Delivery &delivery() { return delivery_; }
+    // Queues an application event. False: the queue was full (a GAP will be reported).
+    [[nodiscard]] bool push_event(const lm_event_t &ev) { return events_.push(ev); }
+    void raise(uint32_t kind, uint32_t reason) { emit(kind, reason); }
+    // Root clock estimate from the time slice: feeds deadline checks and credential leases.
+    void set_root_time(const RootTimeBound &t, MonoTime now) { delivery_.set_root_time(t, now); }
+    // [SLICE:S8] membership: joiner/resume/leave on every device, the ledger on the root only.
+    member::Membership &membership() { return membership_; }
+    root::LedgerType &ledger() { return ledger_; }
+    // Membership/operation events: like raise() but with the operation id and the peer they concern.
+    void emit_event(uint32_t kind, uint32_t reason, uint64_t operation, const DeviceId *peer);
+    // Time of the step() being processed (hooks called from RX handling use it).
+    [[nodiscard]] MonoTime step_time() const { return step_now_; }
+    // [SLICE:S10] Root-only USB serial adapter (src/serial); nullptr on leaf/relay. Not owned.
+    void attach_serial(SerialHook *hook) { serial_ = hook; }
 
   private:
     void on_radio_event(const port::RadioEvent &ev, MonoTime now);
@@ -115,12 +135,19 @@ class Engine {
 
     Reply start_radio(MonoTime now);
     Reply stop_radio();
+    void enter_fault();
     [[nodiscard]] Status bring_up_radio();
     void recover_radio(MonoTime now);
     void emit(uint32_t kind, uint32_t reason);
 
     Reply get_capabilities(const Command &cmd) const;
-    Reply next_event(const Command &cmd);
+    Reply next_event(const Command &cmd, MonoTime now);
+    static void rx_sink(void *ctx, const link::RxInfo &info, ByteView plain); // [SLICE:S9]
+    // [SLICE:S8] link::JoinHooks trampolines: the root routes to the ledger, everything else to the
+    // membership module.
+    [[nodiscard]] bool is_root() const { return k_root_capable && config_.role == Role::Root; }
+    void wire_join_hooks();
+    Reply execute_membership(const Command &cmd, MonoTime now);
 
     EngineConfig config_;
     Ports ports_;
@@ -131,6 +158,11 @@ class Engine {
     TxManager tx_;
     member::LocalIdentity ident_; // [SLICE:S5]
     link::LinkLayer link_{*this, ident_};
+    delivery::Delivery delivery_{*this, ident_, link_}; // [SLICE:S9]
+    MonoTime step_now_;                                 // [SLICE:S9] time of the running step()
+    member::Membership membership_{*this};              // [SLICE:S8]
+    root::LedgerType ledger_{*this};                    // [SLICE:S8] empty stand-in off the root
+    SerialHook *serial_ = nullptr; // [SLICE:S10]
     RadioState radio_state_ = RadioState::Stopped;
     uint8_t channel_ = 0;
     int recover_attempts_ = 0;

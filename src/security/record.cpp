@@ -2,6 +2,8 @@
 
 #include <psa/crypto.h>
 
+#include <utility>
+
 #include "core/codec.hpp"
 #include "core/wire/cbor.hpp"
 #include "security/crypto.hpp"
@@ -34,10 +36,19 @@ class OneShotKey {
         status_ = psa_import_key(&a, k.key.data(), k.key.size(), &id_);
         psa_reset_key_attributes(&a);
     }
-    ~OneShotKey() {
-        if (status_ == PSA_SUCCESS) {
-            (void)psa_destroy_key(id_);
+    ~OneShotKey() { (void)destroy(); }
+    // Destroys the key (once; one retry). A key that cannot be destroyed is still live in PSA: the
+    // caller must not report success for the operation it served (FIX1-D21).
+    [[nodiscard]] psa_status_t destroy() {
+        if (status_ != PSA_SUCCESS || destroyed_) {
+            return PSA_SUCCESS;
         }
+        psa_status_t st = psa_destroy_key(id_);
+        if (st != PSA_SUCCESS) {
+            st = psa_destroy_key(id_);
+        }
+        destroyed_ = st == PSA_SUCCESS || st == PSA_ERROR_INVALID_HANDLE;
+        return destroyed_ ? PSA_SUCCESS : st;
     }
     OneShotKey(const OneShotKey &) = delete;
     OneShotKey &operator=(const OneShotKey &) = delete;
@@ -47,6 +58,7 @@ class OneShotKey {
   private:
     psa_key_id_t id_ = PSA_KEY_ID_NULL;
     psa_status_t status_ = PSA_ERROR_GENERIC_ERROR;
+    bool destroyed_ = false;
 };
 
 void wipe_direction(DirectionKey &k) {
@@ -195,12 +207,30 @@ Status end_aad(const Sha256Digest &ctx_hash, RootTerm root_term, ByteView header
     return w.finish();
 }
 
-void RecordSession::install(const RecordKeys &keys) {
-    keys_ = keys;
+void RecordKeys::wipe() {
+    wipe_direction(tx);
+    wipe_direction(rx);
+}
+
+Status RecordSession::install(RecordKeys &&keys) {
+    if (active_) {
+        return Status::Conflict;
+    }
+    keys_ = std::move(keys);
     window_.reset();
     tx_reserved_ = 0;
     tx_sealed_ = 0;
     active_ = true;
+    return Status::Ok;
+}
+
+void RecordSession::take(RecordSession &o) {
+    keys_ = std::move(o.keys_);
+    window_ = o.window_;
+    tx_reserved_ = o.tx_reserved_;
+    tx_sealed_ = o.tx_sealed_;
+    active_ = o.active_;
+    o.wipe();
 }
 
 void RecordSession::wipe() {
@@ -236,13 +266,18 @@ Status RecordSession::seal(uint64_t counter, ByteView aad, ByteView plaintext, M
         return Status::BufferTooSmall;
     }
     tx_sealed_ = counter;
-    const OneShotKey key{keys_.tx, PSA_KEY_USAGE_ENCRYPT};
+    OneShotKey key{keys_.tx, PSA_KEY_USAGE_ENCRYPT};
     LM_TRY(from_psa(key.status()));
     const auto nonce = make_nonce(keys_.tx, counter);
     std::size_t len = 0;
-    LM_TRY(from_psa(psa_aead_encrypt(key.id(), PSA_ALG_GCM, nonce.data(), nonce.size(), aad.data(),
-                                     aad.size(), plaintext.data(), plaintext.size(), out.data(),
-                                     out.size(), &len)));
+    const psa_status_t enc = psa_aead_encrypt(key.id(), PSA_ALG_GCM, nonce.data(), nonce.size(),
+                                              aad.data(), aad.size(), plaintext.data(),
+                                              plaintext.size(), out.data(), out.size(), &len);
+    if (key.destroy() != PSA_SUCCESS) {
+        secure_zero(out); // the key is still live: do not hand out a "sealed" frame
+        return Status::RecoveryRequired;
+    }
+    LM_TRY(from_psa(enc));
     return len == plaintext.size() + k_aead_tag_bytes ? Status::Ok : Status::RecoveryRequired;
 }
 
@@ -266,13 +301,19 @@ Status RecordSession::open(uint64_t counter, ByteView aad, ByteView ciphertext,
     if (plaintext.size() < ciphertext.size() - k_aead_tag_bytes) {
         return Status::BufferTooSmall;
     }
-    const OneShotKey key{keys_.rx, PSA_KEY_USAGE_DECRYPT};
+    OneShotKey key{keys_.rx, PSA_KEY_USAGE_DECRYPT};
     LM_TRY(from_psa(key.status()));
     const auto nonce = make_nonce(keys_.rx, counter);
     std::size_t len = 0;
-    LM_TRY(from_psa(psa_aead_decrypt(key.id(), PSA_ALG_GCM, nonce.data(), nonce.size(), aad.data(),
-                                     aad.size(), ciphertext.data(), ciphertext.size(),
-                                     plaintext.data(), plaintext.size(), &len)));
+    const psa_status_t dec = psa_aead_decrypt(key.id(), PSA_ALG_GCM, nonce.data(), nonce.size(),
+                                              aad.data(), aad.size(), ciphertext.data(),
+                                              ciphertext.size(), plaintext.data(),
+                                              plaintext.size(), &len);
+    if (key.destroy() != PSA_SUCCESS) {
+        secure_zero(plaintext);
+        return Status::RecoveryRequired;
+    }
+    LM_TRY(from_psa(dec));
     plaintext_len = len;
     if (verdict == ReplayVerdict::Duplicate) {
         return Status::Replay; // authentic duplicate: the caller may re-ACK, never re-apply

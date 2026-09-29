@@ -22,14 +22,12 @@ std::string hex(lm::ByteView v) {
     return s;
 }
 
-// One fleet + domain + root per meshsim process, created by the first `provision`.
-lm::fleet::Network &network(Sim &sim) {
-    static std::unique_ptr<lm::fleet::Network> net;
-    if (net == nullptr) {
-        net = std::make_unique<lm::fleet::Network>(sim.world.options().seed);
-    }
-    return *net;
-}
+} // namespace
+
+// The fleet + domain + root every command of this process shares (join commands build tickets from it).
+lm::fleet::Network &fleet_network(Sim &sim) { return network(sim); }
+
+namespace {
 
 const char *identity_state(lm::member::LocalIdentity::State s) {
     static const char *const k[] = {"unloaded", "loading", "unprovisioned", "ready", "failed"};
@@ -42,6 +40,15 @@ const char *phase_name(lm::link::Phase p) {
 }
 
 } // namespace
+
+// One fleet + domain + root per meshsim process, created on first use (shared with cmd_serial.cpp).
+lm::fleet::Network &network(Sim &sim) {
+    static std::unique_ptr<lm::fleet::Network> net;
+    if (net == nullptr) {
+        net = std::make_unique<lm::fleet::Network>(sim.world.options().seed);
+    }
+    return *net;
+}
 
 std::string cmd_provision(Sim &sim, const Args &a) {
     uint16_t i = 0;

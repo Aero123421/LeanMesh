@@ -24,14 +24,34 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
         ++stats_.rx_malformed;
         return true;
     }
-    if (h.kind == wire::FrameKind::Discovery || h.kind == wire::FrameKind::JoinProxy) {
-        return false; // sessionless kinds belong to the join/mesh slices
+    if (h.kind == wire::FrameKind::Discovery) {
+        return false; // hints and beacons belong to the mesh slice
     }
-    if (!identity_.is_member()) {
+    if (h.kind == wire::FrameKind::JoinProxy) {
+        // [S8] Unjoined device <-> root carrier. Discovery hints go to the join module, everything
+        // else is an object of the (single) exchange in join mode; the exchange applies the policy.
+        wire::BootstrapCarrier c;
+        if (wire::decode_bootstrap(payload, c) != Status::Ok) {
+            ++stats_.rx_malformed;
+        } else if (c.object_kind >= member::k_obj_join_hello) {
+            if (shared_.join.discovery != nullptr) {
+                shared_.join.discovery(shared_.join.ctx, rx.src, c);
+            }
+        } else {
+            exchange_.on_bootstrap(rx.src, payload, now, true);
+        }
+        return true;
+    }
+    // An unjoined device only takes the frames of its own JOIN_ONLY handshake and session (SESSION_BIND
+    // and CONTROL under a SID it reserved); the SID/AEAD lookups below find nothing else for it.
+    const bool member = identity_.is_member();
+    const bool join_traffic = h.link_sid != 0 && (h.kind == wire::FrameKind::Edhoc ||
+                                                  h.kind == wire::FrameKind::Control);
+    if (!member && !join_traffic) {
         ++stats_.rx_no_identity;
         return true;
     }
-    if (h.domain_hint != domain_hint_of(identity_.delegation().domain)) {
+    if (member && h.domain_hint != domain_hint_of(identity_.delegation().domain)) {
         ++stats_.rx_wrong_domain;
         return true;
     }
@@ -79,6 +99,33 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
 }
 
 bool LinkLayer::deliver(const Neighbor &n, const wire::LinkHeader &h, const Opened &op, bool duplicate) {
+    if (n.join_only) {
+        // JOIN_ONLY carries the join objects and nothing else (docs/06 §9): DATA/ROUTE never pass.
+        if (h.kind != wire::FrameKind::Control || shared_.join.join_control == nullptr) {
+            ++stats_.rx_no_consumer;
+            return true;
+        }
+        RxInfo info;
+        info.kind = h.kind;
+        info.src = n.mac;
+        info.peer = n.device;
+        info.counter = h.link_counter;
+        info.duplicate = duplicate;
+        shared_.join.join_control(shared_.join.ctx, info, op.view());
+        return true;
+    }
+    if (h.kind == wire::FrameKind::Control && shared_.join.link_control != nullptr) {
+        RxInfo info;
+        info.kind = h.kind;
+        info.src = n.mac;
+        info.peer = n.device;
+        info.address = n.address;
+        info.counter = h.link_counter;
+        info.duplicate = duplicate;
+        if (shared_.join.link_control(shared_.join.ctx, info, op.view())) {
+            return true; // a leave notice: consumed by the membership module
+        }
+    }
     if (sink_ == nullptr || !is_session_kind(h.kind)) {
         ++stats_.rx_no_consumer;
         return false;
@@ -97,7 +144,7 @@ bool LinkLayer::deliver(const Neighbor &n, const wire::LinkHeader &h, const Open
 // Rotation time of one neighbour: age-based (the lower DeviceId first, the other only as a
 // fallback so a silent peer cannot pin an old key) or immediately once the record threshold hit.
 MonoTime LinkLayer::rotation_time(const Neighbor &n) const {
-    if (!n.cur.active) {
+    if (!n.cur.active || n.join_only) { // a JOIN_ONLY session is never rotated: it ends with the join
         return MonoTime::never();
     }
     if (n.rotate_wanted) {
@@ -201,6 +248,32 @@ Status LinkLayer::seal(const DeviceId &peer, wire::FrameKind kind, ByteView plai
         n->rotate_wanted = true;
     }
     return Status::Ok;
+}
+
+Status LinkLayer::seal_join(const DeviceId &peer, uint32_t domain_hint, ByteView plain, SealedFrame &out,
+                            MonoTime now) {
+    Neighbor *n = neighbors_.find_join(peer);
+    if (n == nullptr || !n->cur.active) {
+        return Status::AuthPending;
+    }
+    if (!(now < n->cur.valid_until)) {
+        return Status::Expired;
+    }
+    const Status st = seal_frame(n->cur, wire::FrameKind::Control, domain_hint, n->cur.tx_sid, plain, out);
+    if (st == Status::Ok) {
+        ++stats_.tx_sealed;
+    }
+    return st;
+}
+
+Status LinkLayer::close_join(const DeviceId &peer) {
+    Neighbor *n = neighbors_.find_join(peer);
+    if (n == nullptr) {
+        return Status::NotFound;
+    }
+    const PeerHandle h = n->peer;
+    neighbors_.remove(*n);
+    return shared_.engine.release_peer(h);
 }
 
 Status LinkLayer::close(const DeviceId &peer) {

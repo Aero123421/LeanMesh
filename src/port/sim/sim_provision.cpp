@@ -26,6 +26,9 @@ Status provision_store(port::Store &store, const ProvisionInput &in) {
     auto job = std::make_unique<store::RecordJob>(); // ~1 KiB: heap is fine on the bench
     std::array<uint8_t, store::k_max_payload> buf{};
     std::size_t len = 0;
+    // Counter floor first: a provisioned device must never look virgin to boot_incarnation_advance.
+    std::array<uint8_t, 8> zero{};
+    LM_TRY(commit(store, *job, store::rec::boot_incarnation, 0, ByteView{zero.data(), zero.size()}));
     LM_TRY(member::encode_identity(in.scalar32, in.device_cose, MutByteView{buf}, len));
     LM_TRY(commit(store, *job, store::rec::identity, 0, ByteView{buf.data(), len}));
     LM_TRY(member::encode_trust(in.trust, MutByteView{buf}, len));

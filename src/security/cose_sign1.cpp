@@ -85,6 +85,15 @@ Status sign1_create(KeyHandle key, const DeviceId &kid, ByteView payload, MutByt
     if (payload.size() + 112 > k_cose_sign1_max_bytes) {
         return Status::PayloadTooLarge;
     }
+    // The kid must be the DeviceId of the signing key: a signer cannot claim another identity,
+    // whatever the caller passes. One public-key derivation per signed control object (rare).
+    PublicKey signer_pub;
+    LM_TRY(public_key_of(key, signer_pub));
+    DeviceId signer_id;
+    LM_TRY(device_id_of(signer_pub, signer_id));
+    if (signer_id != kid) {
+        return Status::InvalidArgument;
+    }
     std::array<uint8_t, k_protected_bytes> prot{};
     LM_TRY(protected_header(kid, prot));
     Sha256Digest digest{};

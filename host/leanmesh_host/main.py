@@ -11,6 +11,7 @@ Hub.outbox_ready) and the outbox/inbox functions in db/outbox.py and events/jour
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -31,6 +32,7 @@ from .api.limits import BodyLimit
 from .auth import Principal, load_principals, sync_principals
 from .db import startup
 from .events.hub import Hub
+from .serial import NativeError, SerialLink
 from .settings import Settings
 from .storage import StorageBusy, StorageFull, StorageThread
 
@@ -50,6 +52,26 @@ def _envelope(status: int, code: str, message: str, retry_after_ms: int | None =
     if details:
         body["details"] = details
     return JSONResponse(status_code=status, content=body)
+
+
+def _start_serial(settings: Settings, hub: Hub) -> SerialLink | None:
+    """Starts the USB serial thread when a port and a Host kit are configured. Fails closed: a bad
+    kit or a missing native helper leaves the service up (degraded: root_connected=false and
+    ready=false), it never falls back to an unauthenticated port (docs/11 §8)."""
+    if not settings.serial_device or settings.usb_kit_path is None:
+        return None
+    try:
+        kit = settings.usb_kit_path.read_bytes()
+        return _run(SerialLink(settings.serial_device, kit, asyncio.get_running_loop(),
+                               on_state=lambda connected, _gen: hub.set_root(connected)))
+    except (OSError, NativeError) as exc:
+        log.error("USB serial disabled: %s", exc)
+        return None
+
+
+def _run(link: SerialLink) -> SerialLink:
+    link.start()
+    return link
 
 
 def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
@@ -82,8 +104,12 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
             app.state.storage = storage
             app.state.hub = hub
             app.state.principals = principals
+            app.state.serial = _start_serial(settings, hub)  # [SLICE:S10] the USB session (bridge: S13)
             yield
         finally:
+            link = getattr(app.state, "serial", None)
+            if link is not None:
+                link.stop()  # port closed, pending requests failed as "session changed"
             if "hub" in locals():
                 hub.close()
             storage.stop()
@@ -140,9 +166,9 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
         # not connected, so every list is empty (never a guessed "supported").
         return {
             "spec_version": SPEC_VERSION,
-            # ready = DB + host USB credential + migrations OK. The USB credential does not exist
-            # until the USB-SERIAL slice, so the host is not ready (docs/11 §8).
-            "ready": False,
+            # ready = DB + host USB credential + migrations OK (docs/11 §8). The credential is the
+            # Host kit of the USB session; without it (or with a rejected one) the host is not ready.
+            "ready": getattr(request.app.state, "serial", None) is not None,
             "root_connected": hub.root_connected,
             "journal_id": hub.storage.journal_id.hex(),
             "capabilities": {

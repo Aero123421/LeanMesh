@@ -19,6 +19,8 @@ class Settings:
     tokens_path: Path
     schema_path: Path
     serial_device: str | None = None
+    # Host kit of the USB session (identity, fleet trust anchor, expected domain; decision D6).
+    usb_kit_path: Path | None = None
     # Capacity (docs/11 §7). Tests shrink these to reach the limits with a few requests.
     max_events: int = 1_000_000
     # Progress events of accepted operations may exceed max_events by this margin. Admission keeps
@@ -54,4 +56,5 @@ class Settings:
             # db/schema.sql is the normative schema; packaging copies it next to the package.
             schema_path=Path(os.environ.get("LEANMESH_SCHEMA", _REPO_ROOT / "db" / "schema.sql")),
             serial_device=os.environ.get("LEANMESH_SERIAL") or None,
+            usb_kit_path=Path(os.environ["LEANMESH_USB_KIT"]) if os.environ.get("LEANMESH_USB_KIT") else None,
         )

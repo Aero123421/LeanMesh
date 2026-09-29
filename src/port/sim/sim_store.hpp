@@ -48,6 +48,12 @@ class SimStore final : public port::Store {
         cut_mode_ = mode;
     }
     void disarm_cut() { cut_armed_ = false; }
+    // Test bench: flips bits of one journal byte in place (Flash decay after open()).
+    void corrupt_journal_byte(uint32_t offset, uint8_t xor_mask) {
+        if (offset < journal_.size()) {
+            journal_[offset] ^= xor_mask;
+        }
+    }
     [[nodiscard]] bool cut_fired() const { return dead_; }
     void power_restore() { dead_ = false; cut_armed_ = false; }
     [[nodiscard]] uint64_t mutating_ops() const { return op_count_; }
