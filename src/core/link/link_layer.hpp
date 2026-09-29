@@ -1,0 +1,84 @@
+// The link layer of the mesh owner: RX path (header -> domain -> (MAC, SID) -> AEAD -> replay
+// commit -> dispatch), TX seal, session lifetime/rotation timers and the single link exchange
+// (EDHOC purpose 1 + SESSION_BIND). Owner thread only; public-key work runs in worker jobs.
+//
+// Frames that need no session (DISCOVERY, JOIN_PROXY) are not handled here (consumers come with
+// the join/mesh slices). Authenticated payloads of the session kinds (DATA, HOP_ACK, ROUTE,
+// CONTROL, POWER) go to the RxSink; without a sink they are counted and dropped.
+#pragma once
+
+#include <cstdint>
+
+#include "core/link/exchange.hpp"
+#include "core/link/neighbors.hpp"
+#include "core/link/seal.hpp"
+
+namespace lm::link {
+
+struct RxInfo {
+    wire::FrameKind kind = wire::FrameKind::Data;
+    MacAddr src;
+    DeviceId peer;      // full identity behind the session
+    ShortAddr address;  // lookup hint of that peer (never an identity)
+    uint64_t counter = 0;
+    // Authentic duplicate (already accepted): re-ACK it if the protocol says so, never re-apply.
+    bool duplicate = false;
+};
+using RxSink = void (*)(void *ctx, const RxInfo &info, ByteView plain);
+
+class LinkLayer {
+  public:
+    LinkLayer(Engine &engine, member::LocalIdentity &identity)
+        : identity_(identity), shared_{engine, policy_, stats_, neighbors_, identity, gate_, {}},
+          exchange_(shared_) {}
+
+    // ---- owner wiring (Engine calls these) ----
+    // False: a valid frame nobody consumes yet (counted as unhandled by the engine).
+    [[nodiscard]] bool on_rx(const port::RadioRx &rx, MonoTime now);
+    void on_tx_outcome(const TxOutcome &o, MonoTime now) { exchange_.on_tx_outcome(o, now); }
+    void on_job_done(Handle slot, Status s, MonoTime now) { exchange_.on_job_done(slot, s, now); }
+    void on_timer(MonoTime now);
+    [[nodiscard]] MonoTime deadline() const;
+    void stop(); // radio stop: exchange aborted, sessions wiped, peers released
+
+    // ---- services for other modules ----
+    // Opens a session with the neighbour at `mac` (initiator). Conflict when a live session exists
+    // and `replace` is false; other errors as Exchange::start_initiator().
+    [[nodiscard]] Status connect(const MacAddr &mac, MonoTime now, bool replace = false);
+    // Seals one frame for the neighbour with a live session. AuthPending: no session yet.
+    // SessionRefreshRequired: key lifetime over. The bytes are what a retransmission sends again.
+    [[nodiscard]] Status seal(const DeviceId &peer, wire::FrameKind kind, ByteView plain,
+                              SealedFrame &out, MonoTime now);
+    // Closes every session with `peer` (revocation, leave). No message is sent.
+    [[nodiscard]] Status close(const DeviceId &peer);
+
+    void set_sink(RxSink sink, void *ctx) {
+        sink_ = sink;
+        sink_ctx_ = ctx;
+    }
+    void set_root_time(const RootTimeBound &t) { shared_.root_time = t; }
+    LinkPolicy &policy() { return policy_; }
+    [[nodiscard]] const LinkPolicy &policy() const { return policy_; }
+    [[nodiscard]] const LinkStats &stats() const { return stats_; }
+    Neighbors &neighbors() { return neighbors_; }
+    [[nodiscard]] const Neighbors &neighbors() const { return neighbors_; }
+    [[nodiscard]] const Exchange &exchange() const { return exchange_; }
+
+  private:
+    [[nodiscard]] bool deliver(const Neighbor &n, const wire::LinkHeader &h, const Opened &op,
+                               bool duplicate);
+    [[nodiscard]] MonoTime rotation_time(const Neighbor &n) const;
+
+    member::LocalIdentity &identity_;
+    LinkPolicy policy_;
+    LinkStats stats_;
+    Neighbors neighbors_;
+    RateGate gate_;
+    LinkShared shared_;
+    Exchange exchange_;
+    RxSink sink_ = nullptr;
+    void *sink_ctx_ = nullptr;
+    MonoTime rotation_retry_ = MonoTime{0};
+};
+
+} // namespace lm::link

@@ -169,6 +169,7 @@ const Entry k_commands[] = {
     {"power-cut", cmd_power_cut}, {"boot", cmd_boot}, {"serial", cmd_serial}, {"quit", cmd_quit},
     {"start", cmd_start},         {"stop", cmd_stop}, {"inject", cmd_inject}, {"rawtx", cmd_rawtx},
     {"cb-delay", cmd_cb_delay},   {"trace", cmd_trace},
+    {"provision", cmd_provision}, {"link-connect", cmd_link_connect}, {"link-status", cmd_link_status},
 };
 
 } // namespace

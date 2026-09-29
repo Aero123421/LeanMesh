@@ -70,12 +70,14 @@ add_executable(meshsim
     tools/meshsim/main.cpp
     tools/meshsim/control.cpp
     tools/meshsim/cmd_runtime.cpp
+    tools/meshsim/cmd_provision.cpp
     tools/meshsim/topology.cpp
     tools/meshsim/pty.cpp)
 target_compile_options(meshsim PRIVATE ${LM_CXX_WARNINGS})
-target_link_libraries(meshsim PRIVATE lm_sim)
+target_link_libraries(meshsim PRIVATE lm_sim lm_fleet)
 
 add_subdirectory(tools/lmtool) # codec CLI for differential wire tests
+add_subdirectory(tools/lmfleet) # TEST-ONLY fleet issuer (never linked into firmware)
 
 if(LM_BUILD_TESTS)
     enable_testing()

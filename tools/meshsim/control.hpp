@@ -13,6 +13,10 @@
 //   rawtx <from> <to|bcast> <hex>           TEST ONLY: one raw frame through the owner's TX path
 //   cb-delay <ms> [node]                    extra TX-done callback delay (all nodes or one)
 //   trace on [capacity] | off | dump        bounded medium trace (default capacity 1024)
+//   provision <node> <address> [leaf|relay|root|unjoined]   TEST-ONLY fleet issuer writes the sealed
+//                                           identity records into the node's store (before `start`)
+//   link-connect <node> <peer>              open a link session (EDHOC purpose 1) to a neighbour
+//   link-status <node>                      identity state, neighbours/sessions, exchange phase
 //   quit
 // Stdout carries only protocol lines; diagnostics go to stderr.
 #pragma once
@@ -49,6 +53,11 @@ std::string cmd_inject(Sim &sim, const Args &a);
 std::string cmd_rawtx(Sim &sim, const Args &a);
 std::string cmd_cb_delay(Sim &sim, const Args &a);
 std::string cmd_trace(Sim &sim, const Args &a);
+
+// Commands of the identity/link slice (cmd_provision.cpp).
+std::string cmd_provision(Sim &sim, const Args &a);
+std::string cmd_link_connect(Sim &sim, const Args &a);
+std::string cmd_link_status(Sim &sim, const Args &a);
 
 // --topology-file: one `link <a> <b> [loss_permille] [delay_ms] [ack_loss_permille]` per line,
 // `#` starts a comment. False with `err` set on the first bad line (nothing is half-applied).

@@ -22,6 +22,8 @@ namespace lm {
 enum class JobOwner : uint8_t {
     None = 0,
     Test = 1, // native tests only
+    Identity = 2, // S5: boot load of identity/trust/membership records
+    Link = 3,     // S5: link exchange (credential verify, EDHOC steps)
 };
 
 // Public-key jobs share one global slot (docs/06 §8 "同時P-256 jobs1"); Flash jobs are separate.

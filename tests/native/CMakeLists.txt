@@ -19,6 +19,7 @@ lm_add_test(test_runtime_meshsim SOURCES test_runtime_meshsim.cpp LABELS "integr
 target_compile_definitions(test_runtime_meshsim PRIVATE MESHSIM_EXE="$<TARGET_FILE:meshsim>")
 add_dependencies(test_runtime_meshsim meshsim)
 lm_add_test(test_wire SOURCES test_wire.cpp LABELS "unit;wire;scenario")
+lm_add_test(test_route SOURCES test_route.cpp LABELS "unit;integration;route;scenario")
 # CRYPTO slice: record layer, identity/COSE, EDHOC suite-3 handshake; the RFC 9529 replay is C. The
 # linker wraps the allocator so the test can measure PSA heap use (peak and leaks).
 lm_add_test(test_security SOURCES test_security.cpp edhoc_rfc9529.c LABELS "unit;integration;crypto;scenario")
@@ -29,3 +30,9 @@ if(NOT LM_SANITIZE)
     target_link_options(test_security PRIVATE
         -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free)
 endif()
+# IDENTITY+LINK slice (S5): credential codecs/checks and link sessions between provisioned sim nodes.
+# The fleet issuer lm_fleet is TEST-ONLY (tools/lmfleet); nothing here reaches firmware.
+lm_add_test(test_link SOURCES test_link.cpp LABELS "integration;sim;link;scenario")
+target_link_libraries(test_link PRIVATE lm_fleet)
+lm_add_test(test_credentials SOURCES test_credentials.cpp LABELS "unit;link;scenario")
+target_link_libraries(test_credentials PRIVATE lm_fleet)

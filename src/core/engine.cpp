@@ -34,15 +34,18 @@ MonoTime Engine::step(MonoTime now) {
     if (radio_state_ == RadioState::Recovering && now >= recover_at_) {
         recover_radio(now);
     }
+    link_.on_timer(now); // [SLICE:S5] session expiry, rotation, exchange RTO: all real deadlines
     return next_deadline();
 }
 
 void Engine::on_radio_event(const port::RadioEvent &ev, MonoTime now) {
     if (ev.kind == port::RadioEvent::Kind::Rx) {
         ++stats_.rx_frames;
-        // [SLICE:S5 LINK] The link layer (header decode, SID lookup, AEAD open, kind dispatch)
-        // consumes RX frames here. Until then frames are counted and dropped, never acted on.
-        ++stats_.rx_unhandled;
+        // [SLICE:S5 LINK] header decode, SID lookup, AEAD open, kind dispatch. A valid frame with no
+        // consumer yet (discovery, join proxy, no sink) is counted, never acted on.
+        if (!link_.on_rx(ev.rx, now)) {
+            ++stats_.rx_unhandled;
+        }
         return;
     }
     TxOutcome out;
@@ -53,12 +56,23 @@ void Engine::on_radio_event(const port::RadioEvent &ev, MonoTime now) {
     on_tx_outcome(out, now);
 }
 
-void Engine::on_tx_outcome(const TxOutcome & /*o*/, MonoTime /*now*/) {
-    // [SLICE:S5 LINK] link retry/RTO/quality: MacFailed is an RF-loss sample, MacAcked is not a
-    // HOP_ACK, Unknown is neither (docs/03 §4). TxStats already separates the three.
+void Engine::on_tx_outcome(const TxOutcome &o, MonoTime now) {
+    // [SLICE:S5 LINK] MacFailed is an RF-loss sample, MacAcked is not a HOP_ACK, Unknown is neither
+    // (docs/03 §4). The exchange frees its TX slot and retransmits by RTO, not by outcome.
+    link_.on_tx_outcome(o, now);
 }
 
-void Engine::on_job_completion(const port::JobCompletion &c, MonoTime /*now*/) {
+Status Engine::submit_job(JobOwner owner, Handle slot, JobClass cls, port::JobFn fn, void *arg) {
+    JobTicket t;
+    LM_TRY(jobs_.reserve(owner, slot, cls, t));
+    const Status s = ports_.jobs.submit(t.table_index, t.job_id, fn, arg);
+    if (s != Status::Ok) {
+        jobs_.cancel_unsubmitted(t);
+    }
+    return s;
+}
+
+void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
     JobOrigin origin;
     if (!jobs_.complete(c, origin)) {
         stats_.stale_job_completions = jobs_.stale_completions();
@@ -66,6 +80,15 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime /*now*/) {
     }
     switch (origin.owner) {
     // [SLICE] case JobOwner::X: x_.on_job_done(origin.slot, c.status, now); return;
+    case JobOwner::Identity:
+        ident_.on_job_done(c.status, origin.slot);
+        if (ident_.state() == member::LocalIdentity::State::Failed) {
+            emit(LM_EVENT_FAULT, static_cast<uint32_t>(ident_.load_status()));
+        }
+        return;
+    case JobOwner::Link:
+        link_.on_job_done(origin.slot, c.status, now);
+        return;
     case JobOwner::None:
     case JobOwner::Test:
         break;
@@ -78,6 +101,7 @@ MonoTime Engine::next_deadline() const {
         next = earliest(next, recover_at_);
     }
     // [SLICE] next = earliest(next, x_.deadline()); over module deadlines.
+    next = earliest(next, link_.deadline());
     if (yield_) {
         return MonoTime{0}; // "now or earlier": the platform loop steps again immediately
     }
@@ -135,7 +159,10 @@ Reply Engine::start_radio(MonoTime /*now*/) {
         return Reply{Status::Conflict, 0, 0};
     }
     channel_ = 0; // a fresh start uses the profile channel
-    const Status s = bring_up_radio();
+    Status s = bring_up_radio();
+    if (s == Status::Ok) {
+        s = ident_.begin_load(*this); // [SLICE:S5] identity/membership come from sealed records
+    }
     if (s != Status::Ok) {
         (void)ports_.radio.stop();
         return Reply{s, 0, 0};
@@ -150,6 +177,8 @@ Reply Engine::stop_radio() {
         return Reply{Status::Ok, 0, 0};
     }
     // No operation exists yet that needs a drain (delivery slices add it): stop is immediate.
+    link_.stop(); // [SLICE:S5] sessions and the exchange go first (their peers are still registered)
+    ident_.release();
     const Status s = ports_.radio.stop();
     tx_.reinitialised();
     radio_state_ = RadioState::Stopped;

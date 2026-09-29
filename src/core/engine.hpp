@@ -14,6 +14,8 @@
 #include "core/command.hpp"
 #include "core/events.hpp"
 #include "core/jobs.hpp"
+#include "core/link/link_layer.hpp"
+#include "core/member/records.hpp"
 #include "core/ports.hpp"
 #include "core/profile.hpp"
 #include "core/radio/peer_registry.hpp"
@@ -90,6 +92,20 @@ class Engine {
     PeerRegistry &peers() { return peers_; }
     [[nodiscard]] const PeerRegistry &peers() const { return peers_; }
     [[nodiscard]] const TxManager &tx() const { return tx_; }
+    // Registers/frees a driver peer through the registry (NoCapacity = local shortage, not loss).
+    [[nodiscard]] Status acquire_peer(const MacAddr &mac, PeerClass cls, PeerHandle &out) {
+        return peers_.acquire(ports_.radio, mac, cls, out);
+    }
+    [[nodiscard]] Status release_peer(PeerHandle h) { return peers_.release(ports_.radio, h); }
+    // Job service: reserves a table entry and queues the body on the worker. The completion comes
+    // back through on_job_completion() to `owner` with the same `slot`. Busy = table full or a
+    // public-key job already running / worker queue full; the job then does not exist.
+    [[nodiscard]] Status submit_job(JobOwner owner, Handle slot, JobClass cls, port::JobFn fn, void *arg);
+    // CSPRNG bytes for SDK nonces, SIDs and jitter (never key material).
+    void random(MutByteView out) { ports_.jobs.random(out); }
+    // [SLICE:S5] identity and link layer.
+    member::LocalIdentity &identity() { return ident_; }
+    link::LinkLayer &link() { return link_; }
 
   private:
     void on_radio_event(const port::RadioEvent &ev, MonoTime now);
@@ -113,6 +129,8 @@ class Engine {
     AppEventQueue<k_max_app_events> events_;
     PeerRegistry peers_;
     TxManager tx_;
+    member::LocalIdentity ident_; // [SLICE:S5]
+    link::LinkLayer link_{*this, ident_};
     RadioState radio_state_ = RadioState::Stopped;
     uint8_t channel_ = 0;
     int recover_attempts_ = 0;

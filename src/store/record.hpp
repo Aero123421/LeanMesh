@@ -52,6 +52,8 @@ inline constexpr uint16_t assignment_high_water = 6;
 inline constexpr uint16_t channel_plan = 7;
 inline constexpr uint16_t policy = 8;
 inline constexpr uint16_t root_ledger = 9;
+inline constexpr uint16_t revocation_floors = 10; // S5: member/records.cpp
+inline constexpr uint16_t root_delegation = 11;   // S5: fleet-signed RootDelegation COSE object
 } // namespace rec
 
 // One worker job's whole memory: payload in/out plus the read/verify scratch. The owner keeps it
