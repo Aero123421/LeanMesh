@@ -38,7 +38,9 @@ class Bucket:
         if self.rate <= 0:
             return 0
         self._refill(now)
-        return 0 if self.tokens >= 1.0 else max(1, math.ceil((1.0 - self.tokens) / self.rate * 1000))
+        # Refill is float arithmetic on monotonic seconds: after exactly retry_after_ms the bucket can
+        # hold 0.9999999 of a token. A tolerance far below one request keeps the advertised wait honest.
+        return 0 if self.tokens >= 1.0 - 1e-6 else max(1, math.ceil((1.0 - self.tokens) / self.rate * 1000))
 
     def take(self) -> None:
         if self.rate > 0:
