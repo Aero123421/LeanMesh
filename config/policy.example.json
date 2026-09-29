@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "revision": "1",
+  "relay_allowed": true,
+  "join": {
+    "mode": "external",
+    "listen_ms": 800,
+    "search_budget_ms": 30000,
+    "auto_transfer_on_isolation": false,
+    "isolation_before_transfer_ms": 600000
+  },
+  "channel": {
+    "automatic": true,
+    "freeze": false,
+    "cooldown_ms": 3600000,
+    "minimum_improvement_percent": 25,
+    "allow_maintenance_gap": false,
+    "max_clock_error_ms": 2000
+  }
+}

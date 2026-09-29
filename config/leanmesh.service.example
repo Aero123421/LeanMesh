@@ -1,0 +1,25 @@
+[Unit]
+Description=LeanMesh local host (deployment template; SDK not included)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=leanmesh
+Group=leanmesh
+RuntimeDirectory=leanmesh
+RuntimeDirectoryMode=0750
+StateDirectory=leanmesh
+UMask=0077
+ExecStart=/opt/leanmesh/venv/bin/python -m uvicorn leanmesh_host.main:app --uds /run/leanmesh/api.sock --workers 1
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/leanmesh /run/leanmesh
+# Grant only the intended serial device via udev group/ACL; do not run as root.
+
+[Install]
+WantedBy=multi-user.target

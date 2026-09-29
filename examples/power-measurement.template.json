@@ -1,0 +1,11 @@
+{
+  "status": "NOT_MEASURED",
+  "soc": null,
+  "board": null,
+  "firmware_sha256": null,
+  "instrument": null,
+  "trace_sha256": null,
+  "measurement": null,
+  "model": null,
+  "notes": "実機/測定器の情報を記録する。SYNTHETIC sampleの値をここへ実測として転載しない。"
+}

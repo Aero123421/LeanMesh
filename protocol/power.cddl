@@ -1,0 +1,13 @@
+; Documentation of the decoded values; wire is fixed binary, not CBOR.
+; Common LM link header24 + AES-GCM ciphertext(payload) + tag16.
+; POWER frame kind8 is authenticated 1-hop only, and requires power capability.
+power-poll = [subtype: 1, version: 1, rx-credit: 0..65535,
+ poll-nonce: 1..18446744073709551615, revision-hint: 0..4294967295,
+ planned-interval-ms: 0..86400000, window-ms: 1..65535,
+ flags: 0, reserved: 0]
+power-grant = [subtype: 2, version: 1, pending-frames: 0..65535,
+ poll-nonce: 1..18446744073709551615, window-ttl-ms: 1..65535,
+ granted-credit: 0..65535, reserved: 0, reason: 0..4294967295]
+; struct_formats registry is authoritative for widths: poll28/grant24.
+; Semantic checks: matching parent/session, nonce echo, credit bounded by request,
+; grant TTL <= first poll window, no deadline reset on retry, unknown flags reject.

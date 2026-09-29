@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:leanmesh:policy:1",
+  "title": "LeanMesh policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "revision",
+    "join",
+    "channel",
+    "relay_allowed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$",
+      "description": "decimal u63; parsed upper bound 2^63-1 checked by implementation"
+    },
+    "relay_allowed": {
+      "type": "boolean"
+    },
+    "join": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "listen_ms",
+        "search_budget_ms",
+        "auto_transfer_on_isolation",
+        "isolation_before_transfer_ms"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "closed",
+            "external",
+            "preapproved"
+          ]
+        },
+        "listen_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 5000
+        },
+        "search_budget_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "auto_transfer_on_isolation": {
+          "type": "boolean"
+        },
+        "isolation_before_transfer_ms": {
+          "type": "integer",
+          "minimum": 600000,
+          "maximum": 604800000
+        }
+      }
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "automatic",
+        "freeze",
+        "cooldown_ms",
+        "minimum_improvement_percent",
+        "allow_maintenance_gap",
+        "max_clock_error_ms"
+      ],
+      "properties": {
+        "automatic": {
+          "type": "boolean"
+        },
+        "freeze": {
+          "type": "boolean"
+        },
+        "cooldown_ms": {
+          "type": "integer",
+          "minimum": 60000,
+          "maximum": 86400000
+        },
+        "minimum_improvement_percent": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 90
+        },
+        "allow_maintenance_gap": {
+          "type": "boolean"
+        },
+        "max_clock_error_ms": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 10000
+        }
+      }
+    }
+  }
+}

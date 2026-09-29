@@ -1,0 +1,3 @@
+# Spec checker only; these are not the product runtime dependency lock.
+cryptography>=42
+jsonschema>=4.20

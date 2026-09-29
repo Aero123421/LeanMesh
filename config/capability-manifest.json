@@ -1,0 +1,145 @@
+{
+  "artifact": "specification-only",
+  "spec_version": "0.2",
+  "soc_targets": [
+    "esp32s3",
+    "esp32c3",
+    "esp32c5",
+    "esp32c6"
+  ],
+  "features": [
+    {
+      "name": "SMALL_MESSAGE",
+      "bit": 0,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "OBJECT_4K",
+      "bit": 1,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "GROUP_FANOUT_V2",
+      "bit": 2,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "POWER_REPORT_ONLY",
+      "bit": 3,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "POWER_WINDOWED_RX",
+      "bit": 4,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "RAM_SESSION_RETAIN",
+      "bit": 5,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "AUTO_CHANNEL",
+      "bit": 6,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "SIGNED_TRANSFER",
+      "bit": 7,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "COMMISSIONING_WINDOW",
+      "bit": 8,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "ROOT_HANDOVER",
+      "bit": 9,
+      "design_target": true,
+      "specified": true,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "設計契約。実装のcapability宣言ではない。"
+    },
+    {
+      "name": "RTC_SECURE_RESUME_RESERVED",
+      "bit": 10,
+      "design_target": false,
+      "specified": false,
+      "implemented": false,
+      "build_tested": false,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "note": "予約のみ。実装・安全性・省電力測定のgate前。"
+    }
+  ],
+  "rule": "Runtime enables a capability only when implemented, peer-negotiated, profile-qualified and deployment-approved. No capability is enabled by this specification bundle."
+}

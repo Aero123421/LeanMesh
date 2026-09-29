@@ -1,0 +1,233 @@
+{
+  "artifact": "LeanMesh spec v0.2",
+  "date": "2026-09-28",
+  "status": "PASS",
+  "environment": {
+    "python": "3.13.5",
+    "sqlite": "3.46.1",
+    "cryptography": "46.0.4"
+  },
+  "checks": [
+    {
+      "name": "json_parse",
+      "status": "PASS",
+      "detail": {
+        "files": 23
+      }
+    },
+    {
+      "name": "wire_layout",
+      "status": "PASS",
+      "detail": {
+        "fixed_headers": "24/16/42 bytes",
+        "application_capacity_1_20_40_hop": [
+          134,
+          96,
+          56
+        ],
+        "record_bitmap_bytes": 35,
+        "status_codes": 35
+      }
+    },
+    {
+      "name": "aes_cose_and_cbor_vectors",
+      "status": "PASS",
+      "detail": {
+        "aes_gcm_frames": 4,
+        "cose_signature_fixtures": 1,
+        "negative_checks": 24,
+        "edhoc_handshakes_run": 0
+      }
+    },
+    {
+      "name": "fragment_contract",
+      "status": "PASS",
+      "detail": {
+        "cases": [
+          {
+            "hops": 1,
+            "payload": 512,
+            "fragments": 7
+          },
+          {
+            "hops": 20,
+            "payload": 128,
+            "fragments": 3
+          },
+          {
+            "hops": 20,
+            "payload": 512,
+            "fragments": 11
+          },
+          {
+            "hops": 40,
+            "payload": 512,
+            "fragments": 32
+          },
+          {
+            "hops": 40,
+            "payload": 4096,
+            "fragments": 256
+          }
+        ],
+        "scope": "standalone fixture reassembly shape, not product reliability tests"
+      }
+    },
+    {
+      "name": "sqlite_schema",
+      "status": "PASS",
+      "detail": {
+        "sqlite_version": "3.46.1",
+        "tables": 14,
+        "wal_full": true,
+        "power_cut_test": false
+      }
+    },
+    {
+      "name": "openapi_and_policy",
+      "status": "PASS",
+      "detail": {
+        "openapi": "3.1 shapes/refs/path params plus positive/negative request constraints",
+        "paths": 16,
+        "schemas": 24,
+        "resolved_references": 257,
+        "formal_openapi_meta_schema_validation": false
+      }
+    },
+    {
+      "name": "c_and_cpp_syntax",
+      "status": "PASS",
+      "detail": {
+        "declarations_and_example": [
+          "c",
+          "c++"
+        ],
+        "linked_implementation": false,
+        "esp_idf_build": false
+      }
+    },
+    {
+      "name": "partition_accounting",
+      "status": "PASS",
+      "detail": {
+        "partition_count": 10,
+        "flash_bytes": 4194304,
+        "ota_slot_bytes": 1900544,
+        "hardware_test": false
+      }
+    },
+    {
+      "name": "requirement_traceability",
+      "status": "PASS",
+      "detail": {
+        "requirements": 25,
+        "acceptance_scenarios": 158,
+        "product_scenarios_executed": 0,
+        "source_records": 55
+      }
+    },
+    {
+      "name": "markdown_links",
+      "status": "PASS",
+      "detail": {
+        "local_markdown_links": 76,
+        "external_urls_fetched_by_checker": false
+      }
+    },
+    {
+      "name": "control_contract_bounds",
+      "status": "PASS",
+      "detail": {
+        "selected_cross_contract_checks": true,
+        "formal_cddl_grammar_and_cbor_instance_validation": false
+      }
+    },
+    {
+      "name": "airtime_accounting",
+      "status": "PASS",
+      "detail": {
+        "20hop_96B_serialized_bits_lower_bound_ms": 193.28,
+        "not_latency_prediction": true
+      }
+    },
+    {
+      "name": "power_policy_contract",
+      "status": "PASS",
+      "detail": {
+        "positive_negative_cases": 17,
+        "product_power_manager_executed": false
+      }
+    },
+    {
+      "name": "power_wire_contract",
+      "status": "PASS",
+      "detail": {
+        "poll_frame_bytes_with_link_aead": 68,
+        "grant_frame_bytes_with_link_aead": 64,
+        "scope": "fixed binary shapes and semantic bounds; no RF send"
+      }
+    },
+    {
+      "name": "power_state_models",
+      "status": "PASS",
+      "detail": {
+        "session_cases": 7,
+        "sleep_target_cases": 6,
+        "two_clock_drift_guard_ms": 72,
+        "scope": "specification decision model only"
+      }
+    },
+    {
+      "name": "group_generation_and_outcome_contract",
+      "status": "PASS",
+      "detail": {
+        "target_generations_hash_bound": true,
+        "counts_are_current_outcomes": true,
+        "product_group_dispatch_executed": false
+      }
+    },
+    {
+      "name": "energy_integrator_and_provenance",
+      "status": "PASS",
+      "detail": {
+        "synthetic_integral_energy_j": 0.03300000000000001,
+        "measured_trace_count": 0,
+        "invalid_trace_cases": 4,
+        "measurement_provenance_negative": true
+      }
+    },
+    {
+      "name": "power_c_and_cpp_syntax",
+      "status": "PASS",
+      "detail": {
+        "power_example": [
+          "c",
+          "c++"
+        ],
+        "sdk_linked": false
+      }
+    },
+    {
+      "name": "full_bundle_inventory",
+      "status": "PASS",
+      "detail": {
+        "original_paths_retained": 54,
+        "python_syntax_files": 6,
+        "new_product_tests_run": 0
+      }
+    }
+  ],
+  "product_tests_run": false,
+  "not_executed": [
+    "EDHOC full engine interop/RFC trace run",
+    "ESP-IDF builds for all four chips",
+    "radio PHY/peer behavior",
+    "physical 20/40 hop",
+    "FastAPI product server",
+    "power cut/disk failure on real hardware",
+    "independent cryptographic review",
+    "measured firmware flash/RAM/CPU/energy",
+    "clang-format/clang-tidy/ruff product lint",
+    "full lifecycle and power runtime implementation"
+  ]
+}

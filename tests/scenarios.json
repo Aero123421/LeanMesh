@@ -1,0 +1,2820 @@
+{
+  "note": "All product scenarios remain NOT_RUN_PRODUCT_TEST. Specification helper checks are reported separately.",
+  "scenarios": [
+    {
+      "id": "B01",
+      "title": "4target同一pin build",
+      "requirements": [
+        "REQ-01",
+        "REQ-14"
+      ],
+      "level": "BUILD",
+      "setup": "IDF6.0.3固定、同一機能",
+      "fault": "C3/S3/C5/C6それぞれでbuild",
+      "expected": "同Wire/定数、map/heap予算、未対応APIを偽stubで通さない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c3-c3",
+      "title": "異種SoC双方向通信 c3→c3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c3-s3",
+      "title": "異種SoC双方向通信 c3→s3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c3-c5",
+      "title": "異種SoC双方向通信 c3→c5",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c3-c6",
+      "title": "異種SoC双方向通信 c3→c6",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-s3-c3",
+      "title": "異種SoC双方向通信 s3→c3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-s3-s3",
+      "title": "異種SoC双方向通信 s3→s3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-s3-c5",
+      "title": "異種SoC双方向通信 s3→c5",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-s3-c6",
+      "title": "異種SoC双方向通信 s3→c6",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c5-c3",
+      "title": "異種SoC双方向通信 c5→c3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c5-s3",
+      "title": "異種SoC双方向通信 c5→s3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c5-c5",
+      "title": "異種SoC双方向通信 c5→c5",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c5-c6",
+      "title": "異種SoC双方向通信 c5→c6",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c6-c3",
+      "title": "異種SoC双方向通信 c6→c3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c6-s3",
+      "title": "異種SoC双方向通信 c6→s3",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c6-c5",
+      "title": "異種SoC双方向通信 c6→c5",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "RF-c6-c6",
+      "title": "異種SoC双方向通信 c6→c6",
+      "requirements": [
+        "REQ-01"
+      ],
+      "level": "HARDWARE",
+      "setup": "個体鍵・同一LR250 profile",
+      "fault": "send、ACK loss、reset、再認証",
+      "expected": "真の実RF受信とreceipt、型/peer制限/PHYreadback一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R01",
+      "title": "21radio20hop強制chain",
+      "requirements": [
+        "REQ-02"
+      ],
+      "level": "HARDWARE",
+      "setup": "root+20ノード、96B低負荷",
+      "fault": "直接shortcutを制限",
+      "expected": "20辺で到達しp95/p99とairtimeを記録",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R02",
+      "title": "40hop端末間",
+      "requirements": [
+        "REQ-02"
+      ],
+      "level": "HARDWARE",
+      "setup": "rootの両側20hop、少なくとも41radio",
+      "fault": "56Bと512B",
+      "expected": "depth20と総path40を別報告、分割含め到達",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R03",
+      "title": "同時親選択",
+      "requirements": [
+        "REQ-03"
+      ],
+      "level": "MODEL",
+      "setup": "古い候補pathでA/Bが互いを選択",
+      "fault": "同時register・逆順ACK",
+      "expected": "root承認木にcycleなし、各packet単純path",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R04",
+      "title": "重複source route",
+      "requirements": [
+        "REQ-03"
+      ],
+      "level": "UNIT",
+      "setup": "認証したDATA",
+      "fault": "同じaddressを2回pathへ入れる",
+      "expected": "AEAD正常でもDROP、アプリ未通知",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R05",
+      "title": "stale source path",
+      "requirements": [
+        "REQ-03"
+      ],
+      "level": "INTEGRATION",
+      "setup": "diamond+既存pending",
+      "fault": "relay1台停止",
+      "expected": "古い経路をfloodせずrepair、新pathで同IDを配送",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R06",
+      "title": "rootなし",
+      "requirements": [
+        "REQ-03"
+      ],
+      "level": "HARDWARE",
+      "setup": "既存session/pathあり",
+      "fault": "root電源断",
+      "expected": "有効pathは継続、期限後は失効/不明、新root捏造なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R07",
+      "title": "全台停電",
+      "requirements": [
+        "REQ-03"
+      ],
+      "level": "HARDWARE",
+      "setup": "21台ACTIVE",
+      "fault": "同時cold boot20回",
+      "expected": "membership維持、fresh sessions、Join storm予算を計測",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R08",
+      "title": "peer容量とhandoff",
+      "requirements": [
+        "REQ-03"
+      ],
+      "level": "HARDWARE",
+      "setup": "16regular+3transient+broadcast",
+      "fault": "100回peer入替、遅いrelease",
+      "expected": "予約漏れ/隣接消失なし、満杯明示",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R09",
+      "title": "short ID再使用",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "INTEGRATION",
+      "setup": "旧Deviceへshort42",
+      "fault": "別Deviceへ同short再割当",
+      "expected": "古いsession/routeを拒否、fullIdentity混同なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "R10",
+      "title": "古いjob完了",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "UNIT",
+      "setup": "crypto job実行中にslot解放",
+      "fault": "slot再利用後に旧completion",
+      "expected": "新slotに副作用を与えない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C01",
+      "title": "自動最適化正常",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "2地点以上の候補比較",
+      "fault": "homeの複数linkを継続悪化",
+      "expected": "閾値/clock/RF条件を満たした場合だけ新plan",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C02",
+      "title": "単一悪link",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "MODEL",
+      "setup": "一つの経路だけ悪化",
+      "fault": "RSSI低下/remote busy混在",
+      "expected": "まずroute修復、全体channel変更しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C03",
+      "title": "READY欠落",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "INTEGRATION",
+      "setup": "必須relay snapshot固定",
+      "fault": "READY喪失",
+      "expected": "分母から外さずtimeout ABORT",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C04",
+      "title": "COMMIT欠落",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "全READY後",
+      "fault": "1relayにCOMMITが届かない",
+      "expected": "他はtarget、missingは認証scanで追随、partial明示",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C05",
+      "title": "COMMIT後root停電",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "root committed slot保存直後",
+      "fault": "root再起動",
+      "expected": "保存target先適用、新term、単独旧channelrollbackなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C06",
+      "title": "clock誤差超過",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "MODEL",
+      "setup": "20hop遅延変動",
+      "fault": "片方向500ms遅延/clock drift",
+      "expected": "READY拒否TIME_UNCERTAIN、UTCを偽装しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C07",
+      "title": "チャネルfreeze",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "UNIT",
+      "setup": "PREPARINGとCOMMITTEDを別々に試す",
+      "fault": "freeze=true",
+      "expected": "前者新規抑制、後者勝手に取消しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C08",
+      "title": "candidate部分悪化",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "平均では良いchannel",
+      "fault": "重要relay地点だけ妨害",
+      "expected": "最悪link条件未達なら移行しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C09",
+      "title": "sleepy取り残し",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "leaf24h asleep",
+      "fault": "起床前にchannel移行",
+      "expected": "旧→pending→許可集合探索、所属は維持",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C10",
+      "title": "all-channel jam",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "許可channelに到達なし",
+      "fault": "RF妨害/遮蔽",
+      "expected": "復旧不能を明示、送信/探索予算を超えない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C11",
+      "title": "chainのsurvey休止",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "HARDWARE",
+      "setup": "代替のない中間relay",
+      "fault": "maintenance_gap=falseでscan要求",
+      "expected": "予定なしoff-channelを拒否、child孤立を隠さない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "C12",
+      "title": "rollback",
+      "requirements": [
+        "REQ-04"
+      ],
+      "level": "INTEGRATION",
+      "setup": "新channelが悪い",
+      "fault": "rootがrollback発行",
+      "expected": "さらに大きいepoch、古いplanを再有効化しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S01",
+      "title": "EDHOC公式trace",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "UNIT",
+      "setup": "採用したEDHOC実装",
+      "fault": "RFC9529該当vectors/相互実装",
+      "expected": "完全input消費とExporter一致、test-only shortcutなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S02",
+      "title": "session context混同",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "UNIT",
+      "setup": "正しい鍵で異なるcontext",
+      "fault": "domain/purpose/generation変更",
+      "expected": "Exporter context/bind照合で失敗、通常DATAは許可しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S03",
+      "title": "QR複製",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "HARDWARE",
+      "setup": "同じラベル別private key",
+      "fault": "Join要求",
+      "expected": "候補表示のみ、本手続きは拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S04",
+      "title": "packet replay",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "UNIT",
+      "setup": "受理済み暗号frame",
+      "fault": "重複/窓外/同counter異payload",
+      "expected": "重複はアプリ再適用なし、異payload拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S05",
+      "title": "cold boot nonce",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "HARDWARE",
+      "setup": "traffic途中",
+      "fault": "双方片側のcold boot",
+      "expected": "freshEDHOC、旧ciphertext/sessionを受理しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S06",
+      "title": "失効通知未達",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "HARDWARE",
+      "setup": "対象node圏外",
+      "fault": "revoke",
+      "expected": "残存側拒否を進め、端末消去未確認を分離",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S07",
+      "title": "invalid key/cert",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "UNIT",
+      "setup": "認証credential",
+      "fault": "invalid curve point/key length/hash/署名/lowgeneration",
+      "expected": "必ず拒否、固定PSKfallbackなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S08",
+      "title": "認証CPU飽和",
+      "requirements": [
+        "REQ-14"
+      ],
+      "level": "HARDWARE",
+      "setup": "既存DATA+Joinburst",
+      "fault": "不正/正規handshake集中",
+      "expected": "中継owner非blocking、queue有界、ms/energy記録",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S09",
+      "title": "USB偽相手",
+      "requirements": [
+        "REQ-16"
+      ],
+      "level": "HARDWARE",
+      "setup": "正しいserialdeviceと偽Host",
+      "fault": "HELLO偽装/固定共通鍵",
+      "expected": "相互認証失敗、config/send拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "S10",
+      "title": "鍵rotation",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "INTEGRATION",
+      "setup": "旧session通信中",
+      "fault": "閾値到達、ACK欠落",
+      "expected": "新旧期限分離、無期限overlapなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J01",
+      "title": "proxy Join",
+      "requirements": [
+        "REQ-06"
+      ],
+      "level": "HARDWARE",
+      "setup": "未所属機がroot直達不可",
+      "fault": "19hop relay経由",
+      "expected": "Device↔root相互認証、relayは承認権限なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J02",
+      "title": "期待リスト更新",
+      "requirements": [
+        "REQ-06"
+      ],
+      "level": "INTEGRATION",
+      "setup": "B未登録で先にNodeを起動",
+      "fault": "後からexpected_revision更新",
+      "expected": "長期固定拒否せず再探索、本承認でactive",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J03",
+      "title": "hint false positive",
+      "requirements": [
+        "REQ-06"
+      ],
+      "level": "UNIT",
+      "setup": "偽OFFER/誤ったfilter",
+      "fault": "candidate accepted hint",
+      "expected": "bounded本handshakeで拒否、認可は成立しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J04",
+      "title": "approval停止",
+      "requirements": [
+        "REQ-06"
+      ],
+      "level": "HARDWARE",
+      "setup": "external承認mode",
+      "fault": "FastAPI停止",
+      "expected": "pending、既存通信継続、無条件approveなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J05",
+      "title": "既存member復帰",
+      "requirements": [
+        "REQ-07"
+      ],
+      "level": "HARDWARE",
+      "setup": "ACTIVE stored",
+      "fault": "parent断→復帰",
+      "expected": "ACTIVE+ISOLATED→REACHABLE、初回承認やidentity削除なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J06",
+      "title": "Join同ID異hash",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "UNIT",
+      "setup": "PREPARED pending",
+      "fault": "同request_idの異内容",
+      "expected": "CONFLICT、short address二重発行なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "J07",
+      "title": "Join最終ACK消失",
+      "requirements": [
+        "REQ-05"
+      ],
+      "level": "INTEGRATION",
+      "setup": "NodeCOMMIT完了",
+      "fault": "JOIN_ACTIVE損失",
+      "expected": "request照会で収束、false新加入なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M01",
+      "title": "A停止でB移設",
+      "requirements": [
+        "REQ-13"
+      ],
+      "level": "HARDWARE",
+      "setup": "A member、A root off",
+      "fault": "署名transfergrant+新B起動",
+      "expected": "Bcommit可能、A reconciliation pending",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M02",
+      "title": "A稼働でB移設",
+      "requirements": [
+        "REQ-13"
+      ],
+      "level": "HARDWARE",
+      "setup": "A/B双方電波圏",
+      "fault": "Bへ明示transfer",
+      "expected": "同時ACTIVEなし、Aから旧command拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M03",
+      "title": "A→B→A",
+      "requirements": [
+        "REQ-13"
+      ],
+      "level": "INTEGRATION",
+      "setup": "安定DeviceIdentity",
+      "fault": "連続移設、新generation",
+      "expected": "key/DeviceId維持、short再割当可、古いgrant拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M04",
+      "title": "紛失機器",
+      "requirements": [
+        "REQ-13"
+      ],
+      "level": "INTEGRATION",
+      "setup": "最新revocation floorあり",
+      "fault": "旧ticketでJoin",
+      "expected": "拒否、stale情報の新規承認はfailclosed",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M05",
+      "title": "transfer途中停電",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "各record write境界",
+      "fault": "一つずつpowercut",
+      "expected": "oldまたはnewだけ、halfmerged keysなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M06",
+      "title": "leave drain",
+      "requirements": [
+        "REQ-13"
+      ],
+      "level": "HARDWARE",
+      "setup": "子がいるrelay",
+      "fault": "deadline30s、代替なし",
+      "expected": "勝手にIMMEDIATE化しない、明示失敗",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "M07",
+      "title": "同現場移設",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "APPLICATION",
+      "setup": "KG旧calibrationあり",
+      "fault": "placement/bindingrevision更新",
+      "expected": "SDKはmembership維持、KGだけ校正無効化",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D01",
+      "title": "APPLIED非同期",
+      "requirements": [
+        "REQ-08"
+      ],
+      "level": "INTEGRATION",
+      "setup": "端末受信は成功",
+      "fault": "アプリI/O遅延/拒否",
+      "expected": "END_RECEIVEDとAPP_APPLIED分離",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D02",
+      "title": "適用直後停電",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "物理I/O成功",
+      "fault": "receipt保存前powercut",
+      "expected": "INDETERMINATE、アプリ再照合、exactlyonce捏造なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D03",
+      "title": "late receipt",
+      "requirements": [
+        "REQ-09"
+      ],
+      "level": "INTEGRATION",
+      "setup": "新generation発行済み",
+      "fault": "古いAPP_APPLIED到着",
+      "expected": "履歴保存、最新state巻戻しなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D04",
+      "title": "cancel競合",
+      "requirements": [
+        "REQ-09"
+      ],
+      "level": "UNIT",
+      "setup": "queue前/外部write後",
+      "fault": "cancel",
+      "expected": "NOT_SENTと不明を区別",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D05",
+      "title": "latest key分離",
+      "requirements": [
+        "REQ-09"
+      ],
+      "level": "UNIT",
+      "setup": "同dest異なるkey",
+      "fault": "burst state更新",
+      "expected": "同key未送信のみcoalesce、他key保持",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D06",
+      "title": "期限の再延長禁止",
+      "requirements": [
+        "REQ-09"
+      ],
+      "level": "INTEGRATION",
+      "setup": "deadline付きpending",
+      "fault": "path/Host/root reboot",
+      "expected": "元期限を再付与しない、clockunknownは明示",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D07",
+      "title": "小message分割",
+      "requirements": [
+        "REQ-10"
+      ],
+      "level": "HARDWARE",
+      "setup": "20/40hop path",
+      "fault": "512B、順不同、dup、1chunk欠落",
+      "expected": "1回だけcomplete通知、選択再送、hash一致",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D08",
+      "title": "4KiB最大",
+      "requirements": [
+        "REQ-10"
+      ],
+      "level": "HARDWARE",
+      "setup": "objectenabled",
+      "fault": "4096/4097B",
+      "expected": "4096は有界復元、4097は拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D09",
+      "title": "fragment異内容",
+      "requirements": [
+        "REQ-10"
+      ],
+      "level": "UNIT",
+      "setup": "受理済みoffset",
+      "fault": "同offset別bytes",
+      "expected": "CONFLICT、半分の本文をappへ出さない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D10",
+      "title": "ACK callback順",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "ESP-NOW TX進行",
+      "fault": "earlyHOP_ACK、callback500ms遅延",
+      "expected": "正しいTXと結合、次frame成功へ誤帰属なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D11",
+      "title": "全台fan-out",
+      "requirements": [
+        "REQ-08"
+      ],
+      "level": "APPLICATION",
+      "setup": "64target snapshot、origin非root",
+      "fault": "join/revokeが途中で発生",
+      "expected": "対象集合固定、per-target結果、部分成功",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "D12",
+      "title": "groupend秘密",
+      "requirements": [
+        "REQ-08"
+      ],
+      "level": "UNIT",
+      "setup": "relay/root観測",
+      "fault": "端末間fanout ciphertext取得",
+      "expected": "rootにend keyを渡さず、assuranceを過剰表示しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "Q01",
+      "title": "飢餓なし",
+      "requirements": [
+        "REQ-14"
+      ],
+      "level": "INTEGRATION",
+      "setup": "control+urgent+bulk大量",
+      "fault": "queue90%負荷",
+      "expected": "予約controlが進む、airtime/拒否理由記録",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "Q02",
+      "title": "idempotency予算",
+      "requirements": [
+        "REQ-09"
+      ],
+      "level": "UNIT",
+      "setup": "完了request大量retry",
+      "fault": "同key100回",
+      "expected": "新規RF送信なし、別principalと混同なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "Q03",
+      "title": "DB満杯",
+      "requirements": [
+        "REQ-11"
+      ],
+      "level": "HOST",
+      "setup": "protected未ACKeventあり",
+      "fault": "容量枯渇",
+      "expected": "新受付507、既存critical保持、false202なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H01",
+      "title": "commit後HTTP切断",
+      "requirements": [
+        "REQ-11"
+      ],
+      "level": "HOST",
+      "setup": "POST同key",
+      "fault": "commit直後socketclose",
+      "expected": "再POSTで同operation、二重命令なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H02",
+      "title": "consumer gap",
+      "requirements": [
+        "REQ-11"
+      ],
+      "level": "HOST",
+      "setup": "cursor保持下限外",
+      "fault": "旧cursor再開",
+      "expected": "410+最古最新、黙ったスキップなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H03",
+      "title": "serial再接続",
+      "requirements": [
+        "REQ-16"
+      ],
+      "level": "HARDWARE",
+      "setup": "Host送信中",
+      "fault": "USBunplug/reset、別device入替",
+      "expected": "identity再確認、旧sessionresults不適用",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H04",
+      "title": "Host停止",
+      "requirements": [
+        "REQ-16"
+      ],
+      "level": "HARDWARE",
+      "setup": "Node2NodeとHost宛両方",
+      "fault": "servicekill",
+      "expected": "Node通信継続、Hostdurableは未commit",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H05",
+      "title": "backup巻戻し",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HOST",
+      "setup": "newrevoke/epoch確定後",
+      "fault": "旧DBrestore",
+      "expected": "floor照合、新epoch、盲再送なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H06",
+      "title": "slow subscriber",
+      "requirements": [
+        "REQ-11"
+      ],
+      "level": "HOST",
+      "setup": "consumer読取停止",
+      "fault": "他consumerと同時高頻度受信",
+      "expected": "boundedstage/gap、他の受信を止めない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "H07",
+      "title": "二重Host",
+      "requirements": [
+        "REQ-11"
+      ],
+      "level": "HOST",
+      "setup": "既存service起動",
+      "fault": "2worker/2process起動",
+      "expected": "singleton lockで一方拒否、USB2重openなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "P01",
+      "title": "sleep ticket race",
+      "requirements": [
+        "REQ-12"
+      ],
+      "level": "UNIT",
+      "setup": "sleep_prepare完了",
+      "fault": "新DATA/commit到着",
+      "expected": "sleepenter拒否して再prepare",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "P02",
+      "title": "sleep≠loss",
+      "requirements": [
+        "REQ-07"
+      ],
+      "level": "HARDWARE",
+      "setup": "既知wake予定",
+      "fault": "leaf長sleep",
+      "expected": "RF損失に加算しない、membership維持",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "P03",
+      "title": "wake deadline不足",
+      "requirements": [
+        "REQ-12"
+      ],
+      "level": "INTEGRATION",
+      "setup": "commanddeadline<nextwake",
+      "fault": "下りsubmit",
+      "expected": "受信不可を早期明示、無限spoolなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "P04",
+      "title": "圏外電池",
+      "requirements": [
+        "REQ-12"
+      ],
+      "level": "HARDWARE",
+      "setup": "電池leaf",
+      "fault": "長時間圏外",
+      "expected": "探索予算・sleep電流・energy/report測定",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "O01",
+      "title": "OTA2面",
+      "requirements": [
+        "REQ-17"
+      ],
+      "level": "HARDWARE",
+      "setup": "4MiB各SoC",
+      "fault": "imagewrite中/boot前後powercut",
+      "expected": "旧または新の有効image、identity保持",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "O02",
+      "title": "OTA署名/target",
+      "requirements": [
+        "REQ-17"
+      ],
+      "level": "UNIT",
+      "setup": "別SoC/古いsecurityversion",
+      "fault": "manifest/image改ざん",
+      "expected": "拒否、boot対象変更なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "O03",
+      "title": "schema rollback",
+      "requirements": [
+        "REQ-17"
+      ],
+      "level": "HARDWARE",
+      "setup": "newimagependingverify",
+      "fault": "crashrollback",
+      "expected": "oldimageでstoreを安全に読める、不可逆床を先に壊さない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "K01",
+      "title": "3表示盤対象識別",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "APPLICATION",
+      "setup": "実ToF/S3/Pico/Go",
+      "fault": "Aのみ禁止→全台→A解除",
+      "expected": "各drawn一致、他hold無断解除なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "K02",
+      "title": "occとtr",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "APPLICATION",
+      "setup": "snapshotとusagehistory併送",
+      "fault": "短い断線/再送",
+      "expected": "occ最新化、tr累積ACKまで保持",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "K03",
+      "title": "Pico故障",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "APPLICATION",
+      "setup": "radioonline",
+      "fault": "PicoUART応答停止",
+      "expected": "onlineかつdisplayfailed、falseAPPLIEDなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "K04",
+      "title": "8hcloud断",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "APPLICATION",
+      "setup": "KG+Hostlocal稼働",
+      "fault": "internet8h遮断",
+      "expected": "有限容量でevent/outcome保持、古い履歴で現在を巻戻さない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "K05",
+      "title": "KG共存owner",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "APPLICATION",
+      "setup": "旧WiFiFWと新SDK候補",
+      "fault": "同一表示盤を同時登録",
+      "expected": "1制御owner規則、切戻し手順を検証",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "K06",
+      "title": "KG参照をcore排除",
+      "requirements": [
+        "REQ-18"
+      ],
+      "level": "UNIT",
+      "setup": "firstpartycore",
+      "fault": "KG語彙/CloudURL/固有ID検索",
+      "expected": "integration以外に業務語彙なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "L01",
+      "title": "72h負荷/資源",
+      "requirements": [
+        "REQ-14"
+      ],
+      "level": "HARDWARE",
+      "setup": "64members混在",
+      "fault": "Joinburst+control+bulk+移設",
+      "expected": "map/heap/stack/energy/latency、leak/resetを記録",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-before-slot-write",
+      "title": "durable境界 before-slot-write",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "before-slot-writeで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-during-slot-write",
+      "title": "durable境界 during-slot-write",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "during-slot-writeで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-after-slot-commit",
+      "title": "durable境界 after-slot-commit",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "after-slot-commitで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-before-marker",
+      "title": "durable境界 before-marker",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "before-markerで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-after-marker",
+      "title": "durable境界 after-marker",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "after-markerで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-before-ack",
+      "title": "durable境界 before-ack",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "before-ackで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "POWER-after-ack",
+      "title": "durable境界 after-ack",
+      "requirements": [
+        "REQ-15"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join/transfer/channel/journalをそれぞれ対象",
+      "fault": "after-ackで電源断",
+      "expected": "docs12の唯一の許可状態へ復旧。旧世代を黙って再使用しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact firmware/host commit and config",
+        "seed or physical setup",
+        "event trace and failures; no averages-only report"
+      ]
+    },
+    {
+      "id": "LP01",
+      "title": "power role検査",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "LEAF/RELAY/ROOTに3mode設定",
+      "fault": "relay/rootをWINDOWED/REPORTへ変更",
+      "expected": "ROLE_NOT_ALLOWED、旧policy継続、radioを停止しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP02",
+      "title": "間欠窓の実受信",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "各SoCで未接続STA、window250ms/interval5s",
+      "fault": "非同期に各時刻で下り発生",
+      "expected": "認証poll後の窓のみ送信、待ち時間を測定、常時RX fallbackなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP03",
+      "title": "report起床→停止",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "DURABLE報告/1h、活動15s",
+      "fault": "通常送信とdownlink pending",
+      "expected": "journal/receipt/pendingの事実を保持して再sleep",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP04",
+      "title": "sleep ticket race",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "prepare完了後ticket取得",
+      "fault": "直前に新DATA/policy変更",
+      "expected": "古ticket拒否、受信/commitを捨てない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP05",
+      "title": "sleep veto",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "周辺センサーがまだbusy",
+      "fault": "appからsleep_abort",
+      "expected": "ticket無効、PM lock/通信状態正常復帰",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP06",
+      "title": "圏外24h",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "REPORT_ONLY、1hのradio budget60s",
+      "fault": "全親/全許可channel不可",
+      "expected": "追加探索予算有限、cursor/backoff維持、Jとoverrunを記録",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP07",
+      "title": "イベントwake storm",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "外部割込みを連続発生",
+      "fault": "追加wake quota超過",
+      "expected": "通常/例外budget分離、無制限TXなし、失った計測の有無を明示",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP08",
+      "title": "RAM保持session",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "Light/Modem Sleep間で有効key/counter/window保持",
+      "fault": "1,000wakeと重複frame",
+      "expected": "期限内は不要EDHOCなし、counter単調、再適用なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP09",
+      "title": "Deep/cold session",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "Deep Sleep/cold/watchdog/brownout",
+      "fault": "旧SID/旧暗号frame注入",
+      "expected": "fresh EDHOC、承認再要求なし、旧key/counterを復元しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP10",
+      "title": "parent mailbox喪失",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "sleepy target待ちframe2件",
+      "fault": "parent電源断",
+      "expected": "HOP受理をDURABLE扱いせずorigin再送で回復",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP11",
+      "title": "20hop ACK持越し",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "20hop末端DURABLE report",
+      "fault": "終端receipt前に活動予算終了",
+      "expected": "SAVE_AND_SLEEPで原本保持、次wake同ID照会/再送、虚偽成功なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP12",
+      "title": "leaseを跨ぐsleep",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "authorization期限15min",
+      "fault": "30min寝てwake",
+      "expected": "旧leaseを復元せず新鮮な権限確認、membershipは消さない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP13",
+      "title": "相手だけ再起動",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "leafはRAM保持、parentだけreset",
+      "fault": "旧peer SIDを照会",
+      "expected": "対象sessionだけ再確立、全網Joinなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP14",
+      "title": "poll/grant loss",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "250ms窓、authenticated poll",
+      "fault": "grant欠落/遅着/重複",
+      "expected": "nonce一致、再試行2回、window開始を延長しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP15",
+      "title": "sleepとchannel",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "leaf sleeping、root channel変更",
+      "fault": "PREPARE/COMMITを全て取り逃す",
+      "expected": "wake時に有界探索、署名/epoch確認後追随",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP16",
+      "title": "critical sleeper移行",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "critical receiverが長期sleep",
+      "fault": "channel plan開始",
+      "expected": "勝手に必須集合から除外せず延期/明示deferred",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP17",
+      "title": "予定外periodic wake",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "安定REPORT_ONLY",
+      "fault": "hello/route refresh期限だけ経過",
+      "expected": "そのためだけにwakeしない、次wakeに必要lease更新",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP18",
+      "title": "PM lock負例",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "送受信/暗号/保存実行",
+      "fault": "timeout/cancel/driver fault",
+      "expected": "lockリークなし、owner progress、energy比較",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP19",
+      "title": "sensor周辺電力",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "実基板+LDO/USB/センサー",
+      "fault": "切替/電源OFF/測定器接続差",
+      "expected": "MCU railと基板入口を分離し全体Jを測る",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LP20",
+      "title": "RTC連続性不明",
+      "requirements": [
+        "REQ-12",
+        "REQ-19",
+        "REQ-20",
+        "REQ-21"
+      ],
+      "level": "HARDWARE",
+      "setup": "hour/day budget保持後",
+      "fault": "cold boot/RTC初期化",
+      "expected": "起動episode以外の不確かな残予算は保守的再補充",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC01",
+      "title": "設置window expiry",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "有効署名と予定一覧、5min window",
+      "fault": "期限と同時に新規承認",
+      "expected": "新規承認拒否、既commit案件の確認だけ継続",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC02",
+      "title": "64台設置",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "予定64Device、予算固定",
+      "fault": "全台同時電源ON",
+      "expected": "進捗は個別証拠、同request予約重複なし、通常DATAを中断しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC03",
+      "title": "電源先行",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "B予定登録前にwake",
+      "fault": "後からexpected revision更新",
+      "expected": "次の通常wakeで再評価、偽revisionで電力budgetリセットしない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC04",
+      "title": "工場→倉庫→本番",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "別DomainId/個体key",
+      "fault": "試験credentialを本番へ提示",
+      "expected": "高い正当assignmentなし参加不可、共有factory秘密なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC05",
+      "title": "承認待ちsleep",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "外部承認pending",
+      "fault": "appがsleep、Host再起動後承認",
+      "expected": "同request復帰、必要fresh auth、予約/期限の二重発行なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC06",
+      "title": "commit片側喪失",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "Join PREPARED/ACTIVE境界",
+      "fault": "JOIN_COMMITかJOIN_ACTIVE欠落",
+      "expected": "再照会で収束、active_unconfirmedを完了にしない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC07",
+      "title": "A→B旧履歴",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "未ACKのA向け履歴あり",
+      "fault": "旧root停止したまま移設",
+      "expected": "履歴をBへ新データとして送らない、回収/破棄方針を明示",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC08",
+      "title": "正常root交換",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "旧root drain、新個体delegation",
+      "fault": "計画handover",
+      "expected": "新term/generation確認、fresh auth、旧命令の盲再送なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC09",
+      "title": "root故障交換",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "検証済みbackupとfleet権限",
+      "fault": "旧rootなしでhandover",
+      "expected": "既知floorより高いterm、情報不足はRECOVERY_REQUIRED",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC10",
+      "title": "旧root再出現",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "handover確認済みNode群",
+      "fault": "旧root起動/旧命令",
+      "expected": "受入済み高delegationで拒否、未達Nodeを完了扱いしない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC11",
+      "title": "network reset",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "active membership、consumed grant",
+      "fault": "leave IMMEDIATE/再起動",
+      "expected": "DeviceId/fleet/floors/boot counter維持、無権限再参加不可",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "LC12",
+      "title": "異なる利用アプリ",
+      "requirements": [
+        "REQ-05",
+        "REQ-13",
+        "REQ-23"
+      ],
+      "level": "HARDWARE",
+      "setup": "設備制御と環境計測、同SDK",
+      "fault": "KG依存なしで設置/送信/移設",
+      "expected": "coreにKG型/URL/業務ルールが不要",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS01",
+      "title": "origin fan-out",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "通常Nodeからgroup32",
+      "fault": "rootを経由して複数endへ送信",
+      "expected": "rootは本文平文を見ず、originが宛先別end暗号化",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS02",
+      "title": "世代snapshot",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "64target複数page",
+      "fault": "page途中にrevoke/移設",
+      "expected": "token/hash固定、世代変化は拒否、別個体へ再転送なし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS03",
+      "title": "group編集",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "送信開始後snapshot保存",
+      "fault": "membersを追加/削除",
+      "expected": "既操作の集合不変、新操作のみ新版",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS04",
+      "title": "mixed sleep",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "awake75%/sleep25%",
+      "fault": "全体へAPPLIED要求",
+      "expected": "awake対象を先に配送、WAIT_WAKEがslot独占しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS05",
+      "title": "wake不可能",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "deadline5s、次wake60s",
+      "fault": "未送信targetを選択",
+      "expected": "DEADLINE_UNREACHABLE、RF loss非加算",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS06",
+      "title": "wake時刻不明",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "GPIOだけのwake target",
+      "fault": "期限なしDURABLE履歴と有限command",
+      "expected": "UNKNOWNを勝手に不可能判定せず、期限で適切に終端",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS07",
+      "title": "cancel/late結果",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "group送信一部はradio済み",
+      "fault": "全体cancelと遅いAPPLIED",
+      "expected": "未送信だけ取消、late事実保存、集約revision更新",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS08",
+      "title": "payload単一copy",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "64target、512B payload",
+      "fault": "groupを最大同時数まで受付",
+      "expected": "役割budget内、targetごとpayload複製なし、容量超過受付拒否",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS09",
+      "title": "group DURABLE再起動",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "snapshot/target IDsと本文commit",
+      "fault": "途中でoriginまたはHost reset",
+      "expected": "同ID/進捗で再照合、全台新commandへ化けない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS10",
+      "title": "結果の総和",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "pending/received/applied混在",
+      "fault": "重複receiptとloss",
+      "expected": "current outcome総和=total、履歴証拠を二重計上しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS11",
+      "title": "一斉配信負荷",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "30/64targetsとdepth20",
+      "fault": "Join+channel候補+group burst",
+      "expected": "control非飢餓、airtime/最後の反映遅延公開",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "GS12",
+      "title": "sleepy origin",
+      "requirements": [
+        "REQ-08",
+        "REQ-09",
+        "REQ-22",
+        "REQ-24"
+      ],
+      "level": "HARDWARE",
+      "setup": "電池originのDURABLE group",
+      "fault": "途中でSAVE_AND_SLEEP",
+      "expected": "自己journal保持、無断root平文委託なし、次wake収束",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME01",
+      "title": "4SoC power比較",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "C3/S3/C5/C6全3mode",
+      "fault": "同payload/周期/距離でA-B",
+      "expected": "各board独立測定、Jと成功率・最大遅延を同時報告",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME02",
+      "title": "sleep方式break-even",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "10s/60s/15min/1h周期",
+      "fault": "WINDOWEDとDEEP+EDHOC比較",
+      "expected": "CPU/無線/センサー含めenergy比較、安全機能維持",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME03",
+      "title": "距離の一連成功",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "近距離/限界域/干渉",
+      "fault": "Discovery/Join/DATA/ACK/recovery",
+      "expected": "片方向DATA成功だけで長距離認定しない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME04",
+      "title": "容量差分",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "同IDF/radio基線",
+      "fault": "SDK+全必須機能build",
+      "expected": "vendor込みFlash/RAM/最大heapblockとSLOCを別計上",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME05",
+      "title": "低負荷CPU",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "全網stable idle",
+      "fault": "タイマー/observer有効",
+      "expected": "wakeups/CPU<目標、2ms全表pollなし",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME06",
+      "title": "CSV計測品質",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "校正機器・trace metadata",
+      "fault": "gap/帯域不足/符号異常",
+      "expected": "問題を報告し補間や削除で成功値を作らない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME07",
+      "title": "故障条件energy",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "24h圏外/1,000wake",
+      "fault": "reset/key期限/Host停止を混在",
+      "expected": "省電力budgetと成功/不明件数、power gateの限界公開",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    },
+    {
+      "id": "ME08",
+      "title": "低電池＋安全優先",
+      "requirements": [
+        "REQ-14",
+        "REQ-25"
+      ],
+      "level": "HARDWARE",
+      "setup": "設定された電池目標とdeadline",
+      "fault": "両方同時に満たせない構成",
+      "expected": "未達と理由を返す、認証省略や未送信成功はしない",
+      "execution_status": "NOT_RUN_PRODUCT_TEST",
+      "evidence_required": [
+        "exact SoC/board/firmware/host commit and policy",
+        "physical trace or production-path instrumentation",
+        "all failures, latency distribution and energy where relevant; no synthetic-to-measured relabelling"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,277 @@
+{
+  "source_archive": "leanmesh-spec-0.1.zip",
+  "source_archive_sha256": "c81d37b83e6836a5fbeba53098b2e8d466687ab27840ee693b64d0ca7d07476e",
+  "source_files": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "fd8fdb0425d0e3974c7e4d8bf670e5411ba250bcfd0e5c7f5de7bdb404d3de82",
+      "bytes": 3214
+    },
+    {
+      "path": "LICENSE-AND-SOURCES.md",
+      "sha256": "5f4fb61d32a31477467a75e10def2c94bf550ae178f536669f20993baff5f939",
+      "bytes": 884
+    },
+    {
+      "path": "README.md",
+      "sha256": "59e60ce8ac39d53ec9c38ec908ae5e57fb9e79b5859073056a1feba0ae4b52b7",
+      "bytes": 5069
+    },
+    {
+      "path": "SHA256SUMS.txt",
+      "sha256": "957ff85a753114a37a47ec1d443669277d16ae9ba405baa4f79c087c159d3f77",
+      "bytes": 4668
+    },
+    {
+      "path": "START_HERE.md",
+      "sha256": "e3774c7544e38ff1f959bb3fbb0aed3f474c122a86e3084209472bd5d63a21b3",
+      "bytes": 1814
+    },
+    {
+      "path": "api/SEMANTICS.md",
+      "sha256": "48012c0b84b85b3b1fd21c9519c40e32084c5997e56044449722cee21168b5a5",
+      "bytes": 3823
+    },
+    {
+      "path": "api/leanmesh.h",
+      "sha256": "bb25b335f752c31e09db7deb28ead154dfbbf7beda0ea663748f359434abbd71",
+      "bytes": 8756
+    },
+    {
+      "path": "api/openapi.json",
+      "sha256": "0bbab1acea3479cae8ada987a1b2bfabf544e6b532c311e81f2cb89e93b2afdd",
+      "bytes": 71678
+    },
+    {
+      "path": "config/defaults.json",
+      "sha256": "4b6c43aedc990b463d9d22654eb2ed0db8254d4cf9c1290421fcb5378b28e737",
+      "bytes": 2682
+    },
+    {
+      "path": "config/dependencies.json",
+      "sha256": "ae936c78a289d7f3e9d544fd6cbfea6401fd61a60d984d2627a3bceec5d89fd9",
+      "bytes": 992
+    },
+    {
+      "path": "config/leanmesh.service.example",
+      "sha256": "6e24b2945a29fb2cf411a6822b0a72c69b66c1567b457cd9ea62048951c60196",
+      "bytes": 645
+    },
+    {
+      "path": "config/partitions_4m.csv",
+      "sha256": "108b7410ed423d8f5788ef76b899a5a0a43be065a20892e73853b2d9601df2c2",
+      "bytes": 387
+    },
+    {
+      "path": "config/policy.example.json",
+      "sha256": "11f4ea60baeabf05154f8b5df2956a0162e895018de861de5a5688d6adfdf269",
+      "bytes": 446
+    },
+    {
+      "path": "config/policy.schema.json",
+      "sha256": "e339dbe78238e600e588943d2a7ca5580f358e41b8e60aa1fb2df78b0106f4a5",
+      "bytes": 2348
+    },
+    {
+      "path": "config/profiles.json",
+      "sha256": "b12ac622e0b27a0a5a39a61a89bb9a271513b10c0e8f88999a40ebfba2e43ecf",
+      "bytes": 1228
+    },
+    {
+      "path": "db/schema.sql",
+      "sha256": "e898eb9a7e13e0092fb621c38c8f5d0f5ab51cd09b8c644d3e101dea9971caee",
+      "bytes": 4588
+    },
+    {
+      "path": "decisions/ADR-001-small-by-single-path.md",
+      "sha256": "3afcbdac11a87dc2bdf03ae89bea0c31acd239588048c181eb50bf4b08b68d2a",
+      "bytes": 1063
+    },
+    {
+      "path": "docs/01-requirements.md",
+      "sha256": "30cb6c8b5ff2ebd35306879035c14494fcd3c410adbc3f4f5a808b958df1eed1",
+      "bytes": 4496
+    },
+    {
+      "path": "docs/02-architecture.md",
+      "sha256": "df623faea645a949f87de379928b50ecab2db390f048822f1ad53415098202a5",
+      "bytes": 3938
+    },
+    {
+      "path": "docs/03-radio-targets.md",
+      "sha256": "ab59b122704691d30b528a3c89416df0048431c17c20fad17204c8a1f4e9a11d",
+      "bytes": 3615
+    },
+    {
+      "path": "docs/04-routing.md",
+      "sha256": "2d67253895d6a7ffd05db219097cd2bd96bc6da3212e00ed75901e0d62b19e22",
+      "bytes": 6032
+    },
+    {
+      "path": "docs/05-channel.md",
+      "sha256": "e16d494a7567a7b99b0a2a4fe65c8855bcac225ad44b0f11ee6cbcae08a198b0",
+      "bytes": 6127
+    },
+    {
+      "path": "docs/06-security.md",
+      "sha256": "fcbc7932f753752ee7c9db2c4a53f72239e22e034eb72e980a9a20228fc0bb9b",
+      "bytes": 8255
+    },
+    {
+      "path": "docs/07-membership.md",
+      "sha256": "fb6b471cc488e77c5df9dc7dfbfeec4375882d774145bafe325b0f4052a003c4",
+      "bytes": 7262
+    },
+    {
+      "path": "docs/08-delivery.md",
+      "sha256": "96be9521df866ee029ea8c04b73ba487cbc0c3ee91cd12260b86b2a2005bda1a",
+      "bytes": 6925
+    },
+    {
+      "path": "docs/09-wire.md",
+      "sha256": "bd5d37c1abace128111cdac5f3c8659f4c53ef92facbf9cfc46bf535da13e001",
+      "bytes": 8213
+    },
+    {
+      "path": "docs/10-device-api.md",
+      "sha256": "05889a21eb30ee5914a45f3b07c370bd38de2018eb4920b76e234c5c34e50b45",
+      "bytes": 5830
+    },
+    {
+      "path": "docs/11-host.md",
+      "sha256": "2320e3aaae7c4f862307fef1ea4034db78bd0cb581b823ad1cd46471d35d8232",
+      "bytes": 5290
+    },
+    {
+      "path": "docs/12-storage.md",
+      "sha256": "f6db32d059231a856b25b8ded48ba081a490ed74df2fea3fd55d682cbc1c77ea",
+      "bytes": 4485
+    },
+    {
+      "path": "docs/13-power-maintenance.md",
+      "sha256": "0e2454d9925e553ff9069f4e85934c82f6f186058daeee0e43fffad35b0ed3c9",
+      "bytes": 3660
+    },
+    {
+      "path": "docs/14-kg-integration.md",
+      "sha256": "f9e63cd60887e66c2ae59367d30f033dfafcf98b4a698589402b44484f802b1d",
+      "bytes": 5734
+    },
+    {
+      "path": "docs/15-coding-standards.md",
+      "sha256": "c0e7d81d901d9aa34dc2c24bd061475fa3b0e7d89e2fcd141e857330394841f4",
+      "bytes": 3915
+    },
+    {
+      "path": "docs/16-budgets.md",
+      "sha256": "c90dbfd67967cce38f6195d8ef76086aaf6f879453773294f35601eb80a74fd1",
+      "bytes": 4687
+    },
+    {
+      "path": "docs/17-implementation-plan.md",
+      "sha256": "45f4b4df63381bac23d7a01b7f8bfebbb2dc537efb69449610039259218b1c08",
+      "bytes": 3339
+    },
+    {
+      "path": "docs/18-verification.md",
+      "sha256": "732cdc457cb393f1589afe2d2f9bb56a3ae6c9a634f1b383997f1a3fca38143f",
+      "bytes": 3633
+    },
+    {
+      "path": "docs/19-serial-and-control.md",
+      "sha256": "103b6ae30398beb98d02876d1d8f7114d9cc2cf9d2076a835830080eb0a9348e",
+      "bytes": 5104
+    },
+    {
+      "path": "evidence/REVIEW.md",
+      "sha256": "274e97a4bcbea77412ea4138c50591b721f19ae3b836ce8d847fea1d6740d067",
+      "bytes": 3282
+    },
+    {
+      "path": "evidence/SOURCES.md",
+      "sha256": "d38530674e7b5d907ad926921fb6358ce32964f9cc690517247a1e9615a48a02",
+      "bytes": 12026
+    },
+    {
+      "path": "evidence/VALIDATION.json",
+      "sha256": "94074fd2755026b8502d33395c77a6fc3692222378a8885b56d2d65a5b1ccc0e",
+      "bytes": 3798
+    },
+    {
+      "path": "evidence/source_registry.json",
+      "sha256": "545ce292f858d680c1da6f7e359a60b190987289d05df247bf467ed65adeda18",
+      "bytes": 18070
+    },
+    {
+      "path": "examples/application.c",
+      "sha256": "4fd6e0df6a357df8444a3f804d77494472289912d8edaf6c160e8eb7dec5330f",
+      "bytes": 953
+    },
+    {
+      "path": "examples/host-client.sh",
+      "sha256": "47abf4d929e9bb74b24b4fd0b978dd7da9ec684fe413e9810508eb591cba2548",
+      "bytes": 444
+    },
+    {
+      "path": "manifest.json",
+      "sha256": "d091ff54d7cfebb8967e08a5552eac9f9acfaa0ee0c1fa54712859c8d4728e8b",
+      "bytes": 2050
+    },
+    {
+      "path": "protocol/control.cddl",
+      "sha256": "e131a2f234f8d2c46f32f6df73b5cae4eab23569b22f8fd7aa9d61f598274a23",
+      "bytes": 5704
+    },
+    {
+      "path": "protocol/registry.json",
+      "sha256": "aea59b9d673b4a0fce00aec46b93b2a79878b77e8170ea5163d45289607e0eab",
+      "bytes": 5639
+    },
+    {
+      "path": "protocol/serial.cddl",
+      "sha256": "30d16a2135844b10844bae343a88fc18637c6e34dfe0ccdaa5078b271269f5e7",
+      "bytes": 1809
+    },
+    {
+      "path": "scripts/airtime.py",
+      "sha256": "a78b0f14991abae1b76fa7c5c5c7982256218a83f7f20b59d18061918d7ba881",
+      "bytes": 1529
+    },
+    {
+      "path": "scripts/check_spec.py",
+      "sha256": "b142275a8a0349708ab1485ea77f5195d3f410e9bab907274fd7495586cb3b81",
+      "bytes": 15119
+    },
+    {
+      "path": "scripts/requirements-check.txt",
+      "sha256": "fc8b4ae94997d5485818b4dc8fd71953e354dd79cdcdb92926776a4438e3ded1",
+      "bytes": 106
+    },
+    {
+      "path": "scripts/wire_fixture.py",
+      "sha256": "e169fe3ca5e6a74e2f9fe0ccf8b836d08617b325ac2826f75855b7a4e9780930",
+      "bytes": 10793
+    },
+    {
+      "path": "tests/SCENARIOS.md",
+      "sha256": "8bc284346f2dd8e10ac3dc511ebf039e93da257a45715436cc5c9345cc5a93b7",
+      "bytes": 24593
+    },
+    {
+      "path": "tests/golden.json",
+      "sha256": "5e32d8c08f0b57e251a1b9cad4f93e28c756b2d6c415fe2ec567c0cef7ad17a5",
+      "bytes": 10811
+    },
+    {
+      "path": "tests/scenarios.json",
+      "sha256": "8952507fe130600b3791fec30d725a76988cfc6140c7720ab86d602aa903f346",
+      "bytes": 57551
+    },
+    {
+      "path": "tests/traceability.csv",
+      "sha256": "bd38c281928ba0b3dcb9727f3c14ceb8da581382aab1475a8cd875931378a8a4",
+      "bytes": 2043
+    }
+  ],
+  "note": "All original paths are retained in the spec0.2 full package; some have been revised."
+}

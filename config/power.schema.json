@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:leanmesh:power-policy:1",
+  "title": "LeanMesh power policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "revision",
+    "mode",
+    "wake_interval_ms",
+    "rx_window_ms",
+    "max_rx_window_ms",
+    "awake_budget_ms",
+    "shutdown_reserve_ms",
+    "search_budget_ms",
+    "guard_ms",
+    "retry_min_ms",
+    "retry_max_ms",
+    "offline_radio_ms_per_hour",
+    "extra_event_wakes_per_day",
+    "extra_event_radio_ms_per_day",
+    "shutdown_overrun_limit_ms",
+    "pending_policy",
+    "mailbox_frames_per_child",
+    "mailbox_frames_total",
+    "session_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$",
+      "description": "decimal integer; numeric upper bound 2^63-1 also checked"
+    },
+    "mode": {
+      "enum": [
+        "ALWAYS_RX",
+        "WINDOWED_RX",
+        "REPORT_ONLY"
+      ]
+    },
+    "wake_interval_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400000
+    },
+    "rx_window_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 60000
+    },
+    "max_rx_window_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "awake_budget_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 300000
+    },
+    "shutdown_reserve_ms": {
+      "type": "integer",
+      "minimum": 50,
+      "maximum": 10000
+    },
+    "search_budget_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 300000
+    },
+    "guard_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "retry_min_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000
+    },
+    "retry_max_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 86400000
+    },
+    "offline_radio_ms_per_hour": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000
+    },
+    "extra_event_wakes_per_day": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1024
+    },
+    "extra_event_radio_ms_per_day": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3600000
+    },
+    "shutdown_overrun_limit_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 10000
+    },
+    "pending_policy": {
+      "enum": [
+        "REQUIRE_SETTLED",
+        "SAVE_AND_SLEEP"
+      ]
+    },
+    "mailbox_frames_per_child": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "mailbox_frames_total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "session_policy": {
+      "const": "RAM_RETAIN_OR_FRESH_EDHOC"
+    }
+  }
+}

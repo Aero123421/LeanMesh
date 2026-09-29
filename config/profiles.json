@@ -1,0 +1,62 @@
+{
+  "status": "design_targets_not_measurements",
+  "profiles": {
+    "leaf": {
+      "members": 0,
+      "neighbors": 8,
+      "path_cache": 4,
+      "tx_frames": 8,
+      "rx_frames": 8,
+      "app_messages": 4,
+      "end_sessions": 4,
+      "join_slots": 1,
+      "small_reassembly": 2,
+      "object_reassembly": 1,
+      "durable_pending": 16,
+      "receipts": 32,
+      "ram_target_bytes": 32768,
+      "control_reassembly_slots": 1,
+      "group_operations": 1,
+      "power_state_budget_bytes": 1024,
+      "mailbox_frames_are_borrowed_from_tx_pool": true
+    },
+    "relay": {
+      "members": 0,
+      "neighbors": 16,
+      "path_cache": 4,
+      "tx_frames": 12,
+      "rx_frames": 12,
+      "app_messages": 4,
+      "end_sessions": 4,
+      "join_slots": 2,
+      "small_reassembly": 2,
+      "object_reassembly": 1,
+      "durable_pending": 16,
+      "receipts": 32,
+      "ram_target_bytes": 49152,
+      "control_reassembly_slots": 1,
+      "group_operations": 1,
+      "power_state_budget_bytes": 1024,
+      "mailbox_frames_are_borrowed_from_tx_pool": true
+    },
+    "root": {
+      "members": 64,
+      "neighbors": 16,
+      "path_cache": 64,
+      "tx_frames": 24,
+      "rx_frames": 24,
+      "app_messages": 16,
+      "end_sessions": 64,
+      "join_slots": 4,
+      "small_reassembly": 4,
+      "object_reassembly": 1,
+      "durable_pending": 64,
+      "receipts": 128,
+      "ram_target_bytes": 98304,
+      "control_reassembly_slots": 2,
+      "group_operations": 4,
+      "power_state_budget_bytes": 1024,
+      "mailbox_frames_are_borrowed_from_tx_pool": true
+    }
+  }
+}

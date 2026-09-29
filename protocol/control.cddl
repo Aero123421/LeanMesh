@@ -1,0 +1,122 @@
+; LM1 deterministic CBOR. Bounded fields are normative. No implementation bundled.
+u32 = 0..4294967295
+u63 = 0..9223372036854775807
+u64 = 0..18446744073709551615
+id16 = bstr .size 16
+id32 = bstr .size 32
+address = 1..65534
+channel = 1..13
+cose-key = {1: 2, -1: 1, -2: bstr .size 32, -3: bstr .size 32}
+ccs = {2: tstr .size 64, 8: {1: cose-key}}
+; Every signed payload is this typed array; type may not be repurposed.
+control-body = [type: (1..21 / 25..33), version: 1, request-id: id16,
+                domain: id16, revision: u63, issuer: id32, data: control-data]
+; The semantic type/data mapping is mandatory, not any cross-product.
+control-data = device-credential / root-delegation / assignment-ticket /
+ member-credential / expected-set / join-request / join-prepare /
+ join-stored / join-commit / join-active / revoke-object / policy-object /
+ route-register / route-lease / route-query / probe / time-request /
+ time-response / channel-plan / channel-receipt / recovery-beacon /
+ group-snapshot-v2 / delivery-receipt /
+ ota-manifest / leave-request / sleep-schedule / power-policy / commissioning-window / root-handover / group-snapshot-request
+cose-sign1 = #6.18([protected: bstr, unprotected: {}, payload: bstr,
+                    signature: bstr .size 64])
+; protected decodes to {1: -7, 4: id32}; external_aad = h'4c4d312d434f4e54524f4c'
+; 1. SHA-256(cose-key) == device; SHA-256(ccs) == ccs-hash.
+device-credential = [device: id32, key: cose-key, fleet: id16,
+ serial: tstr .size (1..48), credential-generation: u63, ccs-hash: id32]
+; 2. permissions bits: approve1/revoke2/channel4/groups8/config16/root-app32
+root-delegation = [fleet: id16, root: id32, key: cose-key,
+ domain: id16, delegation-generation: u63, permissions: 0..63]
+; 3. source is all-zero16 for initial assignment, expected-old=0.
+; mode0=fresh device nonce, mode1=preissued one-time grant registered at device.
+assignment-ticket = [device: id32, fleet: id16, source: id16,
+ target: id16, root-delegation-hash: id32, expected-old: u63,
+ new-generation: u63, grant-id: id16, mode: 0..1, nonce: id16,
+ device-credential-hash: id32]
+; 4. Authorization expiration is a root-clock lease, not an assumed UTC.
+member-credential = [device: id32, address: address, assignment: u63,
+ membership: u63, role: 0..2, relay-allowed: bool, root-term: u32,
+ lease-expires-root-ms: u64, policy-hash: id32, credential-hash: id32]
+; 5. Full lists are paged; a page is <=16 entries, unchanged digest per revision.
+expected-set = [page: 0..15, pages: 1..16, set-hash: id32,
+ entries: [* 8 expected-entry]]
+expected-entry = [device: id32, assignment: u63, grant-hash: id32, allowed: bool]
+; 6-10. ACK includes byte-identical prepare/hash; never silently reallocates ID.
+join-request = [device-credential: bstr .size (1..1024),
+ ticket: bstr .size (1..1024), nonce: id16, capabilities: u64]
+join-prepare = [member: bstr .size (1..1024), prepare-hash: id32,
+ address: address, membership: u63, root-term: u32, reservation-ms: 1..120000]
+join-stored = [prepare-hash: id32, record-generation: u63]
+join-commit = [prepare-hash: id32, membership: u63]
+join-active = [prepare-hash: id32, record-generation: u63]
+; 11. local_notice and network_refusal are separately observed by receipts.
+revoke-object = [device: id32, assignment-floor: u63,
+ membership-floor: u63, reason: u32, revocation-revision: u63]
+; 12. key/value keys and bounds are defined by policy.schema.json.
+policy-object = [expected-revision: u63, new-revision: u63,
+ policy-json-sha256: id32, canonical-policy-json: bstr .size (1..3072)]
+; 13-15. path root->device includes root (1) and device, max21 addresses.
+route-register = [device: id32, assignment: u63, membership: u63,
+ root-term: u32, parent: address, candidate-path: [1*21 address],
+ request-sequence: u32, parent-probe-nonce: id16]
+route-lease = [device: id32, root-term: u32, path-revision: u32,
+ path: [1*21 address], lease-expires-root-ms: u64]
+route-query = [destination: id32, current-path-revision: u32]
+probe = [nonce: id16, sender: address, receiver: address,
+ reply: bool, credit: 0..255, membership: u63]
+time-request = [nonce: id16, root-term: u32, t1-local-us: u64]
+time-response = [nonce: id16, root-term: u32, t1-local-us: u64,
+ t2-root-us: u64, t3-root-us: u64]
+; 19. phase0 prepare/phase1 commit/phase2 abort; immutable committed plan hash.
+channel-plan = [plan-id: id16, phase: 0..2, root-term: u32,
+ channel-epoch: u32, old: channel, new: channel, participant-hash: id32,
+ switch-root-ms: u64, max-clock-error-ms: u32, settle-ms: u32,
+ policy-revision: u63, plan-hash: id32]
+channel-receipt = [plan-id: id16, plan-hash: id32, device: id32,
+ evidence: 0..3, reason: u32, clock-error-ms: u32]
+recovery-beacon = [root-term: u32, channel-epoch: u32,
+ channel: channel, plan-id: id16, plan-hash: id32, delegation-hash: id32]
+; 22 is reserved for the deprecated spec0.1 group snapshot. New sends use 32.
+; 23/24 are reserved. Fragment prefix and record-kind5 bitmap are fixed binary.
+delivery-receipt = [message-id: id16, intent-hash: id32,
+ evidence: 0..6, reason: u32, receipt-sequence: u32,
+ application-result: bstr .size (0..32)]
+ota-manifest = [soc: "esp32c3" / "esp32s3" / "esp32c5" / "esp32c6",
+ board-family: tstr .size (1..32), image-bytes: 1..1900544,
+ image-sha256: id32, version: tstr .size (1..32), security-version: u32,
+ storage-schema-min: u32, storage-schema-max: u32, loader-min: u32,
+ block-bytes: 4096]
+leave-request = [device: id32, mode: 0..1, deadline-ms: 0..30000]
+
+; EDHOC carrier post-handshake records, not ControlObject type IDs.
+session-bind = [1, ctx-hash: id32, receiver-sid: 1..4294967295, bind-nonce: id16]
+session-bind-ack = session-bind
+
+
+; 28. AEAD-only control, originating from this member. Unknown time => both zero.
+sleep-schedule = [device: id32, assignment: u63, membership: u63,
+ root-term: u32, schedule-revision: u63, mode: 0..2,
+ quality: 0..2, next-earliest-root-ms: u64, next-latest-root-ms: u64,
+ interval-ms: 0..86400000, window-ms: 0..65535, max-age-ms: 1..86400000]
+; 29. Root-signed power change. Local trusted app uses the same validator.
+power-policy = [device: id32, expected-revision: u63, new-revision: u63,
+ policy-hash: id32, canonical-policy-json: bstr .size (1..1024)]
+; 30. Root-signed admission window. This never bypasses identity/assignment checks.
+commissioning-window = [window-id: id16, root-term: u32,
+ expected-set-revision: u63, not-before-root-ms: u64, expires-root-ms: u64,
+ max-new-members: 1..64, allowed-roles: 1..3, policy-revision: u63]
+; 31. Fleet signature; root identities and delegation generations fully bound.
+root-handover = [handover-id: id16, old-root: id32, new-root: id32,
+ old-delegation-generation: u63, new-delegation-generation: u63,
+ new-delegation-hash: id32, new-root-term: u32, recovery-mode: 0..1]
+; 32. Root signature. Snapshot binds identity AND assignment/membership generation.
+group-target = [device: id32, assignment: u63, membership: u63]
+group-snapshot-v2 = [group-id: u32, group-revision: u63, token: id16,
+ origin: id32, total: 0..64, page: 0..3, snapshot-hash: id32,
+ targets: [* 16 group-target]]
+
+; 33. AEAD-only request to the root. Origin is the authenticated session identity.
+; page0/token=nil starts a snapshot; later pages require the returned token.
+group-snapshot-request = [group-id: u32, group-revision: u63,
+ page: 0..3, snapshot-token: id16 / nil]

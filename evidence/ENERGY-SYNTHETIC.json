@@ -1,0 +1,12 @@
+{
+  "samples": 11,
+  "duration_s": 1.0,
+  "charge_mah": 0.002777777777777778,
+  "energy_j": 0.03300000000000001,
+  "average_current_ma": 10.0,
+  "peak_current_ma": 10.0,
+  "trace_sha256": "bceb1c94dd74dec93e06aa747fedb261c57b4ff54fe7b50caca33000fdd415c4",
+  "integration": "trapezoidal; sample-bandwidth dependent",
+  "trace_kind": "SYNTHETIC",
+  "battery_lifetime_guarantee": false
+}

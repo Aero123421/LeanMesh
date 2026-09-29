@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "soc",
+    "board",
+    "firmware_sha256",
+    "instrument",
+    "trace_sha256",
+    "measurement"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "NOT_MEASURED",
+        "MEASURED",
+        "ESTIMATED"
+      ]
+    },
+    "soc": {
+      "enum": [
+        "esp32c3",
+        "esp32s3",
+        "esp32c5",
+        "esp32c6",
+        null
+      ]
+    },
+    "board": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "firmware_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "instrument": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trace_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "measurement": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "MEASURED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "soc": {
+            "type": "string"
+          },
+          "board": {
+            "type": "string",
+            "minLength": 1
+          },
+          "instrument": {
+            "type": "string",
+            "minLength": 1
+          },
+          "firmware_sha256": {
+            "type": "string"
+          },
+          "trace_sha256": {
+            "type": "string"
+          },
+          "measurement": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  ]
+}

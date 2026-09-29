@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "revision": "1",
+  "mode": "REPORT_ONLY",
+  "wake_interval_ms": 3600000,
+  "rx_window_ms": 250,
+  "max_rx_window_ms": 1500,
+  "awake_budget_ms": 15000,
+  "shutdown_reserve_ms": 500,
+  "search_budget_ms": 1000,
+  "guard_ms": 20,
+  "retry_min_ms": 60000,
+  "retry_max_ms": 3600000,
+  "offline_radio_ms_per_hour": 60000,
+  "extra_event_wakes_per_day": 32,
+  "extra_event_radio_ms_per_day": 120000,
+  "shutdown_overrun_limit_ms": 2000,
+  "pending_policy": "SAVE_AND_SLEEP",
+  "mailbox_frames_per_child": 2,
+  "mailbox_frames_total": 16,
+  "session_policy": "RAM_RETAIN_OR_FRESH_EDHOC"
+}

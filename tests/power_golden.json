@@ -1,0 +1,78 @@
+{
+  "scope": "SPEC_MODEL_ONLY_NOT_PRODUCT",
+  "poll_hex": "010100020000000000000001000000010000138800fa000000000000",
+  "grant_hex": "020100020000000000000001000000c80002000000000000",
+  "guard_example": {
+    "elapsed_ms": 60000,
+    "local_ppm": 500,
+    "peer_ppm": 500,
+    "timestamp_error_ms": 5,
+    "wakeup_error_ms": 7,
+    "expected_ms": 72
+  },
+  "session_cases": [
+    {
+      "reset_cause": "LIGHT_WAKE",
+      "complete_ram_state": true,
+      "peer_session_valid": true,
+      "elapsed_upper_ms": 5000,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "RAM_REUSE"
+    },
+    {
+      "reset_cause": "MODEM_WINDOW",
+      "complete_ram_state": true,
+      "peer_session_valid": true,
+      "elapsed_upper_ms": 5000,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "RAM_REUSE"
+    },
+    {
+      "reset_cause": "DEEP_WAKE",
+      "complete_ram_state": true,
+      "peer_session_valid": true,
+      "elapsed_upper_ms": 5000,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "FRESH_EDHOC"
+    },
+    {
+      "reset_cause": "LIGHT_WAKE",
+      "complete_ram_state": false,
+      "peer_session_valid": true,
+      "elapsed_upper_ms": 5000,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "FRESH_EDHOC"
+    },
+    {
+      "reset_cause": "LIGHT_WAKE",
+      "complete_ram_state": true,
+      "peer_session_valid": false,
+      "elapsed_upper_ms": 5000,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "FRESH_EDHOC"
+    },
+    {
+      "reset_cause": "LIGHT_WAKE",
+      "complete_ram_state": true,
+      "peer_session_valid": true,
+      "elapsed_upper_ms": null,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "FRESH_EDHOC"
+    },
+    {
+      "reset_cause": "LIGHT_WAKE",
+      "complete_ram_state": true,
+      "peer_session_valid": true,
+      "elapsed_upper_ms": 900000,
+      "authorization_remaining_ms": 900000,
+      "key_remaining_ms": 3600000,
+      "expected": "FRESH_EDHOC"
+    }
+  ]
+}

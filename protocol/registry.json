@@ -1,0 +1,410 @@
+{
+  "spec_version": "0.2",
+  "wire_version": 1,
+  "abi_version": 2,
+  "byte_order": "big",
+  "limits": {
+    "rf_body_bytes": 250,
+    "root_depth": 20,
+    "path_hops": 40,
+    "small_message_bytes": 512,
+    "object_bytes": 4096,
+    "fragment_quantum": 16,
+    "regular_peers": 16,
+    "transient_peers": 3,
+    "broadcast_peers": 1,
+    "members": 64,
+    "fragment_prefix_bytes": 40,
+    "fragment_bitmap_bytes": 32,
+    "serial_payload_bytes": 8192,
+    "serial_decoded_bytes": 8230
+  },
+  "frame_kinds": {
+    "DISCOVERY": 1,
+    "HOP_ACK": 2,
+    "DATA": 3,
+    "ROUTE": 4,
+    "CONTROL": 5,
+    "EDHOC": 6,
+    "JOIN_PROXY": 7,
+    "POWER": 8
+  },
+  "record_kinds": {
+    "DATA": 1,
+    "RECEIPT": 2,
+    "FRAGMENT": 3,
+    "CONTROL": 4,
+    "TRANSFER_BITMAP": 5
+  },
+  "status_codes": {
+    "OK": 0,
+    "INVALID_ARGUMENT": 1,
+    "UNSUPPORTED": 2,
+    "BUSY": 3,
+    "NO_CAPACITY": 4,
+    "NO_ROUTE": 5,
+    "AUTH_PENDING": 6,
+    "AUTH_REJECTED": 7,
+    "REVOKED": 8,
+    "CONFLICT": 9,
+    "EXPIRED": 10,
+    "TIME_UNCERTAIN": 11,
+    "RX_WINDOW_CLOSED": 12,
+    "RF_PROFILE_UNAPPROVED": 13,
+    "STORAGE_FAILURE": 14,
+    "RECOVERY_REQUIRED": 15,
+    "DRIVER_RESULT_UNKNOWN": 16,
+    "BUFFER_TOO_SMALL": 17,
+    "CANCEL_TOO_LATE": 18,
+    "CURSOR_GAP": 19,
+    "EPOCH_CLOSED": 20,
+    "PAYLOAD_TOO_LARGE": 21,
+    "NETWORK_MISMATCH": 22,
+    "ROLE_NOT_ALLOWED": 23,
+    "NOT_FOUND": 24,
+    "BAD_FRAME": 25,
+    "REPLAY": 26,
+    "RATE_LIMITED": 27,
+    "ROOT_UNAVAILABLE": 28,
+    "DEADLINE_UNREACHABLE": 29,
+    "POWER_BUDGET_EXHAUSTED": 30,
+    "SLEEP_TICKET_STALE": 31,
+    "SESSION_REFRESH_REQUIRED": 32,
+    "PEER_ASLEEP": 33,
+    "TARGET_GENERATION_CHANGED": 34
+  },
+  "control_types": {
+    "DeviceCredential": 1,
+    "RootDelegation": 2,
+    "AssignmentTicket": 3,
+    "MemberCredential": 4,
+    "ExpectedSet": 5,
+    "JoinRequest": 6,
+    "JoinPrepare": 7,
+    "JoinStored": 8,
+    "JoinCommit": 9,
+    "JoinActive": 10,
+    "RevokeObject": 11,
+    "PolicyObject": 12,
+    "RouteRegister": 13,
+    "RouteLease": 14,
+    "RouteQuery": 15,
+    "Probe": 16,
+    "TimeRequest": 17,
+    "TimeResponse": 18,
+    "ChannelPlan": 19,
+    "ChannelReceipt": 20,
+    "RecoveryBeacon": 21,
+    "DeliveryReceipt": 25,
+    "OTAManifest": 26,
+    "LeaveRequest": 27,
+    "SleepSchedule": 28,
+    "PowerPolicy": 29,
+    "CommissioningWindow": 30,
+    "RootHandover": 31,
+    "GroupSnapshotV2": 32,
+    "GroupSnapshotRequest": 33
+  },
+  "fields": {
+    "link": {
+      "bytes": 24,
+      "items": [
+        {
+          "name": "magic",
+          "offset": 0,
+          "size": 2
+        },
+        {
+          "name": "version",
+          "offset": 2,
+          "size": 1
+        },
+        {
+          "name": "kind",
+          "offset": 3,
+          "size": 1
+        },
+        {
+          "name": "domain_hint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "link_sid",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "link_counter",
+          "offset": 12,
+          "size": 8
+        },
+        {
+          "name": "body_length",
+          "offset": 20,
+          "size": 2
+        },
+        {
+          "name": "flags",
+          "offset": 22,
+          "size": 1
+        },
+        {
+          "name": "reserved",
+          "offset": 23,
+          "size": 1
+        }
+      ]
+    },
+    "route": {
+      "bytes": 16,
+      "items": [
+        {
+          "name": "origin",
+          "offset": 0,
+          "size": 2
+        },
+        {
+          "name": "final",
+          "offset": 2,
+          "size": 2
+        },
+        {
+          "name": "path_len",
+          "offset": 4,
+          "size": 1
+        },
+        {
+          "name": "next_index",
+          "offset": 5,
+          "size": 1
+        },
+        {
+          "name": "budget",
+          "offset": 6,
+          "size": 1
+        },
+        {
+          "name": "reserved",
+          "offset": 7,
+          "size": 1
+        },
+        {
+          "name": "root_term",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "path_revision",
+          "offset": 12,
+          "size": 4
+        }
+      ]
+    },
+    "end": {
+      "bytes": 42,
+      "items": [
+        {
+          "name": "end_sid",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "end_counter",
+          "offset": 4,
+          "size": 8
+        },
+        {
+          "name": "message_id",
+          "offset": 12,
+          "size": 16
+        },
+        {
+          "name": "app_port",
+          "offset": 28,
+          "size": 2
+        },
+        {
+          "name": "record_kind",
+          "offset": 30,
+          "size": 1
+        },
+        {
+          "name": "flags",
+          "offset": 31,
+          "size": 1
+        },
+        {
+          "name": "expires_root_ms",
+          "offset": 32,
+          "size": 8
+        },
+        {
+          "name": "plaintext_length",
+          "offset": 40,
+          "size": 2
+        }
+      ]
+    }
+  },
+  "struct_formats": {
+    "link": ">2sBBIIQHBB",
+    "route": ">HHBBBBII",
+    "end": ">IQ16sHBBQH",
+    "hop_ack": ">QBBH",
+    "serial": ">2sBBIQH",
+    "fragment": ">HHHBB32s",
+    "power_poll": ">BBHQIIHHI",
+    "power_grant": ">BBHQIHHI"
+  },
+  "aead": {
+    "algorithm": "AES-128-GCM",
+    "tag_bytes": 16,
+    "key_bytes": 16,
+    "nonce_prefix_bytes": 4,
+    "counter_bytes": 8,
+    "edhoc": {
+      "method": 0,
+      "suite": 3,
+      "exporter_label": 40000
+    }
+  },
+  "session_binding": {
+    "ead_sent_labels": [],
+    "exporter_label": 40000,
+    "binding_required_before_data": true,
+    "carrier": "EDHOC post-handshake protected record",
+    "timeout_ms": 30000,
+    "max_attempts": 3
+  },
+  "reserved_control_types": [
+    22,
+    23,
+    24
+  ],
+  "signed_control_types": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    11,
+    12,
+    19,
+    21,
+    26,
+    29,
+    30,
+    31,
+    32
+  ],
+  "serial_kinds": {
+    "HELLO": 1,
+    "EDHOC": 2,
+    "REQUEST": 3,
+    "RESPONSE": 4,
+    "EVENT": 5,
+    "CREDIT": 6,
+    "PING": 7
+  },
+  "capability_bits": {
+    "SMALL_MESSAGE": 0,
+    "OBJECT_4K": 1,
+    "GROUP_FANOUT_V2": 2,
+    "POWER_REPORT_ONLY": 3,
+    "POWER_WINDOWED_RX": 4,
+    "RAM_SESSION_RETAIN": 5,
+    "AUTO_CHANNEL": 6,
+    "SIGNED_TRANSFER": 7,
+    "COMMISSIONING_WINDOW": 8,
+    "ROOT_HANDOVER": 9,
+    "RTC_SECURE_RESUME_RESERVED": 10
+  },
+  "power_frames": {
+    "protection": "link AEAD required; previous handshake and current membership; no unprotected POWER frames",
+    "poll": {
+      "subtype": 1,
+      "bytes": 28,
+      "fields": [
+        [
+          "subtype",
+          1
+        ],
+        [
+          "version",
+          1
+        ],
+        [
+          "rx_credit",
+          2
+        ],
+        [
+          "poll_nonce",
+          8
+        ],
+        [
+          "power_revision",
+          4
+        ],
+        [
+          "planned_interval_ms",
+          4
+        ],
+        [
+          "receive_window_ms",
+          2
+        ],
+        [
+          "flags",
+          2
+        ],
+        [
+          "reserved",
+          4
+        ]
+      ],
+      "revision_note": "low32 lookup hint; full policy revision is in signed PowerPolicy/SleepSchedule and link identity. A wrap triggers full policy refresh, never authority by low32 alone."
+    },
+    "grant": {
+      "subtype": 2,
+      "bytes": 24,
+      "fields": [
+        [
+          "subtype",
+          1
+        ],
+        [
+          "version",
+          1
+        ],
+        [
+          "pending_frames",
+          2
+        ],
+        [
+          "poll_nonce",
+          8
+        ],
+        [
+          "window_ttl_ms",
+          4
+        ],
+        [
+          "granted_credit",
+          2
+        ],
+        [
+          "reserved",
+          2
+        ],
+        [
+          "reason",
+          4
+        ]
+      ]
+    },
+    "no_e2e_or_route_header": true,
+    "max_attempts": 2,
+    "nonce_retries_extend_window": false
+  }
+}

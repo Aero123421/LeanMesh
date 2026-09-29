@@ -1,0 +1,506 @@
+{
+  "date": "2026-09-28",
+  "snapshots": {
+    "KG": "4ed3e1ff0e63eec54c52e89444e18b2a18be2130",
+    "RouteLoom": "77b5792669fefee13498ef29a3c2e48119c562a0"
+  },
+  "scope": "Selected live repository files, issues and latest KG112 comments. Not a full audit or measured build.",
+  "sources": [
+    {
+      "id": "USER",
+      "title": "利用者が指定した要求",
+      "url": "conversation:current",
+      "kind": "user_requirement",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "汎用長距離Wi-Fi、4SoC、rootから20hop、自動channel、Join/移設、Python/FastAPI、小容量/低負荷/安定。"
+    },
+    {
+      "id": "E01",
+      "title": "Espressif ESP32-C6 Wi-Fi",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32c6/api-guides/wifi.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "C6のESP-NOW/LR能力確認。選定pin6.0.3での実機認定を意味しない。"
+    },
+    {
+      "id": "E02",
+      "title": "Espressif ESP32-C5 Wi-Fi",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c5/api-guides/wifi-driver/overview.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "C5の2.4GHzとLRの条件。5GHzを混在Mesh共通経路にしない。stable URLは後で変わり得る。"
+    },
+    {
+      "id": "E03",
+      "title": "Espressif ESP-NOW",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c5/api-reference/network/esp_now.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "v1/v2 payload・peer数・callback/PHY設定。LMは250B互換基準。20peerと網の20hopは別。"
+    },
+    {
+      "id": "E04",
+      "title": "RFC9528 EDHOC",
+      "url": "https://www.rfc-editor.org/rfc/rfc9528.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "method/suite、credentials、Exporter private-use範囲とEAD registryを確認。LM専用recordは別レビュー。"
+    },
+    {
+      "id": "E05",
+      "title": "RFC9529 EDHOC traces",
+      "url": "https://www.rfc-editor.org/rfc/rfc9529.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "実装時の公式trace照合元。今回そのEDHOC試験を実行したという意味ではない。"
+    },
+    {
+      "id": "E06",
+      "title": "Espressif RNG",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/system/random.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "真性entropy供給条件を満たして生成する。静的testseedは製品禁止。"
+    },
+    {
+      "id": "E07",
+      "title": "Espressif OTA",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/system/ota.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "複数partition・rollback・valid確認の公式挙動。4MiB計画の実機試験は未実施。"
+    },
+    {
+      "id": "E08",
+      "title": "FastAPI lifespan",
+      "url": "https://fastapi.tiangolo.com/advanced/events/",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "起動/停止資源管理の公式境界。1worker/singletonはこの仕様の設計決定。"
+    },
+    {
+      "id": "E09",
+      "title": "SQLite WAL",
+      "url": "https://sqlite.org/wal.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "WAL・同一ホスト・永続化条件。現場配備時の実SQLite版/修正状況を別に固定する。"
+    },
+    {
+      "id": "E10",
+      "title": "COSE RFC9052",
+      "url": "https://www.rfc-editor.org/rfc/rfc9052.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "署名objectの構造。公開testkeyでのfixtureは認証システムの監査ではない。"
+    },
+    {
+      "id": "E11",
+      "title": "CBOR RFC8949",
+      "url": "https://www.rfc-editor.org/rfc/rfc8949.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "§4.2.1 core deterministic encoding。length-first方式と混同しない。"
+    },
+    {
+      "id": "E12",
+      "title": "SQLite STRICT",
+      "url": "https://sqlite.org/stricttables.html",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "STRICT tableが3.37以降であること。今回実行版はVALIDATIONに記録。"
+    },
+    {
+      "id": "E13",
+      "title": "SQLite synchronous",
+      "url": "https://sqlite.org/pragma.html#pragma_synchronous",
+      "kind": "primary_external",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "WAL/FULL、commit前後の電源断条件の参照。OS/ストレージのflush保証は実機別。"
+    },
+    {
+      "id": "KG-CODE-01",
+      "title": "KG Transport",
+      "url": "https://github.com/MOVEI144/KG/blob/4ed3e1ff0e63eec54c52e89444e18b2a18be2130/apps/edge-go/internal/displaylink/transport.go",
+      "kind": "source_code_or_repository_doc",
+      "observed_date": "2026-09-28",
+      "revision": "4ed3e1ff0e63eec54c52e89444e18b2a18be2130",
+      "note": "読取範囲 1–99: EventFrame未認証、Route非再使用、SendWrittenはserial Writeのみ。"
+    },
+    {
+      "id": "KG-CODE-02",
+      "title": "KG Go README",
+      "url": "https://github.com/MOVEI144/KG/blob/4ed3e1ff0e63eec54c52e89444e18b2a18be2130/apps/edge-go/README.md",
+      "kind": "source_code_or_repository_doc",
+      "observed_date": "2026-09-28",
+      "revision": "4ed3e1ff0e63eec54c52e89444e18b2a18be2130",
+      "note": "読取範囲 1–160: 9/27現行Go sitecore、S3親機、RouteLoom未同梱と旧計画の区別。"
+    },
+    {
+      "id": "RL-CODE-01",
+      "title": "RouteLoom public C header",
+      "url": "https://github.com/MOVEI144/RouteLoom/blob/77b5792669fefee13498ef29a3c2e48119c562a0/components/routeloom/include/routeloom/routeloom.h",
+      "kind": "source_code_or_repository_doc",
+      "observed_date": "2026-09-28",
+      "revision": "77b5792669fefee13498ef29a3c2e48119c562a0",
+      "note": "読取範囲 1–160: C ABIのAPPLIED未提供とC++との差、128B/250B制限、版付き構造。"
+    },
+    {
+      "id": "RL-CODE-02",
+      "title": "RouteLoom SiteStore",
+      "url": "https://github.com/MOVEI144/RouteLoom/blob/77b5792669fefee13498ef29a3c2e48119c562a0/components/routeloom/src/sdkv1_store.cpp",
+      "kind": "source_code_or_repository_doc",
+      "observed_date": "2026-09-28",
+      "revision": "77b5792669fefee13498ef29a3c2e48119c562a0",
+      "note": "読取範囲 480–590: 異site拒否と世代/floor・commit順序。移設ではこの検査を単純削除しない。"
+    },
+    {
+      "id": "RL-CODE-03",
+      "title": "RouteLoom ESP-NOW owner",
+      "url": "https://github.com/MOVEI144/RouteLoom/blob/77b5792669fefee13498ef29a3c2e48119c562a0/components/routeloom_espnow/src/espnow_runtime.cpp",
+      "kind": "source_code_or_repository_doc",
+      "observed_date": "2026-09-28",
+      "revision": "77b5792669fefee13498ef29a3c2e48119c562a0",
+      "note": "読取範囲 1–170: drivererror分類、単一owner、peer/返信予約。全120kBを精査したとは扱わない。"
+    },
+    {
+      "id": "RL-CODE-04",
+      "title": "RouteLoom vendor manifest",
+      "url": "https://github.com/MOVEI144/RouteLoom/blob/77b5792669fefee13498ef29a3c2e48119c562a0/components/routeloom/third_party/VENDORED.json",
+      "kind": "source_code_or_repository_doc",
+      "observed_date": "2026-09-28",
+      "revision": "77b5792669fefee13498ef29a3c2e48119c562a0",
+      "note": "読取範囲 1–180: libedhoc pin/MIT/末尾byte検査patch。巨大化を理由に既知の厳密decodeを削らない。"
+    },
+    {
+      "id": "KG-16",
+      "title": "KG Issue #16",
+      "url": "https://github.com/MOVEI144/KG/issues/16",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "QRと予備機の単体追加/交換。開発PC必須を避ける。"
+    },
+    {
+      "id": "KG-15",
+      "title": "KG Issue #15",
+      "url": "https://github.com/MOVEI144/KG/issues/15",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "移設時の旧校正の無効化。SDKではなくアプリのbinding責務。"
+    },
+    {
+      "id": "KG-9",
+      "title": "KG Issue #9",
+      "url": "https://github.com/MOVEI144/KG/issues/9",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "通信断と安全上の禁止状態を分離。古い業務状態を無期限保証しない。"
+    },
+    {
+      "id": "KG-10",
+      "title": "KG Issue #10",
+      "url": "https://github.com/MOVEI144/KG/issues/10",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "cloud断時の履歴保持と復旧同期。有限容量を明記。"
+    },
+    {
+      "id": "KG-25",
+      "title": "KG Issue #25",
+      "url": "https://github.com/MOVEI144/KG/issues/25",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "言語間契約fixture。"
+    },
+    {
+      "id": "KG-29",
+      "title": "KG Issue #29",
+      "url": "https://github.com/MOVEI144/KG/issues/29",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "小さいDeviceLink/Transport境界。"
+    },
+    {
+      "id": "KG-41",
+      "title": "KG Issue #41",
+      "url": "https://github.com/MOVEI144/KG/issues/41",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "取消・上書き・期限・遅いACKの整合。"
+    },
+    {
+      "id": "KG-44",
+      "title": "KG Issue #44",
+      "url": "https://github.com/MOVEI144/KG/issues/44",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "表示系の健康状態と無線onlineの分離。"
+    },
+    {
+      "id": "KG-76",
+      "title": "KG Issue #76",
+      "url": "https://github.com/MOVEI144/KG/issues/76",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "asset/installation/roleと本人認証を分離。"
+    },
+    {
+      "id": "KG-100",
+      "title": "KG Issue #100",
+      "url": "https://github.com/MOVEI144/KG/issues/100",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "9/23デモの固定スター案は履歴。20hop仕様の上限根拠にしない。"
+    },
+    {
+      "id": "KG-109",
+      "title": "KG Issue #109",
+      "url": "https://github.com/MOVEI144/KG/issues/109",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "10台の自己形成、relay停止、全台復電、表示盤連動。10台は10hopを意味しない。"
+    },
+    {
+      "id": "KG-112",
+      "title": "KG Issue #112",
+      "url": "https://github.com/MOVEI144/KG/issues/112",
+      "kind": "request_or_historical_issue",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "9/26統合評価は過去時点。最新コメントを優先して意味を照合。"
+    },
+    {
+      "id": "KG-112-NEW",
+      "title": "KG #112 2026-09-28追記",
+      "url": "https://github.com/MOVEI144/KG/issues/112#issuecomment-5869076509",
+      "kind": "dated_plan",
+      "observed_date": "2026-09-28",
+      "revision": "2026-09-28T11:37:09Z",
+      "note": "20:37 JST。4SoC、DeviceAPI、optional4KiB、移設、occ/latest・tr/event、S3USB、IDF/binary/adaptorの導入計画。実装完了ではない。"
+    },
+    {
+      "id": "RL-191",
+      "title": "RouteLoom Issue #191",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/191",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "公開C/C++ Device APIとlifecycle/APPLIEDの不足。"
+    },
+    {
+      "id": "RL-192",
+      "title": "RouteLoom Issue #192",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/192",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "所属とreachabilityの独立状態。"
+    },
+    {
+      "id": "RL-193",
+      "title": "RouteLoom Issue #193",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/193",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "Join cooldown/拒否の硬直化。設定revisionとbounded再探索。"
+    },
+    {
+      "id": "RL-194",
+      "title": "RouteLoom Issue #194",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/194",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "KG固有語彙/decision_modeやgroup実装の汎用性。"
+    },
+    {
+      "id": "RL-195",
+      "title": "RouteLoom Issue #195",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/195",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "送信受付・latest・group予算の一貫性。"
+    },
+    {
+      "id": "RL-196",
+      "title": "RouteLoom Issue #196",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/196",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "旧rootが停止した機器の現場間移設、旧siteguard、A→B→A。"
+    },
+    {
+      "id": "RL-197",
+      "title": "RouteLoom Issue #197",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/197",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "listen→hint→本手続きという賢いJoin案。認可の代替にはしない。"
+    },
+    {
+      "id": "RL-199",
+      "title": "RouteLoom Issue #199",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/199",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "コード/flash/RAM/処理負荷の抜本見直し要望。投稿中のサイズ数値は本作業で再測定していない。"
+    },
+    {
+      "id": "RL-176",
+      "title": "RouteLoom Issue #176",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/176",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "閉じた参加方針のrelay伝播と適用証拠。"
+    },
+    {
+      "id": "RL-101",
+      "title": "RouteLoom Issue #101",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/101",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "曖昧なgrant/opaque承認ticketを具体契約へ。"
+    },
+    {
+      "id": "RL-179",
+      "title": "RouteLoom Issue #179",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/179",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "4KiB級fragmentation/reassemblyの要求。"
+    },
+    {
+      "id": "RL-171",
+      "title": "RouteLoom Issue #171",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/171",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "署名OTA、2面partition、更新/rollbackの課題。"
+    },
+    {
+      "id": "RL-169",
+      "title": "RouteLoom Issue #169",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/169",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "relay-firstからNO_ROUTEに陥る実機事例。C6対象外という当時の方針はsilicon非対応の証拠ではない。"
+    },
+    {
+      "id": "RL-168",
+      "title": "RouteLoom Issue #168",
+      "url": "https://github.com/MOVEI144/RouteLoom/issues/168",
+      "kind": "request_or_issue_report",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "revoke/GK/cutoverの実機失敗。closeだけで実機再試験合格を推測しない。"
+    },
+    {
+      "id": "RL-202",
+      "title": "RouteLoom PR #202",
+      "url": "https://github.com/MOVEI144/RouteLoom/pull/202",
+      "kind": "merged_test_change",
+      "observed_date": "2026-09-28",
+      "revision": "77b5792669fefee13498ef29a3c2e48119c562a0",
+      "note": "real-Ownerソフトウェアharnessのroute-loss試験追加。test-onlyでRF/HILの代用ではない。"
+    },
+    {
+      "id": "RL-201",
+      "title": "RouteLoom PR #201",
+      "url": "https://github.com/MOVEI144/RouteLoom/pull/201",
+      "kind": "merged_software_change",
+      "observed_date": "2026-09-28",
+      "revision": null,
+      "note": "失効拒否と通知の分離・tree順cutover。実機再試験は別。"
+    },
+    {
+      "id": "RL-PLAN",
+      "title": "RouteLoomの最新導入計画（KG側への報告）",
+      "url": "https://github.com/MOVEI144/KG/issues/112#issuecomment-5869076509",
+      "kind": "dated_plan",
+      "observed_date": "2026-09-28",
+      "revision": "2026-09-28T11:37:09Z",
+      "note": "計画として4SoCを採用。mainの実装/資格状態と区別。"
+    },
+    {
+      "id": "E-PWR-01",
+      "title": "Espressif ESP-NOW / ESP32-C6",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c6/api-reference/network/esp_now.html",
+      "kind": "official_documentation",
+      "observed_date": "2026-09-28",
+      "revision": "stable resolved to documentation v6.0.2 at read time",
+      "note": "STA power-save wake window and interval; disconnected-PM condition; callbacks must remain short. Does not validate the inherited 6.0.3 implementation input."
+    },
+    {
+      "id": "E-PWR-02",
+      "title": "Espressif Sleep modes / ESP32-C3",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/system/sleep_modes.html",
+      "kind": "official_documentation",
+      "observed_date": "2026-09-28",
+      "revision": "stable resolved to documentation v6.0.2 at read time",
+      "note": "Light-sleep RAM retention vs Deep-sleep shutdown; manual wireless shutdown vs automatic driver-managed sleep; RTC/GPIO constraints. Does not validate the inherited 6.0.3 implementation input."
+    },
+    {
+      "id": "E-PWR-03",
+      "title": "Espressif Power management / ESP32-S3",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/system/power_management.html",
+      "kind": "official_documentation",
+      "observed_date": "2026-09-28",
+      "revision": "stable resolved to documentation v6.0.2 at read time",
+      "note": "DFS and automatic Light-sleep depend on PM locks and Tickless Idle; nearest wake deadline and timer behavior. Does not validate the inherited 6.0.3 implementation input."
+    },
+    {
+      "id": "E-PWR-04",
+      "title": "Espressif connectionless power save / ESP32-C6",
+      "url": "https://docs.espressif.com/projects/esp-idf/en/stable/esp32c6/api-guides/wifi-driver/wifi-performance-and-power-save.html",
+      "kind": "official_documentation",
+      "observed_date": "2026-09-28",
+      "revision": "stable resolved to documentation v6.0.2 at read time",
+      "note": "Connectionless window/interval and runtime Wi-Fi memory/power behavior; target qualification required. Does not validate the inherited 6.0.3 implementation input."
+    },
+    {
+      "id": "USER-REV2",
+      "title": "Current conversation: small, stable, lightweight, long-range, low-power general SDK",
+      "url": null,
+      "kind": "user_requirement",
+      "observed_date": "2026-09-28",
+      "revision": "spec0.2 brief",
+      "note": "全部のZIP。KG専用化しない。Join/移設/一斉配信とlow powerを共通のSDKとして統合する。"
+    }
+  ],
+  "revision_scope": "Spec0.2 inherits the fixed KG/RouteLoom snapshots. No new GitHub HEAD audit in this packaging revision. Four official PM documentation pages were checked."
+}

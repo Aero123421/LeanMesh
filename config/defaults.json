@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "root_depth": 20,
+  "max_path_hops": 40,
+  "members": 64,
+  "radio": {
+    "band": "2.4GHz",
+    "phy": "LR250",
+    "max_frame_bytes": 250,
+    "regular_peers": 16,
+    "transient_peers": 3,
+    "broadcast_peers": 1,
+    "driver_watchdog_ms": 1000,
+    "deployment_approved": false,
+    "country": null,
+    "allowed_channels": [],
+    "tx_power_qdbm": null
+  },
+  "join": {
+    "mode": "external",
+    "listen_ms": 800,
+    "search_budget_ms": 30000,
+    "candidates": 3,
+    "full_handshakes": 2,
+    "approval_timeout_ms": 300000,
+    "prepared_timeout_ms": 120000,
+    "auto_transfer_on_isolation": false,
+    "isolation_before_transfer_ms": 600000,
+    "root_full_handshakes_per_second": 4
+  },
+  "routing": {
+    "parent_failures": 3,
+    "parent_hold_ms": 30000,
+    "improvement_percent": 20,
+    "lease_ms": 180000,
+    "lease_refresh_ms": 60000,
+    "hello_min_ms": 2000,
+    "hello_max_ms": 32000,
+    "active_parent_silence_ms": 5000,
+    "idle_liveness_multiplier": 3
+  },
+  "channel": {
+    "automatic": true,
+    "degradation_window_ms": 300000,
+    "minimum_samples": 32,
+    "minimum_improvement_percent": 25,
+    "cooldown_ms": 3600000,
+    "daily_change_limit": 4,
+    "prepare_timeout_ms": 120000,
+    "commit_lead_ms": 60000,
+    "settle_ms": 60000,
+    "survey_visit_ms": 60,
+    "max_visits_per_minute": 2,
+    "freeze": false,
+    "max_clock_error_ms": 2000,
+    "qualified_clock_drift_ppm": 500
+  },
+  "delivery": {
+    "max_small_bytes": 512,
+    "max_object_bytes": 4096,
+    "fragment_quantum": 16,
+    "fragment_window": 4,
+    "link_attempts": 3,
+    "e2e_rounds": 3,
+    "rto_initial_ms": 80,
+    "rto_min_ms": 20,
+    "rto_max_ms": 500,
+    "small_reassembly_ms": 30000,
+    "object_reassembly_ms": 120000,
+    "fanout_inflight": 4,
+    "snapshot_cache_entries": 4,
+    "snapshot_cache_ms": 120000
+  },
+  "scheduler": {
+    "drr_weights": [
+      4,
+      8,
+      4,
+      1
+    ],
+    "airtime_ms_per_second": 300,
+    "airtime_burst_ms": 600,
+    "urgent_debt_ms": 100,
+    "principal_requests_per_second": 20,
+    "principal_burst": 40,
+    "global_requests_per_second": 100,
+    "global_burst": 100
+  },
+  "security": {
+    "edhoc_method": 0,
+    "edhoc_suite": 3,
+    "authorization_lease_ms": 900000,
+    "authorization_refresh_ms": 600000,
+    "traffic_key_rotation_ms": 3600000,
+    "traffic_key_packet_limit": 16777216
+  },
+  "host": {
+    "api_socket": "/run/leanmesh/api.sock",
+    "workers": 1,
+    "db_max_bytes": 1073741824,
+    "free_reserve_bytes": 134217728,
+    "pending_operations": 4096,
+    "max_events": 1000000,
+    "subscriber_events": 128,
+    "subscriber_bytes": 262144,
+    "request_bytes": 32768,
+    "long_poll_ms": 15000,
+    "db_synchronous": "FULL"
+  },
+  "power_policy_reference": "power.always-rx.json",
+  "power_limits": {
+    "sleep_ticket_ms": 2000,
+    "poll_max_attempts": 2,
+    "schedule_max_age_ms": 86400000,
+    "group_operations": {
+      "leaf": 1,
+      "relay": 1,
+      "root": 4
+    },
+    "rtc_secure_resume_enabled": false
+  }
+}

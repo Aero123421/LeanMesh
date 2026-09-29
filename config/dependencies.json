@@ -1,0 +1,23 @@
+{
+  "status": "implementation inputs; product builds not executed",
+  "esp_idf": {
+    "version": "6.0.3",
+    "commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+    "basis": "RouteLoom pin; resolve/reproduce and qualify all four SoCs in G1",
+    "external_validation": "Not built in this bundle. New PM web reads resolved stable docs to v6.0.2; do not silently replace or claim verification of v6.0.3. Resolve the inherited exact pin in G1."
+  },
+  "edhoc": {
+    "engine": "libedhoc",
+    "version": "2.3.2",
+    "commit": "c8857b62d66be3664d1694bbe4eea37c56c05d9e",
+    "backend": "one IDF/PSA crypto implementation",
+    "patch_review": "exact-input-consumption patches referenced in RL-CODE-04 must be preserved or proved upstream fixed"
+  },
+  "host": {
+    "python_min": "3.12",
+    "framework": "FastAPI/Uvicorn single worker",
+    "persistence": "stdlib sqlite3 WAL FULL, STRICT requires SQLite>=3.37",
+    "dependency_lock_gate": "G1 records exact Python, FastAPI, Uvicorn, Pydantic, cryptography, serial package versions and hashes after OS/ABI checks; this archive is not a fabricated runtime lock"
+  },
+  "spec_checker": "requirements-check.txt is checker dependencies only"
+}
