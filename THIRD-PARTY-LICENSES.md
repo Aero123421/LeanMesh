@@ -52,5 +52,27 @@ License file欄は、インストール済みwheelの `*.dist-info` 内で確認
 
 `scripts/requirements-check.txt`(仕様検査用 jsonschema/cryptography)はHost runtime lockとは別で、本台帳の対象外。
 
+## 4b. Host試験専用 (`host/requirements-dev.lock`、製品venvには入れない)
+runtime pinは`host/requirements.lock`と同一(`scripts/setup_host_venv.sh lock`が検査)。追加分のみ記す。
+
+| package | 版 | license (METADATA) | license file(先頭16桁sha256) |
+|---|---|---|---|
+| pytest | 9.1.1 | MIT | LICENSE ca836a5f9ecca3b2 |
+| httpx2 | 2.13.1 | BSD-3-Clause | LICENSE.md 7e7d6dbaf7fe160d |
+| httpcore2 | 2.13.1 | BSD-3-Clause | LICENSE.md c4df125c807b0613 |
+| truststore | 0.10.4 | MIT | LICENSE 33be7b7e8fa4fd19 |
+| iniconfig | 2.3.0 | MIT | LICENSE 3409fa91f7ace557 |
+| packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | LICENSE cad1ef5bd340d73e |
+| pluggy | 1.6.0 | MIT | LICENSE d6b65e6c213a5d0b |
+| pygments | 2.21.0 | BSD-2-Clause | LICENSE a9d66f1d526df02e |
+
+## 4c. Native build (製品imageに入らない試験用)
+| 名称 | 版/固定点 | 備考 |
+|---|---|---|
+| TF-PSA-Crypto (native) | IDF v6.0.3 `components/mbedtls/mbedtls` @ ce3f3485a121c100f58f36d700cb35b060f6e866 (Mbed TLS 4.1.1 fork) | meshsim/native testとHost native bindingが同じPSA sourceをsoftware driverでbuildする。licenseはIDF同梱のmbedtls LICENSE(Apache-2.0 OR GPL-2.0-or-later)に従う。`cmake/native_crypto_compat/`はIDF port wrapper相当の2行shimで第三者コードの改変ではない。 |
+| libedhoc/zcbor sparse checkout | T01の`LICENSE/include/library/backends`限定から全tree checkoutへ変更 | `cmake/sources.cmake`と`edhoc_config.h.in`を使用するため。compileするのはcore/CBOR backend/zcbor srcのみ。`scripts/check_spec.py`は`third_party/`を走査対象外にした。 |
+
+C++試験frameworkは導入せず、`tests/native/lmtest.hpp`(first-party、約120行)を使う。
+
 ## 5. 未確認
 IDF imageに入るcomponent別license集計、SBOM、libgcc/newlib等のimage内容、pyserial/OpenSSL/Rust crateの再配布条件、NOTICE要件、zcbor/libedhocの非取得external。これらはT24のrelease manifestまで持ち越し。

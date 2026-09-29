@@ -1,0 +1,8 @@
+get_filename_component(lm_repo "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+if(CMAKE_BUILD_EARLY_EXPANSION)
+    idf_component_register(REQUIRES leanmesh mbedtls)
+    return()
+endif()
+include("${lm_repo}/cmake/lm_edhoc.cmake")
+lm_edhoc_collect("${CMAKE_CURRENT_BINARY_DIR}/edhoc")
+idf_component_register(SRCS "main.c" INCLUDE_DIRS ${LM_EDHOC_PUBLIC_INCLUDE} REQUIRES leanmesh mbedtls)

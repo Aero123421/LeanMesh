@@ -8,3 +8,14 @@ select = ["E4", "E7", "E9", "F", "B", "UP"]
 "scripts/check_spec.py" = ["E701", "E702"]
 "scripts/wire_fixture.py" = ["E701", "E702"]
 "scripts/airtime.py" = ["E701", "E702"]
+
+[tool.pytest.ini_options]
+# Host unit/integration/E2E tests. E2E tests spawn build outputs (meshsim) from
+# $LEANMESH_NATIVE_BUILD (default ~/.cache/leanmesh/native) and FAIL, never skip, when missing.
+testpaths = ["host/tests"]
+pythonpath = ["host"]
+addopts = "--strict-markers -p no:cacheprovider"
+markers = [
+    "scenario(*ids): acceptance scenario IDs (tests/scenarios.json) this test covers in software",
+    "e2e: spawns meshsim and/or a uvicorn host process",
+]

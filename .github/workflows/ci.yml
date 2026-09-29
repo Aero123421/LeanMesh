@@ -1,0 +1,72 @@
+# LeanMesh CI. Every job fails loudly; nothing is skipped when a tool or pin is missing.
+# The ESP-IDF image tag was verified on Docker Hub (2026-09-29): espressif/idf:v6.0.3, manifest-list
+# digest pinned in each job's `container:`. The build scripts additionally refuse any IDF HEAD other than the pin in
+# config/dependencies.json. CI never flashes hardware.
+name: ci
+on: [push, pull_request]
+
+jobs:
+  spec:
+    name: spec consistency (G0)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install -r scripts/requirements-check.txt
+      - run: python scripts/check_spec.py
+
+  native-and-host:
+    name: native build + ctest + host pytest (incl. meshsim E2E)
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_NATIVE_BUILD: /tmp/leanmesh-native
+      LEANMESH_VENV: /tmp/leanmesh-venv
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - name: host C/C++ compiler and Python 3.12
+        run: |
+          if ! command -v c++ >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends g++
+          fi
+          if ! command -v python3.12 >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv
+          fi
+          c++ --version && python3.12 --version
+      - run: scripts/third_party.sh setup
+      - run: scripts/third_party.sh verify
+      - name: native configure + build (TF-PSA-Crypto from the pinned IDF tree)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
+          cmake --build "$LEANMESH_NATIVE_BUILD"
+      - name: ctest
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          ctest --test-dir "$LEANMESH_NATIVE_BUILD" --output-on-failure
+      - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
+      - name: host pytest (unit, integration, E2E against meshsim)
+        run: "$LEANMESH_VENV/bin/python" -m pytest -v
+
+  idf-targets:
+    name: IDF build ${{ matrix.target }} (baseline, example_node, crypto_link_check)
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32c3, esp32c5, esp32c6]
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_BUILD_ROOT: /tmp/leanmesh-build
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - run: scripts/third_party.sh setup
+      - run: scripts/build_targets.sh ${{ matrix.target }}

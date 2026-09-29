@@ -1,0 +1,2 @@
+# Same optimisation for every target/baseline so map differences stay comparable (docs/16).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

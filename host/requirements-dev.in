@@ -1,0 +1,6 @@
+# Test-only dependencies (never installed in a production venv). Locked with hashes into
+# host/requirements-dev.lock together with the runtime set (requirements.in), so runtime versions
+# are identical to host/requirements.lock; scripts/setup_host_venv.sh lock checks that.
+-r requirements.in
+pytest
+httpx2

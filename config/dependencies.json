@@ -51,6 +51,14 @@
         "not_covered": "message_1 and other decoders were not reviewed for trailing bytes; T03 must test them"
       },
       "mbedtls_and_other_externals": "not fetched"
+    },
+    "resolved_skeleton": {
+      "checkout": "full tree (sparse checkout dropped); scripts/check_spec.py excludes third_party/",
+      "compiled": "libedhoc core + CBOR backend + zcbor sources via cmake/lm_edhoc.cmake (upstream cmake/sources.cmake list); no libedhoc reference cipher suite is compiled",
+      "config": "cmake/lm_edhoc.cmake: 1 suite, method 0, log level 0, stack memory backend; buffer limits at upstream values until T03 sizes them",
+      "crypto_backend": "PSA only: native = TF-PSA-Crypto sources of the pinned IDF tree (components/mbedtls/mbedtls @ ce3f3485a121c100f58f36d700cb35b060f6e866, Mbed TLS 4.1.1); IDF = the mbedtls component",
+      "linked": "native tests (golden AES-GCM/COSE vectors via PSA, libedhoc context init) and firmware/crypto_link_check for esp32s3/c3/c5/c6 (build only, never flashed)",
+      "suite3_glue": "not implemented (T03)"
     }
   },
   "host": {

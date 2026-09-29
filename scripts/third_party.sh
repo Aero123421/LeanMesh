@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# libedhoc (submodule, pinned) + its zcbor: sparse checkout, local patch, byte-level verification.
-# Usage: scripts/third_party.sh setup    init submodules, sparse-checkout, apply patch (idempotent)
+# libedhoc (submodule, pinned) + its zcbor: full checkout, local patch, byte-level verification.
+# Usage: scripts/third_party.sh setup    init submodules, apply patch (idempotent)
 #        scripts/third_party.sh verify   check pins and blob ids; exit 1 on any mismatch
-# Sparse checkout keeps upstream *.md/*.json out of the tree: scripts/check_spec.py rglobs them
-# and would fail on upstream relative links. Only LICENSE, include/, library/, backends/ (libedhoc)
-# and LICENSE, include/, src/ (zcbor) are checked out, the same subset RouteLoom vendored.
+# The full upstream tree is checked out (cmake/sources.cmake and cmake/edhoc_config.h.in are used by
+# cmake/lm_edhoc.cmake). scripts/check_spec.py excludes third_party/ from its *.json/*.md scans.
+# Only libedhoc core, the CBOR backend and zcbor sources are compiled; the other externals
+# (mbedtls, compact25519, Unity, liboqs, XKCP) are never fetched: the crypto backend is IDF's PSA.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ed="$repo/third_party/libedhoc"
@@ -18,11 +19,14 @@ declare -A PAT=( [message_2]=b1ba89076d1ebf13a06e45b9a05ed84f38900230 [message_3
 
 setup() {
   git -C "$repo" submodule update --init third_party/libedhoc
-  git -C "$ed" sparse-checkout init --no-cone
-  git -C "$ed" sparse-checkout set '/LICENSE' '/include/' '/library/' '/backends/'
+  # Earlier checkouts used a sparse subset; restore the full tree if that is still configured.
+  if [ "$(git -C "$ed" config --bool core.sparseCheckout || true)" = "true" ]; then
+    git -C "$ed" sparse-checkout disable
+  fi
   git -C "$ed" submodule update --init externals/zcbor
-  git -C "$zc" sparse-checkout init --no-cone
-  git -C "$zc" sparse-checkout set '/LICENSE' '/include/' '/src/'
+  if [ "$(git -C "$zc" config --bool core.sparseCheckout || true)" = "true" ]; then
+    git -C "$zc" sparse-checkout disable
+  fi
   if git -C "$ed" apply --check -R "$patch_file" 2>/dev/null; then
     echo "patch already applied"
   else

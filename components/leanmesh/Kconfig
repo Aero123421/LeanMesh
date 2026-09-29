@@ -1,0 +1,19 @@
+menu "LeanMesh"
+
+    choice LEANMESH_PROFILE
+        prompt "Capacity profile (config/profiles.json)"
+        default LEANMESH_PROFILE_LEAF
+        help
+            Maximum role this image can run. The profile sizes fixed pools only; security,
+            join and frame interpretation are identical for every profile (docs/16).
+            Root-only code (topology, ledger, serial bridge) is compiled only for ROOT.
+
+        config LEANMESH_PROFILE_LEAF
+            bool "leaf"
+        config LEANMESH_PROFILE_RELAY
+            bool "relay"
+        config LEANMESH_PROFILE_ROOT
+            bool "root"
+    endchoice
+
+endmenu
