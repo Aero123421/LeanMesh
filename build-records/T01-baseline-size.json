@@ -1,0 +1,91 @@
+{
+  "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+  "app": "firmware/baseline_espnow",
+  "note": "empty IDF + ESP-NOW baseline, -Os; bytes from `idf.py size --format json2`",
+  "targets": {
+    "esp32s3": {
+      "image_total_bytes": 675460,
+      "memory": {
+        "Flash Code": {
+          "used": 485048,
+          "total": 0
+        },
+        "Flash Data": {
+          "used": 97184,
+          "total": 0
+        },
+        "DIRAM": {
+          "used": 92896,
+          "total": 341760
+        },
+        "IRAM": {
+          "used": 16384,
+          "total": 16384
+        },
+        "RTC SLOW": {
+          "used": 36,
+          "total": 8192
+        },
+        "RTC FAST": {
+          "used": 24,
+          "total": 8192
+        }
+      }
+    },
+    "esp32c3": {
+      "image_total_bytes": 707608,
+      "memory": {
+        "Flash Code": {
+          "used": 533360,
+          "total": 0
+        },
+        "Flash Data": {
+          "used": 97080,
+          "total": 0
+        },
+        "DRAM": {
+          "used": 95080,
+          "total": 321296
+        },
+        "RTC SLOW": {
+          "used": 60,
+          "total": 8192
+        }
+      }
+    },
+    "esp32c5": {
+      "image_total_bytes": 803417,
+      "memory": {
+        "Flash": {
+          "used": 710926,
+          "total": 0
+        },
+        "HP SRAM": {
+          "used": 116759,
+          "total": 320928
+        },
+        "LP SRAM": {
+          "used": 24,
+          "total": 16384
+        }
+      }
+    },
+    "esp32c6": {
+      "image_total_bytes": 801401,
+      "memory": {
+        "Flash Code": {
+          "used": 694750,
+          "total": 0
+        },
+        "DIRAM": {
+          "used": 128999,
+          "total": 452112
+        },
+        "LP SRAM": {
+          "used": 24,
+          "total": 16384
+        }
+      }
+    }
+  }
+}

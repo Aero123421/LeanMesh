@@ -1,0 +1,9 @@
+# Build output and venv live outside the repo (see scripts/build_targets.sh, setup_host_venv.sh);
+# these are safety nets. scripts/check_spec.py rglobs *.json/*.md, so never place them here.
+__pycache__/
+*.pyc
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+.venv/

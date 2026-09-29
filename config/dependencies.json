@@ -1,23 +1,79 @@
 {
-  "status": "implementation inputs; product builds not executed",
+  "status": "implementation inputs; T01 baseline-only builds executed (empty IDF+ESP-NOW, 4 targets); no SDK/product build, no hardware test",
   "esp_idf": {
     "version": "6.0.3",
     "commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
     "basis": "RouteLoom pin; resolve/reproduce and qualify all four SoCs in G1",
-    "external_validation": "Not built in this bundle. New PM web reads resolved stable docs to v6.0.2; do not silently replace or claim verification of v6.0.3. Resolve the inherited exact pin in G1."
+    "external_validation": "T01 built the empty ESP-NOW baseline with this exact commit for esp32s3/c3/c5/c6 (compile/link only). Behaviour, RF and power are not verified. Do not replace the pin silently.",
+    "resolved_T01": {
+      "checkout": "~/esp/esp-idf-v6.0.3 (git describe v6.0.3), HEAD equals commit above, tree unmodified",
+      "targets_installed": [
+        "esp32s3",
+        "esp32c3",
+        "esp32c5",
+        "esp32c6"
+      ],
+      "toolchain": {
+        "xtensa-esp-elf": "esp-15.2.0_20251204",
+        "riscv32-esp-elf": "esp-15.2.0_20251204"
+      },
+      "cmake": "3.28.3 (system, not the IDF-managed tool)",
+      "ninja": "1.11.1 (system)",
+      "python": "3.12.3",
+      "baseline_build": "firmware/baseline_espnow built for all four targets by scripts/build_targets.sh; sizes in build-records/T01-baseline-size.json",
+      "not_done": "no radio/HIL run; CI workflow not executed; IDF-managed cmake/ninja not installed"
+    }
   },
   "edhoc": {
     "engine": "libedhoc",
     "version": "2.3.2",
     "commit": "c8857b62d66be3664d1694bbe4eea37c56c05d9e",
     "backend": "one IDF/PSA crypto implementation",
-    "patch_review": "exact-input-consumption patches referenced in RL-CODE-04 must be preserved or proved upstream fixed"
+    "patch_review": "exact-input-consumption patches referenced in RL-CODE-04 must be preserved or proved upstream fixed",
+    "resolved_T01": {
+      "integration": "git submodule third_party/libedhoc pinned to commit above; sparse checkout (LICENSE, include, library, backends); not linked into any firmware yet",
+      "zcbor": {
+        "version": "0.8.1",
+        "commit": "d3093b5684f62268c7f27f8a5079f166772619de",
+        "source": "libedhoc externals/zcbor pin",
+        "local_patch": "RouteLoom's zero-length memmove guard in src/zcbor_encode.c identified, NOT applied"
+      },
+      "exact_input_consumption_patch": {
+        "status": "applied to worktree; upstream pristine pin recorded in gitlink",
+        "patch_file": "third_party/patches/libedhoc-2.3.2-exact-input-consumption.patch",
+        "files": [
+          "library/core/classic/edhoc_classic_message_2.c",
+          "library/core/classic/edhoc_classic_message_3.c",
+          "library/core/classic/edhoc_classic_message_4.c"
+        ],
+        "origin": "RouteLoom 77b5792 components/routeloom/third_party/VENDORED.json local_patches; upstream blob ids equal, patched blob ids reproduced byte-identical",
+        "verify": "scripts/third_party.sh verify",
+        "not_covered": "message_1 and other decoders were not reviewed for trailing bytes; T03 must test them"
+      },
+      "mbedtls_and_other_externals": "not fetched"
+    }
   },
   "host": {
     "python_min": "3.12",
     "framework": "FastAPI/Uvicorn single worker",
     "persistence": "stdlib sqlite3 WAL FULL, STRICT requires SQLite>=3.37",
-    "dependency_lock_gate": "G1 records exact Python, FastAPI, Uvicorn, Pydantic, cryptography, serial package versions and hashes after OS/ABI checks; this archive is not a fabricated runtime lock"
+    "dependency_lock_gate": "G1 records exact Python, FastAPI, Uvicorn, Pydantic, cryptography, serial package versions and hashes after OS/ABI checks; this archive is not a fabricated runtime lock",
+    "resolved_T01": {
+      "input": "host/requirements.in",
+      "lock": "host/requirements.lock (pip-compile 7.6.1, --generate-hashes, --require-hashes on install)",
+      "python": "3.12.3",
+      "sqlite": "3.45.1 (>=3.37 for STRICT)",
+      "versions": {
+        "fastapi": "0.141.1",
+        "uvicorn": "0.54.0",
+        "pydantic": "2.13.5",
+        "pyserial": "3.5",
+        "cryptography": "50.0.1"
+      },
+      "venv": "outside repo: scripts/setup_host_venv.sh sync (default ~/.cache/leanmesh/host-venv)",
+      "scope": "linux x86_64 CPython 3.12 install verified; other OS/ABI checks still open; no Host application code exists"
+    }
   },
-  "spec_checker": "requirements-check.txt is checker dependencies only"
+  "spec_checker": "requirements-check.txt is checker dependencies only",
+  "license_ledger": "THIRD-PARTY-LICENSES.md"
 }
