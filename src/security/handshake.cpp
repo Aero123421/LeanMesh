@@ -66,8 +66,6 @@ Status map_rc(int rc, int32_t fault) {
     }
 }
 
-void copy_id(DeviceId &dst, const DeviceId &src) { dst = src; }
-
 } // namespace
 
 Status HandshakeSlot::begin(HsRole role, KeyHandle local_key, ByteView local_ccs,
@@ -78,24 +76,26 @@ Status HandshakeSlot::begin(HsRole role, KeyHandle local_key, ByteView local_ccs
     if (state_ != State::Idle || in_flight_) {
         return Status::Busy;
     }
-    if (local_key.id == 0 || local_ccs.empty() || local_ccs.size() > local_ccs_.size() ||
+    if (local_key.id == 0 || local_ccs.empty() || local_ccs.size() > sizeof session_.local_ccs ||
         peer_count == 0 || peer_count > k_edhoc_max_peers || peer_ccs == nullptr) {
         return Status::InvalidArgument;
     }
     for (std::size_t i = 0; i < peer_count; ++i) {
-        if (peer_ccs[i].empty() || peer_ccs[i].size() > k_ccs_max_bytes) {
+        if (peer_ccs[i].empty() || peer_ccs[i].size() > sizeof session_.peers[i].ccs) {
             return Status::InvalidArgument;
         }
     }
     role_ = role;
     local_key_ = local_key;
-    LM_TRY(copy_bytes(MutByteView{local_ccs_.data(), local_ccs_.size()}, local_ccs));
-    local_ccs_len_ = local_ccs.size();
+    // The inputs go straight into the idle EDHOC session, their only copy; the first job parses and
+    // validates them there (the owner never touches the session while a job may run).
+    std::memcpy(session_.local_ccs, local_ccs.data(), local_ccs.size());
+    session_.local_ccs_len = local_ccs.size();
     for (std::size_t i = 0; i < peer_count; ++i) {
-        LM_TRY(copy_bytes(MutByteView{peer_ccs_[i].data(), peer_ccs_[i].size()}, peer_ccs[i]));
-        peer_ccs_len_[i] = peer_ccs[i].size();
+        std::memcpy(session_.peers[i].ccs, peer_ccs[i].data(), peer_ccs[i].size());
+        session_.peers[i].ccs_len = peer_ccs[i].size();
     }
-    peer_count_ = peer_count;
+    session_.peer_count = peer_count;
     state_ = State::Running;
     expected_ = role == HsRole::Initiator ? HsStep::M1Compose : HsStep::M1Process;
     return Status::Ok;
@@ -140,33 +140,28 @@ void HandshakeSlot::unprepare() {
 
 Status HandshakeSlot::init_session() {
     PublicKey local_pub;
-    LM_TRY(ccs_parse(ByteView{local_ccs_.data(), local_ccs_len_}, local_pub, local_device_));
+    const ByteView local_ccs{session_.local_ccs, session_.local_ccs_len};
+    LM_TRY(ccs_parse(local_ccs, local_pub, local_device_));
     PublicKey actual;
     LM_TRY(public_key_of(local_key_, actual));
     if (actual.x != local_pub.x || actual.y != local_pub.y) {
         return Status::InvalidArgument; // the CCS we would present is not the key we sign with
     }
     session_.local_key = local_key_.id;
-    for (std::size_t i = 0; i < 32; ++i) {
-        session_.local_kid[i] = local_device_.bytes[i];
-    }
-    std::memcpy(session_.local_ccs, local_ccs_.data(), local_ccs_len_);
-    session_.local_ccs_len = local_ccs_len_;
-    for (std::size_t i = 0; i < peer_count_; ++i) {
+    std::memcpy(session_.local_kid, local_device_.bytes.data(), 32);
+    for (std::size_t i = 0; i < session_.peer_count; ++i) {
+        lm_edhoc_peer &p = session_.peers[i];
         PublicKey pub;
-        LM_TRY(ccs_parse(ByteView{peer_ccs_[i].data(), peer_ccs_len_[i]}, pub, peer_ids_[i]));
-        if (peer_ids_[i] == local_device_) {
+        DeviceId id;
+        LM_TRY(ccs_parse(ByteView{p.ccs, p.ccs_len}, pub, id));
+        if (id == local_device_) {
             return Status::InvalidArgument; // no handshake with ourselves
         }
-        lm_edhoc_peer &p = session_.peers[i];
-        std::memcpy(p.kid, peer_ids_[i].bytes.data(), 32);
+        std::memcpy(p.kid, id.bytes.data(), 32);
         p.pub[0] = 0x04;
         std::memcpy(p.pub + 1, pub.x.data(), 32);
         std::memcpy(p.pub + 33, pub.y.data(), 32);
-        std::memcpy(p.ccs, peer_ccs_[i].data(), peer_ccs_len_[i]);
-        p.ccs_len = peer_ccs_len_[i];
     }
-    session_.peer_count = peer_count_;
     const int rc = lm_edhoc_session_init(&session_, role_ == HsRole::Initiator ? 1 : 0);
     last_rc_ = rc;
     if (rc != 0) {
@@ -235,12 +230,12 @@ Status HandshakeSlot::complete(Status job_status) {
     case HsStep::M2Process:
     case HsStep::M3Process: {
         const int idx = session_.matched_peer;
-        if (idx < 0 || static_cast<std::size_t>(idx) >= peer_count_) {
+        if (idx < 0 || static_cast<std::size_t>(idx) >= session_.peer_count) {
             const Status w = wipe();
             return w == Status::Ok ? Status::AuthRejected : w; // authenticated nobody
         }
         peer_index_ = static_cast<std::size_t>(idx);
-        copy_id(peer_device_, peer_ids_[peer_index_]);
+        std::memcpy(peer_device_.bytes.data(), session_.peers[peer_index_].kid, 32);
         peer_known_ = true;
         expected_ = init ? HsStep::M3Compose : HsStep::M4Compose;
         break;
@@ -305,9 +300,6 @@ Status HandshakeSlot::wipe() {
     secure_zero(MutByteView{in_.data(), in_.size()});
     secure_zero(MutByteView{out_.data(), out_.size()});
     local_key_ = KeyHandle{};
-    local_ccs_len_ = 0;
-    peer_count_ = 0;
-    peer_ccs_len_.fill(0);
     in_len_ = out_len_ = 0;
     ctx_hash_.fill(0);
     state_ = State::Idle;

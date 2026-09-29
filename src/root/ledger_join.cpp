@@ -250,6 +250,9 @@ void Ledger::decide_policy(Txn &t, MonoTime now) {
 Status Ledger::decide(const JoinDecision &d, MonoTime now) {
     for (Txn &t : txns_) {
         if (t.state == TxnState::Pending && t.request == d.request) {
+            if (d.verify && (t.device != d.device || t.dc_hash != d.credential)) {
+                return Status::Conflict; // not the request the operator looked at
+            }
             if (!d.approve) {
                 refuse(t, Status::AuthRejected, now);
             } else {
@@ -259,6 +262,16 @@ Status Ledger::decide(const JoinDecision &d, MonoTime now) {
         }
     }
     return Status::NotFound;
+}
+
+bool Ledger::pending_join(std::size_t i, PendingJoin &out) const {
+    if (i >= txns_.size() || txns_[i].state != TxnState::Pending) {
+        return false;
+    }
+    out.request = txns_[i].request;
+    out.device = txns_[i].device;
+    out.credential = txns_[i].dc_hash;
+    return true;
 }
 
 Status Ledger::pick_slot(const DeviceId &device, std::size_t &slot) const {

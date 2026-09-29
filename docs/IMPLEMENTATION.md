@@ -17,7 +17,11 @@ cmake -S . -B ~/.cache/leanmesh/native-asan -G Ninja -DLM_SANITIZE=ON -DCMAKE_BU
 scripts/setup_host_venv.sh sync-dev                               # hash-locked runtime + pytest
 ~/.cache/leanmesh/host-venv/bin/python -m pytest                  # unit/integration/E2E (meshsim)
 scripts/build_targets.sh --app example_node --app crypto_link_check esp32c3   # quick IDF check
+scripts/build_targets.sh --app example_node --profile ROOT esp32c3             # root-only code too
 scripts/build_targets.sh                                          # all apps x 4 targets (wave close)
+scripts/budget_report.py --native-build ~/.cache/leanmesh/native \
+    --idf-build ~/.cache/leanmesh/build/example_node/esp32c3 \
+    --idf-build ~/.cache/leanmesh/build/example_node-ROOT/esp32c3        # ADR-002 numbers
 python3 scripts/check_spec.py && git checkout evidence/VALIDATION.json
 ```
 
@@ -217,10 +221,12 @@ merges them.
 
 ## 11. Work breakdown (waves of parallel slices on disjoint files)
 
-Acceptance for every slice also includes §0 green (native, pytest, esp32c3 IDF build; 4 targets
-at wave close), no new warnings in first-party code, and a report: files, commands + real output,
-scenario IDs covered (sim/host evidence), size diff of `example_node` vs baseline, `sizeof` of new
-tables, unverified items, decisions.
+Acceptance for every slice also includes §0 green (native, pytest, esp32c3 IDF build of the LEAF and
+the ROOT profile, `scripts/build_targets.sh --profile ROOT`; 4 targets at wave close), no new
+warnings in first-party code, and a report: files, commands + real output, scenario IDs covered
+(sim/host evidence), `scripts/budget_report.py` before/after (sizeof per profile, static DRAM, image
+diff, SLOC) against the slice's allocation in [ADR-002](../decisions/ADR-002-budget-status.md), unverified
+items, decisions.
 
 ### Wave 1 — foundations
 | Slice | T | Owns | Deps | Acceptance |
@@ -263,7 +269,7 @@ tables, unverified items, decisions.
 ### Wave 6 — closure
 | Slice | T | Owns | Deps | Acceptance |
 |---|---|---|---|---|
-| S19 DIAG+BUDGET | T19, T23 sw, T28 sw | `src/core/diag/**`, OTA manifest check, `scripts/budget_report.py`, `scripts/scenario_coverage.py` | all | diagnostics/capabilities with validity bits; O02; budget report vs docs/16 (SLOC first-party vs vendor/tests, map diff per SoC, static RAM, sizeof per profile, PSA peak); coverage report; K06; B01 |
+| S19 DIAG+BUDGET | T19, T23 sw, T28 sw | `src/core/diag/**`, OTA manifest check, `scripts/budget_report.py` (exists since ARCH-D10: extend it), `scripts/scenario_coverage.py` | all | diagnostics/capabilities with validity bits; O02; budget report vs docs/16 (PSA peak and per-SoC map diff added to the existing report); coverage report; K06; B01 |
 | S20 E2E-HARDENING | — | `host/tests/e2e/`, `tests/native/test_model*.cpp`, CI sanitizer job | all | full-stack 21-node E2E via Host, power-cut matrix across join/transfer/channel/journal, 64-node LC02-sim, LC12 (two non-KG apps), seeded property tests, ASan/UBSan (`-DLM_SANITIZE=ON`) green |
 
 Shared files (additive edits only, re-read before editing): `src/core/engine.{hpp,cpp}` (`[SLICE]`
@@ -289,5 +295,16 @@ Decision ids from here on are slice-prefixed (`S5-D1` …) to avoid collisions. 
 - **S7 HOST-CORE**: bridge plug point = `app.state.hub` (`set_root`, `write`/`read`, `outbox_ready`), `db/outbox.py` (`claim` commits `external_write_possible=1` before sending; `record`, `pending_reconcile`, `cancel_requests`, `release_unwritten`), `events/journal.ingest` (HOST_STORE_ACK only after it returns; 507 → no ACK), `db/mirror.py` writers. Host does not verify fleet signatures (root does → REJECTED evidence). Without root: capability-gated controls 503 UNSUPPORTED, power/channel 503/404 ROOT_UNAVAILABLE. Rollback detection via DB floor sidecar. Host 429 rate limiting left to S14.
 - **S7 update (review fixes)**: signatures changed — `outbox.release_unwritten(conn, cfg, op_id)`, `ops.open_epoch(conn, cfg, …)`, `ops.accept(conn, cfg, sub, precheck)`, `journal.ack(conn, cfg, …)`. `outbox.record()` rejects a mismatched message_id with 409 and rolls back; evidence dedup by equality, history capped (64+16); per-op event quota `op_event_reserve`=4; transitions via explicit `_NEXT` graph; bridge evidence published verbatim in `HOST_RECORDED` events; central byte budget `db/budget.room()`; consumers leased (7 d) and capped (8/principal, 64 global).
 - **S5 IDENTITY+LINK**: see S5-D1..D12 in the S5 sources. Credentials exchanged before EDHOC in bootstrap carriers (object_kind 1..6, 160 B fragments); BIND/ACK sealed under the new key; glare → lower DeviceId initiates; old session RX-only 10 s after rotation; rotation at 50/55 min or 2^24−2^20 records, hard 1 h; single exchange slot + rate gate; identity load fail-closed; unknown SID silent drop; authentic duplicates reach the RX sink flagged `duplicate`. Worker stack is 10 KiB (measured EDHOC step 4856 B, calibrated) — supersedes the S3 note.
-- **RAM budget warning (after wave 2)**: leaf is at ≈27 KiB of the 32 KiB target (lm_context 14.7 KB, LinkLayer 10.2 KB, task stacks 14 KiB). Every later slice must borrow from existing pools (frame/TX pool, boot scratch, reassembly buffer) instead of adding per-feature buffers, and report `sizeof` deltas for LEAF/RELAY/ROOT.
+- **RAM budget warning (after wave 2)**: superseded by [ADR-002](../decisions/ADR-002-budget-status.md) (measured status after wave 3, the consolidation pass and the per-slice RAM/SLOC allocations of S11-S20). Every later slice borrows from existing pools (TX frame pool, message pool, exchange scratch, record job memory) instead of adding per-feature buffers and reports `scripts/budget_report.py` before/after.
 - **FIX1 (external review, security/store/runtime)**: `RecordSession`/`RecordKeys` are move-only with zeroising destructors; `RecordSession::install(RecordKeys&&)` returns `Status` and is Conflict while active (FIX1-D1/2/19). IDF owner calls wait on a per-call stack `StaticSemaphore_t`, no notification index (D3). A radio whose `stop()` fails leaves the engine Faulted (never Stopped), `lm_destroy` stays Busy and `lm_stop` retries (D5). Boot incarnation: a missing counter is virgin only while no identity record exists; provisioning MUST commit `rec::boot_incarnation` (u64be 0) before `rec::identity`, otherwise RecoveryRequired (D9). Oversized slot/marker = corruption → RecoveryRequired, never NotFound (D10). Journal reclaim validates header/id/seq/len/CRC against `JournalLive` before re-sealing, fails with the source untouched (D11). `HandshakeSlot::wipe()` propagates a failed PSA destroy (`teardown_failed()`, retried by `cancel()`/`begin()`); the C glue stashes handles libedhoc forgets after a failed destroy and retries them in `lm_edhoc_session_destroy` (now `int`) (D20). One-shot AES keys are destroyed (one retry) before seal/open may return Ok (D21). Every local PSA hash failure calls `note()` (D22). `sign1_create` requires `kid == DeviceId(key)` (InvalidArgument; costs one public-key derivation per signed control object) (D23). `Pool` retires a slot at generation UINT32_MAX instead of wrapping (D25).
+- **ARCH consolidation (after wave 3, [ADR-002](../decisions/ADR-002-budget-status.md))**:
+  ARCH-D1 one handshake engine: `delivery::EndExchange` is folded into `link::Exchange` (`Mode::End`), so link, join and end sessions share one exchange slot, one `HandshakeSlot` and one credential buffer; `JobOwner::EndExchange` is gone (completions come as `JobOwner::Link`). A send that finds the slot taken by any mode waits (`Delivery::slot_wait_`) and is kicked when it frees; `Delivery::end_stats()` is `link::EndStats` (+`cred_time_uncertain`); `Delivery::exchange()` returns the link exchange. Wire unchanged.
+  ARCH-D2 `HandshakeSlot` keeps its CCS inputs only in the EDHOC session (no second copy).
+  ARCH-D3 one in-order chunk format, `member::JoinChunk` (tag u8 | total u16 | offset u16 | bytes <= 160): JOIN_ONLY control objects (S8-D4) and the routed handshake carrier (S9-D2) use the same codec (byte-identical to before). The 1-hop bootstrap carrier keeps its docs/09 §8 layout. S12 adds only the spec's FRAGMENT/TRANSFER_BITMAP for authenticated end objects; S11 proxy legs carry pre-authentication and JOIN_ONLY objects as `JoinChunk`, never a third format.
+  ARCH-D4 one route table: `route::PathCache` (address- and DeviceId-keyed) replaces `Delivery::RouteEntry`; `EndSession::reply`/`born` are gone: the reverse of every authenticated route is `learn()`ed (never replacing an entry of the same term that is at least as new, never shortening its lifetime) and receipts use `route_for()`.
+  ARCH-D5 `SpscRing` takes any capacity (indices over [0, 2N)); the IDF RX ring is exactly `rx_frames + 2`.
+  ARCH-D6 USB records are decrypted in place in the 8230 B decode buffer (`RecordSession::open_in_place`: multi-part PSA AES-GCM through a 64 B bounce buffer, because `MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS` forbids overlapping in/out; unauthenticated plaintext is zeroed on failure); `UsbLink::plain_` is gone.
+  ARCH-D7 record ids folded into `store::rec`: `assignment_ticket = 12` (was 0x40, S8-D5) and `paired_host = 13` (was 0x40, S10-D2: the two collided). The identity load job reads the paired Host on root-capable builds (`LocalIdentity::paired_host[_status]()`, its own status: a pairing problem never fails the identity); `RootUsb` has no Flash job or record buffers of its own and takes the verified delegation from the identity.
+  ARCH-D8 `store::Journal` stages entries in memory its owner lends (`>= k_journal_min_scratch`, 532 B; its size bounds a batch); `Durable` lends its boot job's record scratch.
+  ARCH-D9 `Engine::execute()` sets `step_time()` too: hooks and completions reached from a command see the command's time.
+  ARCH-D10 `scripts/budget_report.py` + `tools/budget_probe` (sizeof per profile via `nm -S`, SoC compiler through an IDF build's compile command, map static DRAM, image diff, SLOC); `scripts/build_targets.sh --profile LEAF|RELAY|ROOT`; CI runs the report (not a gate) and builds `example_node` ROOT for every SoC.

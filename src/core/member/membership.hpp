@@ -39,8 +39,9 @@ class Engine;
 
 namespace lm::member {
 
-// Record ids of this slice (decision S8-D5). The store owner may fold them into store::rec.
-inline constexpr uint16_t k_rec_assignment_ticket = 0x40; // signed AssignmentTicket, verbatim
+// Record id of this slice (decision S8-D5; folded into store::rec, 0x40 collided with the paired
+// Host record of S10-D2).
+inline constexpr uint16_t k_rec_assignment_ticket = store::rec::assignment_ticket;
 inline constexpr std::size_t k_prepared_head = 16 + 16 + 32; // PREPARED record: request | nonce | prepare hash | credential
 inline constexpr uint8_t k_prepared_state = 1;            // membership_prepared: PREPARED
 inline constexpr uint8_t k_prepared_consumed = 2;         // membership_prepared: finished or aborted

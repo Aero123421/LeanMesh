@@ -10,6 +10,7 @@
 // fails the load closed (Failed), never "unprovisioned"; only a missing identity record means that.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -82,6 +83,15 @@ class LocalIdentity {
     // The verbatim RootDelegation COSE a root hands to joiners. Root-capable builds only; empty
     // elsewhere (a relay forwards join traffic without ever answering a handshake).
     [[nodiscard]] ByteView delegation_cose() const { return ByteView{deleg_cose_.data(), deleg_cose_len_}; }
+    // [S10] Root-capable builds: the one Host paired for USB (decision D6), read with the identity.
+    // NotFound = unpaired (every Host is refused); another error = unreadable (the USB link stays
+    // down, the mesh does not). Only the root's serial adapter uses it.
+    [[nodiscard]] Status paired_host_status() const { return paired_status_; }
+    [[nodiscard]] DeviceId paired_host() const {
+        DeviceId d;
+        std::copy(paired_host_.begin(), paired_host_.end(), d.bytes.begin());
+        return d;
+    }
     // A committed ACTIVE MemberCredential becomes the live one (the caller verified the chain and
     // persisted it). Conflict unless the identity is Ready.
     [[nodiscard]] Status adopt_member(const RootDelegation &delegation, const MemberCredential &mc,
@@ -108,6 +118,7 @@ class LocalIdentity {
     [[nodiscard]] Status run_load(port::JobEnv &env);
     [[nodiscard]] Status load_record(port::JobEnv &env, uint16_t id);
     [[nodiscard]] Status load_membership(port::JobEnv &env);
+    void load_paired_host(port::JobEnv &env);
     void clear();
 
     State state_ = State::Unloaded;
@@ -134,6 +145,8 @@ class LocalIdentity {
     std::size_t dc_off_ = 0, dc_len_ = 0, mc_off_ = 0, mc_len_ = 0;
     std::array<uint8_t, k_root_capable ? k_max_delegation_cose : 1> deleg_cose_{};
     std::size_t deleg_cose_len_ = 0;
+    std::array<uint8_t, k_root_capable ? sizeof(DeviceId) : 0> paired_host_{};
+    Status paired_status_ = Status::NotFound;
     store::RecordJob rec_;                            // the job's I/O memory
 };
 

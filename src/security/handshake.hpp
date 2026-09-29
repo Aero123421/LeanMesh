@@ -140,19 +140,13 @@ class HandshakeSlot {
     Purpose purpose_ = Purpose::Link;
 
     KeyHandle local_key_;
-    std::array<uint8_t, k_ccs_max_bytes> local_ccs_{};
-    std::size_t local_ccs_len_ = 0;
-    std::array<std::array<uint8_t, k_ccs_max_bytes>, k_edhoc_max_peers> peer_ccs_{};
-    std::array<std::size_t, k_edhoc_max_peers> peer_ccs_len_{};
-    std::size_t peer_count_ = 0;
-    std::array<DeviceId, k_edhoc_max_peers> peer_ids_{};
 
     std::array<uint8_t, k_edhoc_max_message> in_{};
     std::size_t in_len_ = 0;
     std::array<uint8_t, k_edhoc_max_message> out_{};
     std::size_t out_len_ = 0;
     RecordKeys keys_{};
-    lm_edhoc_session session_{};
+    lm_edhoc_session session_{}; // also the only copy of the local and candidate peer CCSs
 };
 
 } // namespace lm::sec

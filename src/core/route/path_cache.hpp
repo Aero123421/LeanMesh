@@ -1,8 +1,9 @@
 // Bounded cache of resolved source routes for application destinations (docs/04 §2: leaf 4,
-// relay 4, root 64 entries). Owner: the route module on the mesh owner. Full: the least recently
-// used entry is replaced (a cache miss only costs a ROUTE_QUERY). An entry is valid only for its
-// root_term, its local expiry and until an address on it changes membership (invalidate_addr).
-// A route older than the cached revision of the same destination never replaces it.
+// relay 4, root 64 entries): the node's one route table (the delivery module sends by it; ARCH-D4).
+// Full: the least recently used entry is replaced (a cache miss only costs a ROUTE_QUERY). An entry
+// is valid only for its root_term, its local expiry and until an address on it changes membership
+// (invalidate_addr). A route older than the cached revision of the same destination never replaces
+// it. Sends are addressed by DeviceId, so an entry may also name the destination's identity.
 #pragma once
 
 #include <array>
@@ -18,6 +19,7 @@ namespace lm::route {
 
 struct CachedRoute {
     ShortAddr destination{};
+    DeviceId device{}; // the destination's identity when known (all zero: address only)
     RootTerm root_term{};
     PathRevision revision{};
     uint8_t len = 0;
@@ -31,13 +33,25 @@ template <std::size_t N> class PathCache {
     // InvalidArgument: not a simple path ending at `destination` (self is excluded by the caller
     // via `self`). Conflict: an entry of the same term already has a newer revision.
     [[nodiscard]] Status put(ShortAddr self, const CachedRoute &r, MonoTime expires);
+    // A route learned from traffic (the reverse of an authenticated record's path): stored only
+    // when no entry of the same term is at least as new, so what traffic showed never downgrades
+    // a resolved route or shortens its lifetime.
+    [[nodiscard]] Status learn(ShortAddr self, const CachedRoute &r, MonoTime expires);
     // NotFound when absent, from another root_term, or expired (the entry is dropped then).
     [[nodiscard]] Status lookup(ShortAddr destination, RootTerm term, MonoTime now,
                                 CachedRoute &out);
+    [[nodiscard]] Status lookup(const DeviceId &device, RootTerm term, MonoTime now,
+                                CachedRoute &out);
     void invalidate_destination(ShortAddr destination);
+    void invalidate_device(const DeviceId &device);
     // Drops every route that uses `a` as hop or destination (membership_generation change).
     void invalidate_addr(ShortAddr a);
-    void clear() { *this = PathCache{}; }
+    void clear() { // slot by slot: no whole-table temporary on the owner stack (root: 64 routes)
+        for (Slot &s : slots_) {
+            s = Slot{};
+        }
+        tick_ = 0;
+    }
     [[nodiscard]] std::size_t size() const;
 
   private:
@@ -47,6 +61,13 @@ template <std::size_t N> class PathCache {
         MonoTime expires{};
         CachedRoute route{};
     };
+    // One entry per destination: same address, or same (known) identity.
+    [[nodiscard]] static bool same_destination(const CachedRoute &a, const CachedRoute &b) {
+        return a.destination == b.destination || (!b.device.is_zero() && a.device == b.device);
+    }
+    template <class Match>
+    Status lookup_if(Match match, RootTerm term, MonoTime now, CachedRoute &out);
+
     std::array<Slot, N> slots_{};
     uint32_t tick_ = 0;
 };
@@ -58,15 +79,15 @@ Status PathCache<N>::put(ShortAddr self, const CachedRoute &r, MonoTime expires)
     LM_TRY(check_cache_route(self, r));
     Slot *target = nullptr;
     for (Slot &s : slots_) {
-        if (s.used && s.route.destination == r.destination) {
-            if (s.route.root_term == r.root_term && r.revision < s.route.revision) {
-                return Status::Conflict;
-            }
-            target = &s;
-            break;
+        if (s.used && same_destination(s.route, r) && s.route.root_term == r.root_term &&
+            r.revision < s.route.revision) {
+            return Status::Conflict;
         }
     }
     for (Slot &s : slots_) {
+        if (s.used && same_destination(s.route, r)) {
+            s = Slot{}; // the destination moved or got a newer route: one entry remains
+        }
         if (target == nullptr && !s.used) {
             target = &s;
         }
@@ -85,9 +106,21 @@ Status PathCache<N>::put(ShortAddr self, const CachedRoute &r, MonoTime expires)
 }
 
 template <std::size_t N>
-Status PathCache<N>::lookup(ShortAddr destination, RootTerm term, MonoTime now, CachedRoute &out) {
+Status PathCache<N>::learn(ShortAddr self, const CachedRoute &r, MonoTime expires) {
+    for (const Slot &s : slots_) {
+        if (s.used && same_destination(s.route, r) && s.route.root_term == r.root_term &&
+            !(s.route.revision < r.revision)) {
+            return Status::Ok;
+        }
+    }
+    return put(self, r, expires);
+}
+
+template <std::size_t N>
+template <class Match>
+Status PathCache<N>::lookup_if(Match match, RootTerm term, MonoTime now, CachedRoute &out) {
     for (Slot &s : slots_) {
-        if (!s.used || s.route.destination != destination) {
+        if (!s.used || !match(s.route)) {
             continue;
         }
         if (s.route.root_term != term || now >= s.expires) {
@@ -101,9 +134,29 @@ Status PathCache<N>::lookup(ShortAddr destination, RootTerm term, MonoTime now, 
     return Status::NotFound;
 }
 
+template <std::size_t N>
+Status PathCache<N>::lookup(ShortAddr destination, RootTerm term, MonoTime now, CachedRoute &out) {
+    const auto match = [&](const CachedRoute &r) { return r.destination == destination; };
+    return lookup_if(match, term, now, out);
+}
+
+template <std::size_t N>
+Status PathCache<N>::lookup(const DeviceId &device, RootTerm term, MonoTime now, CachedRoute &out) {
+    const auto match = [&](const CachedRoute &r) { return !device.is_zero() && r.device == device; };
+    return lookup_if(match, term, now, out);
+}
+
 template <std::size_t N> void PathCache<N>::invalidate_destination(ShortAddr destination) {
     for (Slot &s : slots_) {
         if (s.used && s.route.destination == destination) {
+            s = Slot{};
+        }
+    }
+}
+
+template <std::size_t N> void PathCache<N>::invalidate_device(const DeviceId &device) {
+    for (Slot &s : slots_) {
+        if (s.used && !device.is_zero() && s.route.device == device) {
             s = Slot{};
         }
     }

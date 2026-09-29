@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "core/assert.hpp"
 #include "core/codec.hpp"
 #include "core/wire/cbor.hpp"
 #include "core/wire/cbor_reader.hpp"
@@ -251,7 +252,11 @@ void UsbLink::handle_auth(const wire::SerialHeader &h, ByteView header18, ByteVi
     std::memcpy(aad.data() + header18.size(), k.ctx_hash.data(), k.ctx_hash.size());
     std::size_t plen = 0;
     sec::ReplayVerdict verdict = sec::ReplayVerdict::Fresh;
-    const Status st = k.rec.open(h.counter, ByteView{aad}, body, MutByteView{plain_}, plen, verdict);
+    // Decrypted in place: `body` lies in the decode buffer (dec_ -> rx_), which is not read again
+    // before this frame is handled, so no second 8 KiB buffer is needed (docs/19 §6).
+    LM_ASSERT(body.data() >= rx_.data() && body.data() + body.size() <= rx_.data() + rx_.size());
+    const MutByteView sealed{rx_.data() + (body.data() - rx_.data()), body.size()};
+    const Status st = k.rec.open_in_place(h.counter, ByteView{aad}, sealed, plen, verdict);
     if (st == Status::Replay && verdict == sec::ReplayVerdict::Duplicate) {
         ++stats_.rx_replay; // authentic duplicate: never applied twice, no reason to end the session
         return;
@@ -265,7 +270,7 @@ void UsbLink::handle_auth(const wire::SerialHeader &h, ByteView header18, ByteVi
         }
         return;
     }
-    const ByteView plain{plain_.data(), plen};
+    const ByteView plain{sealed.data(), plen};
     if (slot == cand_) {
         // Key confirmation: the first protected record must be the PING that proves the keys.
         wire::CborReader r{plain};

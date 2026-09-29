@@ -1317,6 +1317,65 @@ LM_TEST("FIX1-21 a key that cannot be destroyed fails seal/open instead of repor
     LM_CHECK_OK(open_bytes(b, c, view(aad), good, pt, v)); // healthy again
 }
 
+LM_TEST("S04 open_in_place gives exactly what open() gives, in the record's own buffer") {
+    LM_CHECK_OK(crypto_init());
+    const Bytes seed(32, 0x3C);
+    RecordSession a, b;
+    Sha256Digest h{};
+    make_pair(seed, base_context(), Purpose::Usb, a, b, h);
+    const Bytes aad = {9, 8, 7};
+    ReplayVerdict v{};
+    std::size_t len = 0;
+    // Lengths around the AES block and the 64-byte chunk, up to the serial maximum (docs/09 §9).
+    for (const std::size_t n : {std::size_t{0}, std::size_t{1}, std::size_t{15}, std::size_t{16}, std::size_t{17},
+                                std::size_t{63}, std::size_t{64}, std::size_t{65}, std::size_t{1000}, std::size_t{8192}}) {
+        Bytes pt(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            pt[i] = static_cast<uint8_t>(i * 7 + n);
+        }
+        uint64_t c = 0;
+        const Bytes ct = seal_bytes(a, view(aad), pt, c);
+        Bytes ref;
+        LM_CHECK_OK(open_bytes(b, c, view(aad), ct, ref, v));
+        Bytes buf = ct;
+        LM_CHECK_OK(b.open_in_place(c, view(aad), MutByteView{buf.data(), buf.size()}, len, v));
+        LM_CHECK(v == ReplayVerdict::Fresh && len == n);
+        LM_CHECK(Bytes(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(len)) == ref && ref == pt);
+        b.accept(c);
+        buf = ct; // an authentic duplicate opens, is reported as such and is never applied twice
+        LM_CHECK(b.open_in_place(c, view(aad), MutByteView{buf.data(), buf.size()}, len, v) == Status::Replay);
+        LM_CHECK(v == ReplayVerdict::Duplicate);
+        if (n > 0) { // a flipped byte: rejected and no unauthenticated plaintext is left behind
+            uint64_t c2 = 0;
+            Bytes bad = seal_bytes(a, view(aad), pt, c2);
+            bad[n / 2] ^= 0x40U;
+            LM_CHECK(b.open_in_place(c2, view(aad), MutByteView{bad.data(), bad.size()}, len, v) ==
+                     Status::AuthRejected);
+            LM_CHECK(len == 0 && Bytes(bad.begin(), bad.begin() + static_cast<std::ptrdiff_t>(n)) == Bytes(n, 0));
+        }
+    }
+    Bytes shortbuf(15, 0);
+    LM_CHECK(b.open_in_place(500, view(aad), MutByteView{shortbuf.data(), shortbuf.size()}, len, v) ==
+             Status::BadFrame);
+    for (int i = 0; i < 70; ++i) { // move the window far beyond counter 2
+        uint64_t ci = 0;
+        (void)seal_bytes(a, view(aad), Bytes(1, 1), ci);
+        b.accept(ci);
+    }
+    Bytes old_rec(20, 0);
+    LM_CHECK(b.open_in_place(2, view(aad), MutByteView{old_rec.data(), old_rec.size()}, len, v) ==
+             Status::Replay); // outside the window: dropped before any crypto
+    LM_CHECK(v == ReplayVerdict::TooOld);
+    // FIX1-21 holds here too: a one-shot key that cannot be destroyed opens nothing.
+    uint64_t c = 0;
+    const Bytes good = seal_bytes(a, view(aad), Bytes(40, 5), c);
+    Bytes buf = good;
+    g_destroy_failures = 2;
+    LM_CHECK(b.open_in_place(c, view(aad), MutByteView{buf.data(), buf.size()}, len, v) == Status::RecoveryRequired);
+    LM_CHECK(Bytes(buf.begin(), buf.begin() + 40) == Bytes(40, 0));
+    release_stuck();
+}
+
 LM_TEST("FIX1-20 handshake teardown that cannot free a PSA key keeps the handle and retries") {
     LM_CHECK_OK(crypto_init());
     Identity a, b;

@@ -49,7 +49,9 @@ class Durable {
         void (*read_done)(void *ctx, uint32_t id, Status st, ByteView record, MonoTime now) = nullptr;
     };
 
-    explicit Durable(Engine &engine) : engine_(engine), journal_(index_.data(), index_.size()) {}
+    // The journal stages its entries in the boot job's record scratch (one job at a time uses it).
+    explicit Durable(Engine &engine)
+        : engine_(engine), journal_(index_.data(), index_.size(), MutByteView{boot_.rec.scratch}) {}
     void set_hooks(const Hooks &h) { hooks_ = h; }
 
     // Advances the boot incarnation and opens the journal (one job). Busy while an older job of a
@@ -91,10 +93,11 @@ class Durable {
     uint64_t incarnation_ = 0;
 
     std::array<store::JournalLive, k_journal_entries> index_{};
-    store::Journal journal_;
-    // Job memory: BootJob is the largest scratch (RecordJob payload + read/verify buffer); the
-    // journal jobs borrow its payload buffer instead of adding their own.
+    // Job memory: BootJob is the largest scratch (RecordJob payload + read/verify buffer). The
+    // journal jobs borrow it instead of adding their own: the record is built in its payload and
+    // staged by the journal in its scratch (declared before journal_, which holds a view of it).
     store::BootJob boot_;
+    store::Journal journal_;
     store::JournalOp op_;
     DurableReq req_;
     std::size_t rec_len_ = 0;

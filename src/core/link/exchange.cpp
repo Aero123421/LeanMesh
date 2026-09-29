@@ -1,3 +1,6 @@
+// The exchange state machine: lifecycle, worker jobs, owner-side steps and the link session
+// binding. exchange_io.cpp holds the carrier side (receive, assembly, transmit, timers);
+// exchange_join.cpp and exchange_end.cpp what differs for the JOIN_ONLY and the end-session modes.
 #include "core/link/exchange.hpp"
 
 #include <algorithm>
@@ -12,45 +15,27 @@
 namespace lm::link {
 namespace {
 
-constexpr Duration k_linger = Duration::from_s(5);   // responder keeps its ACK for bind retransmits
-constexpr uint8_t k_bind_version = 1;
+// The same handshake event counted in the link counters (link/join modes) or the end counters.
+struct CountField {
+    uint64_t LinkStats::*link;
+    uint64_t EndStats::*end;
+};
+constexpr CountField k_count_fields[] = {
+    {&LinkStats::hs_started, &EndStats::started},
+    {&LinkStats::hs_completed, &EndStats::completed},
+    {&LinkStats::hs_failed, &EndStats::failed},
+    {&LinkStats::hs_rate_limited, &EndStats::rate_limited},
+    {&LinkStats::hs_retransmits, &EndStats::retransmits},
+    {&LinkStats::cred_rejected, &EndStats::cred_rejected},
+    {&LinkStats::cred_time_uncertain, &EndStats::cred_time_uncertain},
+    {&LinkStats::bind_bad, &EndStats::bind_bad},
+};
 
 } // namespace
 
-// ---- RateGate ----
-bool RateGate::allow(const MacAddr &mac, MonoTime now, Duration min) const {
-    for (const Entry &e : entries_) {
-        if (e.used && e.mac == mac) {
-            return now - e.at >= min;
-        }
-    }
-    return true;
-}
-
-void RateGate::touch(const MacAddr &mac, MonoTime now) {
-    Entry *slot = nullptr;
-    for (Entry &e : entries_) {
-        if (e.used && e.mac == mac) {
-            slot = &e;
-            break;
-        }
-        if (!e.used && slot == nullptr) {
-            slot = &e;
-        }
-    }
-    if (slot == nullptr) {
-        slot = &*std::min_element(entries_.begin(), entries_.end(),
-                                  [](const Entry &a, const Entry &b) { return a.at < b.at; });
-    }
-    *slot = Entry{mac, now, true};
-}
-
-void RateGate::forget(const MacAddr &mac) {
-    for (Entry &e : entries_) {
-        if (e.used && e.mac == mac) {
-            e = Entry{};
-        }
-    }
+void Exchange::count(Count c) {
+    const CountField &f = k_count_fields[static_cast<std::size_t>(c)];
+    ++(mode_ == Mode::End ? end_stats_.*f.end : s_.stats.*f.link);
 }
 
 // ---- lifecycle ----
@@ -58,6 +43,11 @@ Status Exchange::start_initiator(const MacAddr &mac, MonoTime now) {
     if (!s_.identity.is_member()) {
         return Status::AuthPending;
     }
+    return start_1hop(Mode::Link, mac, now);
+}
+
+// Initiator over one hop (link or join): the slot, the MAC's rate gate, a driver registration.
+Status Exchange::start_1hop(Mode mode, const MacAddr &mac, MonoTime now) {
     if (busy()) {
         return Status::Busy;
     }
@@ -68,17 +58,20 @@ Status Exchange::start_initiator(const MacAddr &mac, MonoTime now) {
         ++s_.stats.hs_rate_limited;
         return Status::RateLimited;
     }
-    LM_TRY(begin_common(mac, true, now));
+    LM_TRY(acquire_link_peer(mac));
+    begin_common(mode, true, now);
     s_.gate.touch(mac, now); // we chose to spend a full handshake on this peer
     s_.engine.random(MutByteView{xid_});
     phase_ = Phase::SendCred;
     expect_ = ObjKind::CredR;
-    send_object(Tx::Cred, ObjKind::CredI, false);
+    send_object(ObjKind::CredI, false);
     pump(now);
     return Status::Ok;
 }
 
-Status Exchange::begin_common(const MacAddr &mac, bool initiator, MonoTime now) {
+// The driver registration of a 1-hop peer: the neighbour's own, or a transient one for the
+// exchange.
+Status Exchange::acquire_link_peer(const MacAddr &mac) {
     peer_ = PeerHandle{};
     peer_transient_ = false;
     if (Neighbor *n = s_.neighbors.find_mac(mac)) {
@@ -88,35 +81,39 @@ Status Exchange::begin_common(const MacAddr &mac, bool initiator, MonoTime now) 
         peer_transient_ = true;
     }
     mac_ = mac;
+    return Status::Ok;
+}
+
+void Exchange::begin_common(Mode mode, bool initiator, MonoTime now) {
+    mode_ = mode;
     initiator_ = initiator;
-    handle_ = Handle{0, ++handle_gen_};
+    handle_ = Handle{0, ++handle_gen_ == 0 ? ++handle_gen_ : handle_gen_};
     hard_deadline_ = now + s_.policy.exchange_deadline;
     deadline_ = hard_deadline_;
-    rto_at_ = MonoTime::never();
+    rto_at_ = retry_at_ = MonoTime::never();
     attempts_ = 0;
     rx_len_ = rx_total_ = 0;
-    tx_ = Tx::None;
-    tx_inflight_ = false;
-    last_len_ = 0;
-    peer_state_reset();
+    tx_active_ = tx_inflight_ = false;
+    stage_len_ = 0;
+    peer_state_ = PeerState{};
+    peer_known_ = false;
     pend_.wipe();
     last_failure_ = Status::Ok;
     phase_ = Phase::AwaitMsg;
     expect_ = ObjKind::CredI;
-    ++s_.stats.hs_started;
-    return Status::Ok;
+    count(Count::Started);
 }
-
-void Exchange::peer_state_reset() { peer_state_ = PeerState{}; }
 
 void Exchange::abort(Status why) {
     if (phase_ == Phase::Idle || phase_ == Phase::Zombie) {
         return;
     }
-    if (phase_ != Phase::Linger) {
-        ++s_.stats.hs_failed;
+    const bool lingering = phase_ == Phase::Linger;
+    if (!lingering) {
+        count(Count::Failed);
         last_failure_ = why;
-        if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && initiator_)) && s_.join.exchange_failed != nullptr) {
+        if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && initiator_)) &&
+            s_.join.exchange_failed != nullptr) {
             s_.join.exchange_failed(s_.join.ctx, why); // [S8] the joiner learns the attempt is over
         }
     }
@@ -125,19 +122,17 @@ void Exchange::abort(Status why) {
     }
     peer_ = PeerHandle{};
     peer_transient_ = false;
-    pend_.wipe();
-    tx_ = Tx::None;
-    rto_at_ = MonoTime::never();
-    retry_at_ = MonoTime::never();
-    deadline_ = MonoTime::never();
-    rx_len_ = 0;
+    const bool notify_end = mode_ == Mode::End && !lingering && peer_known_ && end_.done != nullptr;
+    const DeviceId peer = peer_id_;
+    finish_idle();
     (void)hs_.cancel(); // Busy when a job is in flight: wiped by its completion (zombie rule)
     if (job_ != Job::None) {
         cancelled_ = true;
         phase_ = Phase::Zombie;
-    } else {
-        phase_ = Phase::Idle;
-        mode_ = Mode::Link;
+    }
+    if (notify_end) {
+        end_.done(end_.ctx, peer, why,
+                  s_.engine.step_time()); // the delivery module re-plans its sends
     }
 }
 
@@ -153,6 +148,14 @@ void Exchange::wipe() {
     pend_.wipe();
 }
 
+void Exchange::finish_idle() {
+    pend_.wipe();
+    tx_active_ = false;
+    rto_at_ = retry_at_ = deadline_ = MonoTime::never();
+    rx_len_ = 0;
+    phase_ = Phase::Idle;
+}
+
 MonoTime Exchange::deadline() const {
     if (phase_ == Phase::Idle || phase_ == Phase::Zombie) {
         return MonoTime::never();
@@ -166,8 +169,10 @@ Status Exchange::job_entry(port::JobEnv &env, void *arg) {
     return x->job_ == Job::Verify ? verify_body(*x) : sec::HandshakeSlot::run_job(env, &x->hs_);
 }
 
+// Worker. Link and end: the bundle [DeviceCredential, MemberCredential] under the fleet trust
+// anchor and this domain's delegation, bound to each other; the peer's CCS for EDHOC.
 Status Exchange::verify_body(Exchange &x) {
-    if (x.mode_ != Mode::Link) {
+    if (x.mode_ == Mode::JoinInit || x.mode_ == Mode::JoinResp) {
         return verify_join_body(x);
     }
     member::Bundle b;
@@ -178,8 +183,6 @@ Status Exchange::verify_body(Exchange &x) {
     LM_TRY(member::check_binding(p.dc, b.device_cose, p.mc));
     LM_TRY(sec::ccs_encode(ByteView{p.dc.serial.data(), p.dc.serial_len}, p.dc.key,
                            MutByteView{p.ccs}, p.ccs_len));
-    p.mc_off = static_cast<std::size_t>(b.member_cose.data() - x.rx_.data());
-    p.mc_len = b.member_cose.size();
     return sec::sha256(b.member_cose, p.mc_hash);
 }
 
@@ -187,7 +190,8 @@ Status Exchange::run_verify() {
     vin_.trust = s_.identity.trust();
     vin_.delegation = s_.identity.delegation();
     job_ = Job::Verify;
-    const Status st = s_.engine.submit_job(JobOwner::Link, handle_, JobClass::PublicKey, &job_entry, this);
+    const Status st =
+        s_.engine.submit_job(JobOwner::Link, handle_, JobClass::PublicKey, &job_entry, this);
     if (st != Status::Ok) {
         job_ = Job::None;
     }
@@ -197,7 +201,8 @@ Status Exchange::run_verify() {
 Status Exchange::run_hs(sec::HsStep step, ByteView input) {
     LM_TRY(hs_.prepare(step, input));
     job_ = Job::Hs;
-    const Status st = s_.engine.submit_job(JobOwner::Link, handle_, JobClass::PublicKey, &job_entry, this);
+    const Status st =
+        s_.engine.submit_job(JobOwner::Link, handle_, JobClass::PublicKey, &job_entry, this);
     if (st != Status::Ok) {
         job_ = Job::None;
         hs_.unprepare();
@@ -215,7 +220,6 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
         job_ = Job::None;
         cancelled_ = false;
         phase_ = Phase::Idle;
-        mode_ = Mode::Link;
         return;
     }
     if (slot != handle_ || job_ == Job::None) {
@@ -227,7 +231,7 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
         if (j == Job::Hs) {
             (void)hs_.complete(job_status); // aborts the handshake, wipes the secrets
         } else {
-            ++s_.stats.cred_rejected;
+            count(Count::CredRejected);
         }
         abort(job_status);
         return;
@@ -241,67 +245,80 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
 
 // ---- owner-side steps ----
 void Exchange::after_verify(MonoTime now) {
-    const member::MemberCredential &mc = peer_state_.mc;
-    Status st = Status::Ok;
-    if (mode_ != Mode::Link) {
+    if (mode_ == Mode::JoinInit || mode_ == Mode::JoinResp) {
         // [S8] JOIN_ONLY: no member credentials exist yet, so no floors/lease checks here; the
         // ledger decides on the JoinRequest (ticket, expected entry, revocation, capacity).
         if (mode_ == Mode::JoinInit) {
             join_out_->known = true;
-            start_hs_initiator(now);
+            start_hs(sec::HsRole::Initiator, ByteView{}, now);
             return;
         }
-        st = build_join_response();
+        const Status st = build_join_response();
         if (st != Status::Ok) {
             abort(st);
             return;
         }
         phase_ = Phase::SendCred;
-        send_object(Tx::Cred, ObjKind::CredR, false);
+        send_object(ObjKind::CredR, false);
         pump(now);
         return;
     }
-    if (peer_state_.dc.device == s_.identity.self()) {
-        st = Status::AuthRejected; // a device does not link to itself
-    } else {
-        st = s_.identity.floors().check(peer_state_.dc.device, mc.assignment, mc.membership);
-    }
-    if (st == Status::Ok && !initiator_ && s_.join.link_admit != nullptr &&
-        !s_.join.link_admit(s_.join.ctx, peer_state_.dc.device, mc)) {
-        st = Status::Revoked; // [S8] root ledger: not ACTIVE with this membership generation
-    }
-    if (st == Status::Ok) {
-        switch (member::check_lease(mc, s_.root_time)) {
-        case DeadlineCheck::After:
-            st = Status::Expired;
-            break;
-        case DeadlineCheck::Uncertain:
-            ++s_.stats.cred_time_uncertain; // no root time yet: link comes first, time sync follows
-            break;
-        case DeadlineCheck::Before:
-            break;
-        }
-    }
+    const Status st = admit_peer();
     if (st != Status::Ok) {
-        ++s_.stats.cred_rejected;
+        count(Count::CredRejected);
         abort(st);
         return;
     }
+    if (mode_ == Mode::End) {
+        peer_id_ = peer_state_.dc.device;
+        peer_known_ = true;
+    }
     if (initiator_) {
-        start_hs_initiator(now);
+        start_hs(sec::HsRole::Initiator, ByteView{}, now);
         return;
     }
     phase_ = Phase::SendCred;
-    send_object(Tx::Cred, ObjKind::CredR, false);
+    send_object(ObjKind::CredR, false);
     pump(now);
 }
 
-void Exchange::start_hs_initiator(MonoTime /*now*/) {
+// Link and end: may this verified member hold a session with us now?
+Status Exchange::admit_peer() {
+    const member::MemberCredential &mc = peer_state_.mc;
+    const DeviceId &device = peer_state_.dc.device;
+    if (device == s_.identity.self()) {
+        return Status::AuthRejected; // a device does not talk to itself
+    }
+    if (mode_ == Mode::End && ((peer_known_ && device != peer_id_) || mc.address != route_.dest)) {
+        return Status::AuthRejected; // not the peer we asked for / the route ends at another node
+    }
+    LM_TRY(s_.identity.floors().check(device, mc.assignment, mc.membership));
+    if (mode_ == Mode::Link && !initiator_ && s_.join.link_admit != nullptr &&
+        !s_.join.link_admit(s_.join.ctx, device, mc)) {
+        return Status::Revoked; // [S8] root ledger: not ACTIVE with this membership generation
+    }
+    const RootTimeBound rt = mode_ == Mode::End ? root_time(s_.engine.step_time()) : s_.root_time;
+    switch (member::check_lease(mc, rt)) {
+    case DeadlineCheck::After:
+        return Status::Expired;
+    case DeadlineCheck::Uncertain:
+        count(Count::TimeUncertain); // no root time yet: the session comes first, time sync follows
+        break;
+    case DeadlineCheck::Before:
+        break;
+    }
+    return Status::Ok;
+}
+
+// Starts EDHOC with the verified peer's CCS as the only acceptable credential. The initiator
+// composes message_1, the responder processes the received one.
+void Exchange::start_hs(sec::HsRole role, ByteView msg1, MonoTime /*now*/) {
     const ByteView peers[1] = {ByteView{peer_state_.ccs.data(), peer_state_.ccs_len}};
-    Status st = hs_.begin(sec::HsRole::Initiator, s_.identity.key(), s_.identity.ccs(), peers, 1);
+    Status st = hs_.begin(role, s_.identity.key(), s_.identity.ccs(), peers, 1);
     if (st == Status::Ok) {
         phase_ = Phase::Hs;
-        st = run_hs(sec::HsStep::M1Compose);
+        st = role == sec::HsRole::Initiator ? run_hs(sec::HsStep::M1Compose)
+                                            : run_hs(sec::HsStep::M1Process, msg1);
     }
     if (st != Status::Ok) {
         abort(st);
@@ -309,13 +326,13 @@ void Exchange::start_hs_initiator(MonoTime /*now*/) {
 }
 
 Status Exchange::make_context(sec::SessionContext &ctx) const {
-    const member::LocalIdentity &id = s_.identity;
-    if (mode_ != Mode::Link) {
+    if (mode_ == Mode::JoinInit || mode_ == Mode::JoinResp) {
         return make_join_context(ctx);
     }
+    const member::LocalIdentity &id = s_.identity;
     Sha256Digest self_hash{};
     LM_TRY(sec::sha256(id.member_cose(), self_hash));
-    ctx.purpose = sec::Purpose::Link;
+    ctx.purpose = mode_ == Mode::End ? sec::Purpose::End : sec::Purpose::Link;
     ctx.fleet = id.trust().fleet;
     ctx.domain = id.delegation().domain;
     const member::MemberCredential &pm = peer_state_.mc;
@@ -341,6 +358,12 @@ Status Exchange::make_context(sec::SessionContext &ctx) const {
     return Status::Ok;
 }
 
+void Exchange::stage(ObjKind kind, ByteView bytes) {
+    stage_len_ = std::min(bytes.size(), stage_.size());
+    std::memcpy(stage_.data(), bytes.data(), stage_len_);
+    staged_ = kind;
+}
+
 void Exchange::after_hs(MonoTime now) {
     const sec::HsStep step = hs_step_;
     Status st = hs_.complete(Status::Ok);
@@ -351,20 +374,20 @@ void Exchange::after_hs(MonoTime now) {
     using S = sec::HsStep;
     switch (step) {
     case S::M1Compose:
-        stage_frame(ObjKind::Msg1, hs_.output());
+        stage(ObjKind::Msg1, hs_.output());
         phase_ = Phase::AwaitMsg;
         expect_ = ObjKind::Msg2;
-        send_object(Tx::Frame, ObjKind::Msg1, false);
+        send_object(ObjKind::Msg1, false);
         break;
     case S::M2Process:
         phase_ = Phase::Hs;
         st = run_hs(S::M3Compose);
         break;
     case S::M3Compose:
-        stage_frame(ObjKind::Msg3, hs_.output());
+        stage(ObjKind::Msg3, hs_.output());
         phase_ = Phase::AwaitMsg;
         expect_ = ObjKind::Msg4;
-        send_object(Tx::Frame, ObjKind::Msg3, false);
+        send_object(ObjKind::Msg3, false);
         break;
     case S::M4Process:
     case S::M3Process:
@@ -384,14 +407,14 @@ void Exchange::after_hs(MonoTime now) {
         st = run_hs(S::M2Compose);
         break;
     case S::M2Compose:
-        stage_frame(ObjKind::Msg2, hs_.output());
+        stage(ObjKind::Msg2, hs_.output());
         phase_ = Phase::AwaitMsg;
         expect_ = ObjKind::Msg3;
-        send_object(Tx::Frame, ObjKind::Msg2, false);
+        send_object(ObjKind::Msg2, false);
         break;
     case S::M4Compose:
         // Held back until the keys exist: SESSION_BIND may follow message_4 immediately.
-        stage_frame(ObjKind::Msg4, hs_.output());
+        stage(ObjKind::Msg4, hs_.output());
         phase_ = Phase::Hs;
         st = run_hs(S::Export);
         break;
@@ -409,12 +432,17 @@ void Exchange::after_hs(MonoTime now) {
     pump(now);
 }
 
+// A receiver-assigned SID, unique among this node's sessions of the same purpose (docs/06 §5).
 Status Exchange::alloc_sid(uint32_t &sid) {
     for (int i = 0; i < 8; ++i) {
         std::array<uint8_t, 4> b{};
         s_.engine.random(MutByteView{b});
-        const uint32_t v = (uint32_t{b[0]} << 24U) | (uint32_t{b[1]} << 16U) | (uint32_t{b[2]} << 8U) | b[3];
-        if (v != 0 && !s_.neighbors.sid_in_use(v)) {
+        const uint32_t v =
+            (uint32_t{b[0]} << 24U) | (uint32_t{b[1]} << 16U) | (uint32_t{b[2]} << 8U) | b[3];
+        const bool used = mode_ == Mode::End
+                              ? v == delivery::k_handshake_sid || end_.sessions->sid_in_use(v)
+                              : s_.neighbors.sid_in_use(v);
+        if (v != 0 && !used) {
             sid = v;
             return Status::Ok;
         }
@@ -422,11 +450,14 @@ Status Exchange::alloc_sid(uint32_t &sid) {
     return Status::RecoveryRequired;
 }
 
+// Keys exist: the initiator seals SESSION_BIND, the responder sends its held message_4. Nothing is
+// installed before the peer's bind (initiator: its ACK) was verified.
 void Exchange::finish_keys(MonoTime now) {
     sec::RecordKeys keys;
     Status st = hs_.take_keys(keys);
     if (st == Status::Ok) {
-        st = pend_.rec.install(std::move(keys)); // one-shot: Conflict if pend_ still holds a session
+        st =
+            pend_.rec.install(std::move(keys)); // one-shot: Conflict if pend_ still holds a session
         if (st == Status::Ok) {
             pend_.ctx_hash = ctx_hash_;
             pend_.born = now;
@@ -437,19 +468,20 @@ void Exchange::finish_keys(MonoTime now) {
     }
     if (st == Status::Ok && initiator_) {
         s_.engine.random(MutByteView{bind_nonce_});
-        st = seal_bind(pend_, bind_nonce_);
+        st = mode_ == Mode::End ? seal_end_bind(pend_.rec, pend_.ctx_hash, pend_.rx_sid)
+                                : seal_bind(pend_, bind_nonce_);
     }
     if (st != Status::Ok) {
         abort(st);
         return;
     }
     phase_ = Phase::AwaitBind;
-    send_object(Tx::Frame, ObjKind::Msg4, false);
+    send_object(staged_, false); // initiator: SESSION_BIND; responder: message_4
     pump(now);
 }
 
 // SESSION_BIND / ACK = [1, ctx_hash, receiver_sid, nonce]; sealed under the new key with the
-// sender's own reserved SID in the header (S5-D3). Kept in last_ for byte-identical retransmission.
+// sender's own reserved SID in the header (S5-D3). Staged for byte-identical retransmission.
 Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce) {
     std::array<uint8_t, 64> plain{};
     wire::CborWriter w{MutByteView{plain}};
@@ -461,8 +493,7 @@ Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce)
     LM_TRY(w.finish());
     SealedFrame f;
     LM_TRY(seal_frame(k, wire::FrameKind::Edhoc, hint(), k.rx_sid, w.written(), f));
-    std::memcpy(last_.data(), f.bytes.data(), f.len);
-    last_len_ = f.len;
+    stage(initiator_ ? ObjKind::Bind : ObjKind::BindAck, f.view());
     return Status::Ok;
 }
 
@@ -487,7 +518,7 @@ bool Exchange::check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &si
 
 bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, ByteView frame,
                              MonoTime now) {
-    if (src != mac_) {
+    if (src != mac_ || mode_ == Mode::End) {
         return false;
     }
     if (phase_ == Phase::Linger && !initiator_) {
@@ -499,7 +530,7 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
         Opened op;
         const Status st = open_frame(n->cur, h, frame, op);
         if (st == Status::Replay && op.verdict == sec::ReplayVerdict::Duplicate) {
-            send_object(Tx::Frame, ObjKind::Msg4, true);
+            send_object(ObjKind::BindAck, true);
             pump(now);
         }
         return true;
@@ -519,18 +550,17 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
     std::array<uint8_t, 16> nonce{};
     if (!check_bind_body(op.view(), h.link_sid, sid, nonce) ||
         (initiator_ && nonce != bind_nonce_)) {
-        ++s_.stats.bind_bad;
+        count(Count::BindBad);
         return true;
     }
     pend_.rec.accept(h.link_counter);
     pend_.tx_sid = sid;
-    peer_sid_ = sid;
     Status is = mode_ == Mode::Link ? install_session(now) : install_join_session(now);
     if (is != Status::Ok) {
         abort(is);
         return true;
     }
-    ++s_.stats.hs_completed;
+    count(Count::Completed);
     if (initiator_) {
         finish_idle();
         return true;
@@ -543,11 +573,16 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
         return true;
     }
     phase_ = Phase::Linger;
-    deadline_ = now + k_linger;
+    deadline_ = now + s_.policy.linger;
     rto_at_ = MonoTime::never();
-    send_object(Tx::Frame, ObjKind::Msg4, false);
+    send_object(ObjKind::BindAck, false);
     pump(now);
     return true;
+}
+
+Neighbor *Exchange::installed() {
+    return mode_ == Mode::Link ? s_.neighbors.find_device(peer_state_.dc.device)
+                               : s_.neighbors.find_join(peer_state_.dc.device);
 }
 
 Status Exchange::install_session(MonoTime now) {
@@ -601,20 +636,10 @@ Status Exchange::install_session(MonoTime now) {
     pend_.wipe();
     n->rotate_wanted = false;
     if (s_.join.link_up != nullptr) {
-        s_.join.link_up(s_.join.ctx, n->device, n->role); // [S8] e.g. the root confirmation still owed
+        s_.join.link_up(s_.join.ctx, n->device,
+                        n->role); // [S8] e.g. the root confirmation still owed
     }
     return Status::Ok;
-}
-
-void Exchange::finish_idle() {
-    pend_.wipe();
-    tx_ = Tx::None;
-    rto_at_ = MonoTime::never();
-    retry_at_ = MonoTime::never();
-    deadline_ = MonoTime::never();
-    rx_len_ = 0;
-    phase_ = Phase::Idle;
-    mode_ = Mode::Link;
 }
 
 } // namespace lm::link

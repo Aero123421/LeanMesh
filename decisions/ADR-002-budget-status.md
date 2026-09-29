@@ -1,0 +1,243 @@
+# ADR-002: Budget status after wave 3, the consolidation pass, and allocations for S11-S20
+
+Status: Proposed. Measured 2026-09-29 on `feat/sdk-impl` HEAD `a5e9834` ("before") and on HEAD plus
+the consolidation pass ("after"). Software measurements only: nothing here is a hardware result
+(no heap, stack or current was measured on a SoC).
+
+## Context
+
+[docs/16](../docs/16-budgets.md) sets design targets that `config/profiles.json` repeats as
+`ram_target_bytes`: fixed RAM (static + fixed pools + SDK task stacks; RX ring and the serial
+receive buffer included) of 32 KiB leaf, 48 KiB relay, 96 KiB root, crypto peak <= 24 KiB counted
+separately, SDK flash difference 256 KiB (320 KiB review line), and 16,000 first-party C/C++ SLOC for
+core + idf + root/serial. After wave 3 the SDK was far over those numbers with half of the features
+still missing (S11-S20). This ADR records the measured status, what the consolidation pass changed,
+what stays over and why, and hard allocations for the remaining slices.
+
+## How the numbers are measured (the same for every later slice)
+
+`scripts/budget_report.py` (decision ARCH-D10, [IMPLEMENTATION.md §13](../docs/IMPLEMENTATION.md)):
+- `sizeof` of every owner object per compile-time profile: `tools/budget_probe/probe.cpp` defines one
+  array per object, `nm -S` reads the compiler's size. Native (x86-64) from the `lm_budget_probe_*`
+  targets; for a SoC the probe is compiled with the compile command of an ESP-IDF build of
+  `firmware/example_node` (esp32c3 below: riscv32-esp-elf GCC 15.2.0 of IDF v6.0.3, -Os).
+- Static DRAM of `libleanmesh.a` (task stacks, queues, radio rings, ROOT: USB serial adapter, its task
+  stack and byte ring) from the link map with `esp_idf_size`; image size against
+  `build-records/T01-baseline-size.json` (empty IDF + ESP-NOW, same SoC and options).
+- Fixed RAM = workspace (`lm_context`, allocated once by the application at `lm_init`) + that static
+  DRAM. Not included: Wi-Fi/IDF runtime heap, the application's stacks, PSA heap (crypto peak below).
+- SLOC = non-blank lines that are not only a comment. Budget set "sdk" = everything compiled into the
+  firmware: `src/core/**`, `src/security`, `src/store`, `src/capi`, `src/root`, `src/serial`,
+  `src/port/idf`. Native-only code (`src/port/sim`, `src/hostnative`), tools and tests are separate.
+
+Commands: `scripts/build_targets.sh --app example_node [--profile RELAY|ROOT] esp32c3`, then
+`scripts/budget_report.py --native-build <native> --idf-build <leaf build> --idf-build <relay build>
+--idf-build <root build>`.
+
+## Results
+
+### Fixed RAM, esp32c3 (bytes)
+
+| | LEAF before | LEAF after | RELAY before | RELAY after | ROOT before | ROOT after |
+|---|---:|---:|---:|---:|---:|---:|
+| workspace (`lm_context`) | 44,568 | 35,368 | 48,896 | 39,696 | 128,912 | 113,016 |
+| `libleanmesh.a` static DRAM (map) | 19,520 | 17,840 | 19,520 | 18,960 | 64,372 | 52,332 |
+| **fixed total** | **64,088** | **53,208** | **68,416** | **58,656** | **193,284** | **165,348** |
+| target (`ram_target_bytes`) | 32,768 | 32,768 | 49,152 | 49,152 | 98,304 | 98,304 |
+| over target | +31,320 | +20,440 | +19,264 | +9,504 | +94,980 | +67,044 |
+| change | | -10,880 | | -9,760 | | -27,936 |
+
+Static DRAM breakdown (all profiles): owner stack 4,096, worker stack 10,240 (2x the natively measured
+EDHOC job depth, S5), radio RX ring (rx_frames + 2) x 280 B = 2,800 / 3,920 / 7,280, done ring, queues,
+task control blocks; ROOT adds the USB serial adapter (25,272 after, 35,632 before), its 2,560 B task
+stack and 2,048 B byte ring. Native `lm_context` (x86-64): 45,088 / 49,416 / 129,624 before,
+35,792 / 40,120 / 113,640 after.
+
+Crypto peak (separate, docs/16 "crypto scratch/peak <= 24 KiB"; native software model, unchanged by this
+pass): PSA heap peak 4,992 B during a full handshake, worker stack depth of the deepest EDHOC job
+4,840 B (inside the 10 KiB worker stack counted above); the one `HandshakeSlot` (3,528 B on the SoC,
+4,088 before) is part of the workspace. About 8.5 KB in all: inside 24 KiB.
+
+The "after" columns are this consolidation alone. The shared tree at the end of this pass also holds
+the S13 host bridge, still in progress: with it the fixed RAM is LEAF 53,208, RELAY 58,656 and ROOT
+180,348 B (ROOT static DRAM 67,332 B: the bridge adds 15,000 B, mostly an 8-slot event ring of
+~870 B each, a 4,608 B response scratch and a 512 B payload copy, against the 3,000 B S13 allocation
+below), the ROOT image is +231,360 B over the baseline and the sdk SLOC are 21,318 (S13: +984).
+
+### Largest objects, esp32c3 sizeof (bytes)
+
+| object | LEAF before | LEAF after | ROOT before | ROOT after |
+|---|---:|---:|---:|---:|
+| end-session exchange (`EndExchange`) | 7,520 | 0 (folded) | 7,520 | 0 (folded) |
+| link exchange (now the only exchange) | 6,744 | 6,616 | 6,744 | 6,616 |
+| `HandshakeSlot` inside it | 4,088 | 3,528 | 4,088 | 3,528 |
+| dedup/receipt cache (receipts x 192 B) | 6,144 | 6,144 | 24,576 | 24,576 |
+| end sessions (x 304 B -> 200 B) | 1,224 | 808 | 19,464 | 12,808 |
+| TX frame pool (`HopTx`, tx_frames x 328 B) | 3,368 | 3,368 | 8,712 | 8,712 |
+| `Durable` (journal + boot job) | 3,440 | 2,344 | 5,168 | 4,072 |
+| message pool (app_messages x 512 B) | 2,048 | 2,048 | 8,192 | 8,192 |
+| operation history (2 x app_messages x 208 B) | 1,664 | 1,664 | 6,656 | 6,656 |
+| neighbours (x 368 B) | 3,000 | 3,000 | 5,992 | 5,992 |
+| `LocalIdentity` (bundle, record job, creds) | 3,456 | 3,464 | 3,904 | 3,936 |
+| root ledger (64 entries x 112 B + txns) | - | - | 11,264 | 11,264 |
+| route table (path_cache x ~140 B) | ~560 | ~560 | ~9,000 | ~9,000 |
+| USB serial adapter (`RootUsb`, static) | - | - | 35,632 | 25,272 |
+
+### Flash (esp32c3 image minus the empty IDF + ESP-NOW baseline)
+
+LEAF +182,004 -> +177,266 B, RELAY +182,008 -> +177,822 B, ROOT +224,148 -> +221,752 B: inside the
+256 KiB target (vendor libedhoc/zcbor included; PSA is shared with the baseline's Wi-Fi stack).
+
+### First-party SLOC (sdk set)
+
+| module | before | after |
+|---|---:|---:|
+| src/core (top level) | 1,449 | 1,454 |
+| src/core/wire | 1,426 | 1,426 |
+| src/core/radio | 245 | 245 |
+| src/core/link | 1,841 | 2,245 |
+| src/core/member | 3,168 | 3,193 |
+| src/core/route | 311 | 354 |
+| src/core/delivery | 4,435 | 3,465 |
+| src/security | 2,081 | 2,136 |
+| src/store | 739 | 747 |
+| src/capi | 360 | 360 |
+| src/root | 2,042 | 2,042 |
+| src/serial | 1,892 | 1,833 |
+| src/port/idf | 841 | 834 |
+| **total (budget 16,000)** | **20,830** | **20,334** |
+
+Native-only 1,405, tools 2,244, native tests 8,371 -> 8,534 (new tests for the changed contracts).
+Python Host 2,946 (budget 6,000).
+
+## What changed (decisions ARCH-D1..D10, details in IMPLEMENTATION.md §13)
+
+- ARCH-D1 one handshake engine: the end-session exchange (EDHOC purpose 2) was a second copy of the
+  link exchange state machine with its own `HandshakeSlot`, 1 KiB credential buffer, staging buffers
+  and job owner, although at most one P-256 job may run (docs/06 §8). It is now `Mode::End` of
+  `link::Exchange`: one slot, one `HandshakeSlot`, one credential buffer for link, join and end
+  sessions; only the carrier differs (1-hop bootstrap frames vs routed end records). -7.1 KB every
+  profile; the two exchanges were 2,221 SLOC, the one exchange is 1,666. Consequence: a link, join and end handshake never overlap; a send that
+  finds the slot taken waits and is kicked when it frees (the P-256 work was already serialised).
+- ARCH-D2 `HandshakeSlot` keeps the local/peer CCS only in the EDHOC session: -560 B.
+- ARCH-D3 one in-order chunk format and rule for objects sent in order (JOIN_ONLY objects and routed
+  handshake carriers already had the same 5-byte header; now one codec). See "chunking" below.
+- ARCH-D4 one route table: `route::PathCache` (S6, unused in production) and the delivery module's own
+  `RouteEntry` table implemented the same rules twice. The delivery module now sends by `PathCache`
+  (address- and DeviceId-keyed); the per-session reply path (`EndSession::reply`, 96 B) became learned
+  routes in the same table. -104 B per end session (root -6.7 KB).
+- ARCH-D5 RX ring sized exactly (rx_frames + 2 instead of the next power of two): leaf -1.7 KB,
+  relay -0.6 KB, root -1.7 KB.
+- ARCH-D6 USB records decrypted in place in the 8,230 B decode buffer (multi-part PSA AES-GCM through
+  a 64 B bounce buffer; PSA forbids overlapping buffers on IDF): the 8,192 B plaintext buffer is gone.
+- ARCH-D7 the identity load reads the paired-Host record (root builds); the USB adapter lost its own
+  Flash job and 1.6 KB of record buffers. Bug fixed on the way: the assignment-ticket record (S8-D5)
+  and the paired-Host record (S10-D2) both used record id 0x40; both are now in `store::rec`.
+- ARCH-D8 the journal stages entries in the boot job's record scratch instead of its own 1,100 B.
+- ARCH-D9, D10: `step_time()` also for commands; the measurement tooling above, `--profile` for the IDF
+  build script, CI reports (not a gate) and builds `example_node` ROOT for all four SoCs.
+
+## Chunking: the single mechanism S12 extends (ARCH-D3)
+
+1. Pre-authentication and JOIN_ONLY objects move in order: `member::JoinChunk`
+   (`tag u8 | total u16 | offset u16 | bytes <= 160`), one fragment in flight (window 1), the whole
+   object repeated on RTO, assembled in order into a buffer the owner lends (never a reservation made
+   for an unauthenticated peer, docs/09 §8). Used by JoinPipe (tag = object id, plus the ack chunk)
+   and the exchange's routed carrier (tag = object kind). The 1-hop bootstrap carrier keeps its
+   docs/09 §8 layout (exchange id and length fields are spec) and the same in-order rule.
+2. Authenticated end objects (small messages, receipts, control objects > 1 frame) use only the
+   spec's FRAGMENT record + TRANSFER_BITMAP (docs/09 §6), implemented once by S12 in
+   `src/core/delivery/fragment.*`. Reassembled payloads land in the message pool (`MsgBuf`), not in a
+   second per-slot payload buffer.
+3. S11's join proxy carries pre-authentication and JOIN_ONLY objects as `JoinChunk` on both legs
+   (1-hop JOIN_PROXY and the proxy's member route); no third format and no second in-order assembler.
+
+## What stays over budget, why, and the plan
+
+LEAF is 20.4 KB over 32 KiB. 17.8 KB is platform (task stacks 14.3 KB, RX ring 2.8 KB); the rest is
+dominated by the capacities of `profiles.json` at their per-entry cost (32 receipts x 192 B, 8 TX
+frames x 328 B, 4 x 512 B messages, 8 neighbours x 368 B), one handshake (6.6 KB) and the device's
+credentials (3.5 KB). ROOT is 67 KB over 96 KiB for the same reasons at root capacities (128
+receipts, 64 end sessions, 64 routes, 64 ledger entries, 16 messages, 24 TX/RX frames) plus the USB
+link (25 KB, of which 16.5 KB are the decode and TX buffers docs/19 requires).
+
+Planned consolidations (estimates from the measured per-entry sizes; owner in brackets):
+
+| # | change | LEAF | RELAY | ROOT |
+|---|---|---:|---:|---:|
+| P1 | dedup cache: compact terminal record (key, hash, outcome, result) + live extension only for app_messages entries [S14, or a consolidation slice after S13 lands] | -2.0 KB | -2.0 KB | -9.0 KB |
+| P2 | neighbour `prev` session (144 B each, needed 10 s after a rotation) as 2 shared grace slots [S11] | -0.9 KB | -2.0 KB | -2.0 KB |
+| P3 | worker stack from a target measurement (high-water mark over link/join/end/USB handshakes), keeping 2x margin [HIL, S19] | 0 to -4 KB | 0 to -4 KB | 0 to -4 KB |
+| P4 | one record-job memory per node: `Durable` borrows the identity's `RecordJob` per job; join/ledger hold it per job, not per transaction [S18] | -1.1 KB | -1.1 KB | -1.1 KB |
+| P5 | USB handshake on the node's exchange slot (a USB attempt reserves the slot next, bounded wait) [S13 follow-up] | - | - | -5.4 KB |
+| P6 | root: paths derived from the S11 topology instead of 64 cached paths; topology nodes merged with ledger entries (no second DeviceId table) [S11] | - | - | -9 to -12 KB |
+| P7 | TX frame metadata to 32 B (docs/16 §2; counter read from the header) [S14] | -0.3 KB | -0.4 KB | -0.8 KB |
+| P8 | `Membership` and `Ledger` exclusive by role on ROOT images [S18] | - | - | -1.1 KB |
+| P9 | one frame pool: the HOP_ACK seal buffer, the exchange's staged frame, the delivery TX scratch and JoinPipe staging borrow TX-pool frames; S16 mailboxes come from the same pool [S14] | -1.0 KB | -1.0 KB | -1.8 KB |
+
+After P1-P9 the projection (with the S11-S20 allocations below) is about 49-53 KB leaf, 53-57 KB
+relay, 143-150 KB root (the lower ends need P3): the targets are still not met. They are not reachable with the current
+capacities and architecture; a decision is required (not taken here, `profiles.json` is unchanged
+because its numbers are consistent with the spec text):
+- either revise `ram_target_bytes` to what the specified capacities cost (a proposal: leaf 48 KiB,
+  relay 56 KiB, root 160 KiB), or
+- cut capacities (e.g. root receipts 128 -> 64 = -12.3 KB, end_sessions 64 -> 32 = -6.4 KB,
+  app_messages 16 -> 8 = about -10 KB with messages, operations and actives; leaf receipts
+  32 -> 16 = -3.1 KB).
+
+ROOT on ESP32-C3 is the hard case: static DRAM of the ROOT image is 150,310 B of 321,296 B, and the
+113,016 B workspace comes from the heap, leaving about 58 KB before any IDF runtime user (Wi-Fi
+buffers and task stacks, PSA's ~5 KB peak). The docs/16 gate "C3 minimum-ever free heap >= 48 KiB"
+is therefore at risk for ROOT on C3 even after P1-P9 unless capacities are cut. Unverified: the free
+heap was not measured on hardware.
+
+SLOC is 20.3k against 16k with S11-S20 still to come (allocated 6,950 below: projected 27.3k; P1, P4,
+P5 and a shared job-slot helper for the six modules that repeat "one job, generation, zombie" plumbing
+save an estimated 600-800). The 16,000 line is not reachable for the specified feature set; the
+decision (raise the line with this per-slice plan, or drop features) belongs to the spec owner.
+
+## Allocations for S11-S20 (hard numbers)
+
+Fixed RAM (workspace + static, esp32c3 sizeof as the report measures it) and sdk SLOC per slice. A
+slice that needs more amends this ADR in its report before merging; unused allocation is not carried
+over to other slices.
+
+| slice | LEAF B | RELAY B | ROOT B | SLOC | what the allocation covers / must borrow |
+|---|---:|---:|---:|---:|---|
+| S11 MESH | 800 | 1,000 | 4,000 | 1,200 | root path <= 20, parent + 2 candidates, per-neighbour quality, hello/discovery state; root: topology merged with ledger entries (P6). Routes go into the existing `PathCache`; no second route table |
+| S12 FRAGMENT | 1,500 | 1,500 | 1,500 | 700 | small-reassembly metadata (slots x ~100 B) with payloads in the message pool; one 1 KiB control page buffer. Object reassembly (4 KiB) only when `object_transfer_enabled` (+4.2 KB then, 0 otherwise); control objects > 1 KiB to leaf/relay need a paging decision first |
+| S13 HOST-BRIDGE | 0 | 0 | 3,000 | 1,000 | bridge state on the root only; payloads stay in the message pool and the USB TX buffer (the in-progress bridge measures 15,000 B: build responses in the USB link's TX buffer and read event payloads from the message pool instead of copying them into a ring) |
+| S14 SCHED | 200 | 200 | 200 | 450 | DRR deficits, airtime tokens, admission counters; queues are TX-pool frames with a class tag |
+| S15 GROUP | 500 | 500 | 3,500 | 900 | per operation 64-target compact state (payload in the message pool); root group registry by ledger slot, not DeviceId copies |
+| S16 POWER | 1,024 | 1,024 | 1,536 | 900 | docs/16 1 KiB per node; mailbox frames borrowed from the TX pool |
+| S17 CHANNEL | 200 | 200 | 500 | 700 | plan/epoch/freeze/rollback, survey table; root coordinator |
+| S18 LIFECYCLE | 300 | 300 | 800 | 800 | grant-consumption ledger, commissioning window, handover; floors table exists |
+| S19 DIAG | 100 | 100 | 100 | 300 | validity bits and snapshot assembly (reuse the event payload path) |
+| S20 E2E | 0 | 0 | 0 | 0 | tests only |
+| **total** | **4,624** | **4,824** | **15,136** | **6,950** | |
+
+Projection without P1-P9: 57.8 KB leaf, 63.5 KB relay, 180.5 KB root, 27.3k SLOC.
+
+Rules for every slice (additions to IMPLEMENTATION.md §11 acceptance):
+- Report `scripts/budget_report.py` before/after (sizeof per profile, static DRAM of the LEAF and ROOT
+  IDF builds, image diff, SLOC) against the row above.
+- No new buffer >= 256 B per feature without an entry here: borrow the message pool, the TX frame pool,
+  the exchange's lent scratch (1 KiB), the record-job memory or the durable scratch.
+- Root-only state is compiled out of leaf/relay (`k_root_capable`); a disabled feature leaves no buffer.
+- A slice that touches an existing mechanism (routes, chunking, handshakes, job plumbing) extends it
+  instead of adding a parallel one, and says which duplicate it removed.
+
+## Not verified
+
+No SoC measurement of heap, stack high-water marks, CPU or energy; PSA heap and stack depths are the
+native software model. The multi-part AES-GCM path of `open_in_place` is exercised natively (TF-PSA-
+Crypto builtin); on IDF it is only compiled (the esp_aes GCM driver implements the multi-part entry
+points). Wire behaviour did not change (same carriers, same record layout); link, join and end
+handshakes can no longer overlap on one node, which the sim tests cover but no RF test has measured
+for formation time (docs/16 §3 "全21台cold boot").
+
+## Decision (orchestrator, 2026-09-29)
+- The specified capacities in `config/profiles.json` stay (they are functional contract: 64 members, 20 hops, receipts). The docs/16 RAM targets are revised to the measured cost of those capacities: **leaf 48 KiB, relay 56 KiB, root 160 KiB** (static + pools + task stacks + rings; crypto peak reported separately). The 256 KiB Flash target is unchanged and currently met.
+- P1–P9 are mandatory in their owning slices; every slice reports `scripts/budget_report.py` against its allocation row above.
+- **ROOT on ESP32-C3 is not a supported configuration** until a HIL measurement shows minimum-ever free heap ≥ 48 KiB with Wi-Fi up. ROOT is built and CI-checked on all four SoCs, but the supported root SoCs are S3/C5/C6. C3 remains fully supported as leaf and relay. No PSRAM may be used to hide this.
+- The SLOC line is raised to **28k** for the specified feature set (core+idf+root/serial), with the per-slice caps above as hard limits. Over-cap slices need a line here with cause.

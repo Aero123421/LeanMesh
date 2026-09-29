@@ -149,6 +149,9 @@ Status Journal::scan_segment(port::Store &store, uint32_t seg, bool apply_entrie
 }
 
 Status Journal::open(port::Store &store) {
+    if (buf_.size() < k_journal_min_scratch) {
+        return Status::InvalidArgument; // the owner lent too little memory for one entry
+    }
     open_ = false;
     seg_bytes_ = store.journal_segment_bytes();
     nseg_ = store.journal_segments();

@@ -15,6 +15,7 @@
 #include "core/wire/cbor.hpp"
 #include "port/sim/sim_node.hpp"
 #include "serial/pairing.hpp"
+#include "serial/bridge.hpp"
 #include "serial/root_usb.hpp"
 
 namespace meshsim {
@@ -37,6 +38,7 @@ class PtyStream final : public lm::serial::ByteStream {
 struct RootSide {
     std::unique_ptr<PtyStream> stream;
     std::unique_ptr<lm::serial::RootUsb> usb;
+    std::unique_ptr<lm::serial::Bridge> bridge; // --serial-bridge (S13); destroyed BEFORE the adapter
     uint32_t epoch = 0;
 };
 
@@ -62,6 +64,7 @@ void serial_sync(Sim &sim) {
     }
     lm::sim::SimNode &n = sim.world.node(0);
     if (n.ctx() == nullptr) {
+        s.bridge.reset();
         s.usb.reset();
         s.stream.reset();
         return;
@@ -69,6 +72,7 @@ void serial_sync(Sim &sim) {
     if (s.usb != nullptr && s.epoch == n.epoch()) {
         return;
     }
+    s.bridge.reset();
     s.usb.reset();
     s.stream = std::make_unique<PtyStream>(sim);
     s.epoch = n.epoch();
@@ -76,6 +80,9 @@ void serial_sync(Sim &sim) {
     // exposed to the adapter yet): a reset always shows up as a new boot in HELLO.
     s.usb = std::make_unique<lm::serial::RootUsb>(n.ctx()->engine, *s.stream, uint64_t{n.epoch()} + 1);
     n.ctx()->engine.attach_serial(s.usb.get());
+    if (sim.bridge) { // without it the adapter answers every REQUEST with UNSUPPORTED (decision D7)
+        s.bridge = std::make_unique<lm::serial::Bridge>(n.ctx()->engine, *s.usb, uint64_t{n.epoch()} + 1);
+    }
 }
 
 void serial_on_rx(Sim &sim, const uint8_t *data, std::size_t len) {
@@ -157,7 +164,7 @@ std::string cmd_serial_status(Sim &sim, const Args &) {
     }
     const lm::serial::UsbLink &l = s.usb->link();
     const lm::serial::UsbStats &st = l.stats();
-    char buf[1100];
+    char buf[1500];
     std::snprintf(
         buf, sizeof buf,
         "{\"ok\":true,\"attached\":true,\"configured\":%s,\"paired\":%s,\"active\":%s,\"gen\":%u,\"session_id\":%u,"
@@ -176,7 +183,23 @@ std::string cmd_serial_status(Sim &sim, const Args &) {
         st.tx_partial, st.tx_credit_blocked, st.hs_started, st.hs_failed, st.hs_rejected, st.sessions,
         st.pings_rx, s.usb->stats().unsupported_replies, s.usb->stats().replies_dropped,
         lm::status_name(l.last_failure()));
-    return buf;
+    std::string out = buf;
+    if (s.bridge != nullptr) {
+        const lm::serial::BridgeStats &b = s.bridge->stats();
+        char bb[400];
+        std::snprintf(bb, sizeof bb,
+                      ",\"bridge\":{\"requests\":%" PRIu64 ",\"malformed\":%" PRIu64 ",\"replies\":%" PRIu64
+                      ",\"replies_dropped\":%" PRIu64 ",\"events_queued\":%" PRIu64 ",\"events_sent\":%" PRIu64
+                      ",\"events_resent\":%" PRIu64 ",\"events_settled\":%" PRIu64 ",\"host_store_acks\":%" PRIu64
+                      ",\"send_accepted\":%" PRIu64 ",\"send_refused\":%" PRIu64 ",\"ring_used\":%zu}",
+                      b.requests, b.malformed, b.replies, b.replies_dropped, b.events_queued, b.events_sent,
+                      b.events_resent, b.events_settled, b.host_store_acks, b.send_accepted, b.send_refused,
+                      s.bridge->ring_used());
+        out.pop_back(); // the closing brace of the status object
+        out += bb;
+        out += "}";
+    }
+    return out;
 }
 
 // USB detach/replug: the line goes down (the root drops its session and starts HELLO again) and

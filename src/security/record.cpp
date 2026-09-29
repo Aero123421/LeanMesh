@@ -2,6 +2,7 @@
 
 #include <psa/crypto.h>
 
+#include <cstring>
 #include <utility>
 
 #include "core/codec.hpp"
@@ -315,6 +316,76 @@ Status RecordSession::open(uint64_t counter, ByteView aad, ByteView ciphertext,
     }
     LM_TRY(from_psa(dec));
     plaintext_len = len;
+    if (verdict == ReplayVerdict::Duplicate) {
+        return Status::Replay; // authentic duplicate: the caller may re-ACK, never re-apply
+    }
+    return Status::Ok;
+}
+
+Status RecordSession::open_in_place(uint64_t counter, ByteView aad, MutByteView sealed,
+                                    std::size_t &plaintext_len, ReplayVerdict &verdict) {
+    plaintext_len = 0;
+    verdict = window_.check(counter);
+    if (!active_) {
+        return Status::RecoveryRequired;
+    }
+    if (verdict == ReplayVerdict::Reserved || sealed.size() < k_aead_tag_bytes) {
+        return Status::BadFrame;
+    }
+    if (counter > k_max_records_per_key) {
+        return Status::SessionRefreshRequired;
+    }
+    if (verdict == ReplayVerdict::TooOld) {
+        return Status::Replay; // dropped before any crypto: an old packet is not worth an AEAD
+    }
+    OneShotKey key{keys_.rx, PSA_KEY_USAGE_DECRYPT};
+    LM_TRY(from_psa(key.status()));
+    const auto nonce = make_nonce(keys_.rx, counter);
+    const std::size_t ct_len = sealed.size() - k_aead_tag_bytes;
+    // Chunks are whole AES blocks, so one update never outputs more than it consumed: the plaintext
+    // written back (w) never overtakes the ciphertext still to be read (r).
+    std::array<uint8_t, 64 + 16> bounce{};
+    std::size_t w = 0;
+    psa_aead_operation_t op = PSA_AEAD_OPERATION_INIT;
+    psa_status_t st = psa_aead_decrypt_setup(&op, key.id(), PSA_ALG_GCM);
+    if (st == PSA_SUCCESS) {
+        st = psa_aead_set_nonce(&op, nonce.data(), nonce.size());
+    }
+    if (st == PSA_SUCCESS) {
+        st = psa_aead_update_ad(&op, aad.data(), aad.size());
+    }
+    for (std::size_t r = 0; st == PSA_SUCCESS && r < ct_len; r += 64) {
+        const std::size_t n = ct_len - r < 64 ? ct_len - r : 64;
+        std::size_t out = 0;
+        st = psa_aead_update(&op, sealed.data() + r, n, bounce.data(), bounce.size(), &out);
+        if (st == PSA_SUCCESS && w + out <= r + n) {
+            std::memcpy(sealed.data() + w, bounce.data(), out);
+            w += out;
+        } else if (st == PSA_SUCCESS) {
+            st = PSA_ERROR_CORRUPTION_DETECTED; // would overwrite unread ciphertext: never
+        }
+    }
+    if (st == PSA_SUCCESS) {
+        std::size_t out = 0;
+        st = psa_aead_verify(&op, bounce.data(), bounce.size(), &out, sealed.data() + ct_len,
+                             k_aead_tag_bytes);
+        if (st == PSA_SUCCESS && w + out <= ct_len) {
+            std::memcpy(sealed.data() + w, bounce.data(), out);
+            w += out;
+        } else if (st == PSA_SUCCESS) {
+            st = PSA_ERROR_CORRUPTION_DETECTED;
+        }
+    }
+    psa_aead_abort(&op);
+    secure_zero(MutByteView{bounce.data(), bounce.size()});
+    if (key.destroy() != PSA_SUCCESS) {
+        st = PSA_ERROR_CORRUPTION_DETECTED; // the key is still live: do not report an opened record
+    }
+    if (st != PSA_SUCCESS || w != ct_len) {
+        secure_zero(sealed.first(w)); // unauthenticated plaintext is never left behind
+        return st == PSA_SUCCESS ? Status::RecoveryRequired : from_psa(st);
+    }
+    plaintext_len = w;
     if (verdict == ReplayVerdict::Duplicate) {
         return Status::Replay; // authentic duplicate: the caller may re-ACK, never re-apply
     }

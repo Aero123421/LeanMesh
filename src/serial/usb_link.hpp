@@ -17,8 +17,8 @@
 //
 // Every public-key step is a slow job (Env::submit): on the root it is an Engine job, so the single
 // P-256 slot also covers USB (decision D5); the Host's helper runs the same job body inline.
-// Memory: one 8230 B decode buffer, one 8192 B plaintext buffer and one encoded TX buffer; nothing
-// else queues (docs/19 §6). Owner thread only (root) / one serial thread (Host).
+// Memory: one 8230 B decode buffer (records are decrypted in place there) and one encoded TX
+// buffer; nothing else queues (docs/19 §6). Owner thread only (root) / one serial thread (Host).
 #pragma once
 
 #include <array>
@@ -363,8 +363,7 @@ class UsbLink {
     bool tx_ready_due_ = false;
 
     // buffers
-    std::array<uint8_t, k_rx_bytes> rx_{};
-    std::array<uint8_t, k_plain_bytes> plain_{};
+    std::array<uint8_t, k_rx_bytes> rx_{}; // decoded frame (a record's plaintext replaces it)
     std::array<uint8_t, k_tx_bytes> tx_{};
     std::size_t tx_off_ = 0;
     std::size_t tx_len_ = 0;

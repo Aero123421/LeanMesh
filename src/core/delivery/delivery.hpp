@@ -6,7 +6,8 @@
 //            counter), timers, journal version
 //   InEntry  the dedup/receipt cache: one per message received (or recovered), bounded, terminal
 //            entries are recycled least-recently-used, live ones never
-//   HopTx    TX frames and link retry;  EndExchange/EndSessions  end keys;  Durable  the journal
+//   HopTx    TX frames and link retry;  EndSessions  end keys (set up by the node's single
+//            exchange, link::Exchange in end mode);  Durable  the journal
 // Nothing here blocks or allocates: public-key work and Flash are worker jobs whose completions are
 // matched by (job id, slot generation).
 #pragma once
@@ -17,7 +18,6 @@
 
 #include "core/command.hpp"
 #include "core/delivery/durable.hpp"
-#include "core/delivery/end_exchange.hpp"
 #include "core/delivery/end_session.hpp"
 #include "core/delivery/hop.hpp"
 #include "core/delivery/route_spec.hpp"
@@ -25,6 +25,7 @@
 #include "core/link/link_layer.hpp"
 #include "core/pool.hpp"
 #include "core/route/forward.hpp"
+#include "core/route/path_cache.hpp"
 
 namespace lm {
 class Engine;
@@ -47,6 +48,20 @@ struct MsgBuf {
 struct ReportRequest {
     lm_message_ref_t ref;
     uint32_t outcome = 0;
+};
+// [S13] The Host is the root's application over USB: it picks the MessageId (so it can reconcile after
+// a crash by MessageId alone) and computes the intent_hash; the root recomputes it and refuses a
+// mismatch. Same id + same hash = the same operation (idempotent), same id + other hash = CONFLICT.
+struct HostSendRequest {
+    lm_send_request_t rq;
+    std::array<uint8_t, 16> mid{};
+    Sha256Digest hash{};
+};
+// Root only: what a Host acknowledgement names (docs/19 §4 HOST_STORE_ACK).
+struct HostStoreAckRequest {
+    DeviceId origin;
+    std::array<uint8_t, 16> mid{};
+    Sha256Digest hash{};
 };
 struct CapacityRequest {
     lm_destination_t dest;
@@ -121,6 +136,7 @@ struct InEntry {
     bool durable = false;
     uint16_t jslot = 0;           // journal record id = k_id_in | jslot (durable only)
     bool app_pending = false;     // the application acknowledged without a result yet
+    bool gated = false;           // [S13] END_RECEIVED withheld until the Host's HOST_STORE_ACK
     bool event_owed = false;      // MESSAGE event not queued yet (queue was full)
     bool recovered = false;       // came back from the journal: the application may have seen it
     uint8_t result_len = 0;
@@ -177,7 +193,9 @@ class Delivery {
     void on_timer(MonoTime now);
     [[nodiscard]] MonoTime deadline() const;
     [[nodiscard]] Reply execute(const Command &cmd, MonoTime now);
-    [[nodiscard]] bool job_pending() const { return durable_.job_pending() || exchange_.job_pending(); }
+    [[nodiscard]] bool job_pending() const {
+        return durable_.job_pending() || link_.exchange().job_pending();
+    }
 
     // Root clock estimate (fed by the time slice). Re-drives operations waiting on it.
     void set_root_time(const RootTimeBound &t, MonoTime now);
@@ -190,31 +208,32 @@ class Delivery {
     // Queue space appeared: re-queue MESSAGE events that did not fit.
     void flush_events(MonoTime now);
 
+    // ---- [S13] root <-> Host bridge (delivery_host.cpp) ----
+    // With the gate on, a DURABLE RECEIVED message addressed to this (root) node is confirmed to its
+    // origin (END_RECEIVED) and released only by host_store_ack(): the terminal store is the Host's DB,
+    // not the root's journal. Off (default): the root's own journal commit is the terminal store.
+    void set_host_gate(bool on) { host_gate_ = on; }
+    [[nodiscard]] Status host_store_ack(const HostStoreAckRequest &rq, MonoTime now);
+    // The root clock estimate advanced to `now` (the Host derives root deadlines from it).
+    [[nodiscard]] RootTimeBound root_time(MonoTime now);
+
     // ---- routes (S11 resolves them; until then a bench/provisioning call) ----
     [[nodiscard]] Status install_route(const DeviceId &dest, const PathSpec &route, MonoTime expires);
-    void drop_routes() { routes_ = {}; }
+    void drop_routes() { routes_.clear(); }
 
     // ---- inspection (tests, diagnostics) ----
     [[nodiscard]] const DeliveryStats &stats() const { return stats_; }
     [[nodiscard]] const HopStats &hop_stats() const { return hop_.stats(); }
-    [[nodiscard]] const EndStats &end_stats() const { return exchange_.stats(); }
-    [[nodiscard]] EndPolicy &end_policy() { return end_policy_; }
+    [[nodiscard]] const link::EndStats &end_stats() const { return link_.exchange().end_stats(); }
     [[nodiscard]] EndSessions &sessions() { return sessions_; }
     [[nodiscard]] HopTx &hop() { return hop_; }
     [[nodiscard]] Durable &durable() { return durable_; }
-    [[nodiscard]] const EndExchange &exchange() const { return exchange_; }
+    [[nodiscard]] const link::Exchange &exchange() const { return link_.exchange(); }
     [[nodiscard]] bool ready() const { return ready_; }
     [[nodiscard]] std::size_t in_entries() const { return in_.in_use(); }
     [[nodiscard]] std::size_t free_msg_buffers() const { return msgs_.capacity() - msgs_.in_use(); }
 
   private:
-    struct RouteEntry {
-        bool used = false;
-        DeviceId dest;
-        PathSpec route;
-        MonoTime expires;
-        uint32_t last_use = 0;
-    };
     struct Accepted {
         bool used = false;
         MacAddr mac;
@@ -252,6 +271,7 @@ class Delivery {
     void retire_active(Handle h, bool persist_retire, MonoTime now);
     void fill_operation(const Op &op, lm_operation_t &out) const;
     [[nodiscard]] bool route_for(const DeviceId &dest, PathSpec &out, MonoTime now);
+    void learn_route(const EndSession &s);
     [[nodiscard]] bool build_and_send(const PathSpec &ps, ByteView record, OwnerKind kind, Handle owner,
                                       MonoTime now, Status &why);
     [[nodiscard]] link::Neighbor *neighbor_at(uint16_t addr);
@@ -260,6 +280,11 @@ class Delivery {
 
     // -- origin (delivery_tx.cpp) --
     [[nodiscard]] Reply send(const lm_send_request_t &rq, ByteView payload, MonoTime now);
+    [[nodiscard]] Reply host_send(const HostSendRequest &rq, ByteView payload, MonoTime now); // delivery_host.cpp
+    [[nodiscard]] bool gate_receipt(const InEntry &e) const {
+        return host_gate_ && e.durable && e.delivery == LM_RECEIVED;
+    }
+    void finish_take(Handle h, InEntry &e, MonoTime now);
     [[nodiscard]] Reply cancel(uint64_t op_id, MonoTime now);
     [[nodiscard]] Reply get_operation(uint64_t op_id, lm_operation_t &out);
     [[nodiscard]] Reply get_message(const lm_message_ref_t &ref, lm_operation_t &out);
@@ -278,6 +303,7 @@ class Delivery {
     void on_exchange_done(const DeviceId &peer, Status st, MonoTime now);
     static Status exchange_send(void *ctx, const PathSpec &route, ByteView record, Handle owner, MonoTime now);
     static void exchange_done(void *ctx, const DeviceId &peer, Status st, MonoTime now);
+    static RootTimeBound exchange_root_time(void *ctx, MonoTime now);
     static Status hop_may_send(void *ctx, const TxFrame &f, MonoTime now);
     static void hop_done(void *ctx, const FrameDone &f, HopEnd end, MonoTime now);
 
@@ -330,20 +356,18 @@ class Delivery {
     member::LocalIdentity &identity_;
     link::LinkLayer &link_;
     DeliveryStats stats_;
-    EndPolicy end_policy_;
     RootTimeBound anchor_;   // last estimate given by the time slice ...
     MonoTime anchor_at_;     // ... and when (local monotonic)
     RootTimeBound bound_;    // the estimate advanced to `now` (widened by the clock drift bound)
     EndSessions sessions_;
     HopTx hop_;
-    EndExchange exchange_;
     Durable durable_;
 
     Pool<MsgBuf, k_build_limits.app_messages> msgs_;
     Pool<Active, k_actives> actives_;
     Pool<InEntry, k_in_entries> in_;
     std::array<Op, k_ops> ops_{};
-    std::array<RouteEntry, k_routes> routes_{};
+    route::PathCache<k_routes> routes_; // the node's route table (S11 fills it, tests install)
     std::array<Accepted, k_accepted_ring> accepted_{};
     // Working memory of the RX and TX paths, kept out of the owner stack (docs/02: 4 KiB task).
     static constexpr std::size_t k_rec_off = 16 + 2 * wire::k_max_path; // route header + path precede the record
@@ -355,6 +379,8 @@ class Delivery {
     std::array<bool, k_actives> out_retire_{}; // retire of that slot still to be written
     std::array<bool, k_in_entries> in_j_{}; // journal slots of durable receptions
 
+    const HostSendRequest *host_tag_ = nullptr; // set only while host_send() runs send()
+    bool host_gate_ = false;
     bool ready_ = false;
     bool recovering_ = false;
     std::size_t recover_pos_ = 0;
@@ -365,8 +391,8 @@ class Delivery {
     uint32_t in_tick_ = 0;
     uint32_t arrival_ = 0;
     uint32_t accepted_tick_ = 0;
-    uint32_t route_tick_ = 0;
     MonoTime retry_kick_ = MonoTime::never(); // TX pool was full: try the receipts/frames again
+    bool slot_wait_ = false; // a send waits for the node's single exchange slot (any mode)
 };
 
 } // namespace lm::delivery

@@ -158,6 +158,15 @@ class RecordSession {
                               MutByteView plaintext, std::size_t &plaintext_len,
                               ReplayVerdict &verdict);
 
+    // open() for large records without a second buffer: `sealed` (ciphertext || tag) is replaced
+    // by the plaintext (its first plaintext_len bytes) in place. Same results and window rule as
+    // open(); on any failure the bytes written so far are zeroed, so unauthenticated plaintext
+    // never stays. PSA forbids overlapping input and output (MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS
+    // on IDF), so the record is decrypted in chunks through a small stack buffer and copied back
+    // behind the read position.
+    [[nodiscard]] Status open_in_place(uint64_t counter, ByteView aad, MutByteView sealed,
+                                       std::size_t &plaintext_len, ReplayVerdict &verdict);
+
     // Consumes `counter` in the replay window after open() returned Ok and the checks passed.
     void accept(uint64_t counter) { window_.commit(counter); }
 

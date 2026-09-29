@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build ESP-IDF apps for the four target SoCs, one after another. Never flashes, never opens a port.
-# Usage: scripts/build_targets.sh [--app NAME]... [target ...]
+# Usage: scripts/build_targets.sh [--app NAME]... [--profile LEAF|RELAY|ROOT] [target ...]
+#   --profile  LeanMesh capacity profile (Kconfig LEANMESH_PROFILE_*, default LEAF). A non-default
+#              profile builds into <root>/<app>-<profile>/<target> and does not touch baseline_espnow.
 #   apps (default: all):
 #     baseline_espnow    empty IDF + ESP-NOW size reference (docs/16); no SDK code
 #     example_node       the same bring-up + leanmesh component (SDK size = diff to baseline)
@@ -18,15 +20,18 @@ export IDF_PATH="${IDF_PATH:-$HOME/esp/esp-idf-v6.0.3}"
 root="${LEANMESH_BUILD_ROOT:-$HOME/.cache/leanmesh/build}"
 apps=()
 targets=()
+profile=LEAF
 while [ $# -gt 0 ]; do
   case "$1" in
     --app) apps+=("$2"); shift 2 ;;
+    --profile) profile="$2"; shift 2 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) targets+=("$1"); shift ;;
   esac
 done
 [ ${#apps[@]} -gt 0 ] || apps=(baseline_espnow example_node crypto_link_check)
 [ ${#targets[@]} -gt 0 ] || targets=(esp32s3 esp32c3 esp32c5 esp32c6)
+case "$profile" in LEAF|RELAY|ROOT) ;; *) echo "unknown profile $profile" >&2; exit 2 ;; esac
 
 case "$root" in "$repo"|"$repo"/*) echo "LEANMESH_BUILD_ROOT must be outside the repo" >&2; exit 2;; esac
 for app in "${apps[@]}"; do
@@ -50,12 +55,24 @@ fi
 
 for app in "${apps[@]}"; do
   proj="$repo/firmware/$app"
+  name="$app"
+  defaults=()
+  if [ "$profile" != LEAF ]; then
+    [ "$app" != baseline_espnow ] || { echo "baseline_espnow has no LeanMesh profile" >&2; exit 2; }
+    name="$app-$profile"
+  fi
   for t in "${targets[@]}"; do
-    b="$root/$app/$t"
-    echo "=== $app $t -> $b"
+    b="$root/$name/$t"
+    echo "=== $app $t $profile -> $b"
+    if [ "$profile" != LEAF ]; then
+      # Outside $b: set-target refuses to clean a directory that holds foreign files.
+      mkdir -p "$root/$name"
+      printf 'CONFIG_LEANMESH_PROFILE_%s=y\n' "$profile" > "$root/$name/$t.defaults"
+      defaults=(-DSDKCONFIG_DEFAULTS="$proj/sdkconfig.defaults;$root/$name/$t.defaults")
+    fi
     # A build dir left by another target is discarded by set-target; per-target dirs avoid that.
-    (cd "$proj" && idf.py -B "$b" -DSDKCONFIG="$b/sdkconfig" set-target "$t")
-    (cd "$proj" && idf.py -B "$b" -DSDKCONFIG="$b/sdkconfig" build)
+    (cd "$proj" && idf.py -B "$b" -DSDKCONFIG="$b/sdkconfig" "${defaults[@]}" set-target "$t")
+    (cd "$proj" && idf.py -B "$b" -DSDKCONFIG="$b/sdkconfig" "${defaults[@]}" build)
     (cd "$proj" && idf.py -B "$b" size --format json2) > "$b/size.json"
   done
 
@@ -67,9 +84,9 @@ for app in "${apps[@]}"; do
       else
         out="$root/$app-size.json"
       fi ;;
-    *) out="$root/$app-size.json" ;;
+    *) out="$root/$name-size.json" ;;
   esac
-  python3 - "$root/$app" "$out" "$head" "$app" "${targets[@]}" <<'PY'
+  python3 - "$root/$name" "$out" "$head" "$app" "${targets[@]}" <<'PY'
 import json, sys
 root, out, idf_commit, app, *targets = sys.argv[1:]
 res = {"idf_commit": idf_commit, "app": f"firmware/{app}",

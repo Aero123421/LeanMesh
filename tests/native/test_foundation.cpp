@@ -111,6 +111,27 @@ LM_TEST("spsc ring counts drops") {
     LM_CHECK(r.pop(v) && v == 1);
 }
 
+LM_TEST("spsc ring of a capacity that is not a power of two: FIFO across many wraps, full is full") {
+    SpscRing<int, 5> r;
+    int next_in = 0;
+    int next_out = 0;
+    for (int round = 0; round < 50; ++round) {
+        const int fill = 1 + round % 5; // 1..5 items per round: every index phase is visited
+        for (int i = 0; i < fill; ++i) {
+            LM_CHECK(r.push(next_in++));
+        }
+        if (fill == 5) {
+            LM_CHECK(!r.push(-1)); // exactly N fit
+        }
+        int v = 0;
+        for (int i = 0; i < fill; ++i) {
+            LM_CHECK(r.pop(v) && v == next_out++);
+        }
+        LM_CHECK(!r.pop(v));
+    }
+    LM_CHECK_EQ(r.dropped(), 10u);
+}
+
 LM_TEST("app event queue reports a gap instead of blocking the owner") {
     AppEventQueue<3> q;
     lm_event_t ev{};

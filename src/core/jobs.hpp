@@ -23,10 +23,9 @@ enum class JobOwner : uint8_t {
     None = 0,
     Test = 1, // native tests only
     Identity = 2, // S5: boot load of identity/trust/membership records
-    Link = 3,     // S5: link exchange (credential verify, EDHOC steps)
-    EndExchange = 4, // S9: end-session exchange (credential verify, EDHOC purpose 2 steps)
+    Link = 3,     // S5: the node's single exchange, every mode (credential verify, EDHOC steps)
     Durable = 5,     // S9: boot incarnation, journal open/append/read for delivery
-    Serial = 8,   // S10: root USB serial (record load, credential verify, EDHOC purpose 3)
+    Serial = 8,   // S10: root USB serial (credential verify, EDHOC purpose 3)
     Join = 12,    // S8: joiner (Flash chain, MemberCredential check)
     Ledger = 13,  // S8: root ledger (Flash, ticket check, MemberCredential signature)
 };

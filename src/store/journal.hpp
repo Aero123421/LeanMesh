@@ -29,6 +29,9 @@ namespace lm::store {
 inline constexpr std::size_t k_journal_max_payload = 512;
 inline constexpr std::size_t k_journal_header = 20;
 inline constexpr std::size_t k_journal_max_segments = 32; // 128 KiB / 4 KiB
+// Staging memory the owner lends (see Journal): at least one entry of the largest payload; a larger
+// scratch (e.g. k_journal_batch_bytes) lets apply() take batches of several entries.
+inline constexpr std::size_t k_journal_min_scratch = k_journal_header + k_journal_max_payload;
 inline constexpr std::size_t k_journal_batch_bytes = 1100;
 inline constexpr uint32_t k_commit_batch_window_us = 20'000;
 
@@ -51,7 +54,10 @@ class Journal {
   public:
     // `index` holds the live entries: its size is the durable-entry capacity of this role
     // (profile durable_pending + results). open() fails closed if Flash holds more live entries.
-    Journal(JournalLive *index, std::size_t capacity) : index_(index), capacity_(capacity) {}
+    // `scratch` (>= k_journal_min_scratch) is where every operation stages entries; it belongs to
+    // the owner's job memory (the journal is only used inside jobs) and its size bounds a batch.
+    Journal(JournalLive *index, std::size_t capacity, MutByteView scratch)
+        : index_(index), capacity_(capacity), buf_(scratch) {}
 
     // Scans all segments (two passes), rebuilds the live set, and finishes an interrupted
     // reclaim. Safe to call again after any failed operation.
@@ -93,7 +99,7 @@ class Journal {
     bool open_ = false;
     bool overflow_ = false;
     std::array<Segment, k_journal_max_segments> seg_{};
-    std::array<uint8_t, k_journal_batch_bytes> buf_{};
+    MutByteView buf_; // lent staging memory (see the constructor)
 };
 
 // Entry size on Flash for a payload of `len` bytes.

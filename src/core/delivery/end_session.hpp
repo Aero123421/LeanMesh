@@ -27,13 +27,12 @@ struct EndSession {
     Sha256Digest ctx_hash{};
     uint32_t rx_sid = 0; // ours: the peer puts it into records addressed to us
     uint32_t tx_sid = 0; // the peer's: we put it into records addressed to it
-    MonoTime born;
     MonoTime valid_until = MonoTime::never();
     uint32_t last_use = 0;
     uint32_t epoch = 0;     // changes with every installed session: sealed records remember it
     bool suspect = false;   // a whole message got no answer: the peer may have lost this session
-    PathSpec reply;         // reverse of the latest authenticated route from the peer
-    bool reply_valid = false;
+    // The way back to the peer is not kept here: the reverse of every authenticated route from it
+    // goes into the node's route table (Delivery, ARCH-D4).
 
     // In place (no temporary on the owner stack); the keys are zeroised first.
     void wipe() {
@@ -45,11 +44,9 @@ struct EndSession {
         peer_membership = MembershipGen{};
         ctx_hash = Sha256Digest{};
         rx_sid = tx_sid = 0;
-        born = MonoTime{};
         valid_until = MonoTime::never();
         last_use = epoch = 0;
         suspect = false;
-        reply_valid = false;
     }
 };
 
@@ -83,9 +80,15 @@ class EndSessions {
 // Seals one end record into `out` (header42 || ciphertext || tag16). `h` supplies message id,
 // port, kind, flags, expiry and is completed with `sid` (the peer's SID for ordinary records, our
 // own for SESSION_BIND/ACK), the next counter and the plaintext length. AAD binds the ctx hash and
-// the root term of the route header.
-[[nodiscard]] Status seal_end_record(EndSession &s, uint32_t sid, RootTerm term, wire::EndHeader h,
-                                     ByteView plain, MutByteView out, std::size_t &len);
+// the root term of the route header. The (rec, ctx_hash) form serves a session still being bound.
+[[nodiscard]] Status seal_end_record(sec::RecordSession &rec, const Sha256Digest &ctx_hash,
+                                     uint32_t sid, RootTerm term, wire::EndHeader h, ByteView plain,
+                                     MutByteView out, std::size_t &len);
+[[nodiscard]] inline Status seal_end_record(EndSession &s, uint32_t sid, RootTerm term,
+                                            wire::EndHeader h, ByteView plain, MutByteView out,
+                                            std::size_t &len) {
+    return seal_end_record(s.rec, s.ctx_hash, sid, term, h, plain, out, len);
+}
 
 struct OpenedEnd {
     wire::EndHeader header;
@@ -97,6 +100,11 @@ struct OpenedEnd {
 // Ok = fresh and authentic (window NOT advanced: the caller runs its checks, then accept()).
 // Replay = authentic duplicate (verdict Duplicate) or outside the window. AuthRejected: wrong tag,
 // including "same counter, different payload".
-[[nodiscard]] Status open_end_record(EndSession &s, RootTerm term, ByteView record, OpenedEnd &out);
+[[nodiscard]] Status open_end_record(sec::RecordSession &rec, const Sha256Digest &ctx_hash,
+                                     RootTerm term, ByteView record, OpenedEnd &out);
+[[nodiscard]] inline Status open_end_record(EndSession &s, RootTerm term, ByteView record,
+                                            OpenedEnd &out) {
+    return open_end_record(s.rec, s.ctx_hash, term, record, out);
+}
 
 } // namespace lm::delivery

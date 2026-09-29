@@ -3,7 +3,7 @@
 // SIMULATION ONLY: results are protocol evidence, never RF/range/power/hardware evidence.
 //
 //   meshsim [--nodes N] [--topology chain|full|none] [--topology-file F] [--clock virtual|realtime] [--seed S]
-//           [--serial-pty] [--no-boot]
+//           [--serial-pty] [--serial-bridge] [--no-boot]
 #include <poll.h>
 #include <unistd.h>
 
@@ -25,6 +25,7 @@ struct Options {
     meshsim::ClockMode clock = meshsim::ClockMode::Virtual;
     uint64_t seed = 1;
     bool serial_pty = false;
+    bool serial_bridge = false;
     bool boot = true;
     std::string topology_file; // links on top of --topology (usually with `none`)
 };
@@ -33,7 +34,7 @@ int usage() {
     std::fprintf(
         stderr,
         "usage: meshsim [--nodes N] [--topology chain|full|none] [--topology-file F]\n"
-        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--no-boot]\n");
+        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--serial-bridge] [--no-boot]\n");
     return 2;
 }
 
@@ -57,6 +58,8 @@ bool parse(int argc, char **argv, Options &o) {
             o.seed = std::strtoull(argv[++i], nullptr, 10);
         } else if (a == "--serial-pty") {
             o.serial_pty = true;
+        } else if (a == "--serial-bridge") {
+            o.serial_bridge = true;
         } else if (a == "--no-boot") {
             o.boot = false;
         } else {
@@ -121,6 +124,7 @@ int main(int argc, char **argv) {
         }
     }
     meshsim::Sim sim{world, opt.clock, opt.serial_pty ? &pty : nullptr};
+    sim.bridge = opt.serial_bridge && opt.serial_pty;
     reply(std::string("{\"event\":\"ready\",\"nodes\":") + std::to_string(opt.nodes) +
           ",\"clock\":\"" + (opt.clock == meshsim::ClockMode::Virtual ? "virtual" : "realtime") +
           "\",\"serial_pty\":\"" + (opt.serial_pty ? pty.slave_path() : "") + "\"}");

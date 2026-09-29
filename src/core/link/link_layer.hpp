@@ -1,6 +1,7 @@
 // The link layer of the mesh owner: RX path (header -> domain -> (MAC, SID) -> AEAD -> replay
-// commit -> dispatch), TX seal, session lifetime/rotation timers and the single link exchange
-// (EDHOC purpose 1 + SESSION_BIND). Owner thread only; public-key work runs in worker jobs.
+// commit -> dispatch), TX seal, session lifetime/rotation timers and the node's single handshake
+// exchange (link, join and end modes; exchange.hpp). Owner thread only; public-key work runs in
+// worker jobs.
 //
 // Frames that need no session (DISCOVERY, JOIN_PROXY) are not handled here (consumers come with
 // the join/mesh slices). Authenticated payloads of the session kinds (DATA, HOP_ACK, ROUTE,
@@ -88,7 +89,7 @@ class LinkLayer {
     LinkPolicy policy_;
     LinkStats stats_;
     Neighbors neighbors_;
-    RateGate gate_;
+    RateGate<MacAddr> gate_;
     LinkShared shared_;
     Exchange exchange_;
     RxSink sink_ = nullptr;

@@ -19,6 +19,12 @@ using namespace lm::store;
 
 namespace {
 
+// Staging memory of the journals under test: batch-sized, so every batch the scripts build fits.
+MutByteView journal_scratch() {
+    static std::array<uint8_t, k_journal_batch_bytes> b{};
+    return MutByteView{b.data(), b.size()};
+}
+
 constexpr CutMode k_modes[3] = {CutMode::Before, CutMode::Torn, CutMode::After};
 
 const char *mode_name(CutMode m) {
@@ -421,7 +427,7 @@ Run run_script(SimStore &s, Journal &j) {
 
 LM_TEST("POWER-* journal: cut at every mutating call keeps ACKed entries, never a partial one") {
     static std::array<JournalLive, k_cap> idx;
-    Journal ref(idx.data(), idx.size());
+    Journal ref(idx.data(), idx.size(), journal_scratch());
     SimStore refstore(small_geometry());
     LM_CHECK_OK(ref.open(refstore));
     const Run full = run_script(refstore, ref);
@@ -434,7 +440,7 @@ LM_TEST("POWER-* journal: cut at every mutating call keeps ACKed entries, never 
     LM_CHECK(full.acked.count(100) == 1);     // the long-lived entry survived every compaction
     {
         std::array<JournalLive, k_cap> idx2;
-        Journal again(idx2.data(), idx2.size());
+        Journal again(idx2.data(), idx2.size(), journal_scratch());
         LM_CHECK(recover_model(refstore, again) == full.acked); // clean reopen == acked state
     }
 
@@ -443,7 +449,7 @@ LM_TEST("POWER-* journal: cut at every mutating call keeps ACKed entries, never 
         for (CutMode m : k_modes) {
             SimStore s(small_geometry());
             std::array<JournalLive, k_cap> a;
-            Journal j(a.data(), a.size());
+            Journal j(a.data(), a.size(), journal_scratch());
             LM_CHECK_OK(j.open(s));
             s.arm_cut(k, m);
             const Run r = run_script(s, j);
@@ -454,7 +460,7 @@ LM_TEST("POWER-* journal: cut at every mutating call keeps ACKed entries, never 
             }
             s.power_restore();
             std::array<JournalLive, k_cap> b;
-            Journal j2(b.data(), b.size());
+            Journal j2(b.data(), b.size(), journal_scratch());
             const Model got = recover_model(s, j2);
             // Recovered == acked + some prefix of the in-flight batch (entries are atomic, the
             // batch is one write that may tear between entries).
@@ -480,7 +486,7 @@ LM_TEST("POWER-* journal: cut at every mutating call keeps ACKed entries, never 
                 Model want = got;
                 apply_model(want, after);
                 std::array<JournalLive, k_cap> c;
-                Journal j3(c.data(), c.size());
+                Journal j3(c.data(), c.size(), journal_scratch());
                 LM_CHECK(recover_model(s, j3) == want);
             }
             ++cases;
@@ -493,7 +499,7 @@ LM_TEST("POWER-* journal: cut at every mutating call keeps ACKed entries, never 
 LM_TEST("journal full returns NO_CAPACITY and never drops an ACKed entry") {
     SimStore s(small_geometry()); // 6 x 1 KiB
     static std::array<JournalLive, 64> idx;
-    Journal j(idx.data(), idx.size());
+    Journal j(idx.data(), idx.size(), journal_scratch());
     LM_CHECK_OK(j.open(s));
     Model acked;
     uint32_t id = 1;
@@ -511,7 +517,7 @@ LM_TEST("journal full returns NO_CAPACITY and never drops an ACKed entry") {
     LM_CHECK(st == Status::NoCapacity);
     LM_CHECK(acked.size() >= 3);
     std::array<JournalLive, 64> idx2;
-    Journal j2(idx2.data(), idx2.size());
+    Journal j2(idx2.data(), idx2.size(), journal_scratch());
     LM_CHECK(recover_model(s, j2) == acked);
     // Retiring frees space for new durable entries.
     const Op gone{JournalOp::Kind::Retire, 1, {}};
@@ -521,7 +527,7 @@ LM_TEST("journal full returns NO_CAPACITY and never drops an ACKed entry") {
     LM_CHECK_OK(run_batch(s, j2, {fresh}));
     apply_model(acked, fresh);
     std::array<JournalLive, 64> idx3;
-    Journal j3(idx3.data(), idx3.size());
+    Journal j3(idx3.data(), idx3.size(), journal_scratch());
     LM_CHECK(recover_model(s, j3) == acked);
     // Unknown retire and oversized payload are rejected before anything is written.
     const uint64_t ops = s.mutating_ops();
@@ -534,7 +540,7 @@ LM_TEST("journal full returns NO_CAPACITY and never drops an ACKed entry") {
 LM_TEST("FIX1-11 reclaim refuses to re-seal a live entry that decayed after open(); source is kept") {
     SimStore s(small_geometry()); // 6 x 1 KiB segments
     static std::array<JournalLive, 8> idx;
-    Journal j(idx.data(), idx.size());
+    Journal j(idx.data(), idx.size(), journal_scratch());
     LM_CHECK_OK(j.open(s));
     const std::vector<uint8_t> victim(100, 0x11);
     LM_CHECK_OK(run_batch(s, j, {Op{JournalOp::Kind::Put, 1, victim}}));
@@ -562,7 +568,7 @@ LM_TEST("FIX1-11 reclaim refuses to re-seal a live entry that decayed after open
 LM_TEST("journal live table limit is NO_CAPACITY (durable pending bound)") {
     SimStore s(StoreGeometry{});
     std::array<JournalLive, 3> idx;
-    Journal j(idx.data(), idx.size());
+    Journal j(idx.data(), idx.size(), journal_scratch());
     LM_CHECK_OK(j.open(s));
     for (uint32_t id = 1; id <= 3; ++id) {
         LM_CHECK_OK(run_batch(s, j, {Op{JournalOp::Kind::Put, id, {1, 2, 3}}}));
@@ -579,6 +585,23 @@ LM_TEST("journal live table limit is NO_CAPACITY (durable pending bound)") {
     const uint64_t ops = s.mutating_ops();
     LM_CHECK_OK(run_batch(s, j, {Op{JournalOp::Kind::Put, 1, {7}}, Op{JournalOp::Kind::Retire, 2, {}}}));
     LM_CHECK_EQ(s.mutating_ops() - ops, 1);
+}
+
+LM_TEST("journal staging memory: one largest entry is the minimum, a batch never exceeds the lent scratch") {
+    SimStore s(StoreGeometry{});
+    std::array<JournalLive, 4> idx;
+    std::array<uint8_t, k_journal_min_scratch> scratch{};
+    Journal small(idx.data(), idx.size(), MutByteView{scratch.data(), scratch.size() - 1});
+    LM_CHECK(small.open(s) == Status::InvalidArgument); // cannot hold one entry: refused, not truncated
+    Journal j(idx.data(), idx.size(), MutByteView{scratch.data(), scratch.size()});
+    LM_CHECK_OK(j.open(s));
+    LM_CHECK_OK(run_batch(s, j, {Op{JournalOp::Kind::Put, 1, std::vector<uint8_t>(k_journal_max_payload, 5)}}));
+    LM_CHECK(run_batch(s, j, {Op{JournalOp::Kind::Put, 2, std::vector<uint8_t>(300, 6)},
+                              Op{JournalOp::Kind::Put, 3, std::vector<uint8_t>(300, 7)}}) == Status::PayloadTooLarge);
+    std::vector<uint8_t> out(k_journal_max_payload);
+    std::size_t len = 0;
+    LM_CHECK_OK(j.read(s, 1, MutByteView{out.data(), out.size()}, len));
+    LM_CHECK(len == k_journal_max_payload && out == std::vector<uint8_t>(k_journal_max_payload, 5));
 }
 
 LM_TEST("sizeof store structures (informational)") {

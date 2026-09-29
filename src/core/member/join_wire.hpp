@@ -110,10 +110,13 @@ struct LeaveData {
 [[nodiscard]] Status encode_leave(const LeaveData &d, MutByteView out, std::size_t &len);
 [[nodiscard]] Status decode_leave(ByteView data, LeaveData &out);
 
-// ---- chunking of an object over CONTROL frames ----
-// chunk = obj_id u8 (never 0) | total u16 | offset u16 | bytes; offsets are contiguous from 0. An ack chunk has
-// total 0 and no bytes and tells the sender its object arrived (a pending approval may take minutes,
-// so waiting for the next protocol message alone would exhaust the retransmissions).
+// ---- the in-order chunk (decision ARCH-D3: the one format for objects sent in order) ----
+// chunk = tag u8 (never 0) | total u16 | offset u16 | bytes; offsets are contiguous from 0. Used
+// for the JOIN_ONLY control objects over CONTROL frames (tag = object id, S8-D4) and for the
+// handshake objects the exchange carries over a route (tag = object kind, S9-D2). An ack chunk
+// (JOIN_ONLY only) has total 0 and no bytes and tells the sender its object arrived (a pending
+// approval may take minutes, so waiting for the next protocol message alone would exhaust the
+// retransmissions).
 struct JoinChunk {
     uint8_t object_id = 0;
     uint16_t total = 0;

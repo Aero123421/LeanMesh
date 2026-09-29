@@ -205,8 +205,7 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
     case JobOwner::Ledger:
         ledger_.on_job_done(origin.slot, c.status, now);
         return;
-    case JobOwner::EndExchange: // [SLICE:S9]
-    case JobOwner::Durable:
+    case JobOwner::Durable: // [SLICE:S9]
         delivery_.on_job_done(origin.owner, origin.slot, c.status, now);
         return;
     case JobOwner::None:
@@ -380,6 +379,7 @@ void Engine::recover_radio(MonoTime now) {
 
 Reply Engine::execute(const Command &cmd, MonoTime now) {
     ++stats_.commands;
+    step_now_ = now; // hooks and completions reached from a command see the command's time
     switch (cmd.kind) {
     case CommandKind::GetCapabilities:
         return get_capabilities(cmd);
@@ -408,6 +408,8 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::Cancel:
     case CommandKind::ReportApplicationResult:
     case CommandKind::PayloadCapacity:
+    case CommandKind::RootHostSend: // [SLICE:S13]
+    case CommandKind::RootHostStoreAck:
         return delivery_.execute(cmd, now);
     default:
         // Not implemented in this build: the operation does not exist (no fake success).

@@ -66,6 +66,11 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
     if (dest == identity_.self() || dest.is_zero()) {
         return reply(Status::InvalidArgument);
     }
+    if (host_tag_ != nullptr) { // [S13] a repeated SEND of the Host: same id and hash = the same operation
+        if (const Op *known = find_op_by_message(dest, host_tag_->mid); known != nullptr) {
+            return known->hash == host_tag_->hash ? reply(Status::Ok, known->id) : reply(Status::Conflict);
+        }
+    }
     if (payload.size() > k_msg_bytes) {
         return reply(Status::PayloadTooLarge);
     }
@@ -132,10 +137,10 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
     f.payload = payload;
     Sha256Digest hash{};
     const Status hs = intent_hash(f, hash);
-    if (hs != Status::Ok) {
+    if (hs != Status::Ok || (host_tag_ != nullptr && host_tag_->hash != hash)) {
         (void)msgs_.release(mb);
         (void)actives_.release(ah);
-        return reply(hs);
+        return reply(hs != Status::Ok ? hs : Status::Conflict); // [S13] the Host's hash must be ours
     }
     Active *a = actives_.get(ah);
     a->durable = rq.storage == LM_DURABLE;
@@ -152,7 +157,7 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
     op->used = true;
     op->id = next_op_id_++;
     op->seq = ++op_tick_;
-    op->mid = MessageId{durable_.incarnation(), next_seq_++};
+    op->mid = host_tag_ != nullptr ? to_message_id(host_tag_->mid) : MessageId{durable_.incarnation(), next_seq_++};
     op->dest = dest;
     op->port = rq.app_port;
     op->delivery = static_cast<uint8_t>(rq.delivery);
@@ -444,11 +449,13 @@ void Delivery::kick_all_waiting(MonoTime now) {
 // ---- end sessions ----
 void Delivery::request_exchange(Active &a, Op &op, const PathSpec &ps, MonoTime now) {
     const MonoTime dl = local_deadline(op.expires, op.term, now);
-    if (exchange_.busy()) {
-        a.next_at = dl; // woken by the exchange completion
+    link::Exchange &x = link_.exchange();
+    if (x.busy()) {
+        a.next_at = dl; // woken when the slot is free again (end mode: by the completion)
+        slot_wait_ = true;
         return;
     }
-    const Status st = exchange_.start_initiator(op.dest, ps, now);
+    const Status st = x.start_end(op.dest, ps, now);
     if (st == Status::Ok) {
         a.next_at = dl;
         return;
@@ -468,6 +475,12 @@ Status Delivery::exchange_send(void *ctx, const PathSpec &route, ByteView record
 
 void Delivery::exchange_done(void *ctx, const DeviceId &peer, Status st, MonoTime now) {
     static_cast<Delivery *>(ctx)->on_exchange_done(peer, st, now);
+}
+
+RootTimeBound Delivery::exchange_root_time(void *ctx, MonoTime now) {
+    auto *d = static_cast<Delivery *>(ctx);
+    d->refresh_bound(now);
+    return d->bound_;
 }
 
 void Delivery::on_exchange_done(const DeviceId &peer, Status st, MonoTime now) {
@@ -515,7 +528,7 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
         return Status::Ok;
     }
     case OwnerKind::Exchange:
-        return exchange_.alive(f.owner) ? Status::Ok : Status::Conflict;
+        return link_.exchange().end_alive(f.owner) ? Status::Ok : Status::Conflict;
     default:
         return Status::Ok;
     }
@@ -524,7 +537,7 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
 void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
     refresh_bound(now);
     if (f.kind == OwnerKind::Exchange) {
-        exchange_.on_frame_done(f.owner, end, now);
+        link_.exchange().on_end_frame_done(f.owner, end == HopEnd::Accepted, now);
         return;
     }
     if (f.kind != OwnerKind::Out) {
@@ -574,11 +587,7 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
                 s->suspect = true;
             }
         } else {
-            for (RouteEntry &r : routes_) {
-                if (r.used && r.dest == op.dest) {
-                    r = RouteEntry{};
-                }
-            }
+            routes_.invalidate_device(op.dest);
         }
         if (++a->refusals > k_max_refusals) {
             finalize_active(f.owner, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::NoRoute), now);

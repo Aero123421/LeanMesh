@@ -256,6 +256,58 @@ LM_TEST("path cache: bounded, LRU replacement, revision/term/expiry/membership i
     LM_CHECK(cache.put(self, bad, later) == Status::InvalidArgument);
 }
 
+LM_TEST("path cache by identity: one entry per destination device, a move replaces it, invalidate by device") {
+    PathCache<4> cache;
+    const ShortAddr self{10};
+    auto route = [](uint16_t dest, uint8_t id, uint32_t rev) {
+        CachedRoute r;
+        r.destination = ShortAddr{dest};
+        r.device.bytes.fill(id);
+        r.root_term = RootTerm{1};
+        r.revision = PathRevision{rev};
+        r.len = 1;
+        r.path[0] = dest;
+        return r;
+    };
+    DeviceId a;
+    a.bytes.fill(0xA1);
+    DeviceId b;
+    b.bytes.fill(0xB2);
+    const MonoTime now{0};
+    const MonoTime later = now + Duration::from_s(10);
+    CachedRoute out;
+    LM_CHECK(cache.lookup(a, RootTerm{1}, now, out) == Status::NotFound);
+    LM_CHECK_OK(cache.put(self, route(20, 0xA1, 1), later));
+    LM_CHECK_OK(cache.put(self, route(21, 0xB2, 1), later));
+    LM_CHECK_OK(cache.lookup(a, RootTerm{1}, now, out));
+    LM_CHECK(out.destination == ShortAddr{20});
+    LM_CHECK_OK(cache.put(self, route(22, 0xA1, 2), later)); // device A moved: its old entry goes
+    LM_CHECK_EQ(cache.size(), 2);
+    LM_CHECK(cache.lookup(ShortAddr{20}, RootTerm{1}, now, out) == Status::NotFound);
+    LM_CHECK_OK(cache.lookup(a, RootTerm{1}, now, out));
+    LM_CHECK(out.destination == ShortAddr{22});
+    LM_CHECK(cache.put(self, route(23, 0xA1, 1), later) == Status::Conflict); // older revision of A
+    LM_CHECK(cache.lookup(a, RootTerm{2}, now, out) == Status::NotFound);      // other term: dropped
+    LM_CHECK(cache.lookup(a, RootTerm{1}, now, out) == Status::NotFound);
+    cache.invalidate_device(b);
+    LM_CHECK(cache.lookup(b, RootTerm{1}, now, out) == Status::NotFound);
+    LM_CHECK(cache.lookup(DeviceId{}, RootTerm{1}, now, out) == Status::NotFound); // zero is no identity
+    LM_CHECK_EQ(cache.size(), 0);
+    // Learned routes (reverse of traffic) fill gaps but never replace an entry at least as new, nor
+    // shorten its lifetime; a newer learned revision does replace it.
+    const MonoTime soon = now + Duration::from_s(1);
+    LM_CHECK_OK(cache.learn(self, route(30, 0xB2, 3), soon));
+    LM_CHECK_OK(cache.lookup(b, RootTerm{1}, now, out));
+    LM_CHECK_OK(cache.put(self, route(31, 0xA1, 5), MonoTime::never()));
+    LM_CHECK_OK(cache.learn(self, route(32, 0xA1, 5), soon)); // same revision: the resolved one stays
+    LM_CHECK_OK(cache.lookup(a, RootTerm{1}, later, out));
+    LM_CHECK(out.destination == ShortAddr{31});
+    LM_CHECK_OK(cache.learn(self, route(33, 0xA1, 6), soon)); // newer: taken
+    LM_CHECK_OK(cache.lookup(a, RootTerm{1}, now, out));
+    LM_CHECK(out.destination == ShortAddr{33});
+    LM_CHECK(cache.lookup(b, RootTerm{1}, soon, out) == Status::NotFound); // learned lifetime is over
+}
+
 namespace {
 
 DeviceId dev(unsigned i) {

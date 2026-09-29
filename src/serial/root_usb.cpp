@@ -5,56 +5,16 @@
 
 #include "core/wire/cbor.hpp"
 #include "core/wire/cbor_reader.hpp"
-#include "serial/pairing.hpp"
 
 namespace lm::serial {
-namespace {
-
-constexpr uint16_t k_load_slot = 1; // Handle index of the load job (index 0 is the link's own)
-
-} // namespace
 
 RootUsb::RootUsb(Engine &engine, ByteStream &out, uint64_t boot_id)
     : engine_(engine), out_(out), link_(UsbRole::Root, *this, this, boot_id, false) {}
 
-// Worker: the two records the USB session needs beyond the identity: the fleet-signed RootDelegation
-// that goes to the Host in CredR, and the paired Host. A missing paired-host record is a valid state
-// (unpaired root: every Host is refused); a read error is not "unpaired" (docs/12 §2).
-Status RootUsb::load_entry(port::JobEnv &env, void *arg) {
-    auto *l = static_cast<Load *>(arg);
-    l->rec.op = store::RecordJob::Op::Load;
-    l->rec.id = store::rec::root_delegation;
-    LM_TRY(store::record_load(env.store, l->rec));
-    LM_TRY(copy_bytes(MutByteView{l->delegation}, ByteView{l->rec.payload.data(), l->rec.payload_len}));
-    l->delegation_len = l->rec.payload_len;
-    l->rec.id = k_rec_paired_host;
-    const Status ps = store::record_load(env.store, l->rec);
-    l->paired_ok = false;
-    if (ps == Status::Ok && l->rec.payload_len == l->paired.bytes.size() &&
-        l->rec.state == k_paired_state_active) {
-        std::copy_n(l->rec.payload.begin(), l->paired.bytes.size(), l->paired.bytes.begin());
-        l->paired_ok = true;
-    } else if (ps != Status::NotFound && ps != Status::Ok) {
-        return ps;
-    }
-    return Status::Ok;
-}
-
 void RootUsb::on_started(MonoTime now) {
     now_ = now;
     started_ = true;
-    if (load_in_flight_) {
-        load_stale_ = false; // the running job's records are what this start needs too
-        return;
-    }
-    loaded_ = false;
-    load_ = Load{};
-    const Handle slot{k_load_slot, ++load_gen_ == 0 ? ++load_gen_ : load_gen_};
-    if (engine_.submit_job(JobOwner::Serial, slot, JobClass::Flash, &load_entry, &load_) == Status::Ok) {
-        load_in_flight_ = true;
-    } else {
-        ++stats_.load_failures; // worker queue full at start: the USB link stays down, mesh unaffected
-    }
+    try_open(now); // the identity is still loading at start: on_identity() opens the link
 }
 
 void RootUsb::on_stop() {
@@ -62,11 +22,7 @@ void RootUsb::on_stop() {
     link_.close();
     link_.unconfigure();
     replies_.clear();
-    loaded_ = false;
     paired_ok_ = false;
-    if (load_in_flight_) {
-        load_stale_ = true;
-    }
 }
 
 void RootUsb::on_identity(MonoTime now) {
@@ -76,46 +32,37 @@ void RootUsb::on_identity(MonoTime now) {
 
 void RootUsb::on_job_done(Handle slot, Status job_status, MonoTime now) {
     now_ = now;
-    if (slot.index != k_load_slot) {
-        link_.on_job_done(slot, job_status, now);
-        return;
-    }
-    load_in_flight_ = false;
-    if (!started_ || load_stale_) {
-        load_stale_ = false;
-        if (started_) {
-            on_started(now); // stopped and started again meanwhile: read the records afresh
-        }
-        return;
-    }
-    if (job_status != Status::Ok) {
-        ++stats_.load_failures;
-        return;
-    }
-    loaded_ = true;
-    paired_ok_ = load_.paired_ok;
-    try_open(now);
+    link_.on_job_done(slot, job_status, now);
 }
 
-// Needs the loaded records and a Ready identity (key, credential, trust anchor, delegation).
+// Needs a Ready identity: key, credential, trust anchor, the verified RootDelegation and the paired
+// Host, all read by the identity load job (one set of records, one job).
 void RootUsb::try_open(MonoTime now) {
     const member::LocalIdentity &id = engine_.identity();
-    if (!started_ || !loaded_ || id.state() != member::LocalIdentity::State::Ready || link_.configured()) {
+    if (!started_ || id.state() != member::LocalIdentity::State::Ready || link_.configured()) {
+        return;
+    }
+    const Status ps = id.paired_host_status();
+    if (ps != Status::Ok && ps != Status::NotFound) {
+        ++stats_.load_failures; // unreadable pairing record is not "unpaired" (docs/12 §2)
         return;
     }
     UsbKit kit;
     kit.key = id.key();
     kit.ccs = id.ccs();
     kit.device_cose = id.device_cose();
-    kit.delegation_cose = ByteView{load_.delegation.data(), load_.delegation_len};
+    kit.delegation_cose = id.delegation_cose();
     kit.trust = id.trust();
     kit.self = id.self();
     kit.domain = id.delegation().domain;
-    kit.paired = load_.paired; // all zero when unpaired: no DeviceId is zero, so nobody matches
-    if (link_.configure(kit) == Status::Ok) {
-        link_.open(now);
-        link_.pump_now(now);
+    kit.paired = ps == Status::Ok ? id.paired_host() : DeviceId{}; // all zero: no DeviceId matches
+    paired_ok_ = ps == Status::Ok;
+    if (link_.configure(kit) != Status::Ok) {
+        ++stats_.load_failures; // no delegation (not part of a domain): nothing to prove to a Host
+        return;
     }
+    link_.open(now);
+    link_.pump_now(now);
 }
 
 void RootUsb::on_bytes(ByteView bytes, MonoTime now) {
@@ -146,6 +93,9 @@ void RootUsb::on_step(MonoTime now) {
     }
     if (link_.deadline() <= now) {
         link_.on_timer(now);
+    }
+    if (bridge_ != nullptr) {
+        bridge_->on_step(now);
     }
 }
 

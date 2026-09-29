@@ -91,6 +91,7 @@ set_target_properties(leanmesh_host PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
 add_subdirectory(tools/lmtool) # codec CLI for differential wire tests
 add_subdirectory(tools/lmfleet) # TEST-ONLY fleet issuer (never linked into firmware)
+add_subdirectory(tools/budget_probe) # sizeof per profile for scripts/budget_report.py (never linked)
 
 if(LM_BUILD_TESTS)
     enable_testing()

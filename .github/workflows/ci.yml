@@ -49,6 +49,10 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
           ctest --test-dir "$LEANMESH_NATIVE_BUILD" --output-on-failure
+      - name: budget report (docs/16; a report, not a gate)
+        run: python3 scripts/budget_report.py --native-build "$LEANMESH_NATIVE_BUILD" --json budget-native.json
+      - uses: actions/upload-artifact@v4
+        with: { name: budget-native, path: budget-native.json }
       - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
       - name: host pytest (unit, integration, E2E against meshsim)
         run: |
@@ -71,3 +75,13 @@ jobs:
       - run: git config --global --add safe.directory '*'
       - run: scripts/third_party.sh setup
       - run: scripts/build_targets.sh ${{ matrix.target }}
+      - name: example_node with the ROOT profile
+        run: scripts/build_targets.sh --app example_node --profile ROOT ${{ matrix.target }}
+      - name: budget report (SoC compiler sizeof, map, image diff; a report, not a gate)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          python3 scripts/budget_report.py --json budget-${{ matrix.target }}.json \
+            --idf-build "$LEANMESH_BUILD_ROOT/example_node/${{ matrix.target }}" \
+            --idf-build "$LEANMESH_BUILD_ROOT/example_node-ROOT/${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with: { name: "budget-${{ matrix.target }}", path: "budget-${{ matrix.target }}.json" }

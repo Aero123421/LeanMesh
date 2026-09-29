@@ -54,7 +54,10 @@ inline constexpr uint16_t policy = 8;
 inline constexpr uint16_t root_ledger = 9;
 inline constexpr uint16_t revocation_floors = 10; // S5: member/records.cpp
 inline constexpr uint16_t root_delegation = 11;   // S5: fleet-signed RootDelegation COSE object
+inline constexpr uint16_t assignment_ticket = 12; // S8: signed AssignmentTicket, verbatim
+inline constexpr uint16_t paired_host = 13;       // S10: the root's one paired Host DeviceId (D6)
 } // namespace rec
+inline constexpr uint8_t k_paired_host_active = 1; // record state of an installed pairing
 
 // One worker job's whole memory: payload in/out plus the read/verify scratch. The owner keeps it
 // untouched until the completion is polled (docs/IMPLEMENTATION.md §3 zombie rule).

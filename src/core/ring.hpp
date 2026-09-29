@@ -51,21 +51,22 @@ template <class T, std::size_t N> class BoundedQueue {
 
 // Lock-free single-producer/single-consumer ring for driver callback -> owner hand-off.
 // The producer side is safe to call from a driver callback: fixed-size copy, no allocation, no
-// logging, no crypto (docs/15 §2). N must be a power of two.
+// logging, no crypto (docs/15 §2). Any capacity N >= 2: the indices run over [0, 2N), so a full
+// ring (distance N) and an empty one (distance 0) differ without rounding N up to a power of two.
 template <class T, std::size_t N> class SpscRing {
-    static_assert(N >= 2 && (N & (N - 1)) == 0, "capacity must be a power of two");
+    static_assert(N >= 2 && N < (1U << 30), "capacity");
 
   public:
     // Producer only.
     [[nodiscard]] bool push(const T &v) {
         const uint32_t head = head_.load(std::memory_order_relaxed);
         const uint32_t tail = tail_.load(std::memory_order_acquire);
-        if (head - tail == N) {
+        if (distance(tail, head) == N) {
             dropped_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        items_[head & (N - 1)] = v;
-        head_.store(head + 1, std::memory_order_release);
+        items_[slot(head)] = v;
+        head_.store(next(head), std::memory_order_release);
         return true;
     }
     // Consumer only.
@@ -75,8 +76,8 @@ template <class T, std::size_t N> class SpscRing {
         if (head == tail) {
             return false;
         }
-        out = items_[tail & (N - 1)];
-        tail_.store(tail + 1, std::memory_order_release);
+        out = items_[slot(tail)];
+        tail_.store(next(tail), std::memory_order_release);
         return true;
     }
     // Items the producer could not enqueue (reported in diagnostics, never silently lost).
@@ -84,6 +85,13 @@ template <class T, std::size_t N> class SpscRing {
     static constexpr std::size_t capacity() { return N; }
 
   private:
+    static constexpr uint32_t k_span = 2 * static_cast<uint32_t>(N);
+    static constexpr uint32_t next(uint32_t i) { return i + 1 == k_span ? 0 : i + 1; }
+    static constexpr std::size_t slot(uint32_t i) { return i < N ? i : i - N; }
+    static constexpr uint32_t distance(uint32_t tail, uint32_t head) {
+        return head >= tail ? head - tail : head + k_span - tail;
+    }
+
     std::array<T, N> items_{};
     std::atomic<uint32_t> head_{0};
     std::atomic<uint32_t> tail_{0};

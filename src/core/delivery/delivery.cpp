@@ -28,19 +28,20 @@ lm_device_id_t abi_dev(const DeviceId &d) {
 } // namespace
 
 Delivery::Delivery(Engine &engine, member::LocalIdentity &identity, link::LinkLayer &link)
-    : engine_(engine), identity_(identity), link_(link), hop_(engine, link),
-      exchange_(engine, identity, sessions_, end_policy_, bound_), durable_(engine) {
+    : engine_(engine), identity_(identity), link_(link), hop_(engine, link), durable_(engine) {
     HopTx::Hooks hh;
     hh.ctx = this;
     hh.may_send = &hop_may_send;
     hh.done = &hop_done;
     hop_.set_hooks(hh);
-    EndTransport et;
-    et.ctx = this;
-    et.record_buf = MutByteView{tx_scratch_.data() + k_rec_off, k_record_bytes};
-    et.send = &exchange_send;
-    et.done = &exchange_done;
-    exchange_.set_transport(et);
+    link::EndPort ep; // end sessions are set up by the node's single exchange in end mode
+    ep.ctx = this;
+    ep.sessions = &sessions_;
+    ep.record_buf = MutByteView{tx_scratch_.data() + k_rec_off, k_record_bytes};
+    ep.root_time = &exchange_root_time;
+    ep.send = &exchange_send;
+    ep.done = &exchange_done;
+    link_.exchange().set_end_port(ep);
     Durable::Hooks dh;
     dh.ctx = this;
     dh.fill = &durable_fill;
@@ -197,8 +198,7 @@ Status Delivery::start(MonoTime now) {
 }
 
 void Delivery::stop() {
-    exchange_.stop();
-    hop_.clear();
+    hop_.clear(); // the exchange itself stops with the link layer (Engine::stop_radio)
     durable_.stop();
     for (std::size_t i = 0; i < k_actives; ++i) {
         (void)actives_.release(actives_.handle_at(i));
@@ -210,7 +210,7 @@ void Delivery::stop() {
         (void)msgs_.release(msgs_.handle_at(i));
     }
     ops_ = {};
-    routes_ = {};
+    routes_.clear();
     accepted_ = {};
     out_j_ = {};
     out_retire_ = {};
@@ -219,6 +219,7 @@ void Delivery::stop() {
     ready_ = false;
     recovering_ = false;
     retry_kick_ = MonoTime::never();
+    slot_wait_ = false;
 }
 
 void Delivery::on_tx_outcome(const TxOutcome &o, MonoTime now) {
@@ -228,9 +229,7 @@ void Delivery::on_tx_outcome(const TxOutcome &o, MonoTime now) {
 
 void Delivery::on_job_done(JobOwner owner, Handle slot, Status s, MonoTime now) {
     refresh_bound(now);
-    if (owner == JobOwner::EndExchange) {
-        exchange_.on_job_done(slot, s, now);
-    } else if (owner == JobOwner::Durable) {
+    if (owner == JobOwner::Durable) {
         durable_.on_job_done(slot, s, now);
     }
 }
@@ -238,7 +237,10 @@ void Delivery::on_job_done(JobOwner owner, Handle slot, Status s, MonoTime now) 
 void Delivery::on_timer(MonoTime now) {
     refresh_bound(now);
     hop_.on_timer(now);
-    exchange_.on_timer(now);
+    if (slot_wait_ && !link_.exchange().busy()) {
+        slot_wait_ = false; // a link/join exchange ended: sends waiting for the slot go on
+        kick_all_waiting(now);
+    }
     if (now >= retry_kick_) {
         retry_kick_ = MonoTime::never();
         for (std::size_t i = 0; i < k_in_entries; ++i) {
@@ -271,8 +273,10 @@ void Delivery::on_timer(MonoTime now) {
 }
 
 MonoTime Delivery::deadline() const {
-    MonoTime next = earliest(hop_.deadline(), exchange_.deadline());
-    next = earliest(next, retry_kick_);
+    if (slot_wait_ && !link_.exchange().busy()) {
+        return MonoTime{0}; // known pending work (the slot is free), not a poll
+    }
+    MonoTime next = earliest(hop_.deadline(), retry_kick_);
     for (std::size_t i = 0; i < k_actives; ++i) {
         const Active *a = actives_.get(actives_.handle_at(i));
         if (a != nullptr) {
@@ -344,18 +348,25 @@ void Delivery::on_event_taken(const lm_event_t &ev, MonoTime now) {
         if (e == nullptr || e->st != InEntry::St::Held || e->origin != origin || e->mid != mid) {
             continue;
         }
-        (void)msgs_.release(e->msg);
-        e->msg = Handle{};
-        e->st = InEntry::St::Delivered;
-        e->len = 0;
-        if (e->durable && e->delivery != LM_APPLIED) {
-            // Marker: the application has it, the payload is no longer kept. An APPLIED message keeps
-            // its journal record until the application reports a result, so a power cut in between
-            // brings it back (flagged "recovered") for reconciliation instead of losing it.
-            ++e->version;
-            want_in_commit(h, *e, now);
+        if (gate_receipt(*e)) {
+            return; // [S13] the Host has not stored it yet: the payload and journal record stay
         }
+        finish_take(h, *e, now);
         return;
+    }
+}
+
+void Delivery::finish_take(Handle h, InEntry &e, MonoTime now) {
+    (void)msgs_.release(e.msg);
+    e.msg = Handle{};
+    e.st = InEntry::St::Delivered;
+    e.len = 0;
+    if (e.durable && e.delivery != LM_APPLIED) {
+        // Marker: the application has it, the payload is no longer kept. An APPLIED message keeps
+        // its journal record until the application reports a result, so a power cut in between
+        // brings it back (flagged "recovered") for reconciliation instead of losing it.
+        ++e.version;
+        want_in_commit(h, e, now);
     }
 }
 
@@ -387,54 +398,41 @@ Status Delivery::install_route(const DeviceId &dest, const PathSpec &route, Mono
     if (!identity_.is_member()) {
         return Status::AuthPending;
     }
-    PathSpec r = route;
-    r.origin = self_addr();
-    if (r.len < 1 || r.len > wire::k_max_path || r.dest.value() != r.path[r.len - 1U] ||
-        wire::validate_simple_path(r.origin.value(), r.path.data(), r.len) != Status::Ok) {
-        return Status::InvalidArgument;
-    }
-    RouteEntry *pick = nullptr;
-    for (RouteEntry &e : routes_) {
-        if (e.used && e.dest == dest) {
-            if (e.route.term == r.term && r.revision < e.route.revision) {
-                return Status::Conflict; // never replace a route by an older revision
-            }
-            pick = &e;
-            break;
-        }
-    }
-    for (RouteEntry &e : routes_) {
-        if (pick == nullptr && !e.used) {
-            pick = &e;
-        }
-    }
-    if (pick == nullptr) {
-        pick = &routes_[0];
-        for (RouteEntry &e : routes_) {
-            if (static_cast<int32_t>(e.last_use - pick->last_use) < 0) {
-                pick = &e;
-            }
-        }
-    }
-    *pick = RouteEntry{true, dest, r, expires, ++route_tick_};
-    return Status::Ok;
+    route::CachedRoute r;
+    r.destination = route.dest;
+    r.device = dest;
+    r.root_term = route.term;
+    r.revision = route.revision;
+    r.len = route.len;
+    r.path = route.path;
+    return routes_.put(self_addr(), r, expires); // InvalidArgument / Conflict (older revision)
+}
+
+// The reverse of an authenticated route from `s`'s peer (rx_reply_) is a route to that peer:
+// receipts and answers go back the way the traffic came when nothing newer is known.
+void Delivery::learn_route(const EndSession &s) {
+    route::CachedRoute r;
+    r.destination = rx_reply_.dest;
+    r.device = s.peer;
+    r.root_term = rx_reply_.term;
+    r.revision = rx_reply_.revision;
+    r.len = rx_reply_.len;
+    r.path = rx_reply_.path;
+    (void)routes_.learn(self_addr(), r, s.valid_until); // a malformed path is simply not learned
 }
 
 bool Delivery::route_for(const DeviceId &dest, PathSpec &out, MonoTime now) {
-    for (RouteEntry &e : routes_) {
-        if (!e.used || e.dest != dest) {
-            continue;
-        }
-        if (e.route.term != local_term() || !(now < e.expires)) {
-            e = RouteEntry{}; // stale term or lease: the resolver must supply a new one
-            return false;
-        }
-        e.last_use = ++route_tick_;
-        out = e.route;
-        out.origin = self_addr();
-        return true;
+    route::CachedRoute r;
+    if (routes_.lookup(dest, local_term(), now, r) != Status::Ok) {
+        return false; // none, or a stale term / lease: the resolver must supply a new one
     }
-    return false;
+    out.origin = self_addr();
+    out.dest = r.destination;
+    out.len = r.len;
+    out.path = r.path;
+    out.term = r.root_term;
+    out.revision = r.revision;
+    return true;
 }
 
 link::Neighbor *Delivery::neighbor_at(uint16_t addr) {
@@ -517,6 +515,16 @@ Reply Delivery::execute(const Command &cmd, MonoTime now) {
             return Reply{Status::InvalidArgument, 0, 0};
         }
         return report_result(*static_cast<const ReportRequest *>(cmd.request), cmd.payload, now);
+    case CommandKind::RootHostSend: // [S13]
+        if (cmd.request == nullptr || cmd.request_size != sizeof(HostSendRequest)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        return host_send(*static_cast<const HostSendRequest *>(cmd.request), cmd.payload, now);
+    case CommandKind::RootHostStoreAck:
+        if (cmd.request == nullptr || cmd.request_size != sizeof(HostStoreAckRequest)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        return Reply{host_store_ack(*static_cast<const HostStoreAckRequest *>(cmd.request), now), 0, 0};
     case CommandKind::PayloadCapacity:
         if (cmd.request == nullptr || cmd.request_size != sizeof(CapacityRequest)) {
             return Reply{Status::InvalidArgument, 0, 0};

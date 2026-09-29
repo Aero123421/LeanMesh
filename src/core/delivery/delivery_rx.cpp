@@ -178,8 +178,7 @@ void Delivery::deliver(const link::RxInfo &info, const wire::RouteHeader &h, Byt
     } else {
         const Status st = open_end_record(*s, RootTerm{h.root_term}, record, rx_open_);
         if (st == Status::Ok) {
-            s->reply = rx_reply_;
-            s->reply_valid = true;
+            learn_route(*s);
             s->suspect = false;
             sessions_.touch(*s);
             post_.session = s;
@@ -234,14 +233,14 @@ void Delivery::run_post(MonoTime now) {
     case Post::K::None:
         break;
     case Post::K::Carrier:
-        exchange_.on_carrier(rx_reply_, rx_open_.header, post_.carrier, rx_open_, now);
+        link_.exchange().on_end_carrier(rx_reply_, rx_open_.header, post_.carrier, rx_open_, now);
         break;
     case Post::K::Receipt:
         on_receipt(*post_.session, rx_open_, now);
         break;
     case Post::K::Resend: {
         InEntry *e = in_.get(post_.in);
-        if (e != nullptr && e->delivery != LM_BEST_EFFORT && e->st != InEntry::St::Committing) {
+        if (e != nullptr && e->delivery != LM_BEST_EFFORT && e->st != InEntry::St::Committing && !e->gated) {
             const ReceiptEv v = e->st == InEntry::St::Applied      ? ReceiptEv::AppApplied
                                 : e->st == InEntry::St::AppRejected ? ReceiptEv::AppRejected
                                 : e->app_pending                    ? ReceiptEv::AppPending
@@ -477,11 +476,8 @@ void Delivery::send_receipt_for(const DeviceId &origin, const std::array<uint8_t
         ++stats_.receipts_dropped; // no session: the origin's next round asks again
         return;
     }
-    if (s->reply_valid) {
-        ps = s->reply;
-        ps.origin = self_addr();
-    } else if (!route_for(origin, ps, now)) {
-        ++stats_.receipts_dropped;
+    if (!route_for(origin, ps, now)) {
+        ++stats_.receipts_dropped; // neither resolved nor learned from its traffic
         return;
     }
     Receipt r;

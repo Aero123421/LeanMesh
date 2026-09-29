@@ -210,7 +210,9 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
     if (due_now) {
         e->due_ev = 0xFF;
         if (static_cast<ReceiptEv>(due) == ReceiptEv::EndReceived) {
-            if (e->delivery != LM_BEST_EFFORT) {
+            if (d->gate_receipt(*e)) {
+                e->gated = true; // [S13] the Host's DB commit is the terminal store: HOST_STORE_ACK sends it
+            } else if (e->delivery != LM_BEST_EFFORT) {
                 d->send_receipt(*e, ReceiptEv::EndReceived, 0, now);
             }
             d->queue_message_event(h, *e, now);
@@ -400,6 +402,7 @@ void Delivery::recovered_in(uint32_t slot, ByteView rec, MonoTime now) {
         }
         e->recovered = true; // the application may have handled it before the power cut
         e->event_owed = true; // re-queued by flush_events() once recovery is over
+        e->gated = gate_receipt(*e); // [S13] the Host may not have stored it: its ACK releases it
     }
     (void)now;
 }

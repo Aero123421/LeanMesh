@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "port/idf/idf_owner.hpp"
+#include "serial/bridge.hpp"
 #include "serial/root_usb.hpp"
 
 namespace lm::serial {
@@ -129,6 +130,8 @@ struct RootSerial {
     IdfStream stream;
     alignas(RootUsb) uint8_t usb_storage[sizeof(RootUsb)];
     RootUsb *usb = nullptr;
+    alignas(Bridge) uint8_t bridge_storage[sizeof(Bridge)]; // S13: the Host bridge on the same owner
+    Bridge *bridge = nullptr;
 };
 alignas(RootSerial) uint8_t g_storage[sizeof(RootSerial)];
 RootSerial *g_root = nullptr;
@@ -148,6 +151,7 @@ Status idf_root_serial_start(Engine &engine, idf::IdfOwner &owner) {
     const uint64_t boot = (uint64_t{esp_random()} << 32U) | esp_random(); // HELLO boot id, informative only
     r->usb = new (r->usb_storage) RootUsb(engine, r->stream, boot);
     engine.attach_serial(r->usb);
+    r->bridge = new (r->bridge_storage) Bridge(engine, *r->usb, boot);
     g_root = r;
     return Status::Ok;
 }
@@ -157,6 +161,7 @@ void idf_root_serial_stop() {
         return;
     }
     g_root->stream.stop();
+    g_root->bridge->~Bridge(); // detaches from the adapter first
     g_root->usb->~RootUsb();
     g_root->~RootSerial();
     g_root = nullptr;

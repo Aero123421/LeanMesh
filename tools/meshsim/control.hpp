@@ -53,6 +53,7 @@ struct Sim {
     ClockMode clock;
     Pty *pty; // nullptr without --serial-pty
     bool quit = false;
+    bool bridge = false; // --serial-bridge: the root runs the S13 Host bridge (else UNSUPPORTED replies)
 };
 
 using Args = std::vector<std::string>;

@@ -122,7 +122,7 @@ class Engine {
     root::LedgerType &ledger() { return ledger_; }
     // Membership/operation events: like raise() but with the operation id and the peer they concern.
     void emit_event(uint32_t kind, uint32_t reason, uint64_t operation, const DeviceId *peer);
-    // Time of the step() being processed (hooks called from RX handling use it).
+    // Time of the step() or command being processed (hooks called from RX handling use it).
     [[nodiscard]] MonoTime step_time() const { return step_now_; }
     // [SLICE:S10] Root-only USB serial adapter (src/serial); nullptr on leaf/relay. Not owned.
     void attach_serial(SerialHook *hook) { serial_ = hook; }

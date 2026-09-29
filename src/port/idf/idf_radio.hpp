@@ -25,18 +25,10 @@ namespace lm::idf {
 
 class IdfOwner;
 
-constexpr std::size_t pow2_at_least(std::size_t n) {
-    std::size_t p = 2;
-    while (p < n) {
-        p *= 2;
-    }
-    return p;
-}
-
 class IdfRadio final : public port::Radio {
   public:
-    // RX ring: profile rx_frames plus two, rounded up to a power of two (leaf/relay 16, root 32).
-    static constexpr std::size_t k_rx_ring = pow2_at_least(k_build_limits.rx_frames + 2);
+    // RX ring: profile rx_frames plus two (leaf 10, relay 14, root 26 frames).
+    static constexpr std::size_t k_rx_ring = k_build_limits.rx_frames + 2;
 
     explicit IdfRadio(IdfOwner &owner) : owner_(owner) {}
 

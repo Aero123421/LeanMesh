@@ -30,6 +30,7 @@ from .api.deps import require
 from .api.errors import ApiError
 from .api.limits import BodyLimit
 from .auth import Principal, load_principals, sync_principals
+from .bridge import Bridge
 from .db import startup
 from .events.hub import Hub
 from .serial import NativeError, SerialLink
@@ -54,19 +55,23 @@ def _envelope(status: int, code: str, message: str, retry_after_ms: int | None =
     return JSONResponse(status_code=status, content=body)
 
 
-def _start_serial(settings: Settings, hub: Hub) -> SerialLink | None:
-    """Starts the USB serial thread when a port and a Host kit are configured. Fails closed: a bad
-    kit or a missing native helper leaves the service up (degraded: root_connected=false and
-    ready=false), it never falls back to an unauthenticated port (docs/11 §8)."""
+def _start_serial(settings: Settings, hub: Hub) -> tuple[SerialLink | None, Bridge | None]:
+    """Starts the USB serial thread and the bridge when a port and a Host kit are configured. Fails
+    closed: a bad kit or a missing native helper leaves the service up (degraded: root_connected=false
+    and ready=false), it never falls back to an unauthenticated port (docs/11 §8)."""
     if not settings.serial_device or settings.usb_kit_path is None:
-        return None
+        return None, None
     try:
         kit = settings.usb_kit_path.read_bytes()
-        return _run(SerialLink(settings.serial_device, kit, asyncio.get_running_loop(),
-                               on_state=lambda connected, _gen: hub.set_root(connected)))
+        bridge = Bridge(hub, settings)
+        link = _run(SerialLink(settings.serial_device, kit, asyncio.get_running_loop(),
+                               on_state=bridge.on_state, on_event=bridge.on_event))
+        bridge.attach(link)
+        bridge.start()  # [SLICE:S13] outbox consumer, inbox producer, reconciliation
+        return link, bridge
     except (OSError, NativeError) as exc:
         log.error("USB serial disabled: %s", exc)
-        return None
+        return None, None
 
 
 def _run(link: SerialLink) -> SerialLink:
@@ -104,9 +109,12 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
             app.state.storage = storage
             app.state.hub = hub
             app.state.principals = principals
-            app.state.serial = _start_serial(settings, hub)  # [SLICE:S10] the USB session (bridge: S13)
+            app.state.serial, app.state.bridge = _start_serial(settings, hub)  # [SLICE:S10/S13]
             yield
         finally:
+            bridge = getattr(app.state, "bridge", None)
+            if bridge is not None:
+                await bridge.stop()  # before the link: nothing new is claimed while the port closes
             link = getattr(app.state, "serial", None)
             if link is not None:
                 link.stop()  # port closed, pending requests failed as "session changed"

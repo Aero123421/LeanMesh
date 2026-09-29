@@ -299,6 +299,25 @@ LM_TEST("D01 sim 1 hop: END_RECEIVED and APP_APPLIED are separate, the applicati
 
 LM_TEST("D01 sim 4 hops: same path through three relays") { applied_flow(4); }
 
+LM_TEST("D01 sim: the destination has no route to the origin; receipts take the learned way back") {
+    DNet n(4);
+    n.set_time();
+    LM_CHECK_OK(n.dv(0).install_route(n.id(3), n.spec(0, 3), MonoTime::never())); // one direction only
+    n.node(0).notify();
+    const auto s = n.send(0, 3, LM_APPLIED, LM_VOLATILE, payload_of(4));
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    Received m;
+    LM_CHECK(n.until([&] { return n.pop(3, m, LM_EVENT_MESSAGE); }, 20000));
+    LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & end_received) != 0; }, 5000));
+    LM_CHECK_EQ(n.report(3, m.ev, LM_OUTCOME_APPLIED, Bytes{1}), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_APPLIED; }, 10000));
+    LM_CHECK_EQ(n.dv(3).stats().receipts_dropped, 0u);
+    // The learned route serves the destination's own sends too, until the session ends.
+    const auto back = n.send(3, 0, LM_RECEIVED, LM_VOLATILE, payload_of(5));
+    LM_CHECK_EQ(back.st, LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.op(3, back.op).outcome == LM_OUTCOME_RECEIVED; }, 20000));
+}
+
 
 // ---- helpers for the following scenarios ----
 namespace {
@@ -1153,11 +1172,12 @@ LM_TEST("D02 sim: destination cut after the application took a DURABLE APPLIED m
 
 // ---- measurements (reported, and guarded against silent growth) ----
 LM_TEST("measure: sizeof of the delivery state and owner stack depth of a full E2E exchange") {
-    std::printf("  [measure] sizeof: Delivery=%zu HopTx=%zu EndExchange=%zu (EndHsMem=%zu) Durable=%zu EndSessions=%zu\n"
+    std::printf("  [measure] sizeof: Delivery=%zu HopTx=%zu (end sessions use the single link::Exchange=%zu, "
+                "HandshakeSlot=%zu) Durable=%zu EndSessions=%zu\n"
                 "            EndSession=%zu MsgBuf=%zu Active=%zu InEntry=%zu Op=%zu TxFrame=%zu PathSpec=%zu\n"
                 "            Engine=%zu lm_context=%zu (SIM = root-sized arrays)\n",
-                sizeof(delivery::Delivery), sizeof(delivery::HopTx), sizeof(delivery::EndExchange),
-                sizeof(delivery::EndHsMem), sizeof(delivery::Durable), sizeof(delivery::EndSessions),
+                sizeof(delivery::Delivery), sizeof(delivery::HopTx), sizeof(link::Exchange),
+                sizeof(sec::HandshakeSlot), sizeof(delivery::Durable), sizeof(delivery::EndSessions),
                 sizeof(delivery::EndSession), sizeof(delivery::MsgBuf), sizeof(delivery::Active),
                 sizeof(delivery::InEntry), sizeof(delivery::Op), sizeof(delivery::TxFrame),
                 sizeof(delivery::PathSpec), sizeof(Engine), sizeof(lm_context));

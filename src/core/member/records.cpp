@@ -159,6 +159,8 @@ void LocalIdentity::clear() {
     dc_off_ = dc_len_ = mc_off_ = mc_len_ = 0;
     sec::secure_zero(MutByteView{deleg_cose_});
     deleg_cose_len_ = 0;
+    paired_host_.fill(0);
+    paired_status_ = Status::NotFound;
     rec_lent_ = false;
 }
 
@@ -244,6 +246,9 @@ Status LocalIdentity::run_load(port::JobEnv &env) {
     }
     LM_TRY(sec::ccs_encode(ByteView{dc_.serial.data(), dc_.serial_len}, dc_.key, MutByteView{ccs_},
                            ccs_len_));
+    if constexpr (k_root_capable) {
+        load_paired_host(env); // its own status: a pairing problem never fails the identity
+    }
 
     st = load_record(env, store::rec::revocation_floors);
     if (st == Status::Ok) {
@@ -263,6 +268,17 @@ Status LocalIdentity::run_load(port::JobEnv &env) {
         deleg_cose_len_ = rec_.payload_len;
     }
     return load_membership(env);
+}
+
+void LocalIdentity::load_paired_host(port::JobEnv &env) {
+    paired_status_ = load_record(env, store::rec::paired_host);
+    if (paired_status_ == Status::Ok && (rec_.payload_len != paired_host_.size() ||
+                                         rec_.state != store::k_paired_host_active)) {
+        paired_status_ = Status::NotFound; // no installed pairing: unpaired, every Host is refused
+    }
+    if (paired_status_ == Status::Ok) {
+        std::copy_n(rec_.payload.begin(), paired_host_.size(), paired_host_.begin());
+    }
 }
 
 Status LocalIdentity::load_membership(port::JobEnv &env) {

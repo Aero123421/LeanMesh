@@ -71,6 +71,17 @@ struct Entry {
 struct JoinDecision {
     RequestId request;
     bool approve = false;
+    // [S13] The Host re-checks who it approves: with `verify` a request whose device or credential hash
+    // differs from these is CONFLICT and stays pending (docs/19 §4 JOIN_DECIDE).
+    bool verify = false;
+    DeviceId device;
+    Sha256Digest credential{};
+};
+// A request waiting for the operator's decision (external mode), as the Host is told about it.
+struct PendingJoin {
+    RequestId request;
+    DeviceId device;
+    Sha256Digest credential{}; // SHA-256 of the DeviceCredential the joiner presented
 };
 
 class Ledger {
@@ -124,6 +135,8 @@ class Ledger {
     [[nodiscard]] std::size_t count(EntryState s) const;
     [[nodiscard]] uint64_t expected_revision() const { return expected_revision_; }
     [[nodiscard]] TxnState txn_state(std::size_t i) const { return txns_[i].state; }
+    // [S13] i < k_join_txns; false unless that transaction waits for the operator.
+    [[nodiscard]] bool pending_join(std::size_t i, PendingJoin &out) const;
     struct Stats {
         uint64_t requests = 0;
         uint64_t refused = 0;
@@ -331,6 +344,7 @@ struct NoLedger {
     void set_join_mode(JoinMode) {}
     [[nodiscard]] Status install_expected(ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
     [[nodiscard]] Status decide(const JoinDecision &, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] bool pending_join(std::size_t, PendingJoin &) const { return false; }
 };
 
 using LedgerType = std::conditional_t<k_root_capable, Ledger, NoLedger>;

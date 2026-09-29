@@ -1,6 +1,6 @@
-// Join extension of the link exchange (docs/07 §4, decision S8-D1): the JOIN_ONLY handshake of an
-// unjoined device with the root runs on the same single exchange slot and HandshakeSlot as a link
-// exchange instead of a second engine. Differences from a link exchange:
+// Join modes of the exchange (docs/07 §4, decision S8-D1): the JOIN_ONLY handshake of an unjoined
+// device with the root runs on the node's single exchange slot and HandshakeSlot. Differences from
+// a link exchange:
 //   - carriers travel in frames of kind JOIN_PROXY (SID 0); SESSION_BIND stays kind EDHOC;
 //   - CredI is the joiner's DeviceCredential alone, CredR is [root DeviceCredential, RootDelegation];
 //   - the session context has generation 0 on both sides and hashes the two DeviceCredentials, so
@@ -26,24 +26,9 @@ Status Exchange::start_join(const MacAddr &mac, JoinPeerOut *out, MonoTime now) 
     if (busy()) {
         return Status::Busy;
     }
-    if (phase_ == Phase::Linger) {
-        finish_idle();
-    }
-    if (!s_.gate.allow(mac, now, s_.policy.handshake_gate)) {
-        ++s_.stats.hs_rate_limited;
-        return Status::RateLimited;
-    }
-    LM_TRY(begin_common(mac, true, now));
-    mode_ = Mode::JoinInit;
     join_out_ = out;
     *out = JoinPeerOut{};
-    s_.gate.touch(mac, now);
-    s_.engine.random(MutByteView{xid_});
-    phase_ = Phase::SendCred;
-    expect_ = ObjKind::CredR;
-    send_object(Tx::Cred, ObjKind::CredI, false);
-    pump(now);
-    return Status::Ok;
+    return start_1hop(Mode::JoinInit, mac, now);
 }
 
 MutByteView Exchange::lend_scratch() {
@@ -62,11 +47,6 @@ uint32_t Exchange::hint() const {
         return join_out_ != nullptr && join_out_->known ? domain_hint_of(join_out_->delegation.domain) : 0;
     }
     return domain_hint_of(s_.identity.delegation().domain);
-}
-
-Neighbor *Exchange::installed() {
-    return mode_ == Mode::Link ? s_.neighbors.find_device(peer_state_.dc.device)
-                               : s_.neighbors.find_join(peer_state_.dc.device);
 }
 
 // Worker. JoinResp: the joiner's DeviceCredential (fleet signature, generation floor, key == id).

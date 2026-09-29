@@ -55,6 +55,7 @@ enum class CommandKind : uint8_t {
     RootHostStoreAck,
     RootGroupSnapshot,
     RootSleepWindow,
+    RootHostSend, // [S13] lm_send with the Host's MessageId and intent_hash (see delivery::HostSendRequest)
 };
 
 struct Command {
