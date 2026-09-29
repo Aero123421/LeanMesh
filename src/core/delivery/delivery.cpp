@@ -162,6 +162,12 @@ void Delivery::note_evidence(Op &op, uint32_t bits, MonoTime now) {
 }
 
 void Delivery::emit_op_event(const Op &op, MonoTime now) {
+    if (op.group) { // [S15] a group target reports to its group, never to the application queue
+        if (group_.child != nullptr && op.phase == Phase::Final) {
+            group_.child(group_.ctx, op, now);
+        }
+        return;
+    }
     lm_event_t ev{};
     ev.struct_size = sizeof(ev);
     ev.abi_version = LM_ABI_VERSION;
@@ -302,7 +308,8 @@ bool Delivery::event_payload(const lm_event_t &ev, ByteView &out) const {
         std::memcpy(mid.data(), ev.message_id.bytes, 16);
         for (std::size_t i = 0; i < k_in_entries; ++i) {
             const InEntry *e = in_.get(in_.handle_at(i));
-            if (e != nullptr && e->st == InEntry::St::Held && e->origin == origin && e->mid == mid) {
+            if (e != nullptr && e->st == InEntry::St::Held && e->origin == origin && e->mid == mid &&
+                e->assignment == ev.origin_assignment_generation) {
                 const InLive *l = live_of(*e);
                 if (l == nullptr) {
                     return false;
@@ -346,7 +353,7 @@ void Delivery::queue_message_event(Handle h, InEntry &e, MonoTime now) {
     ev.observed_mono_ms = now.to_ms();
     ev.peer = abi_dev(e.origin);
     ev.message_id = abi_mid(e.mid);
-    ev.origin_assignment_generation = l.origin_assignment;
+    ev.origin_assignment_generation = e.assignment;
     std::memcpy(ev.intent_hash, e.hash.data(), 32);
     ev.app_port = l.port;
     ev.payload_bytes = l.len;
@@ -365,7 +372,8 @@ void Delivery::on_event_taken(const lm_event_t &ev, MonoTime now) {
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         const Handle h = in_.handle_at(i);
         InEntry *e = in_.get(h);
-        if (e == nullptr || e->st != InEntry::St::Held || e->origin != origin || e->mid != mid) {
+        if (e == nullptr || e->st != InEntry::St::Held || e->origin != origin || e->mid != mid ||
+            e->assignment != ev.origin_assignment_generation) {
             continue;
         }
         if (host_gate_) {
@@ -528,8 +536,9 @@ bool Delivery::build_and_send(const PathSpec &ps, Lease &scratch, std::size_t re
     Handle fh;
     TxFrame *f = hop_.reserve(fh, record_class(plain.subspan(hdr_len, record_len)), nb->mac);
     if (f == nullptr) {
-        why = Status::NoCapacity; // TX pool full or the class limit: local shortage, never an RF loss
-        return false;
+        // [S16] a full mailbox of a sleeping next hop waits for its wake (backoff), it does not poll the pool
+        why = engine_.power().child_asleep(nb->mac, now) ? Status::PeerAsleep : Status::NoCapacity;
+        return false; // TX pool full or the class limit: local shortage, never an RF loss
     }
     why = link_.seal(nb->device, wire::FrameKind::Data, plain, f->frame, now);
     if (why != Status::Ok) {

@@ -70,7 +70,7 @@ std::string cmd_node(Sim &sim, const Args &a) {
     const char *radio_state = "off";
     if (e != nullptr) {
         tx = e->tx().stats();
-        static const char *const k_names[] = {"stopped", "running", "recovering", "faulted"};
+        static const char *const k_names[] = {"stopped", "running", "recovering", "faulted", "asleep"};
         radio_state = k_names[static_cast<unsigned>(e->radio_state())];
     }
     char buf[1024];
@@ -181,7 +181,11 @@ const Entry k_commands[] = {
     {"gen-send", cmd_gen_send}, {"gen-next", cmd_gen_next}, {"send-control", cmd_send_control},
     {"ctl-sink", cmd_ctl_sink}, {"ctl-recv", cmd_ctl_recv}, {"frag", cmd_frag},
     {"flood", cmd_flood},         {"sched", cmd_sched},
+    {"group-set", cmd_group_set}, {"group-send", cmd_group_send}, {"group-progress", cmd_group_progress},
+    {"group-targets", cmd_group_targets}, {"group-cancel", cmd_group_cancel},
     {"mesh", cmd_mesh},
+    {"power", cmd_power}, {"power-set", cmd_power_set}, {"sleep", cmd_sleep}, {"wake", cmd_wake},
+    {"channel", cmd_channel},
 };
 
 } // namespace

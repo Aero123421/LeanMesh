@@ -95,14 +95,15 @@ LM_TEST("C ABI config validation: exact struct size, ABI 2, role support") {
     LM_CHECK_EQ(lm_workspace_required(&bad, &ws), LM_STATUS_INVALID_ARGUMENT);
 }
 
-LM_TEST("capabilities through the owner call report nothing implemented") {
+LM_TEST("capabilities through the owner call report what is implemented and nothing qualified") {
     Fixture fx(1);
     lm_capabilities_t caps{};
     caps.struct_size = sizeof(caps);
     caps.abi_version = LM_ABI_VERSION;
     LM_CHECK_EQ(lm_get_capabilities(fx.world.node(0).ctx(), &caps), LM_STATUS_OK);
-    LM_CHECK_EQ(caps.implemented_bits, 0u);
-    LM_CHECK_EQ(caps.enabled_bits, 0u);
+    LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_GROUP_FANOUT_V2, LM_FEATURE_GROUP_FANOUT_V2); // S15
+    LM_CHECK_EQ(caps.implemented_bits & LM_FEATURE_OBJECT_4K, 0u);   // still nothing that is not built
+    LM_CHECK_EQ(caps.qualified_bits, 0u);                            // nothing is qualified by software
     LM_CHECK_EQ(caps.max_root_depth, 20u);
     LM_CHECK_EQ(caps.max_path_hops, 40u);
     LM_CHECK_EQ(caps.available_single_frame_bytes, 56u);

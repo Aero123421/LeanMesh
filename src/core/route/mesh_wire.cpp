@@ -204,8 +204,8 @@ Status encode(const Answer &m, MutByteView out, std::size_t &len) {
 }
 
 bool is_mesh_record(ByteView body) {
-    return !body.empty() && body[0] >= static_cast<uint8_t>(Op::Register) &&
-           body[0] <= static_cast<uint8_t>(Op::Answer);
+    return !body.empty() && ((body[0] >= static_cast<uint8_t>(Op::Register) && body[0] <= static_cast<uint8_t>(Op::Answer)) ||
+                             body[0] == static_cast<uint8_t>(Op::Power)); // Power: the S16 schedule report
 }
 
 namespace {

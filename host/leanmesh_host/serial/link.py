@@ -39,6 +39,7 @@ BACKOFF_MIN_S = 0.5
 BACKOFF_MAX_S = 30.0  # docs/11 §8: 0.5..30 s + jitter
 _READ_CHUNK = 16384
 _EVENT_BUF = 8192 + 64
+_WRITE_TIMEOUT_S = 2.0  # a port that takes no byte for this long is treated as lost
 
 
 class SessionGone(RuntimeError):
@@ -100,6 +101,7 @@ class SerialLink:
             raise native.NativeError(status.value, "USB kit rejected")
         self._h = ctypes.c_void_p(handle)
         self._thread: threading.Thread | None = None
+        self._tx_blocked_since: float | None = None
         self._stop = threading.Event()
         rfd, wfd = os.pipe()
         os.set_blocking(rfd, False)
@@ -119,18 +121,26 @@ class SerialLink:
         self._thread = threading.Thread(target=self._run, name="leanmesh-serial", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Stops the thread, then frees the native state. The state is destroyed only after the thread has
+        really ended (FIX2-D13): if it is still inside a native call after `timeout`, nothing is freed (a
+        leak, reported by False) rather than a use after free. Every waiting request fails with its own
+        SessionChanged that says whether it had been written."""
         if not self._h:
-            return  # already stopped
+            return True  # already stopped
         self._stop.set()
         self._wake()
         if self._thread is not None:
             self._thread.join(timeout)
-        self._fail_all(SessionGone("serial link stopped"))
+            if self._thread.is_alive():
+                log.error("serial thread did not stop within %.1fs: native session state is kept", timeout)
+                return False
+        self._fail_all("serial link stopped")
         self._lib.lmh_usb_destroy(self._h)
         self._h = ctypes.c_void_p(0)
         os.close(self._wake_r)
         os.close(self._wake_w)
+        return True
 
     def stats(self) -> dict[str, int]:
         st = native.Stats()
@@ -183,7 +193,7 @@ class SerialLink:
         backoff = BACKOFF_MIN_S
         while not self._stop.is_set():
             try:
-                port = serial.Serial(self.device, baudrate=115200, timeout=0, write_timeout=2.0)
+                port = serial.Serial(self.device, baudrate=115200, timeout=0)
             except (serial.SerialException, OSError) as exc:
                 self.last_error = f"open: {exc}"
                 log.warning("cannot open %s (%s); retry in %.1fs", self.device, exc, backoff)
@@ -213,13 +223,17 @@ class SerialLink:
         fd = port.fileno()
         self._lib.lmh_usb_open(self._h, self._now_us())
         buf = (ctypes.c_uint8 * _EVENT_BUF)()
+        self._tx_blocked_since = None
         while not self._stop.is_set():
-            self._pump(port, buf)
+            self._pump(fd, buf)
             deadline = self._lib.lmh_usb_deadline_us(self._h)
             timeout: float | None = None
             if deadline != 0xFFFFFFFFFFFFFFFF:
                 timeout = max(0.0, (deadline - self._now_us()) / 1e6)
-            readable, _, _ = select.select([fd, self._wake_r], [], [], timeout)
+            blocked = self._tx_blocked_since is not None  # bytes wait for the port: wake when it takes them
+            if blocked:
+                timeout = min(timeout if timeout is not None else _WRITE_TIMEOUT_S, 0.5)
+            readable, _, _ = select.select([fd, self._wake_r], [fd] if blocked else [], [], timeout)
             if self._wake_r in readable:
                 try:
                     os.read(self._wake_r, 4096)
@@ -238,11 +252,11 @@ class SerialLink:
         arr = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         self._lib.lmh_usb_feed(self._h, arr, len(data), self._now_us())
 
-    def _pump(self, port: serial.Serial, buf: Any) -> None:
+    def _pump(self, fd: int, buf: Any) -> None:
         """Writes queued requests, drains bytes to the port, dispatches events."""
         for _ in range(64):
             progressed = self._send_queued()
-            progressed |= self._drain_tx(port)
+            progressed |= self._drain_tx(fd)
             progressed |= self._dispatch_events(buf)
             if not progressed:
                 return
@@ -268,13 +282,29 @@ class SerialLink:
             self._resolve(pending, exc=exc)
         return True
 
-    def _drain_tx(self, port: serial.Serial) -> bool:
+    def _drain_tx(self, fd: int) -> bool:
+        """Offers the queued bytes to the port and removes exactly what the OS accepted (FIX2-D14): a write
+        may be partial or refused (the fd is non-blocking); the rest stays queued in the native state."""
         out = (ctypes.c_uint8 * 8192)()
-        n = self._lib.lmh_usb_take_tx(self._h, out, 8192)
+        n = self._lib.lmh_usb_peek_tx(self._h, out, 8192)
         if n == 0:
+            self._tx_blocked_since = None
             return False
-        port.write(bytes(out[:n]))  # bounded by write_timeout; raises SerialTimeoutException
-        return True
+        try:
+            written = os.write(fd, bytes(out[:n]))
+        except BlockingIOError:
+            written = 0
+        if written:
+            self._lib.lmh_usb_consume_tx(self._h, written)
+        if written < n:
+            now = time.monotonic()
+            if written or self._tx_blocked_since is None:
+                self._tx_blocked_since = now
+            elif now - self._tx_blocked_since > _WRITE_TIMEOUT_S:
+                raise serial.SerialTimeoutException("port accepts no bytes")
+        else:
+            self._tx_blocked_since = None
+        return written > 0
 
     def _dispatch_events(self, buf: Any) -> bool:
         ev = native.Event()
@@ -347,12 +377,12 @@ class SerialLink:
         for p in victims:
             self._resolve(p, exc=SessionChanged(why, sent=p.sent))
 
-    def _fail_all(self, exc: Exception | str) -> None:
+    def _fail_all(self, why: str) -> None:
         with self._lock:
             victims = list(self._pending.values())
             self._queue.clear()
-        for p in victims:
-            self._resolve(p, exc=SessionChanged(exc, sent=p.sent) if isinstance(exc, str) else exc)
+        for p in victims:  # one exception per request: each carries its own `sent`
+            self._resolve(p, exc=SessionChanged(why, sent=p.sent))
 
     def _link_down(self, why: str) -> None:
         was = self.connected

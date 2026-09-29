@@ -69,9 +69,15 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
             return known->hash == host_tag_->hash ? reply(Status::Ok, known->id) : reply(Status::Conflict);
         }
     }
+    if (child_mid_ != nullptr) { // [S15] a repeated dispatch of a group target is the same operation
+        if (const Op *known = find_op_by_message(dest, *child_mid_); known != nullptr) {
+            return reply(Status::Ok, known->id);
+        }
+    }
     // [S12] Up to 512 B (4096 through lm_send_object when the object lane is built and enabled, one
     // control page for control objects). Above one frame the message goes out as fragments unless
-    // strict_single_frame was asked for; a durable record must fit one journal entry.
+    // strict_single_frame was asked for. A durable 512 B message fits one journal entry (static_assert in
+    // delivery_durable.cpp).
     std::size_t max_bytes = k_msg_bytes;
     if (control) {
         max_bytes = k_control_bytes;
@@ -81,8 +87,7 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
         }
         max_bytes = gen::limits::object_bytes;
     }
-    if (payload.size() > max_bytes || (control && payload.empty()) ||
-        (rq.storage == LM_DURABLE && payload.size() > k_durable_payload_max)) {
+    if (payload.size() > max_bytes || (control && payload.empty())) {
         return reply(Status::PayloadTooLarge);
     }
     const bool strict = rq.strict_single_frame == 1;
@@ -125,6 +130,10 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
     }
     if (rq.storage == LM_DURABLE && durable_load >= k_build_limits.durable_pending) {
         return reply(Status::NoCapacity);
+    }
+    // [S16] episode budget, a sleep being prepared, a target that provably cannot wake before the deadline.
+    if (const Status pw = engine_.power().admit_send(dest, rq.expires_root_ms, now); pw != Status::Ok) {
+        return reply(pw);
     }
 
     // [S14] class share of the operation slots and LATEST: the unsent send of the same key ends
@@ -197,7 +206,10 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
     op->used = true;
     op->id = next_op_id_++;
     op->seq = ++op_tick_;
-    op->mid = host_tag_ != nullptr ? to_message_id(host_tag_->mid) : MessageId{durable_.incarnation(), next_seq_++};
+    op->mid = host_tag_ != nullptr ? to_message_id(host_tag_->mid)
+              : child_mid_ != nullptr ? to_message_id(*child_mid_)
+                                      : MessageId{durable_.incarnation(), next_seq_++};
+    op->group = child_mid_ != nullptr;
     op->dest = dest;
     op->port = rq.app_port;
     op->delivery = static_cast<uint8_t>(rq.delivery);
@@ -360,6 +372,11 @@ void Delivery::drive(Handle h, MonoTime now) {
         a->st = Active::St::WaitSession;
         request_exchange(*a, op, ps, now);
         return;
+    }
+    if (op.group && group_.gate != nullptr &&
+        !group_.gate(group_.ctx, op, s->peer_assignment.value(), s->peer_membership.value())) {
+        finalize_active(h, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::TargetGenerationChanged), now);
+        return; // the device behind this DeviceId is not the one the snapshot named (docs/22 §2)
     }
     // 5. End record: sealed once per (session, root term); a retry sends the same ciphertext. A
     // fragmented message seals its next fragment instead (never the same counter twice).
@@ -648,7 +665,7 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
         op.phase = Phase::WaitingReceipt;
         a->round_at = ((op.evidence & ev::end_received) != 0 && op.delivery == LM_APPLIED)
                           ? now + k_result_poll
-                          : now + round_timeout(a->hops);
+                          : now + round_timeout(a->hops) + engine_.power().wait_for_wake(op.dest, now); // [S16] WAIT_WAKE
         a->next_at = earliest(a->round_at, local_deadline(op.expires, op.term, now));
         return;
     case HopEnd::Failed:
@@ -670,7 +687,9 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
         } else {
             routes_.invalidate_device(op.dest);
         }
-        if (++a->refusals > k_max_refusals) {
+        // [S16] a refusal on the way to a target that sleeps by schedule (a restarted parent has no session with it
+        // until its next wake) is a wait, not a verdict: the retry backoff paces it until the deadline.
+        if (++a->refusals > k_max_refusals && !engine_.power().sleepy_target(op.dest, now)) {
             finalize_active(f.owner, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::NoRoute), now);
             return;
         }
@@ -809,7 +828,7 @@ Reply Delivery::cancel(uint64_t op_id, MonoTime now) {
 Reply Delivery::get_operation(uint64_t op_id, lm_operation_t &out) {
     const Op *op = find_op(op_id);
     if (op == nullptr) {
-        return reply(Status::NotFound);
+        return engine_.power().get_operation(op_id, out); // [S16] policy set / sleep prepare operations
     }
     fill_operation(*op, out);
     return reply(Status::Ok, op_id);
@@ -835,7 +854,7 @@ Reply Delivery::get_message(const lm_message_ref_t &ref, lm_operation_t &out) {
         return reply(Status::NotFound);
     }
     // A message received here: the destination's own record (outcome = what this node knows).
-    const InEntry *e = find_in(origin, mid);
+    const InEntry *e = find_in(origin, ref.assignment_generation, mid);
     if (e == nullptr || e->hash != hash) {
         return reply(Status::NotFound);
     }

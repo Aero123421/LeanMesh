@@ -134,6 +134,16 @@ struct JobEnv {
 // memory the owner keeps untouched (and unreused) until the completion has been polled.
 using JobFn = Status (*)(JobEnv &env, void *arg);
 
+// Stack of the worker that runs job bodies: at least twice the deepest measured body (an EDHOC
+// message_2/3 step, tests/native/test_link "EDHOC worker stack": 4344 B at -O2, 4488 B at -Og,
+// 5600 B unoptimised, x86-64; SEC-D15). An unoptimised build runs deeper, so it gets its own size
+// instead of a thinner margin. Not yet measured on a SoC (uxTaskGetStackHighWaterMark on hardware).
+#if defined(__OPTIMIZE__)
+inline constexpr std::size_t k_worker_stack_bytes = 10240;
+#else
+inline constexpr std::size_t k_worker_stack_bytes = 12288;
+#endif
+
 struct JobCompletion {
     uint16_t table_index = 0;
     uint32_t job_id = 0;
@@ -153,6 +163,46 @@ class Jobs {
 
   protected:
     ~Jobs() = default;
+};
+
+// ---- Pm (S16) ----------------------------------------------------------------------------------
+// Power management: PM locks, sleep entry and the facts of a wake. Optional (Ports::pm may be null: the
+// build then cannot sleep and reports the power modes as not enabled). Owner thread only.
+namespace pm_lock {
+// Level-triggered: the owner passes the set of reasons that need the CPU/radio awake right now, the port
+// acquires/releases the difference. There is no edge (acquire/release) API, so no path can leak a lock.
+inline constexpr uint8_t episode = 1; // an awake episode or an always-on radio: no light sleep
+inline constexpr uint8_t crypto = 2;  // a public-key job runs: CPU at full speed
+inline constexpr uint8_t flash = 4;   // a Flash job runs
+inline constexpr uint8_t radio = 8;   // a frame is on the air
+} // namespace pm_lock
+
+enum class ResetCause : uint8_t { Cold, LightWake, ModemWindow, DeepWake, Brownout, Watchdog };
+struct WakeInfo {
+    ResetCause cause = ResetCause::Cold;
+    uint8_t source = 0;             // LM_WAKE_TIMER / LM_WAKE_EXTERNAL that caused it (0 = none/unknown)
+    bool ram_complete = false;      // every byte of security state survived (never true after a reset)
+    bool elapsed_known = false;     // elapsed_upper_ms is a proven bound (RTC continuity), not a guess
+    uint64_t elapsed_upper_ms = 0;  // time asleep, rounded up
+    std::array<uint8_t, 32> retained{}; // what retain() stored before a deep sleep (RTC memory)
+    uint8_t retained_len = 0;           // 0 after a cold boot
+};
+enum class SleepStart : uint8_t { Woke, Pending, Unsupported }; // Woke: the call blocked and the CPU is back
+
+class Pm {
+  public:
+    virtual void set_locks(uint8_t mask) = 0;
+    virtual WakeInfo boot_info() = 0;
+    // Survives a deep sleep, not a power-on reset. At most 32 bytes.
+    virtual void retain(ByteView state) = 0;
+    // Starts the sleep the owner prepared (radio already stopped, records committed). LM_SLEEP_LIGHT keeps
+    // the RAM; the port either blocks until the wake and returns Woke (ESP-IDF) or returns Pending and the
+    // wake arrives later (simulation: the owner wakes itself at its deadline or Engine::power_wake()).
+    // LM_SLEEP_DEEP does not return on hardware. duration_ms 0 = no timer wake.
+    [[nodiscard]] virtual SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, WakeInfo &woke) = 0;
+
+  protected:
+    ~Pm() = default;
 };
 
 } // namespace lm::port

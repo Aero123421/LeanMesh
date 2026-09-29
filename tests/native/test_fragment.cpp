@@ -610,8 +610,16 @@ LM_TEST("D07 sim: a DURABLE 300 B message is persisted, fragmented, and confirme
     Received m;
     LM_CHECK(n.pop(3, m, LM_EVENT_MESSAGE));
     LM_CHECK(m.payload == body);
-    // A journal record holds at most k_durable_payload_max bytes of payload: more is refused up front.
-    const Bytes too_big = bytes_of(22, delivery::k_durable_payload_max + 1);
+    // FIX2-D6: the small-message limit (512 B) is also the durable limit, journalled at both ends.
+    const Bytes full = bytes_of(23, 512);
+    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, full.data(), full.size(), &op), LM_STATUS_OK);
+    n.node(0).notify();
+    LM_CHECK(n.until([&] { return n.op(0, op).outcome == LM_OUTCOME_RECEIVED; }, 60000));
+    LM_CHECK((n.op(0, op).evidence_bits & delivery::ev::persisted) != 0);
+    LM_CHECK(n.pop(3, m, LM_EVENT_MESSAGE));
+    LM_CHECK(m.payload == full);
+    // One byte more is refused up front.
+    const Bytes too_big = bytes_of(22, 513);
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, too_big.data(), too_big.size(), &op), LM_STATUS_PAYLOAD_TOO_LARGE);
 }
 

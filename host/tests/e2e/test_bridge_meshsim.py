@@ -260,6 +260,35 @@ def test_external_join_is_approved_through_the_host(bench: Callable[..., Bench])
 
 
 @pytest.mark.e2e
+@pytest.mark.scenario("J04")
+@pytest.mark.scenario("H04")
+def test_host_crash_after_join_decision_is_reconciled_by_get_request(bench: Callable[..., Bench]) -> None:
+    """FIX2-D10/D12: the Host dies after the root took JOIN_DECIDE but before it recorded the answer. The
+    restarted Host does not send it again and does not give up: it asks GET_REQUEST and finishes the operation
+    only from the ledger state (an approval is APPLIED when the ledger holds the entry)."""
+    b = bench(37, join=False, mode="external")
+    b.start_host(crash="before_commit:apply_send")
+    wait_for(lambda: b.status().get("root_connected"), 25, "root_connected")
+    assert b.sim.ok("grant 1 1 1")["status"] == "OK"
+    time.sleep(0.5)
+    node = b.sim.ok("membership 1")["device"]
+    assert b.sim.ok("join 1 96")["status"] == "OK"
+    domain = wait_for(lambda: (r := db_rows(b.host.db, "SELECT id FROM domains")) and bytes(r[0][0]).hex(), 20, "domain")
+    b.domain = domain
+    item = wait_for(lambda: (i := b.get("/v1/lifecycle/requests", domain_id=domain)["items"]) and i[0], 40, "pending")
+    op = _control(b, "JOIN_DECISION", device_id=node, decision="APPROVE", expected_revision=item["revision"])["id"]
+    assert b.host.proc.wait(timeout=30) == 9  # the root has the decision, the Host never recorded its answer
+    assert db_rows(b.host.db, "SELECT COUNT(*) FROM meta WHERE key LIKE 'join:%'")[0][0] == 1  # the lookup key
+    b.start_host()
+    wait_for(lambda: b.status().get("root_connected"), 25, "root_connected again")
+    o = wait_for(lambda: (x := b.operation(op))["state"] == "FINAL" and x, 40, "reconciled")
+    assert o["outcome"] == "APPLIED" and "ROOT_APPLIED" in {e["kind"] for e in o["evidence"]}
+    b.await_active(1)
+    assert b.sim.ok("ledger")["activated"] == 1  # decided once: the Host never sent it again
+    assert db_rows(b.host.db, "SELECT COUNT(*) FROM meta WHERE key LIKE 'join:%'")[0][0] == 0
+
+
+@pytest.mark.e2e
 @pytest.mark.scenario("H04")
 def test_cancel_of_an_unsent_message_is_exact(bench: Callable[..., Bench]) -> None:
     """The route is down before any frame of this message left the root: CANCEL is exact (CANCELLED_NOT_SENT)."""
@@ -284,7 +313,8 @@ class _Raw:
         from leanmesh_host.serial import SerialLink  # noqa: PLC0415
 
         self.loop = asyncio.new_event_loop()
-        self.link = SerialLink(port, kit.read_bytes(), self.loop)
+        self.events: list[bytes] = []
+        self.link = SerialLink(port, kit.read_bytes(), self.loop, on_event=lambda payload, _gen: self.events.append(payload))
         self.link.start()
         deadline = time.monotonic() + 20
         while not self.link.connected and time.monotonic() < deadline:
@@ -300,6 +330,37 @@ class _Raw:
     def close(self) -> None:
         self.link.stop()
         self.loop.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("H04")
+def test_host_store_ack_names_the_assignment_of_the_message_it_releases(bench: Callable[..., Bench]) -> None:
+    """FIX2-D1: MessageId + intent alone do not identify a message; after a leave/rejoin the same pair can
+    come from another assignment. A HOST_STORE_ACK for another assignment finds nothing and releases nothing;
+    the right one confirms the origin."""
+    import asyncio  # noqa: PLC0415
+
+    from leanmesh_host.wire import cbor_decode  # noqa: PLC0415
+
+    b = bench(39)
+    b.link_and_routes()
+    raw = _Raw(b.sim.ready["serial_pty"], b.kit)
+    try:
+        op = b.sim.ok("send 1 root received durable 200 0 0 c0ffee")["operation"]
+        def message() -> dict | None:  # type: ignore[type-arg]
+            raw.loop.run_until_complete(asyncio.sleep(0.1))  # lets the serial thread's hand-overs run
+            return next((cbor_decode(cbor_decode(p)[3]) for p in raw.events if cbor_decode(p)[2] == 2), None)
+
+        ev = wait_for(message, 30, "MESSAGE event")
+        args = [ev["origin"], ev["assignment_generation"], ev["message_id"], ev["intent_hash"], bytes(16), 1]
+        wrong = [args[0], args[1] + 1, *args[2:]]
+        assert raw.call(9, wrong)[0] == 24  # NOT_FOUND
+        time.sleep(1.5)
+        assert not (_node_op(b, op)["evidence_bits"] & (1 << 4))  # END_RECEIVED is still withheld
+        assert raw.call(9, args)[0] == 0
+        wait_for(lambda: _node_op(b, op)["evidence_bits"] & (1 << 4), 30, "END_RECEIVED after the right ACK")
+    finally:
+        raw.close()
 
 
 @pytest.mark.e2e
@@ -321,11 +382,13 @@ def test_serial_methods_1_to_15_answer_typed_results_or_unsupported(
     try:
         UNSUP, INVALID, CONFLICT, NOT_FOUND = 2, 1, 9, 24
         st, _, caps = raw.call(1)
-        assert st == 0 and caps is not None and caps["enabled"] == [] and caps["root_time"] is None
+        assert st == 0 and caps is not None and "GROUP_FANOUT_V2" in caps["enabled"] and caps["root_time"] is None
         assert len(caps["domain"]) == 16 and len(caps["root"]) == 32 and caps["gateway_boot"] >= 1
         assert raw.call(1, [1])[0] == INVALID  # CAPABILITIES takes no params
         st, _, nodes = raw.call(7, [None])
-        assert st == 0 and nodes == {"nodes": [], "pending": [], "revision": 0}
+        # (S17: the answer also carries the root's `channel` report, exercised in test_channel_meshsim.py)
+        assert st == 0 and {k: nodes[k] for k in ("nodes", "pending", "revision")} == {"nodes": [], "pending": [], "revision": 0}
+        assert nodes["channel"]["state"] == 0 and nodes["channel"]["epoch"] == 0
         assert raw.call(7, [os.urandom(32)])[0] == 0 and raw.call(7, [b"short"])[0] == INVALID
         # SEND: the root recomputes the intent hash. A wrong one is CONFLICT; the right one is accepted, and the
         # same MessageId + hash again is the same operation (a retry after a lost answer), other hash: CONFLICT.
@@ -370,10 +433,17 @@ def test_serial_methods_1_to_15_answer_typed_results_or_unsupported(
         assert raw.call(13, [req_id])[0] == NOT_FOUND
         # Methods of modules that have not landed: well-formed = UNSUPPORTED, malformed = INVALID_ARGUMENT.
         assert raw.call(8, [1, 0, 0, None])[0] == UNSUP and raw.call(8, [1])[0] == INVALID
-        assert raw.call(11, [1, 0])[0] == UNSUP and raw.call(11, [3, 0])[0] == INVALID
+        # CHANNEL_ACTION (S17) is a compare-and-set on the root's policy revision: freeze at revision 0 is accepted, the
+        # same revision again is stale, an action above 2 is malformed.
+        assert raw.call(11, [1, 0])[0] == 0 and raw.call(11, [1, 0])[0] == CONFLICT and raw.call(11, [3, 0])[0] == INVALID
         assert raw.call(12, [os.urandom(32), 0, 1])[0] == UNSUP
-        assert raw.call(14, [1, 0, [os.urandom(32)]])[0] == UNSUP
-        assert raw.call(15, [1, 1, os.urandom(16), 0, 16])[0] == UNSUP and raw.call(15, [1, 1, os.urandom(16), 0, 17])[0] == INVALID
+        # Groups (S15): GROUP_SET needs members of the ledger and the current revision; GROUP_TARGETS names an
+        # operation of this gateway boot (a zero token means its own snapshot).
+        assert raw.call(14, [1, 0, [os.urandom(32)]])[0] == NOT_FOUND and raw.call(14, [1, 0, [b"short"]])[0] == INVALID
+        assert raw.call(14, [1, 5, []])[0] == CONFLICT and raw.call(14, [1, 0, []])[0] == 0
+        assert raw.call(14, [1, 0, []])[0] == CONFLICT  # now at revision 1
+        assert raw.call(15, [caps["gateway_boot"], 1, os.urandom(16), 0, 16])[0] == NOT_FOUND
+        assert raw.call(15, [caps["gateway_boot"], 1, os.urandom(16), 0, 17])[0] == INVALID
     finally:
         raw.close()
     st = sim.ok("serial-status")

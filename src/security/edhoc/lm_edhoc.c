@@ -162,17 +162,30 @@ static int ecdh_pair(void *uc, psa_key_id_t *out, uint8_t x_out[P256_X_LEN]) {
 	return EDHOC_SUCCESS;
 }
 
+/* The raw agreement writes G_XY into the context and it is imported as a derivation key at once;
+ * the bytes are wiped on every path. Same result as psa_key_agreement() (which keeps the same bytes
+ * in a buffer of its own frame) at about 1.1 KiB less worker stack. */
 static int ecdh(void *uc, psa_key_id_t priv, const uint8_t *peer_x, size_t peer_len,
 		void *secret_slot) {
 	uint8_t pt[P256_POINT_LEN];
 	if (priv == PSA_KEY_ID_NULL || decompress(uc, peer_x, peer_len, pt) != EDHOC_SUCCESS) {
 		return EDHOC_ERROR_CRYPTO_FAILURE;
 	}
-	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
-	derive_attrs(&a, HASH_LEN);
+	struct lm_edhoc_crypto_ctx *c = uc;
+	size_t len = 0;
+	psa_status_t st = psa_raw_key_agreement(PSA_ALG_ECDH, priv, pt, sizeof pt, c->secret,
+						sizeof c->secret, &len);
 	psa_key_id_t out = PSA_KEY_ID_NULL;
-	const psa_status_t st = psa_key_agreement(priv, pt, sizeof pt, PSA_ALG_ECDH, &a, &out);
-	psa_reset_key_attributes(&a);
+	if (st == PSA_SUCCESS && len != HASH_LEN) {
+		st = PSA_ERROR_GENERIC_ERROR; /* a P-256 shared secret is exactly 32 bytes */
+	}
+	if (st == PSA_SUCCESS) {
+		psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
+		derive_attrs(&a, HASH_LEN);
+		st = psa_import_key(&a, c->secret, HASH_LEN, &out);
+		psa_reset_key_attributes(&a);
+	}
+	wipe(c->secret, sizeof c->secret);
 	if (st != PSA_SUCCESS) {
 		note(uc, st);
 		return EDHOC_ERROR_CRYPTO_FAILURE;
@@ -248,13 +261,25 @@ static int c_key_agreement(void *uc, const void *priv, const uint8_t *peer, size
 	return ecdh(uc, key_load(priv), peer, peer_len, secret);
 }
 
+/* ES256 over SHA-256(in): the digest is taken first and the hash is signed (psa_sign_hash), which is
+ * the same signature as psa_sign_message() but ~1.8 KiB shallower on the worker stack (SEC-D15). */
+static psa_status_t digest_of(const uint8_t *in, size_t in_len, uint8_t out[HASH_LEN]) {
+	size_t len = 0;
+	const psa_status_t st = psa_hash_compute(PSA_ALG_SHA_256, in, in_len, out, HASH_LEN, &len);
+	return st == PSA_SUCCESS && len != HASH_LEN ? PSA_ERROR_GENERIC_ERROR : st;
+}
+
 static int c_sign(void *uc, const void *priv, const uint8_t *in, size_t in_len, uint8_t *sig,
 		  size_t sig_cap, size_t *sig_len) {
 	if (sig_cap < SIG_LEN) {
 		return EDHOC_ERROR_BUFFER_TOO_SMALL;
 	}
-	const psa_status_t st = psa_sign_message(key_load(priv), PSA_ALG_ECDSA(PSA_ALG_SHA_256), in,
-						 in_len, sig, sig_cap, sig_len);
+	uint8_t h[HASH_LEN];
+	psa_status_t st = digest_of(in, in_len, h);
+	if (st == PSA_SUCCESS) {
+		st = psa_sign_hash(key_load(priv), PSA_ALG_ECDSA(PSA_ALG_SHA_256), h, sizeof h, sig,
+				   sig_cap, sig_len);
+	}
 	note(uc, st);
 	return (st == PSA_SUCCESS && *sig_len == SIG_LEN) ? EDHOC_SUCCESS : EDHOC_ERROR_CRYPTO_FAILURE;
 }
@@ -265,10 +290,16 @@ static int c_verify(void *uc, const uint8_t *pub, size_t pub_len, const uint8_t 
 	if (pub == NULL || pub_len != P256_POINT_LEN || pub[0] != 0x04 || sig_len != SIG_LEN) {
 		return EDHOC_ERROR_INVALID_ARGUMENT;
 	}
+	uint8_t h[HASH_LEN];
+	const psa_status_t hs = digest_of(in, in_len, h);
+	if (hs != PSA_SUCCESS) {
+		note(uc, hs);
+		return EDHOC_ERROR_CRYPTO_FAILURE;
+	}
 	psa_key_attributes_t a = PSA_KEY_ATTRIBUTES_INIT;
 	psa_set_key_lifetime(&a, PSA_KEY_LIFETIME_VOLATILE);
 	psa_set_key_type(&a, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
-	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_VERIFY_MESSAGE);
+	psa_set_key_usage_flags(&a, PSA_KEY_USAGE_VERIFY_HASH);
 	psa_set_key_algorithm(&a, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
 	psa_key_id_t k = PSA_KEY_ID_NULL;
 	const psa_status_t imp = psa_import_key(&a, pub, pub_len, &k);
@@ -277,8 +308,7 @@ static int c_verify(void *uc, const uint8_t *pub, size_t pub_len, const uint8_t 
 		note(uc, imp);
 		return EDHOC_ERROR_CRYPTO_FAILURE;
 	}
-	const psa_status_t st =
-		psa_verify_message(k, PSA_ALG_ECDSA(PSA_ALG_SHA_256), in, in_len, sig, sig_len);
+	const psa_status_t st = psa_verify_hash(k, PSA_ALG_ECDSA(PSA_ALG_SHA_256), h, sizeof h, sig, sig_len);
 	const psa_status_t d = psa_destroy_key(k);
 	note(uc, d); /* a public-key slot that cannot be freed is a local leak, not a peer failure */
 	note(uc, st);

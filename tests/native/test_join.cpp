@@ -70,7 +70,12 @@ struct JNet {
             boot(static_cast<uint16_t>(i));
         }
         run_ms(50);
+        root_loaded();
         eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    }
+    // The root answers once its ledger is loaded (other owners may hold the identity's record memory at boot).
+    void root_loaded() {
+        (void)run_until([&] { return eng(0).ledger().ready() || eng(0).ledger().failed(); }, 1000, 5000);
     }
 
     // Identity + trust anchor only: no delegation, no membership (the domain is learned from the root).
@@ -100,6 +105,7 @@ struct JNet {
         boot(i);
         run_ms(50);
         if (i == 0) {
+            root_loaded();
             eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
         }
     }
@@ -162,9 +168,20 @@ struct JNet {
     Bytes ticket_for(unsigned i, uint64_t generation) {
         return net.fleet.ticket(kits[i].kit, DomainId{}, net.domain, net.delegation_cose, 0, generation);
     }
+    // BUSY is local (another owner holds the record memory, e.g. at boot): the caller asks again, bounded.
+    lm_status_t install(unsigned i, uint32_t type, const Bytes &obj, lm_operation_id_t &op) {
+        lm_status_t s = LM_STATUS_BUSY;
+        (void)run_until(
+            [&] {
+                s = lm_install_control(ctx(i), type, obj.data(), obj.size(), &op);
+                return s != LM_STATUS_BUSY;
+            },
+            1000, 5000);
+        return s;
+    }
     Status install_ticket(unsigned i, const Bytes &t) {
         lm_operation_id_t op = 0;
-        const lm_status_t s = lm_install_control(ctx(i), 3, t.data(), t.size(), &op);
+        const lm_status_t s = install(i, 3, t, op);
         if (s != LM_STATUS_OK) {
             return static_cast<Status>(s);
         }
@@ -198,11 +215,51 @@ struct JNet {
     }
     Status install_expected(const Bytes &page) {
         lm_operation_id_t op = 0;
-        const lm_status_t s = lm_install_control(ctx(0), 5, page.data(), page.size(), &op);
+        const lm_status_t s = install(0, 5, page, op);
         if (s != LM_STATUS_OK) {
             return static_cast<Status>(s);
         }
         return wait_operation(0, op, 2000) == 0 ? Status::Ok : Status::Conflict;
+    }
+    // The operation's own result (the status in its event; 0xFFFF: no result within the wait).
+    uint32_t install_expected_result(const Bytes &page) {
+        lm_operation_id_t op = 0;
+        const lm_status_t s = install(0, 5, page, op);
+        return s != LM_STATUS_OK ? s : wait_operation(0, op, 2000);
+    }
+    // Any fleet-signed ExpectedSet page: `devices` are granted generation 1 with a grant hash derived from `tag`.
+    Bytes page(uint64_t revision, uint8_t index, uint8_t pages, uint8_t set_tag, const std::vector<unsigned> &devices,
+               uint8_t tag = 1) {
+        Sha256Digest set_hash{};
+        set_hash.fill(set_tag);
+        std::array<uint8_t, 1024> buf{};
+        wire::CborWriter w{MutByteView{buf}};
+        w.array(4);
+        w.uint(index);
+        w.uint(pages);
+        w.bytes(ByteView{set_hash});
+        w.array(devices.size());
+        for (unsigned d : devices) {
+            Sha256Digest g{};
+            g.fill(static_cast<uint8_t>(tag + d));
+            w.array(4);
+            w.bytes(id(d).view());
+            w.uint(1);
+            w.bytes(ByteView{g});
+            w.boolean(true);
+        }
+        LM_CHECK_OK(w.finish());
+        member::Envelope env;
+        env.type = member::k_type_expected_set;
+        env.domain = net.domain;
+        env.revision = revision;
+        env.issuer = net.fleet.trust().key_id;
+        env.request.bytes[0] = static_cast<uint8_t>(revision + index + tag);
+        return net.fleet.sign(env, w.written());
+    }
+    bool expected(unsigned i) {
+        const root::Entry *e = ledger().find(id(i));
+        return e != nullptr && e->state == root::EntryState::Expected;
     }
     // Ticket + expected entry for device i, ready for a preapproved join.
     Bytes grant(unsigned i, uint64_t generation, uint64_t revision) {
@@ -617,15 +674,17 @@ void commit_record(SimStore &store, uint16_t id, uint8_t state, ByteView payload
     LM_CHECK_OK(store::record_commit(store, *job));
 }
 
-// A ledger record as documented in src/root/ledger.cpp: confirmed u8 | assignment | membership | device |
-// request 16 | hash 32 (no credential: a departed/foreign member of the table).
+// A ledger record as documented in src/root/ledger_internal.hpp: confirmed u8 | assignment | membership |
+// consumed | device | request 16 | hash 32 (no credential: a departed/foreign member of the table). A crafted
+// Active/Left entry consumed its assignment (SEC-D4).
 void craft_entry(SimStore &store, std::size_t slot, const DeviceId &dev, root::EntryState st, uint64_t assignment,
                  uint64_t membership) {
-    std::array<uint8_t, 97> p{};
+    std::array<uint8_t, 105> p{};
     Writer w{MutByteView{p}};
     w.u8(1);
     w.u64be(assignment);
     w.u64be(membership);
+    w.u64be(st == root::EntryState::Active || st == root::EntryState::Left ? assignment : 0);
     w.bytes(dev.view());
     w.zeros(16 + 32);
     LM_CHECK_OK(w.finish());
@@ -925,7 +984,382 @@ LM_TEST("POWER-* leave (sim): power cut before/torn/after every record commit of
         }
     }
     std::printf("  [measure] leave power-cut sweep: %u cut points\n", iterations);
-    LM_CHECK(iterations >= 20);
+    LM_CHECK(iterations >= 15); // SEC-D8: the device's leave is one record commit (tombstone + floor), was two
+}
+
+// ---------------------------------------------------------------------------------------------
+// SEC-D2: the root admits a Link or End session (either direction) only for an ACTIVE ledger entry of
+// exactly this device, address, assignment and membership. No entry is no admission.
+// ---------------------------------------------------------------------------------------------
+namespace {
+
+// Nodes 1..n-1 become members with fleet-issued credentials (address i + 1, assignment/membership 1); the root
+// ledger lists them only as the test crafts it.
+void make_members(JNet &n, unsigned from, unsigned to) {
+    for (unsigned i = from; i < to; ++i) {
+        n.kits[i] = n.net.make_node(i, static_cast<uint16_t>(i + 1));
+        LM_CHECK_OK(fleet::provision(n.node(i).store, n.net, n.kits[i]));
+    }
+}
+
+delivery::PathSpec path_to_root(uint16_t origin, std::initializer_list<uint16_t> via) {
+    delivery::PathSpec p;
+    p.origin = ShortAddr{origin};
+    for (uint16_t a : via) {
+        p.path[p.len++] = a;
+    }
+    p.dest = ShortAddr{p.path[p.len - 1U]};
+    p.term = RootTerm{1};
+    p.revision = PathRevision{1};
+    return p;
+}
+
+} // namespace
+
+LM_TEST("SEC-2 root-initiated link: refused unless the ledger lists the member ACTIVE with this assignment/membership/address") {
+    JNet n(4, 71, false);
+    make_members(n, 1, 4);
+    craft_entry(n.node(0).store, 0, n.id(1), root::EntryState::Left, 1, 1);   // address 2: departed
+    craft_entry(n.node(0).store, 1, n.id(2), root::EntryState::Active, 2, 1); // address 3: other assignment
+    craft_entry(n.node(0).store, 2, n.id(3), root::EntryState::Active, 1, 1); // address 4: exactly this credential
+    n.start_all();
+    for (unsigned i = 1; i < 4; ++i) {
+        LM_CHECK_OK(n.eng(0).link().connect(n.node(i).radio.mac(), n.node(0).clock.now()));
+        n.node(0).notify();
+        n.run_ms(4000);
+    }
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(2)) == nullptr);
+    LM_CHECK(n.linked(0, 3)); // the one the ledger lists exactly
+    LM_CHECK(n.eng(0).link().stats().cred_rejected >= 2u);
+    // A member-initiated attempt of the refused ones fails the same way.
+    n.run_ms(31000);
+    LM_CHECK_OK(n.eng(2).link().connect(n.node(0).radio.mac(), n.node(2).clock.now()));
+    n.node(2).notify();
+    n.run_ms(4000);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(2)) == nullptr);
+}
+
+LM_TEST("SEC-2 end session with the root: refused in both directions for a member the ledger does not list ACTIVE") {
+    JNet n(3, 72, false);
+    n.set_link(0, 2, false); // 0 - 1 - 2: node 2 reaches the root only over the relay
+    make_members(n, 1, 3);
+    craft_entry(n.node(0).store, 0, n.id(1), root::EntryState::Active, 1, 1); // the relay is a member
+    craft_entry(n.node(0).store, 1, n.id(2), root::EntryState::Left, 1, 1);   // node 2 left
+    n.start_all();
+    LM_CHECK_OK(n.eng(1).link().connect(n.node(0).radio.mac(), n.node(1).clock.now()));
+    n.node(1).notify();
+    n.run_ms(3000);
+    LM_CHECK_OK(n.eng(2).link().connect(n.node(1).radio.mac(), n.node(2).clock.now()));
+    n.node(2).notify();
+    n.run_ms(3000);
+    LM_CHECK(n.linked(0, 1) && n.linked(1, 2));
+    // Node 2 -> root over 1 (member-initiated end handshake).
+    LM_CHECK_OK(n.eng(2).link().exchange().start_end(n.id(0), path_to_root(3, {2, 1}), n.node(2).clock.now()));
+    n.node(2).notify();
+    n.run_ms(15000);
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(2)) == nullptr);
+    LM_CHECK(n.eng(2).delivery().sessions().find_peer(n.id(0)) == nullptr);
+    LM_CHECK(n.eng(0).link().exchange().end_stats().cred_rejected >= 1u);
+    // Root -> node 2 (root-initiated end handshake).
+    n.run_ms(31000);
+    delivery::PathSpec back = path_to_root(1, {2, 3});
+    LM_CHECK_OK(n.eng(0).link().exchange().start_end(n.id(2), back, n.node(0).clock.now()));
+    n.node(0).notify();
+    n.run_ms(15000);
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(2)) == nullptr);
+    LM_CHECK(n.eng(2).delivery().sessions().find_peer(n.id(0)) == nullptr);
+}
+
+// SEC-D1: what the root sends at PREPARE is not a credential yet. A joiner that keeps it, never stores, never
+// answers and lets the reservation run out holds nothing an ordinary member accepts.
+LM_TEST("SEC-1 the PREPARE artifact never opens an ordinary session with a member peer") {
+    JNet n(3, 81, false);
+    make_members(n, 2, 3); // node 2: an ordinary member (address 3), no ledger involvement
+    n.start_all();
+    n.grant(1, 1, 1);
+    LM_CHECK(n.join(1, 0x71) != 0);
+    // What the device received in JoinPrepare, as its PREPARED record holds it (request | nonce | hash | credential).
+    auto rec = std::make_unique<store::RecordJob>();
+    const bool got = n.run_until(
+        [&] {
+            rec->op = store::RecordJob::Op::Load;
+            rec->id = store::rec::membership_prepared;
+            return store::record_load(n.node(1).store, *rec) == Status::Ok && rec->state == member::k_prepared_state;
+        },
+        20000, 1);
+    LM_CHECK(got);
+    n.set_link(0, 1, false); // the hostile joiner goes silent: no JoinStored, the reservation lapses
+    const Bytes artifact(rec->payload.begin() + member::k_prepared_head, rec->payload.begin() + rec->payload_len);
+    // Hostile firmware installs the artifact as its ACTIVE credential without any check and asks a member for a link.
+    member::RootDelegation deleg;
+    LM_CHECK_OK(member::check_root_delegation(n.net.fleet.trust(), view(n.net.delegation_cose), deleg));
+    member::Envelope env;
+    ByteView data;
+    member::MemberCredential mc;
+    LM_CHECK_OK(member::peek_signed(view(artifact), member::k_type_member_credential, env, data));
+    LM_CHECK_OK(member::decode_member_credential(data, mc));
+    n.run_ms(130000); // the reservation (120 s) is over at the root
+    n.mem(1).stop();  // the join state machine is out of the way (hostile firmware does not run it)
+    LM_CHECK_OK(n.eng(1).identity().adopt_member(deleg, mc, view(artifact)));
+    const uint64_t rejected = n.eng(2).link().stats().cred_rejected;
+    LM_CHECK_OK(n.eng(1).link().connect(n.node(2).radio.mac(), n.node(1).clock.now()));
+    n.node(1).notify();
+    n.run_ms(6000);
+    LM_CHECK(n.eng(2).link().neighbors().find_device(n.id(1)) == nullptr);
+    LM_CHECK(!n.linked(1, 2));
+    LM_CHECK(n.eng(2).link().stats().cred_rejected > rejected); // refused by the peer's own signature check
+}
+
+// SEC-D4: ticket modes (docs/07 §8, control.cddl note 3). Mode 0 needs the device's fresh nonce, which no API can
+// hand to the fleet yet: refused (fail closed) by the device at install and by the root when presented anyway.
+LM_TEST("SEC-4 a mode-0 ticket (fresh device nonce) is refused: by the device at install, by the root when presented") {
+    JNet n(2, 83);
+    std::array<uint8_t, 16> nonce{};
+    nonce.fill(0x5A);
+    const Bytes t0 = n.net.fleet.ticket(n.kits[1].kit, DomainId{}, n.net.domain, n.net.delegation_cose, 0, 1, 0, &nonce);
+    LM_CHECK_EQ(n.install_ticket(1, t0), Status::Unsupported);
+    // A device whose ticket record was written behind the install check: the root does not act on it.
+    n.node(1).power_cut();
+    n.node(1).store.power_restore();
+    commit_record(n.node(1).store, store::rec::assignment_ticket, 0, view(t0));
+    n.boot(1);
+    n.run_ms(100);
+    LM_CHECK_OK(n.install_expected(n.expected_page(1, 1, t0, 1)));
+    const uint64_t op = n.join(1, 0x72);
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::Unsupported));
+    LM_CHECK_EQ(n.ledger().stats().prepared, 0ull);
+    LM_CHECK(!n.eng(1).identity().is_member());
+}
+
+// SEC-D4: the root keeps what a device consumed (its highest ACTIVE assignment generation) in the ledger entry
+// itself, so a consumed grant stays consumed even when the floor table has no room for the departed device.
+LM_TEST("SEC-4 a consumed mode-1 grant is never accepted again by the root, even with a full floor table") {
+    JNet n(2, 84, false);
+    member::Floors full;
+    for (std::size_t i = 0; i < member::k_max_floors; ++i) {
+        DeviceId d;
+        d.bytes.fill(static_cast<uint8_t>(0xA0 + i));
+        LM_CHECK_OK(full.raise(d, 1, 1));
+    }
+    LM_CHECK_OK(fleet::provision(n.node(0).store, n.net, n.kits[0], true, &full)); // no room for another floor
+    n.start_all();
+    const Bytes t = n.grant(1, 1, 1);
+    lm_status_t st = 0;
+    uint64_t op = n.join(1, 0x73, LM_JOIN_NEW, &st);
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), 0u);
+    n.run_ms(6000);
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, lop, 5000), 0u);
+    n.run_ms(1000);
+    LM_CHECK(n.ledger().find(n.id(1)) != nullptr && n.ledger().find(n.id(1))->state == root::EntryState::Left);
+    // A copy of the device without any memory of it (no floors, no LEFT tombstone) presents the same ticket; an
+    // expected page grants it (again). Only the root can refuse now.
+    n.node(1).power_cut();
+    n.node(1).store.power_restore();
+    for (uint8_t slot = 0; slot < 2; ++slot) {
+        (void)n.node(1).store.slot_erase(store::rec::membership, slot);
+        (void)n.node(1).store.slot_erase(static_cast<uint16_t>(store::rec::membership | store::k_marker_flag), slot);
+    }
+    const member::Floors none;
+    std::array<uint8_t, 8> fbuf{};
+    std::size_t flen = 0;
+    LM_CHECK_OK(member::encode_floors(none, MutByteView{fbuf}, flen));
+    commit_record(n.node(1).store, store::rec::revocation_floors, 0, ByteView{fbuf.data(), flen});
+    n.boot(1);
+    n.run_ms(31000);
+    LM_CHECK_OK(n.install_expected(n.expected_page(1, 1, t, 2)));
+    op = n.join(1, 0x74, LM_JOIN_NEW, &st);
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::Conflict));
+    LM_CHECK_EQ(n.ledger().stats().prepared, 1ull); // one reservation ever: the first join
+    LM_CHECK(!n.eng(1).identity().is_member());
+}
+
+// SEC-D8: a leave is APPLIED only together with the device's own record of what it consumed. That record needs no
+// room in the revocation-floor table (it rides in the membership tombstone), so a full table cannot lose it.
+LM_TEST("SEC-8 leave with a full floor table still keeps the device's own floor; the consumed ticket is refused locally") {
+    JNet n(2, 86, false);
+    member::Floors full;
+    for (std::size_t i = 0; i < member::k_max_floors; ++i) {
+        DeviceId d;
+        d.bytes.fill(static_cast<uint8_t>(0xB0 + i));
+        LM_CHECK_OK(full.raise(d, 1, 1));
+    }
+    sim::ProvisionInput in; // device 1: identity, trust and a floor table without room
+    in.scalar32 = ByteView{n.kits[1].kit.scalar};
+    in.device_cose = view(n.kits[1].kit.device_cose);
+    in.trust = n.net.fleet.trust();
+    in.floors = &full;
+    LM_CHECK_OK(sim::provision_store(n.node(1).store, in));
+    n.start_all();
+    LM_CHECK_EQ(n.join_device(1, 0x75, 1, 1), 0u);
+    n.run_ms(6000);
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, lop, 5000), 0u); // APPLIED, with the floor retained
+    n.reboot(1);
+    LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_UNASSIGNED));
+    // The same (consumed) ticket again: the device refuses it itself, the root never hears of it.
+    n.run_ms(31000);
+    LM_CHECK_OK(n.install_expected(n.expected_page(1, 1, n.tickets[1], 2)));
+    const uint64_t requests = n.ledger().stats().requests;
+    lm_status_t st = 0;
+    const uint64_t op = n.join(1, 0x76, LM_JOIN_NEW, &st);
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, op, 60000), static_cast<uint32_t>(Status::Revoked));
+    LM_CHECK_EQ(n.ledger().stats().requests, requests);
+}
+
+// SEC-D7: an ExpectedSet revision is one signed set: its pages carry one set hash and page count, a page is taken
+// once (the same bytes again are the same answer), and the progress survives a restart. A failure after the first
+// entry of a page changed is RECOVERY_REQUIRED (authorisation moved), never an ordinary refusal; the same page
+// completes it.
+LM_TEST("SEC-7 ExpectedSet: one set per revision, a page once, page < pages, progress durable") {
+    JNet n(4, 87);
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 0, 2, 0x11, {1})), 0u);
+    LM_CHECK(n.expected(1));
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 0, 2, 0x11, {1})), 0u); // the same page again: same answer
+    // The same revision and page with other entries, the same revision with another set hash or page count:
+    // not this set.
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 0, 2, 0x11, {2})), static_cast<uint32_t>(Status::Conflict));
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 1, 2, 0x22, {2})), static_cast<uint32_t>(Status::Conflict));
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 1, 3, 0x11, {2})), static_cast<uint32_t>(Status::Conflict));
+    LM_CHECK(!n.expected(2));
+    // A page number outside its own set.
+    LM_CHECK(n.install_expected_result(n.page(6, 2, 2, 0x33, {3})) != 0u);
+    LM_CHECK(!n.expected(3));
+    // Revision 5 progress is durable: after a restart the root still knows page 0 and its content.
+    n.reboot(0);
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 0, 2, 0x11, {2})), static_cast<uint32_t>(Status::Conflict));
+    LM_CHECK_EQ(n.install_expected_result(n.page(5, 1, 2, 0x11, {2})), 0u);
+    LM_CHECK(n.expected(1) && n.expected(2));
+    LM_CHECK_EQ(n.ledger().manifest().received, 3u);
+}
+
+LM_TEST("SEC-7 ExpectedSet: an entry commit failing after the first entry changed is RECOVERY_REQUIRED; the same page completes it") {
+    JNet n(4, 88);
+    SimStore &st = n.node(0).store;
+    // Page with two entries: the root commits its progress mark, then entry 1, then entry 2 (the one that fails).
+    const Bytes p = n.page(3, 0, 1, 0x44, {1, 2});
+    bool partial = false;
+    for (uint64_t k = 0; k < 12 && !partial; ++k) {
+        JNet m(4, 88);
+        SimStore &ms = m.node(0).store;
+        ms.arm_cut(ms.mutating_ops() + k, CutMode::Before);
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_install_control(m.ctx(0), 5, p.data(), p.size(), &op), LM_STATUS_OK);
+        const bool fired = m.run_until([&] { return ms.cut_fired(); }, 2000, 1);
+        ms.power_restore(); // a transient Flash failure: the node keeps running
+        const uint32_t reason = m.wait_operation(0, op, 2000);
+        if (!fired) {
+            break;
+        }
+        if (m.expected(1) && !m.expected(2)) { // entry 1 changed, entry 2 did not: authorisation moved
+            partial = true;
+            LM_CHECK_EQ(reason, static_cast<uint32_t>(Status::RecoveryRequired));
+            LM_CHECK_EQ(m.install_expected_result(p), 0u); // the same page again completes the set
+            LM_CHECK(m.expected(1) && m.expected(2));
+            LM_CHECK_EQ(m.install_expected_result(m.page(3, 0, 1, 0x44, {3})), static_cast<uint32_t>(Status::Conflict));
+        }
+    }
+    LM_CHECK(partial);
+    (void)st;
+}
+
+// SEC-Da (docs/07 §2-§3): the optional DiscoveryScopeKey narrows discovery. A scoped root offers only to hellos that
+// carry its scope's tag and tags its offers; a scoped device follows only offers with its scope's tag. The tag is a
+// filter every holder of the key can make: it never authorises (the handshake and the credentials do).
+LM_TEST("SEC-a DiscoveryScopeKey: only a hello of the root's scope gets an offer; an untagged hint is not followed") {
+    JNet n(4, 91, false);
+    const std::array<uint8_t, 32> scope_a{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17};
+    const std::array<uint8_t, 32> scope_b{9, 9, 9};
+    commit_record(n.node(0).store, store::rec::discovery_scope, 0, ByteView{scope_a});
+    commit_record(n.node(1).store, store::rec::discovery_scope, 0, ByteView{scope_a});
+    commit_record(n.node(2).store, store::rec::discovery_scope, 0, ByteView{scope_b}); // another scope
+    // node 3 holds no scope key
+    n.start_all();
+    const uint64_t hs1 = n.eng(1).link().stats().hs_started;
+    lm_status_t st = 0;
+    n.grant(1, 1, 1);
+    uint64_t op = n.join(1, 0x77, LM_JOIN_NEW, &st);
+    // A forged offer without the tag, echoing device 1's hello: not followed (no handshake is spent on it).
+    std::array<uint8_t, 64> frame{};
+    std::size_t len = 0;
+    member::OfferHint hint;
+    n.run_ms(900);
+    LM_CHECK_OK(member::encode_discovery(true, n.eng(1).membership().hello_nonce(), link::domain_hint_of(n.net.domain),
+                                         MutByteView{frame}, len, &hint));
+    n.world.inject(n.node(3).radio.mac(), 3, n.node(1).radio.mac(), ByteView{frame.data(), len});
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), 0u); // the scoped root answered with a tagged offer
+    // The JOIN_ONLY handshake with the root and the first ordinary link after it; nothing for the forged hint.
+    LM_CHECK_EQ(n.eng(1).link().stats().hs_started - hs1, 2u);
+    n.grant(2, 1, 2);
+    op = n.join(2, 0x78, LM_JOIN_NEW, &st, 5000);
+    LM_CHECK_EQ(n.wait_operation(2, op, 30000), static_cast<uint32_t>(Status::Expired));
+    n.grant(3, 1, 3);
+    op = n.join(3, 0x79, LM_JOIN_NEW, &st, 5000);
+    LM_CHECK_EQ(n.wait_operation(3, op, 30000), static_cast<uint32_t>(Status::Expired));
+    LM_CHECK_EQ(n.ledger().stats().requests, 1ull); // other scopes never reached the root
+    LM_CHECK(n.eng(1).identity().is_member() && !n.eng(2).identity().is_member() && !n.eng(3).identity().is_member());
+}
+
+// SEC-D5 (docs/12 §5): a root that lost its whole ledger never comes back as an empty one with the same domain key.
+LM_TEST("SEC-5 complete loss of the root ledger is RECOVERY_REQUIRED, never an empty ledger that re-admits a departed member") {
+    JNet n(2, 73);
+    LM_CHECK_EQ(n.join_device(1, 0x90, 1, 1), 0u);
+    n.run_ms(6000);
+    const ByteView mc = n.eng(1).identity().member_cose();
+    const Bytes old_mc(mc.begin(), mc.end());
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, lop, 5000), 0u);
+    n.run_ms(1000);
+    LM_CHECK(n.ledger().find(n.id(1)) != nullptr && n.ledger().find(n.id(1))->state == root::EntryState::Left);
+    // The root's state records are gone (ledger, its manifest, the floors); identity and delegation survive.
+    n.node(0).power_cut();
+    auto erase = [&](uint16_t id) {
+        for (uint8_t slot = 0; slot < 2; ++slot) {
+            (void)n.node(0).store.slot_erase(id, slot);
+            (void)n.node(0).store.slot_erase(static_cast<uint16_t>(id | store::k_marker_flag), slot);
+        }
+    };
+    erase(store::rec::root_ledger);
+    erase(store::rec::revocation_floors);
+    for (std::size_t s = 0; s < root::k_ledger_slots; ++s) {
+        erase(static_cast<uint16_t>(root::k_rec_ledger_base + s));
+    }
+    n.node(0).store.power_restore();
+    n.events[0].clear();
+    n.boot(0);
+    n.run_ms(100);
+    LM_CHECK(!n.ledger().ready());
+    LM_CHECK(n.has_event(0, LM_EVENT_FAULT, static_cast<uint32_t>(Status::RecoveryRequired)));
+    // The departed device brings its old credential back (a copy without floors) and asks the root.
+    n.node(1).power_cut();
+    n.node(1).store.power_restore();
+    commit_record(n.node(1).store, store::rec::membership, member::k_membership_active, view(old_mc));
+    const member::Floors none;
+    std::array<uint8_t, 8> fbuf{};
+    std::size_t flen = 0;
+    LM_CHECK_OK(member::encode_floors(none, MutByteView{fbuf}, flen));
+    commit_record(n.node(1).store, store::rec::revocation_floors, 0, ByteView{fbuf.data(), flen});
+    n.boot(1);
+    n.run_ms(100);
+    LM_CHECK(n.eng(1).identity().is_member());
+    n.run_ms(31000);
+    LM_CHECK_OK(n.eng(1).link().connect(n.node(0).radio.mac(), n.node(1).clock.now()));
+    n.node(1).notify();
+    n.run_ms(6000);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr);
+    LM_CHECK(!n.linked(0, 1));
+    // The root can decide no admission at all (SEC-D2): it answers no handshake and starts none, and that is its own
+    // state, not a rejected credential of the peer.
+    LM_CHECK(n.eng(0).link().stats().hs_busy_drop >= 1u);
+    LM_CHECK_EQ(n.eng(0).link().stats().cred_rejected + n.eng(0).link().stats().hs_started, 0u);
+    LM_CHECK(n.eng(0).link().connect(n.node(1).radio.mac(), n.node(0).clock.now()) == Status::RecoveryRequired);
 }
 
 LM_TEST("S8 root restart between PREPARED and STORED: the old reservation is aborted, never extended; the next join gets a new generation") {

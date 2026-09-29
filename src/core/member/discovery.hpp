@@ -11,12 +11,29 @@
 // no allocation, no polling: `deadline()` is the only timer.
 #pragma once
 
+#include <array>
 #include <cstdint>
 
+#include "core/bytes.hpp"
+#include "core/member/join_wire.hpp"
 #include "core/time.hpp"
 #include "gen/defaults.hpp"
 
 namespace lm::member {
+
+// ---- SEC-Da: the optional DiscoveryScopeKey (docs/07 §2-§3) ----
+// A factory-provisioned 32-byte key shared by the devices, relays and roots of one deployment scope (never a per-
+// domain secret). A scoped node tags its hello/offer with HMAC-SHA256(key, "LM1-DISC" || object kind || the hello's
+// nonce || offer fields: depth u8, revision u32be), first 8 bytes, and answers/follows only hints with its scope's
+// tag. Every holder of the key can make one, so the tag narrows discovery and spares handshakes; it never
+// authorises anything (the handshake and the credentials do), and a miss is no verdict on the device.
+inline constexpr std::size_t k_scope_key_bytes = 32;
+[[nodiscard]] Status scope_tag(ByteView key, uint8_t kind, const std::array<uint8_t, 16> &nonce, const OfferHint &fields,
+                               std::array<uint8_t, 8> &tag);
+// A hint of `kind` for `nonce` passes the scope filter of a node holding `key` (empty: an unscoped node takes any).
+[[nodiscard]] bool scope_ok(ByteView key, uint8_t kind, const std::array<uint8_t, 16> &nonce, const OfferHint &hint);
+// Sets the scope tag of an outgoing hint (nothing without a key).
+[[nodiscard]] Status scope_sign(ByteView key, uint8_t kind, const std::array<uint8_t, 16> &nonce, OfferHint &hint);
 
 class Discovery {
   public:

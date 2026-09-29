@@ -72,8 +72,15 @@ class World {
     // Symmetric allowlist link.
     void set_link(uint16_t a, uint16_t b, const LinkParams &p);
     [[nodiscard]] const LinkParams &link(uint16_t a, uint16_t b) const;
+    // One direction only (S16: a lost GRANT with a delivered poll): frames sent by `from` towards `to`.
+    void set_link_one_way(uint16_t from, uint16_t to, const LinkParams &p);
     void make_chain(); // 0-1-2-...-(n-1)
     void make_full();  // every pair
+    // Interference (S17): extra frame loss (per mille, added to the link loss and to the MAC-ACK loss) at one
+    // node (-1: every node) on one channel (0: every channel). Rules add up. A protocol bench model of "the
+    // new channel is bad at some spots" and "all channels are jammed", not an RF model.
+    void set_noise(int node, uint8_t channel, uint16_t permille);
+    void clear_noise() { noise_.clear(); }
 
     // Advances virtual time, processing every event with time <= t_us in order.
     void run_until(uint64_t t_us);
@@ -87,6 +94,8 @@ class World {
     // Raw injection as if sent with `from_mac` (attacker/replay tests); no TX-done callback.
     void inject(const MacAddr &from_mac, uint16_t via, const MacAddr &dst, ByteView frame);
     void schedule_wake(uint16_t node, uint64_t at_us);
+    // A powered-off node's firmware starts again at `at_us` (a deep-sleep wake, S16): SimNode::on_boot_event().
+    void schedule_boot(uint16_t node, uint64_t at_us);
     void schedule_job_completion(uint16_t node, uint64_t at_us, uint32_t node_epoch,
                                  uint16_t table_index, uint32_t job_id, port::JobFn fn, void *arg);
     uint64_t random_u64() { return rng_(); }
@@ -99,7 +108,7 @@ class World {
     [[nodiscard]] int find_node_by_mac(const MacAddr &mac) const;
 
   private:
-    enum class EventKind : uint8_t { Wake, Rx, TxDone, JobDone };
+    enum class EventKind : uint8_t { Wake, Rx, TxDone, JobDone, Boot };
     struct Event {
         uint64_t at_us = 0;
         uint64_t seq = 0;
@@ -122,6 +131,13 @@ class World {
     void dispatch(const Event &ev);
     [[nodiscard]] static uint64_t airtime_us(std::size_t bytes);
     [[nodiscard]] bool lost(uint16_t permille);
+    [[nodiscard]] uint16_t noise(uint16_t node, uint8_t channel) const;
+    struct Noise {
+        int node;
+        uint8_t channel;
+        uint16_t permille;
+    };
+    std::vector<Noise> noise_;
 
     WorldOptions opts_;
     uint64_t now_us_ = 0;

@@ -125,6 +125,11 @@ class HopTx {
     // are dropped when they are acknowledged or time out. Returns true when nothing had left.
     bool withdraw(OwnerKind kind, Handle owner);
     void clear();
+    // [S16] The parent mailbox is this pool: frames (not borrowed buffers) queued for next hop `mac`.
+    [[nodiscard]] std::size_t queued_for(const MacAddr &mac) const;
+    // Parked frames of a sleepy child that never came back (forwards, receipts, mesh records; a send's own
+    // frames end with the send). Returns how many were released.
+    std::size_t expire_parked(const MacAddr &mac, MonoTime now);
 
     [[nodiscard]] const HopStats &stats() const { return stats_; }
     [[nodiscard]] Duration rto() const { return rto_; }

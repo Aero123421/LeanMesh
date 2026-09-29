@@ -8,6 +8,7 @@
 #include "port/idf/idf_clock.hpp"
 #include "port/idf/idf_jobs.hpp"
 #include "port/idf/idf_owner.hpp"
+#include "port/idf/idf_pm.hpp"
 #include "port/idf/idf_radio.hpp"
 #include "port/idf/idf_store.hpp"
 #include "sdkconfig.h"
@@ -25,6 +26,7 @@ struct Platform {
     IdfStore store;
     IdfRadio radio{owner};
     IdfJobs jobs{store, owner};
+    IdfPm pm; // [S16]
 };
 
 Platform g_platform;
@@ -66,7 +68,7 @@ lm_status_t lm_init(void *workspace, size_t bytes, const lm_config_t *config,
         return to_abi(s); // fail closed: read errors are never "unprovisioned"
     }
     s = capi::init_context(workspace, bytes, config,
-                           Ports{g_platform.clock, g_platform.radio, g_platform.jobs},
+                           Ports{g_platform.clock, g_platform.radio, g_platform.jobs, &g_platform.pm},
                            g_platform.owner, rf_profile_from_config(), &g_ctx);
     if (s != Status::Ok) {
         g_ctx = nullptr;

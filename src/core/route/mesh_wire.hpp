@@ -49,7 +49,7 @@ struct Probe {
                                   MutByteView out, std::size_t &len);
 [[nodiscard]] Status decode_probe(ByteView plain, Probe &out, DeviceId &issuer);
 
-enum class Op : uint8_t { Register = 0xE1, Lease = 0xE2, Ready = 0xE3, Query = 0xE4, Answer = 0xE5 };
+enum class Op : uint8_t { Register = 0xE1, Lease = 0xE2, Ready = 0xE3, Query = 0xE4, Answer = 0xE5, Power = 0xEE /* S16; 0xE6..0xED are the channel module's */ };
 
 struct Register { // node -> root: "approve this parent for me"
     uint32_t sequence = 0;

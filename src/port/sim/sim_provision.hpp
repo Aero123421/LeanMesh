@@ -16,6 +16,9 @@ struct ProvisionInput {
     ByteView delegation_cose; // empty: identity only
     ByteView member_cose;     // empty: not a member
     const member::Floors *floors = nullptr;
+    // A root of a NEW network: its empty ledger (manifest bound to this domain, SEC-D5). The only path that
+    // creates a ledger; a root that later finds none is RECOVERY_REQUIRED.
+    const DomainId *new_ledger_domain = nullptr;
 };
 
 // Durable when Ok (each record committed and read back by the record layer).

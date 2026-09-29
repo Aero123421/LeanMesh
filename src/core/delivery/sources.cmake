@@ -12,4 +12,5 @@ list(APPEND LM_COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/delivery_sched.cpp
     ${CMAKE_CURRENT_LIST_DIR}/delivery_durable.cpp
     ${CMAKE_CURRENT_LIST_DIR}/delivery_host.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/delivery_group.cpp
     ${CMAKE_CURRENT_LIST_DIR}/delivery_mesh.cpp)

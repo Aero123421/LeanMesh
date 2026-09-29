@@ -42,6 +42,12 @@ void World::set_link(uint16_t a, uint16_t b, const LinkParams &p) {
     links_[b * n + a] = p;
 }
 
+void World::set_link_one_way(uint16_t from, uint16_t to, const LinkParams &p) {
+    const std::size_t n = nodes_.size();
+    LM_ASSERT(from < n && to < n && from != to);
+    links_[from * n + to] = p;
+}
+
 const LinkParams &World::link(uint16_t a, uint16_t b) const {
     LM_ASSERT(a < nodes_.size() && b < nodes_.size());
     return links_[static_cast<std::size_t>(a) * nodes_.size() + b];
@@ -80,6 +86,20 @@ uint64_t World::airtime_us(std::size_t bytes) {
 }
 
 bool World::lost(uint16_t permille) { return permille > 0 && (rng_() % 1000U) < permille; }
+
+void World::set_noise(int node, uint8_t channel, uint16_t permille) {
+    noise_.push_back(Noise{node, channel, permille});
+}
+
+uint16_t World::noise(uint16_t node, uint8_t channel) const {
+    unsigned sum = 0;
+    for (const Noise &n : noise_) {
+        if ((n.node < 0 || n.node == node) && (n.channel == 0 || n.channel == channel)) {
+            sum += n.permille;
+        }
+    }
+    return static_cast<uint16_t>(sum > 1000 ? 1000 : sum);
+}
 
 void World::trace_enable(std::size_t capacity) {
     trace_.clear();
@@ -152,7 +172,7 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
             trace_add(TraceKind::Lost, j, frame.size(), 2, token.sequence);
             continue;
         }
-        if (lost(lp.loss_permille)) {
+        if (lost(static_cast<uint16_t>(lp.loss_permille + noise(j, sender.radio.channel())))) {
             trace_add(TraceKind::Lost, j, frame.size(), 1, token.sequence);
             continue;
         }
@@ -161,7 +181,7 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
         rx.radio.rx.at = MonoTime{}; // stamped with the receiver clock on delivery
         push(rx);
         if (!dst.is_broadcast()) {
-            acked = !lost(lp.ack_loss_permille);
+            acked = !lost(static_cast<uint16_t>(lp.ack_loss_permille + noise(from, sender.radio.channel())));
         }
     }
 
@@ -201,6 +221,14 @@ void World::inject(const MacAddr &from_mac, uint16_t via, const MacAddr &dst, By
 void World::schedule_wake(uint16_t node, uint64_t at_us) {
     Event ev;
     ev.kind = EventKind::Wake;
+    ev.node = node;
+    ev.at_us = at_us < now_us_ ? now_us_ : at_us;
+    push(ev);
+}
+
+void World::schedule_boot(uint16_t node, uint64_t at_us) {
+    Event ev;
+    ev.kind = EventKind::Boot;
     ev.node = node;
     ev.at_us = at_us < now_us_ ? now_us_ : at_us;
     push(ev);
@@ -248,6 +276,9 @@ void World::dispatch(const Event &ev) {
     switch (ev.kind) {
     case EventKind::Wake:
         n.on_wake_event(ev.at_us);
+        return;
+    case EventKind::Boot:
+        n.on_boot_event(ev.at_us);
         return;
     case EventKind::Rx: {
         if (!n.powered()) {

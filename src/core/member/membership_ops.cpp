@@ -103,6 +103,14 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
     if (t.device != id.self() || t.fleet != id.trust().fleet) {
         return Status::AuthRejected;
     }
+    // SEC-D4a: mode 0 binds the ticket to a fresh nonce this device issued, and no API hands that nonce to the
+    // fleet yet; accepting one would accept a replayed ticket. Mode 1 (a one-time grant) is consumed by generation.
+    if (t.mode != 1) {
+        return Status::Unsupported;
+    }
+    if (t.new_generation < id.own_floor().assignment) {
+        return Status::Revoked; // SEC-D8: this generation was consumed before the device left
+    }
     if (!lend_record_only()) {
         return Status::Busy;
     }
@@ -216,7 +224,6 @@ Status Membership::leave(uint8_t mode, uint32_t deadline_ms, MonoTime now, uint6
     leave_op_ = k_op_tag | ++op_counter_;
     operation = leave_op_;
     leave_deadline_ = now + Duration::from_ms(deadline_ms);
-    leave_result_ = Status::Ok;
     leave_attempts_ = 0;
     leave_tx_inflight_ = false;
     leave_prepared_only_ = !id.is_member();
@@ -349,62 +356,53 @@ void Membership::leave_commit(MonoTime now) {
         hooks_.settle_pending(hooks_.ctx);
     }
     const LocalIdentity &id = engine_.identity();
+    std::size_t len = 0;
     if (!leave_prepared_only_) {
+        // SEC-D8: one atomic commit ends the membership AND records what it consumed (the generations below the
+        // floor). No room in the revocation-floor table is needed, so nothing can be dropped for lack of it.
         leave_assignment_ = id.member().assignment.value();
         leave_membership_ = id.member().membership.value();
+        Writer w{MutByteView{rec_->payload}};
+        w.u64be(leave_assignment_ + 1);
+        w.u64be(leave_membership_ + 1);
+        len = w.size();
     }
     const Status st = leave_prepared_only_
                           ? start_flash(Step::LeaveCommit, store::RecordJob::Op::Commit,
                                         store::rec::membership_prepared, k_prepared_consumed, 0, now)
                           : start_flash(Step::LeaveCommit, store::RecordJob::Op::Commit, store::rec::membership,
-                                        k_membership_left, 0, now);
+                                        k_membership_left, len, now);
     if (st != Status::Ok) {
         leave_finish(st, LM_OUTCOME_INDETERMINATE, now);
     }
 }
 
-void Membership::leave_flash_done(Step step, Status s, MonoTime now) {
+void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
     LocalIdentity &id = engine_.identity();
-    if (step == Step::LeaveCommit) {
-        if (s != Status::Ok) { // durable state unknown: the next boot decides (ACTIVE or LEFT)
-            leave_finish(s, LM_OUTCOME_INDETERMINATE, now);
-            return;
-        }
-        if (leave_prepared_only_) {
-            have_prepared_ = false;
-            leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
-            return;
-        }
-        // The credential is gone durably: erase it from RAM too and end every session of the domain.
-        const DeviceId self = id.self();
-        DeviceId peers[link::k_max_neighbors];
-        std::size_t n = 0;
-        engine_.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
-            if (n < link::k_max_neighbors && !nb.join_only) {
-                peers[n++] = nb.device;
-            }
-        });
-        for (std::size_t i = 0; i < n; ++i) {
-            (void)engine_.link().close(peers[i]);
-        }
-        id.drop_member();
-        have_prepared_ = false;
-        // Fleet identity stays; the assignment/membership floors record what this device consumed.
-        if (id.floors().raise(self, leave_assignment_ + 1, leave_membership_ + 1) != Status::Ok) {
-            leave_result_ = Status::NoCapacity; // floor table full: reported, the leave still stands
-            leave_finish(Status::NoCapacity, LM_OUTCOME_APPLIED, now);
-            return;
-        }
-        std::size_t len = 0;
-        if (encode_floors(id.floors(), MutByteView{rec_->payload}, len) != Status::Ok ||
-            start_flash(Step::LeaveFloors, store::RecordJob::Op::Commit, store::rec::revocation_floors, 0, len,
-                        now) != Status::Ok) {
-            leave_finish(Status::NoCapacity, LM_OUTCOME_APPLIED, now);
-        }
+    if (s != Status::Ok) { // durable state unknown: the next boot decides (ACTIVE or LEFT)
+        leave_finish(s, LM_OUTCOME_INDETERMINATE, now);
         return;
     }
-    // LeaveFloors: the leave itself is already durable; a failed floor write is reported as such.
-    leave_finish(s, LM_OUTCOME_APPLIED, now);
+    if (leave_prepared_only_) {
+        have_prepared_ = false;
+        leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
+        return;
+    }
+    // The credential is gone durably, its floor with it: erase it from RAM too and end every session of the domain.
+    DeviceId peers[link::k_max_neighbors];
+    std::size_t n = 0;
+    engine_.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
+        if (n < link::k_max_neighbors && !nb.join_only) {
+            peers[n++] = nb.device;
+        }
+    });
+    for (std::size_t i = 0; i < n; ++i) {
+        (void)engine_.link().close(peers[i]);
+    }
+    // Fleet identity stays; the floor records what this device consumed (SEC-D8).
+    id.drop_member(Floors::Entry{id.self(), leave_assignment_ + 1, leave_membership_ + 1});
+    have_prepared_ = false;
+    leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
 }
 
 void Membership::leave_finish(Status why, uint32_t outcome, MonoTime now) {

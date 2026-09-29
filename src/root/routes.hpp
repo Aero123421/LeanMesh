@@ -32,6 +32,11 @@ class Routes {
     Routes &operator=(const Routes &) = delete;
 
     void stop();
+    // The member at `addr` left the ledger: out of the tree now (its children lose their parent link and
+    // re-register), not when its lease runs out.
+    void forget(ShortAddr addr);
+    // [S16] A sleepy member's route lease is sized to its own cycle (power report), still per authenticated READY.
+    void extend_lease(ShortAddr addr, uint32_t lease_ms, MonoTime now);
     // A mesh record of the end session with `peer`; `reply` is the reverse of the route it came along.
     void on_control(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now);
     void on_timer(MonoTime now);
@@ -54,7 +59,8 @@ class Routes {
                      ByteView body, MonoTime now);
     void on_ready(const DeviceId &peer, ShortAddr addr, const delivery::PathSpec &reply, ByteView body, MonoTime now);
     void on_query(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now);
-    void send_lease(const DeviceId &peer, const delivery::PathSpec &route, route::LeaseRec &l, MonoTime now);
+    void send_lease(const DeviceId &peer, const delivery::PathSpec &route, route::LeaseRec &l, MonoTime now,
+                    uint32_t lease_ms = 0);
     void push_next(MonoTime now);
     [[nodiscard]] uint64_t ms(MonoTime now) const { return now.to_ms(); }
 
@@ -70,6 +76,8 @@ class Routes {
 struct NoRoutes {
     explicit NoRoutes(Engine &) {}
     void stop() {}
+    void forget(ShortAddr) {}
+    void extend_lease(ShortAddr, uint32_t, MonoTime) {}
     void on_control(const DeviceId &, const delivery::PathSpec &, ByteView, MonoTime) {}
     void on_timer(MonoTime) {}
     [[nodiscard]] MonoTime deadline() const { return MonoTime::never(); }

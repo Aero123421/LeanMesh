@@ -91,12 +91,13 @@ struct EvRef {
         std::memcpy(r.intent_hash.data(), e.intent_hash, 32);
         return r;
     }
-    // For the core's lookups (Delivery::event_payload names a MESSAGE by kind, origin and MessageId).
+    // For the core's lookups (Delivery::event_payload names a MESSAGE by kind, origin, assignment generation and MessageId).
     [[nodiscard]] lm_event_t event() const {
         lm_event_t e{};
         e.struct_size = sizeof(e);
         e.abi_version = LM_ABI_VERSION;
         e.kind = kind;
+        e.origin_assignment_generation = assignment;
         std::memcpy(e.peer.bytes, peer.data(), 32);
         std::memcpy(e.message_id.bytes, message_id.data(), 16);
         return e;
@@ -127,7 +128,7 @@ class Bridge final : public BridgeHook {
     [[nodiscard]] uint64_t boot_id() const { return boot_; }
 
   private:
-    enum class Result : uint8_t { None, Snapshot, Ack, Caps, Nodes, Request };
+    enum class Result : uint8_t { None, Snapshot, Ack, Caps, Nodes, Request, Targets };
     struct Pending {
         std::array<uint8_t, 16> request_id{};
         uint8_t lane = 0;
@@ -137,9 +138,15 @@ class Bridge final : public BridgeHook {
         uint64_t op = 0;
         Result result = Result::None;
         bool has_filter = false; // NODE_QUERY: `filter` names one device
+        struct GroupPage { // Targets: which page of which group operation (S15)
+            std::array<uint8_t, 16> token;
+            uint32_t offset;
+            uint32_t limit;
+        };
         union {
             OpSnap snap;                      // Snapshot, Request
             std::array<uint8_t, 32> filter;   // Nodes
+            GroupPage page;                   // Targets
         };
         Pending() : snap() {}
     };
@@ -164,6 +171,9 @@ class Bridge final : public BridgeHook {
     void m_host_store_ack(Pending &p, ByteView params);
     void m_event_ack(Pending &p, ByteView params);
     void m_get_request(Pending &p, ByteView params);
+    void m_channel(Pending &p, ByteView params); // [S17] CHANNEL_ACTION
+    void m_group_set(Pending &p, ByteView params);
+    void m_group_targets(Pending &p, ByteView params);
     void m_unsupported(Pending &p, uint64_t method, ByteView params);
     [[nodiscard]] Reply run(CommandKind kind, const void *request, std::size_t request_size,
                             ByteView payload = ByteView{}, void *response = nullptr,

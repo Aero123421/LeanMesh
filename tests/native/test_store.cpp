@@ -532,7 +532,7 @@ LM_TEST("journal full returns NO_CAPACITY and never drops an ACKed entry") {
     // Unknown retire and oversized payload are rejected before anything is written.
     const uint64_t ops = s.mutating_ops();
     LM_CHECK(run_batch(s, j3, {Op{JournalOp::Kind::Retire, 9999, {}}}) == Status::NotFound);
-    LM_CHECK(run_batch(s, j3, {Op{JournalOp::Kind::Put, 5, std::vector<uint8_t>(513, 1)}}) ==
+    LM_CHECK(run_batch(s, j3, {Op{JournalOp::Kind::Put, 5, std::vector<uint8_t>(k_journal_max_payload + 1, 1)}}) ==
              Status::PayloadTooLarge);
     LM_CHECK_EQ(s.mutating_ops(), ops);
 }
@@ -596,8 +596,8 @@ LM_TEST("journal staging memory: one largest entry is the minimum, a batch never
     Journal j(idx.data(), idx.size(), MutByteView{scratch.data(), scratch.size()});
     LM_CHECK_OK(j.open(s));
     LM_CHECK_OK(run_batch(s, j, {Op{JournalOp::Kind::Put, 1, std::vector<uint8_t>(k_journal_max_payload, 5)}}));
-    LM_CHECK(run_batch(s, j, {Op{JournalOp::Kind::Put, 2, std::vector<uint8_t>(300, 6)},
-                              Op{JournalOp::Kind::Put, 3, std::vector<uint8_t>(300, 7)}}) == Status::PayloadTooLarge);
+    LM_CHECK(run_batch(s, j, {Op{JournalOp::Kind::Put, 2, std::vector<uint8_t>(k_journal_max_payload / 2, 6)},
+                              Op{JournalOp::Kind::Put, 3, std::vector<uint8_t>(k_journal_max_payload / 2, 7)}}) == Status::PayloadTooLarge);
     std::vector<uint8_t> out(k_journal_max_payload);
     std::size_t len = 0;
     LM_CHECK_OK(j.read(s, 1, MutByteView{out.data(), out.size()}, len));

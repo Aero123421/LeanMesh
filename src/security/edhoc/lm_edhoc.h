@@ -43,6 +43,10 @@ struct lm_edhoc_crypto_ctx {
 						   * a handle whose destroy failed; we keep it here) */
 	uint8_t stuck_count;
 	uint64_t hash_ops[LM_EDHOC_HASH_OPS][32]; /* psa_hash_operation_t storage */
+	/* ECDH output between the raw agreement and its import as a derivation key (wiped at once).
+	 * Kept here and not on the worker stack: psa_key_agreement() holds a ~1 KiB output buffer in its
+	 * own frame (SEC-D15: the worker stack keeps 2x margin over the deepest job). */
+	uint8_t secret[32];
 };
 void lm_edhoc_crypto_ctx_init(struct lm_edhoc_crypto_ctx *c, uint8_t aead_tag_len);
 

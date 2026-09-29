@@ -79,8 +79,16 @@ int32_t lmh_usb_feed(lmh_usb_t *h, const uint8_t *data, size_t len, uint64_t now
     return s(lm::Status::Ok);
 }
 
-size_t lmh_usb_take_tx(lmh_usb_t *h, uint8_t *out, size_t cap) {
-    return h == nullptr || out == nullptr ? 0 : h->usb.take_tx(lm::MutByteView{out, cap});
+size_t lmh_usb_peek_tx(lmh_usb_t *h, uint8_t *out, size_t cap) {
+    return h == nullptr || out == nullptr ? 0 : h->usb.peek_tx(lm::MutByteView{out, cap});
+}
+
+int32_t lmh_usb_consume_tx(lmh_usb_t *h, size_t n) {
+    if (h == nullptr) {
+        return s(lm::Status::InvalidArgument);
+    }
+    h->usb.consume_tx(n);
+    return s(lm::Status::Ok);
 }
 
 int32_t lmh_usb_tick(lmh_usb_t *h, uint64_t now_us) {

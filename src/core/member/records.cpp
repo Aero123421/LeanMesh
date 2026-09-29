@@ -154,6 +154,7 @@ void LocalIdentity::clear() {
     delegation_ = RootDelegation{};
     mc_ = MemberCredential{};
     floors_.clear();
+    own_floor_ = Floors::Entry{};
     ccs_len_ = 0;
     bundle_len_ = 0;
     dc_off_ = dc_len_ = mc_off_ = mc_len_ = 0;
@@ -161,6 +162,8 @@ void LocalIdentity::clear() {
     deleg_cose_len_ = 0;
     paired_host_.fill(0);
     paired_status_ = Status::NotFound;
+    sec::secure_zero(MutByteView{scope_});
+    has_scope_ = false;
     rec_lent_ = false;
 }
 
@@ -185,7 +188,10 @@ Status LocalIdentity::adopt_member(const RootDelegation &delegation, const Membe
     return Status::Ok;
 }
 
-void LocalIdentity::drop_member() {
+void LocalIdentity::drop_member(const Floors::Entry &floor) {
+    own_floor_.device = dc_.device;
+    own_floor_.assignment = std::max(own_floor_.assignment, floor.assignment);
+    own_floor_.membership = std::max(own_floor_.membership, floor.membership);
     has_member_ = false;
     has_delegation_ = false;
     member_status_ = Status::NotFound;
@@ -249,6 +255,8 @@ Status LocalIdentity::run_load(port::JobEnv &env) {
     if constexpr (k_root_capable) {
         load_paired_host(env); // its own status: a pairing problem never fails the identity
     }
+    load_scope(env);
+    load_power(env);
 
     st = load_record(env, store::rec::revocation_floors);
     if (st == Status::Ok) {
@@ -281,6 +289,27 @@ void LocalIdentity::load_paired_host(port::JobEnv &env) {
     }
 }
 
+void LocalIdentity::load_power(port::JobEnv &env) {
+    power_status_ = load_record(env, store::rec::power_policy);
+    power_len_ = 0;
+    if (power_status_ == Status::Ok && rec_.payload_len > power_policy_.size()) {
+        power_status_ = Status::RecoveryRequired;
+    }
+    if (power_status_ == Status::Ok) {
+        power_len_ = static_cast<uint8_t>(rec_.payload_len);
+        std::copy_n(rec_.payload.begin(), power_len_, power_policy_.begin());
+    }
+    sec::secure_zero(MutByteView{rec_.payload});
+}
+
+void LocalIdentity::load_scope(port::JobEnv &env) {
+    has_scope_ = load_record(env, store::rec::discovery_scope) == Status::Ok && rec_.payload_len == scope_.size();
+    if (has_scope_) {
+        std::copy_n(rec_.payload.begin(), scope_.size(), scope_.begin());
+    }
+    sec::secure_zero(MutByteView{rec_.payload});
+}
+
 Status LocalIdentity::load_membership(port::JobEnv &env) {
     const ByteView dc{bundle_.data() + k_max_bundle - dc_len_, dc_len_};
     const Status st = load_record(env, store::rec::membership);
@@ -288,6 +317,13 @@ Status LocalIdentity::load_membership(port::JobEnv &env) {
         return Status::Ok;
     }
     LM_TRY(st);
+    if (rec_.state == k_membership_left && rec_.payload_len == k_left_bytes) { // SEC-D8: what the device consumed
+        Reader r{ByteView{rec_.payload.data(), rec_.payload_len}};
+        own_floor_.device = dc_.device;
+        own_floor_.assignment = r.u64be();
+        own_floor_.membership = r.u64be();
+        return r.finish();
+    }
     if (rec_.state != k_membership_active) {
         return Status::Ok; // PREPARED or LEAVING records are the join slice's business
     }

@@ -11,6 +11,7 @@ expected entryはDeviceId、target domain、assignment generation、grant hash�
 
 ## 3. 賢い探索
 起動時、保存domain/current channelを800ms listen。既存の認証済み可用peerがあればmembership resumeへ。なければDiscoveryScopeKeyに結合したhint要求をjitter0〜400msで送る。relayはnonceとdomain hint、expected_revision、candidate順位を返し、rootまでのJoin proxy経路を提供する。
+DiscoveryScopeKey（任意、32B、配備scope単位で工場投入。domain秘密ではない）を持つ機器・relay・rootは、hello/offerに`HMAC-SHA256(key, "LM1-DISC" || object種別 || helloのnonce16 || offerならdepth u8・revision u32be)`の先頭8Bをtagとして付け、同じscopeのtagを持つhintにだけ応答/追従する。keyの無いnodeは絞込みをしない。tagはkey保持者全員が作れる絞込みで、positive/negativeとも認可結果ではない（認可はhandshakeとcredential）。
 1回の探索は最大30秒・候補3・許可channel2周・full handshake候補2。失敗後は1〜60秒指数backoff。期待リスト更新またはアプリ明示requestでbackoffを解除できる。同じ機器をB登録前に一度起動しただけで6時間拒否する固定policyを持たない。
 `NOT_EXPECTED`は10〜60秒のhint抑制、`BLOCKED`は署名付き失効情報としてgenerationを記録する。双方を同じタイマーにしない。探索予算切れを機器故障と扱わない。
 
@@ -21,12 +22,12 @@ expected entryはDeviceId、target domain、assignment generation、grant hash�
 |EDHOC|device↔rootをrelay proxy経由で相互認証。JOIN_ONLY session。|
 |REQUEST|DeviceCredential、AssignmentTicket、nonce、capability、request_idを暗号化送信。rootがfleet/domain/key/generation/失効/期待リストを検査。|
 |APPROVAL_PENDING|external modeではHostへ通知。Host不在は保留。preapproved modeは有効な署名ticket+期待entryが揃う場合のみ自動承認。|
-|PREPARE|rootがshort addressとmembership_generationを予約しPREPARED ledgerをcommit。署名MemberCredentialとpolicy hashをNodeへ。|
+|PREPARE|rootがshort addressとmembership_generationを予約しPREPARED ledgerをcommit。MemberCredential（署名64Bを保留＝0、どのpeerも受理しない形）とpolicy hashをNodeへ。PREPARE時点の物はcredentialではない。|
 |STORED|Nodeがinactive slotへ全member recordを保存/readbackしJOIN_STORED(request_id, hash)を返す。|
-|COMMIT|rootがACTIVE ledgerを保存してJOIN_COMMIT。Nodeがcommit markerを保存してJOIN_ACTIVEを返す。|
+|COMMIT|rootがACTIVE ledgerを保存してから保留署名入りJOIN_COMMIT。Nodeは署名で完成したcredentialを検証してからcommit markerを保存しJOIN_ACTIVEを返す。|
 |FINAL|rootがNodeのACTIVE証拠を記録しHostへ反映。ACK喪失時はrequest_id照会で再開。|
 
-準備中のNodeが通常DATAを送っても拒否。Nodeがactiveになった直後に最終ACKが落ちた場合はrootが保留とactiveを同一IDで整合させ、2つ目のshort addressを再発行しない。join objectのretryはhash不変。同じrequest_idの別内容はCONFLICT。
+準備中のNodeが通常DATAを送っても拒否（PREPARE時の物は署名を欠くので、rootに限らずどのmemberもsessionを張らない）。rootはLink/End sessionを、どちらが開始したかに関わらず、ledgerがそのDevice・address・assignment・membershipをACTIVEとして持つ場合だけ張る。ledgerに無い相手は拒否する。ledgerの読込前（起動直後）と喪失時（RECOVERY_REQUIRED）のrootは判定できないので、handshakeを開始も応答もしない（ローカルBUSY。相手credentialの拒否として数えない）。Nodeがactiveになった直後に最終ACKが落ちた場合はrootが保留とactiveを同一IDで整合させ、2つ目のshort addressを再発行しない。join objectのretryはhash不変。同じrequest_idの別内容はCONFLICT。
 承認待ちtimeoutは300秒で、Nodeに再申請可能を返す。prepared予約の期限は120秒。再起動して期限不明なら照会/回復とし、古いticketを勝手に新期限へ延長しない。
 
 ## 5. resume
@@ -40,7 +41,7 @@ ACTIVE recordがあり同domainなら新規の人間承認は不要。cold/deep 
 
 ## 8. 別domainへ移設（旧rootが停止していても可能）
 ユーザーの移設要望を満たすため、手動leave→joinに加えて**signed replacement**を仕様に含める。自動切替の既定はOFF。active recordを保持したまま探索する `join(mode=TRANSFER_CANDIDATE)` を設ける。isolation-triggeredは明示policyでON、最短隔離600秒+通信予算を満たす場合のみ。
-新domain Bはfleet issuerが署名したAssignmentTicketを提示する。DeviceId、source_domain A、target_domain B、target root delegation hash、expected_old_assignment_generation、new_generation、grant_id、Deviceが今回発行したtransfer_nonce16Bを必須とする。new_generationはoldより大きい。事前発行offline ticketはDevice nonceではなく**一回限りの事前登録grant_id**を使い、Device側の消費台帳とfloorで再使用を拒否する。ticket modeで両者を明示的に区別する。
+新domain Bはfleet issuerが署名したAssignmentTicketを提示する。DeviceId、source_domain A、target_domain B、target root delegation hash、expected_old_assignment_generation、new_generation、grant_id、Deviceが今回発行したtransfer_nonce16Bを必須とする。new_generationはoldより大きい。事前発行offline ticketはDevice nonceではなく**一回限りの事前登録grant_id**を使い、Device側の消費台帳とfloorで再使用を拒否する。ticket modeで両者を明示的に区別する。rootもledger entryに、そのDeviceがACTIVEにしたassignment generationの最大値を保存し、それ以下のticketはmodeやpolicyに関わらず消費済みとして拒否する（floor表の空きに依存しない）。Device側の消費記録はleaveのtombstone（LEFT record）自体が保持し、1回のcommitでleaveと同時に確定する。
 DeviceはBの相互認証とticket確認後、旧Aを使えるままB PREPAREDを書き、B/root・deviceのcommit handoffを行う。B COMMITを受理した時点でAの新規DATA送信と受信を停止し、B membershipをatomic選択する。二つのdomainを同時ACTIVEにしない。
 Aへの通知/消去ACKは移設成立の前提でない。Hostに `old_domain_reconciliation=PENDING` を残す。Aのrootが後日戻った時に同ticketの移設事実を伝え、旧authorizationを失効。A→B→Aもより高いassignment generationで許可。Device key/DeviceIdは維持、short addressは変更可。
 **旧Aがオフラインで失効情報を知らない間、全ネットワーク上の旧台帳が瞬時に更新されることは保証しない**。Device側はAを拒否し、他のmemberには有限leaseで伝播させる。紛失機器は最新のfleet revoke floorとticket issuer方針で拒否。staleな承認情報しかなければ新規移設はfail-closed。

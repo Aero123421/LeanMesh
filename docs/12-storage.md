@@ -36,7 +36,7 @@ leaf/relayの初期pending16件×最大512B、結果32件。rootはpending64、�
 全点で電源断を注入する。存在しないcommitを「おそらく完了」と復元しない。
 
 ## 5. 認可情報の回復
-root ledgerを失ったら空member網として同じdomainキーで再起動しない。fleet署名recovery objectでroot delegation/authorization世代を更新する。失効情報の完全な復旧ができなければ既存資格の再検証を要求。offline性能と失効の即時性には限界がある。既存認可lease15分を過ぎた通信は期限切れ理由を返し、root不在なのに恒久的な認可更新を合成しない。
+root ledgerを失ったら空member網として同じdomainキーで再起動しない。ledgerはdomainに結び付いたmanifest（domain、一度でも使ったslot、expected setの進捗）を持ち、manifestが無い・別domain・使用済みslotの記録が無い場合はRECOVERY_REQUIREDで入会・session受理を止める。空ledgerを作るのは新規networkのprovisioningだけ。fleet署名recovery objectでroot delegation/authorization世代を更新する。失効情報の完全な復旧ができなければ既存資格の再検証を要求。offline性能と失効の即時性には限界がある。既存認可lease15分を過ぎた通信は期限切れ理由を返し、root不在なのに恒久的な認可更新を合成しない。
 
 ## 6. 実記憶容量と物理限界
 NVS内部のcopy、page overhead、書込み増幅、GC、brownout挙動はIDF実装に依存する。論理record計算だけでFlash enduranceを保証しない。erase回数/byte量/最大commit latencyをHILで測る。tamper resistant monotonic counterなしの全Flash巻戻しを、2slotだけで防げるとは主張しない。

@@ -36,14 +36,18 @@ from ..serial.link import SerialBusy
 from ..settings import Settings
 from ..wire import WireError, cbor_decode, cbor_encode
 from ..wire.control import decode_cose_sign1, decode_control_body
-from . import mapping
+from . import channel as chan_status
+from . import power as power_status
+from . import groups, mapping
 from .mapping import status_name
 
 log = logging.getLogger(__name__)
 
 M_CAPABILITIES, M_SEND, M_GET_MESSAGE, M_CANCEL, M_JOIN_DECIDE, M_INSTALL = 1, 2, 3, 4, 5, 6
-M_NODE_QUERY, M_HOST_STORE_ACK, M_EVENT_ACK, M_CHANNEL, M_GROUP_SET = 7, 9, 10, 11, 14
+M_NODE_QUERY, M_HOST_STORE_ACK, M_EVENT_ACK, M_CHANNEL, M_GET_REQUEST, M_GROUP_SET = 7, 9, 10, 11, 13, 14
 EV_MESSAGE, EV_OPERATION, EV_MEMBERSHIP, EV_GAP, EV_FAULT = 2, 3, 4, 7, 8
+EV_GROUP_PROGRESS = groups.EV_GROUP_PROGRESS
+EV_CHANNEL = chan_status.EV_CHANNEL
 
 MAX_ATTEMPTS = 30          # transient refusals of one operation before it is refused for good
 RETRY_S = 1.0              # pause between attempts after a transient refusal of the root
@@ -52,6 +56,10 @@ POLL_MAX_S = 30.0          # ... doubling while nothing new happens; events and 
 CAPS_MAX_AGE_S = 5.0       # root clock estimate used for UTC deadlines is refreshed when older
 EVENT_QUEUE = 256          # bounded hand-over from the serial thread; overflow is re-sent by the root
 POLL_BATCH = 16
+RECONCILE_RETRY_S = 2.0    # pause before an unfinished reconciliation is tried again
+JOIN_WAIT_S = 180.0        # a JOIN_DECIDE the root accepted must show durable ledger state within this time
+LEDGER_PREPARED = 2        # root EntryState: Prepared (reserved and stored); 3 Active .. 6 Blocked also imply an entry
+REQUEST_PENDING = 16       # GET_REQUEST state: waiting for the operator
 SIGNED_CONTROLS = ("REVOKE", "TRANSFER", "INSTALL_CONTROL", "POLICY_SET", "POWER_POLICY_SET",
                    "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER")
 
@@ -85,6 +93,7 @@ class Plan:
     mid: bytes | None = None
     attempts: int = 1
     request_id: bytes | None = None  # JOIN_DECISION: the root's pending request
+    group: bool = False              # MESSAGE to a group: the root's per-target results are mirrored
     approve: bool = False
 
 
@@ -102,11 +111,20 @@ class Bridge:
         self._session = asyncio.Event()
         self._ready_evt = asyncio.Event()
         self._need_reconcile = False
+        self._next_reconcile = 0.0
         self._next_poll = 0.0
         self._poll_gap = POLL_S
         self._poll_now = False
+        # EVENT_ACK is cumulative at the root (FIX2-D9): it may only cover events this Host finished. Every
+        # event seen (or dropped on overflow) is "open" until its handling succeeded; the ACK sent never
+        # reaches the lowest open sequence number.
+        self._open_events: set[tuple[int, int]] = set()   # (root boot, seq)
+        self._ack_top: dict[int, int] = {}                # boot -> highest finished seq
+        self._ack_sent: dict[int, int] = {}               # boot -> highest EVENT_ACK the root accepted
         self._ctl_ops: dict[int, bytes] = {}   # root control-operation number -> Host operation (this boot)
         self._opnum: dict[bytes, int] = {}     # Host operation -> root operation number (this boot)
+        self.groups = groups.Groups()          # group operations of this boot and their per-target mirror
+        self._cancel_taken: set[bytes] = set()  # operations whose CANCEL the root accepted (idempotent: not repeated)
 
     # ---- wiring ------------------------------------------------------------------------------
     def attach(self, link: SerialLink) -> None:
@@ -136,8 +154,14 @@ class Bridge:
 
     def on_event(self, payload: bytes, gen: int) -> None:
         try:
+            boot, seq = cbor_decode(payload)[:2]
+            self._open_events.add((int(boot), int(seq)))
+        except Exception:  # not a well-formed EVENT: dropped below; nothing to keep open
+            log.warning("malformed root event dropped")
+            return
+        try:
             self._events.put_nowait((payload, gen))
-        except asyncio.QueueFull:
+        except asyncio.QueueFull:  # stays open: no EVENT_ACK reaches it, the root sends it again
             log.warning("root event dropped (queue full): the root sends it again")
 
     # ---- main loop ---------------------------------------------------------------------------
@@ -156,10 +180,11 @@ class Bridge:
                         await self._sleep(2.0)
                     continue
                 progressed = await self._drain_outbox()
-                if self._need_reconcile:
+                if self._need_reconcile and time.monotonic() >= self._next_reconcile:
                     await self._reconcile()
                 await self._cancels()
                 await self._poll_open()
+                await self.groups.sync(self)
                 if not progressed:
                     await self._idle()
             except asyncio.CancelledError:
@@ -178,7 +203,8 @@ class Bridge:
     async def _idle(self) -> None:
         """Waits for a commit (new operation, cancel) or the next poll of open operations; no timer
         runs while nothing is open."""
-        timeout = max(0.05, self._next_poll - time.monotonic()) if self._next_poll < float("inf") else None
+        due = min(self._next_poll, self._next_reconcile if self._need_reconcile else float("inf"))
+        timeout = max(0.05, due - time.monotonic()) if due < float("inf") else None
         waits = [asyncio.ensure_future(self.hub.outbox_ready.wait()), asyncio.ensure_future(self._session.wait())]
         try:
             await asyncio.wait(waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
@@ -204,6 +230,9 @@ class Bridge:
         old = self.info
         if old is not None and old.boot != info.boot:  # the root restarted: its operation numbers are void
             self._forget_boot()
+        self._open_events = {e for e in self._open_events if e[0] == info.boot}
+        self._ack_top = {b: v for b, v in self._ack_top.items() if b == info.boot}
+        self._ack_sent = {b: v for b, v in self._ack_sent.items() if b == info.boot}
         self.info = info
 
         def register(conn: sqlite3.Connection) -> bool:
@@ -229,6 +258,8 @@ class Bridge:
         lost = list(self._ctl_ops.values())
         self._ctl_ops.clear()
         self._opnum.clear()
+        self._cancel_taken.clear()
+        self.groups.clear()
         if lost:
             asyncio.get_running_loop().create_task(self._indeterminate(lost, "root restarted"))
 
@@ -284,8 +315,11 @@ class Bridge:
         info = self.info
         assert info is not None
         req = item.request
-        if req["destination"]["kind"] != "node" or item.target is None:
-            raise _Refused("UNSUPPORTED", "only node destinations are deliverable from the Host")
+        dest, target = req["destination"], item.target
+        if dest["kind"] == "group":  # the root is the origin of the fan-out; a group is a marker value (groups.py)
+            target = groups.group_dest(int(dest["group_id"]), int(dest["revision"]))
+        elif dest["kind"] != "node" or target is None:
+            raise _Refused("UNSUPPORTED", "only node and group destinations are deliverable from the Host")
         assert item.payload is not None
         key = f"send:{item.operation.hex()}"
         row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -294,14 +328,14 @@ class Bridge:
         else:
             term, expires = self._deadline(conn, item.operation, req["deadline"])
             mid = item.message_id or os.urandom(16)
-            digest = mapping.intent_hash(info.root, item.target, info.domain, req, term, expires, item.payload)
+            digest = mapping.intent_hash(info.root, target, info.domain, req, term, expires, item.payload)
             conn.execute("UPDATE operations SET message_id=? WHERE id=? AND message_id IS NULL",
                          (mid, item.operation))
             conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
                          (key, cbor_encode([mid, term, expires, digest])))
-        params = [item.target, mid, digest, req["app_port"], mapping.send_flags(req), term, expires,
+        params = [target, mid, digest, req["app_port"], mapping.send_flags(req), term, expires,
                   bool(req.get("object_transfer", False)), item.payload]
-        return Plan(item.operation, "MESSAGE", M_SEND, params, mid, item.attempts)
+        return Plan(item.operation, "MESSAGE", M_SEND, params, mid, item.attempts, group=dest["kind"] == "group")
 
     def _deadline(self, conn: sqlite3.Connection, op: bytes, dl: dict[str, Any]) -> tuple[int, int]:
         info = self.info
@@ -328,6 +362,9 @@ class Bridge:
             if row is None:
                 raise _Refused("NOT_FOUND", "no join request of that device is waiting for a decision")
             approve = req["decision"] == "APPROVE"
+            # Kept until the decision is definite (FIX2-D12): the lookup key of a reconciliation after a crash.
+            conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)", (f"join:{item.operation.hex()}", cbor_encode(
+                [bytes(row[0]), item.target, int(approve), now_ms() + int(JOIN_WAIT_S * 1000)])))
             return Plan(item.operation, typ, M_JOIN_DECIDE,
                         [bytes(row[0]), item.target, bytes(row[1]), int(approve), rev],
                         attempts=item.attempts, request_id=bytes(row[0]), approve=approve)
@@ -365,7 +402,7 @@ class Bridge:
             ev["observer"] = observer.hex()
         outbox.record(conn, self.cfg, op, state="FINAL", outcome=terminal or outcome, evidence=ev,
                       outbox_state="DONE")
-        conn.execute("DELETE FROM meta WHERE key=?", (f"send:{op.hex()}",))
+        conn.execute("DELETE FROM meta WHERE key IN (?,?)", (f"send:{op.hex()}", f"join:{op.hex()}"))
 
     async def _execute(self, link: SerialLink, plan: Plan) -> None:
         try:
@@ -406,6 +443,8 @@ class Bridge:
         if status == mapping.OK and op_number is not None:
             if plan.typ == "MESSAGE":
                 self._opnum[plan.op] = op_number
+                if plan.group:
+                    self.groups.track(plan.op, op_number)
             else:
                 self._ctl_ops[op_number] = plan.op  # INSTALL_CONTROL: its end arrives as an OPERATION event
 
@@ -431,15 +470,15 @@ class Bridge:
             self._apply_snapshot(conn, plan.op, snap, plan.mid)
             return
         ev = {"kind": "ROOT_ACCEPTED", "assurance": "SELF_REPORTED", "observer": info.root.hex()}
-        if snap is not None:  # INSTALL_CONTROL: an operation whose end arrives as an OPERATION event
+        if snap is not None or plan.request_id is not None:
+            # INSTALL_CONTROL: an operation whose end arrives as an OPERATION event. JOIN_DECIDE: a bare OK
+            # says the root took the decision, not that it is stored (FIX2-D10): final only when
+            # GET_REQUEST shows the ledger state (_query_join).
             outbox.record(conn, self.cfg, plan.op, state="WAITING_RECEIPT", evidence=ev)
             return
         outbox.record(conn, self.cfg, plan.op, state="FINAL", outcome="APPLIED", outbox_state="DONE",
                       evidence={"kind": "ROOT_APPLIED", "assurance": "SELF_REPORTED",
                                 "observer": info.root.hex()})
-        if plan.request_id is not None:
-            conn.execute("UPDATE lifecycle_requests SET state=? WHERE id=?",
-                         ("APPROVED" if plan.approve else "REJECTED", plan.request_id))
 
     def _apply_snapshot(self, conn: sqlite3.Connection, op: bytes, snap: dict[str, Any],
                         mid: bytes | None) -> None:
@@ -459,18 +498,57 @@ class Bridge:
 
     # ---- reconciliation, polling, cancel -----------------------------------------------------
     async def _reconcile(self) -> None:
-        """After a Host restart or a lost outcome: ask the root by MessageId, never send again."""
+        """After a Host restart or a lost outcome: ask the root by the operation's own key (MessageId for a
+        message, request id for a join decision), never send again. A row that is still unknown afterwards
+        (busy root, interrupted exchange) arms the next attempt instead of being forgotten (FIX2-D12)."""
         link, info = self.link, self.info
         assert link is not None and info is not None
         self._need_reconcile = False
-        pending = await self.hub.read(outbox.pending_reconcile)
-        for op, mid in pending:
-            plan = await self.hub.read(lambda conn, o=op: _stored_plan(conn, o))
-            if mid is None or plan is None:  # controls, or a message whose plan is gone: cannot be looked up
-                await self._indeterminate([op], "the outcome of the write is unknown and cannot be looked up")
-                continue
-            await self._query(link, op, mid, plan[3])
-            self.stats["reconciled"] += 1
+        try:
+            pending = await self.hub.read(outbox.pending_reconcile)
+            for op, mid in pending:
+                join = await self.hub.read(lambda conn, o=op: _stored_join(conn, o))
+                plan = await self.hub.read(lambda conn, o=op: _stored_plan(conn, o))
+                if join is not None:
+                    await self._query_join(link, op, join)
+                elif mid is None or plan is None:  # a control without a lookup key: explicitly unknown
+                    await self._indeterminate([op], "the outcome of the write is unknown and cannot be looked up")
+                else:
+                    await self._query(link, op, mid, plan[3])
+                self.stats["reconciled"] += 1
+        except BaseException:
+            self._need_reconcile = True
+            raise
+        if await self.hub.read(outbox.pending_reconcile):
+            self._need_reconcile = True
+            self._next_reconcile = time.monotonic() + RECONCILE_RETRY_S
+
+    async def _query_join(self, link: SerialLink, op: bytes, join: tuple[bytes, bytes, bool, int]) -> None:
+        """GET_REQUEST for a join decision; final only on durable ledger state, INDETERMINATE when the
+        root cannot show it in time. Waiting rows stay open for _poll_open."""
+        info = self.info
+        assert info is not None
+        request_id, _device, approve, deadline = join
+        accepted = await self.hub.read(lambda conn: any(
+            e["kind"] == "ROOT_ACCEPTED" for e in ops.view_any(conn, op)["evidence"]))
+        res = await link.request(M_GET_REQUEST, [request_id])
+        state = cbor_decode(res.result)["state"] if res.status == mapping.OK and res.result else None
+        verdict = join_verdict(approve, accepted, res.status, state, now_ms() >= deadline)
+
+        def apply_join(conn: sqlite3.Connection) -> None:
+            conn.execute("UPDATE outbox SET state='SENDING' WHERE operation=? AND state='RECONCILE'", (op,))
+            if verdict is None:
+                return
+            outcome, kind, reason = verdict
+            ev = {"kind": kind, "assurance": "SELF_REPORTED" if outcome == "APPLIED" else "UNKNOWN",
+                  "observer": info.root.hex(), "details": {"reason": reason}}
+            outbox.record(conn, self.cfg, op, state="FINAL", outcome=outcome, evidence=ev, outbox_state="DONE")
+            conn.execute("DELETE FROM meta WHERE key=?", (f"join:{op.hex()}",))
+            if outcome == "APPLIED":
+                conn.execute("UPDATE lifecycle_requests SET state=? WHERE id=?",
+                             ("APPROVED" if approve else "REJECTED", request_id))
+
+        await self.hub.write(apply_join)
 
     async def _query(self, link: SerialLink, op: bytes, mid: bytes, digest: bytes) -> int | None:
         """GET_MESSAGE for one operation; applies the answer. Returns the root's operation number."""
@@ -481,6 +559,8 @@ class Bridge:
             snap = cbor_decode(res.result)
             if res.operation_id is not None:
                 self._opnum[op] = res.operation_id
+                if await self.hub.read(lambda conn: _is_group(conn, op)):  # found again after a restart
+                    self.groups.track(op, res.operation_id)
 
             def apply_query(conn: sqlite3.Connection) -> None:
                 self._apply_snapshot(conn, op, snap, mid)
@@ -514,10 +594,20 @@ class Bridge:
                 (POLL_BATCH,)).fetchall()
             return [(bytes(r[0]), bytes(r[1]), _load_plan(bytes(r[2]))[3]) for r in rows]
 
+        def open_joins(conn: sqlite3.Connection) -> list[tuple[bytes, tuple[bytes, bytes, bool, int]]]:
+            rows = conn.execute(
+                "SELECT o.id,m.value FROM operations o JOIN outbox b ON b.operation=o.id "
+                "JOIN meta m ON m.key='join:'||lower(hex(o.id)) WHERE o.state!='FINAL' "
+                "AND b.state IN ('SENDING','RECONCILE') ORDER BY o.created_utc_ms LIMIT ?", (POLL_BATCH,)).fetchall()
+            return [(bytes(r[0]), _load_join(bytes(r[1]))) for r in rows]
+
         rows = await self.hub.read(open_ops)
         for op, mid, digest in rows:
             await self._query(link, op, mid, digest)
-        self._next_poll = time.monotonic() + self._poll_gap if rows else float("inf")
+        joins = await self.hub.read(open_joins)
+        for op, join in joins:
+            await self._query_join(link, op, join)
+        self._next_poll = time.monotonic() + self._poll_gap if rows or joins else float("inf")
         self._poll_gap = min(POLL_MAX_S, self._poll_gap * 2)
 
     async def _cancels(self) -> None:
@@ -527,13 +617,15 @@ class Bridge:
             plan = await self.hub.read(lambda conn, o=op: _stored_plan(conn, o))
             done = await self.hub.read(lambda conn, o=op: any(
                 e["kind"] == "ROOT_CANCEL_TOO_LATE" for e in ops.view_any(conn, o)["evidence"]))
-            if plan is None or done:
+            if plan is None or done or op in self._cancel_taken:
                 continue
             number = self._opnum.get(op) or await self._query(link, op, plan[0], plan[3])
             if number is None:
                 continue
             res = await link.request(4, [info.boot, number])
             snap = cbor_decode(res.result) if res.result else None
+            if res.status == mapping.OK:
+                self._cancel_taken.add(op)  # a group finishes after its cancel: asking again changes nothing
 
             def apply_cancel(conn: sqlite3.Connection, o: bytes = op, st: int = res.status,
                              s: dict[str, Any] | None = snap, m: bytes = plan[0]) -> None:
@@ -556,11 +648,17 @@ class Bridge:
         m = cbor_decode(res.result)
 
         def apply_nodes(conn: sqlite3.Connection) -> None:
+            if m.get("channel", {}).get("current"):  # S17: what the root's coordinator reports (a member the ledger lists, by address)
+                mirror.put_channel(conn, info.domain, chan_status.status(
+                    m["channel"], {a: bytes(d) for d, _, _, _, _, a in m["nodes"] if a}))
             for device, ag, mg, state, confirmed, address in m["nodes"]:
                 mirror.upsert_node(conn, info.domain, device, assignment_generation=ag,
                                    membership_generation=mg, membership=mapping.MEMBERSHIP.get(state, "UNKNOWN"),
                                    connectivity="UNKNOWN", confirmed=bool(confirmed),
                                    short_address=address or None)
+            for row in m.get("power", []):  # S16: schedule hints the members reported to the root
+                policy, snap = power_status.snapshot(row)
+                mirror.put_power(conn, info.domain, bytes(row[0]), policy, snap)
             waiting = {bytes(r[0]) for r in conn.execute(
                 "SELECT id FROM lifecycle_requests WHERE domain=? AND state='PENDING_APPROVAL'", (info.domain,))}
             for request, device, credential in m["pending"]:
@@ -606,17 +704,29 @@ class Bridge:
             return
         if kind == EV_MESSAGE:
             if not await self._store_message(link, m):
-                return  # not committed: no HOST_STORE_ACK, no EVENT_ACK
+                return  # not committed: no HOST_STORE_ACK, no EVENT_ACK, and no later ACK may cover it
+            self._open_events.discard((boot, seq))  # the root settled it at HOST_STORE_ACK
         elif kind == EV_OPERATION:
             await self._on_operation_event(m)
-        elif kind == EV_MEMBERSHIP:
+        elif kind in (EV_MEMBERSHIP, EV_CHANNEL, power_status.EV_POWER):  # (S17: channel state; S16: a schedule report)
             await self._refresh_nodes()
+        elif kind == EV_GROUP_PROGRESS:
+            self.groups.touched(int(m["operation"]))
         elif kind == EV_GAP:
             self._poll_now = True
             self.hub.outbox_ready.set()
         elif kind == EV_FAULT:
             log.error("root reported a fault (reason %s)", m.get("reason"))
-        await link.request(M_EVENT_ACK, [boot, seq])
+        self._open_events.discard((boot, seq))
+        self._ack_top[boot] = max(self._ack_top.get(boot, 0), seq)
+        upto = self._ack_top[boot]
+        lowest = min((q for b, q in self._open_events if b == boot), default=None)
+        if lowest is not None:
+            upto = min(upto, lowest - 1)  # an event below was dropped or failed: never settle it
+        if upto > self._ack_sent.get(boot, 0):
+            res = await link.request(M_EVENT_ACK, [boot, upto])
+            if res.status == mapping.OK:
+                self._ack_sent[boot] = upto
 
     async def _store_message(self, link: SerialLink, m: dict[str, Any]) -> bool:
         info = self.info
@@ -674,9 +784,46 @@ class _Later(Exception):
         self.reason = reason
 
 
+def _is_group(conn: sqlite3.Connection, op: bytes) -> bool:
+    row = conn.execute("SELECT json_extract(request_json,'$.destination.kind') FROM operations WHERE id=?",
+                       (op,)).fetchone()
+    return row is not None and row[0] == "group"
+
+
 def _load_plan(raw: bytes) -> tuple[bytes, int, int, bytes]:
     mid, term, expires, digest = cbor_decode(raw)
     return mid, term, expires, digest
+
+
+def _load_join(raw: bytes) -> tuple[bytes, bytes, bool, int]:
+    request_id, device, approve, deadline = cbor_decode(raw)
+    return request_id, device, bool(approve), deadline
+
+
+def _stored_join(conn: sqlite3.Connection, op: bytes) -> tuple[bytes, bytes, bool, int] | None:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (f"join:{op.hex()}",)).fetchone()
+    return _load_join(bytes(row[0])) if row is not None else None
+
+
+def join_verdict(approve: bool, accepted: bool, status: int, state: int | None,
+                 past_deadline: bool) -> tuple[str, str, str] | None:
+    """What a GET_REQUEST answer proves about a JOIN_DECIDE (FIX2-D10/12): (outcome, evidence kind, reason)
+    when definite, None to keep waiting. An approval is applied only when the ledger holds an entry
+    (Prepared or later: durable). A rejection leaves no ledger state, so "no longer pending" proves it only
+    when the root also said OK to it. A bare OK or an unanswered query is never promoted."""
+    if status == mapping.OK and state == REQUEST_PENDING:
+        if not accepted:
+            return ("INDETERMINATE", "ROOT_DECISION_UNCONFIRMED",
+                    "the root still lists the request as pending: the decision may not have arrived")
+    elif status == mapping.OK and state is not None and approve and state >= LEDGER_PREPARED:
+        return ("APPLIED", "ROOT_APPLIED", f"ledger state {state}")
+    elif status in (mapping.OK, mapping.NOT_FOUND) and not approve:
+        if accepted:
+            return ("APPLIED", "ROOT_APPLIED", "the request is no longer pending")
+        return ("INDETERMINATE", "ROOT_DECISION_UNCONFIRMED", "the request is closed; the rejection is not proven")
+    if past_deadline:
+        return ("INDETERMINATE", "ROOT_DECISION_UNCONFIRMED", "no durable ledger state within the wait limit")
+    return None
 
 
 def _stored_plan(conn: sqlite3.Connection, op: bytes) -> tuple[bytes, int, int, bytes] | None:

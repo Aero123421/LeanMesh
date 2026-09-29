@@ -48,6 +48,10 @@ struct Neighbor {
     uint8_t role = 0;
     PeerHandle peer;
     SessionKeys cur;
+    // SEC-D3: the peer credential's lease. While it cannot be proven (no root time yet) the session carries no
+    // application DATA in either direction (SDK control, e.g. time sync and registration, passes).
+    RootTime lease;
+    bool lease_uncertain = false;
     bool rotate_wanted = false; // tx record threshold reached (seal() sets it)
     // [S8-D1] JOIN_ONLY session (docs/06 §4 membership 0): carries the join control objects only,
     // never DATA/ROUTE, never rotates, and is invisible to find_device(). One per joining device.

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "core/delivery/delivery.hpp"
+#include "core/group/group.hpp"
 #include "core/member/membership.hpp"
 #include "core/wire/cbor_reader.hpp"
 #include "serial/bridge.hpp"
@@ -79,6 +80,12 @@ void Bridge::handle(Pending &p, uint64_t method, ByteView params) {
         return m_event_ack(p, params);
     case kGetRequest:
         return m_get_request(p, params);
+    case kChannelAction:
+        return m_channel(p, params);
+    case kGroupSet:
+        return m_group_set(p, params);
+    case kGroupTargets:
+        return m_group_targets(p, params);
     default:
         return m_unsupported(p, method, params);
     }
@@ -112,7 +119,15 @@ void Bridge::m_send(Pending &p, ByteView params) {
         p.status = Status::Unsupported; // lm_send_object: the object transfer module has not landed
         return;
     }
-    std::memcpy(hs.rq.destination.node.bytes, dest.data(), 32);
+    uint32_t group_id = 0;
+    uint64_t group_revision = 0;
+    if (group::is_group_dest(dest, group_id, group_revision)) { // a group is a marker value (group.hpp)
+        hs.rq.destination.kind = LM_DEST_GROUP;
+        hs.rq.destination.group_id = group_id;
+        hs.rq.destination.group_revision = group_revision;
+    } else {
+        std::memcpy(hs.rq.destination.node.bytes, dest.data(), 32);
+    }
     hs.rq.delivery = static_cast<uint8_t>(delivery);
     hs.rq.storage = (flags & 16U) != 0 ? LM_DURABLE : LM_VOLATILE;
     hs.rq.priority = static_cast<uint8_t>(priority);
@@ -239,7 +254,7 @@ void Bridge::m_host_store_ack(Pending &p, ByteView params) {
     (void)r.array(6, 6);
     delivery::HostStoreAckRequest a;
     take(r, a.origin.bytes);
-    (void)r.uint_in(0, ~uint64_t{0}); // assignment generation: the (origin, MessageId, hash) triple is the key
+    a.assignment = r.uint_in(0, ~uint64_t{0}); // (origin, assignment generation, MessageId) is the identity
     take(r, a.mid);
     take(r, a.hash);
     (void)r.bstr(16, 16);              // journal id and committed sequence are the Host's evidence, not ours
@@ -252,7 +267,8 @@ void Bridge::m_host_store_ack(Pending &p, ByteView params) {
     ++stats_.host_store_acks;
     if (p.status == Status::Ok || p.status == Status::NotFound) {
         for (Slot &s : ring_) { // the Host has it (or the root no longer knows it): stop sending it
-            if (s.used && s.ev.kind == LM_EVENT_MESSAGE && s.ev.message_id == a.mid && s.ev.peer == a.origin.bytes) {
+            if (s.used && s.ev.kind == LM_EVENT_MESSAGE && s.ev.message_id == a.mid && s.ev.peer == a.origin.bytes &&
+                s.ev.assignment == a.assignment) {
                 s.stored = true;
                 settle(s);
             }
@@ -323,8 +339,8 @@ void Bridge::m_get_request(Pending &p, ByteView params) {
     p.result = p.status == Status::Ok ? Result::Request : Result::None;
 }
 
-// Methods 8 (GROUP_SNAPSHOT), 11 (CHANNEL_ACTION), 12 (SLEEP_WINDOW), 14 (GROUP_SET), 15 (GROUP_TARGETS)
-// belong to the group / channel / power slices. Their params are still validated so that a malformed
+// Methods 8 (GROUP_SNAPSHOT: the Host never fans out, the root does it for it, S15), 11 (CHANNEL_ACTION) and
+// 12 (SLEEP_WINDOW) belong to the channel / power slices. Their params are still validated so that a malformed
 // request is told apart from a missing feature; the feature answer is UNSUPPORTED (no operation exists).
 void Bridge::m_unsupported(Pending &p, uint64_t method, ByteView params) {
     wire::CborReader r{params};
@@ -338,39 +354,96 @@ void Bridge::m_unsupported(Pending &p, uint64_t method, ByteView params) {
             (void)r.bstr(16, 16);
         }
         break;
-    case kChannelAction:
-        (void)r.array(2, 2);
-        (void)r.uint_in(0, 2);
-        (void)r.uint_in(0, ~uint64_t{0});
-        break;
     case kSleepWindow:
         (void)r.array(3, 3);
         (void)r.bstr(32, 32);
         (void)r.uint_in(0, ~uint64_t{0});
         (void)r.uint_in(0, k_u32_max);
         break;
-    case kGroupSet: {
-        (void)r.array(3, 3);
-        (void)r.uint_in(0, k_u32_max);
-        (void)r.uint_in(0, ~uint64_t{0});
-        const std::size_t n = r.array(0, 64);
-        for (std::size_t i = 0; i < n; ++i) {
-            (void)r.bstr(32, 32);
-        }
-        break;
-    }
-    case kGroupTargets:
-        (void)r.array(5, 5);
-        (void)r.uint_in(0, ~uint64_t{0});
-        (void)r.uint_in(0, ~uint64_t{0});
-        (void)r.bstr(16, 16);
-        (void)r.uint_in(0, 64);
-        (void)r.uint_in(1, 16);
-        break;
     default:
         break;
     }
     p.status = r.finish() == Status::Ok ? Status::Unsupported : Status::InvalidArgument;
+}
+
+// GROUP_SET: the members of a group as a list of DeviceIds. A CBOR byte string of 32 bytes is `58 20` and its
+// content, so the whole list is addressed in place with a stride of 34 (nothing is copied on the owner stack).
+void Bridge::m_group_set(Pending &p, ByteView params) {
+    wire::CborReader r{params};
+    (void)r.array(3, 3);
+    group::SetRequest rq;
+    rq.group_id = static_cast<uint32_t>(r.uint_in(1, k_u32_max));
+    rq.expected_revision = r.uint_in(0, ~uint64_t{0});
+    rq.count = r.array(0, group::k_max_targets);
+    rq.stride = 34;
+    for (std::size_t i = 0; i < rq.count; ++i) {
+        const ByteView m = r.bstr(32, 32);
+        if (i == 0) {
+            rq.members = m.data();
+        } else if (m.data() != rq.members + i * rq.stride) {
+            r.fail();
+        }
+    }
+    if (r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    const Reply rep = run(CommandKind::GroupSet, &rq, sizeof(rq));
+    p.status = rep.status;
+    if (rep.status == Status::Ok) {
+        p.has_op = true; // completes at once (RAM registry); the OPERATION event says so
+        p.op = rep.operation_id;
+        p.result = Result::Ack;
+    }
+}
+
+// GROUP_TARGETS: one page of the per-target results of a group operation of this gateway boot. A zero
+// token names the operation's own snapshot (the Host does not know it before the first page).
+void Bridge::m_group_targets(Pending &p, ByteView params) {
+    wire::CborReader r{params};
+    (void)r.array(5, 5);
+    const uint64_t boot = r.uint_in(0, ~uint64_t{0});
+    const uint64_t op = r.uint_in(0, ~uint64_t{0});
+    take(r, p.page.token);
+    p.page.offset = static_cast<uint32_t>(r.uint_in(0, group::k_max_targets));
+    p.page.limit = static_cast<uint32_t>(r.uint_in(1, group::k_page));
+    if (r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    lm_group_progress_t g{};
+    g.struct_size = sizeof(g);
+    g.abi_version = LM_ABI_VERSION;
+    p.status = boot != boot_ ? Status::NotFound : run(CommandKind::GroupProgress, &op, sizeof(op), ByteView{}, &g, sizeof(g)).status;
+    if (p.status != Status::Ok) {
+        return;
+    }
+    const std::array<uint8_t, 16> none{};
+    if (p.page.token == none) {
+        std::memcpy(p.page.token.data(), g.snapshot_token, 16);
+    } else if (std::memcmp(p.page.token.data(), g.snapshot_token, 16) != 0) {
+        p.status = Status::Conflict; // another snapshot than this operation's: never a page of a different set
+        return;
+    }
+    p.has_op = true;
+    p.op = op;
+    p.result = Result::Targets;
+}
+
+// [S17] CHANNEL_ACTION = [action 0..2, expected policy revision]: 0 automatic (unfreeze), 1 freeze, 2 recalculate.
+// Accepted means the root applied it (freeze / unfreeze) or started the evaluation (recalculate); what the
+// evaluation concluded, and every later step of a plan, is reported as channel state, never as this answer.
+void Bridge::m_channel(Pending &p, ByteView params) {
+    wire::CborReader r{params};
+    (void)r.array(2, 2);
+    const uint64_t action = r.uint_in(0, 2);
+    const uint64_t revision = r.uint_in(0, ~uint64_t{0});
+    if (r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    const std::array<uint64_t, 2> rq{action, revision};
+    p.status = run(CommandKind::ChannelRequest, &rq, sizeof(rq)).status;
 }
 
 } // namespace lm::serial

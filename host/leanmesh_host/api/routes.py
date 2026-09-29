@@ -82,9 +82,9 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
     if len(payload) > (MAX_OBJECT_BYTES if body.object_transfer else MAX_MESSAGE_BYTES):
         raise ApiError(413, "PAYLOAD_TOO_LARGE", "payload exceeds the message limit")
     dest = body.destination
-    if isinstance(dest, DestGroup):
-        # Group registry, snapshots and per-target fan-out arrive with the GROUP slice.
-        raise ApiError(503, "UNSUPPORTED", "group destinations are not available",
+    if isinstance(dest, DestGroup) and (body.storage == "DURABLE" or body.queue_mode == "LATEST"):
+        # No compact durable group record and no LATEST group (docs/22 §4, §6): an explicit UNSUPPORTED.
+        raise ApiError(503, "UNSUPPORTED", "durable or LATEST group operations are not available",
                        required_capability="GROUP_FANOUT_V2")
     expiry = body.deadline.expiry_ms() if isinstance(body.deadline, DeadlineUtc) else None
     domain = codec.hex_bytes(body.domain_id, 16)
@@ -100,6 +100,8 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
     def precheck(conn: sqlite3.Connection) -> None:
         # Mutable admission state: checked for NEW operations only. An exact retry after a lost
         # response returns the stored operation even if the root or the clock moved on (S7-D8).
+        if isinstance(dest, DestGroup) and "GROUP_FANOUT_V2" not in hub.capabilities:
+            raise ApiError(503, "UNSUPPORTED", "the root has no group fan-out", required_capability="GROUP_FANOUT_V2")
         if body.object_transfer and "OBJECT_4K" not in hub.capabilities:
             raise ApiError(503, "UNSUPPORTED", "object transfer is not enabled", required_capability="OBJECT_4K")
         if expiry is not None and expiry <= journal.now_ms():

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "core/group/group.hpp"
 #include "core/member/membership.hpp"
 #include "core/wire/cbor.hpp"
 #include "core/wire/cbor_reader.hpp"
@@ -46,6 +47,39 @@ void put_snapshot(wire::CborWriter &w, const OpSnap &o, uint64_t op) {
     w.bytes(ByteView{o.intent_hash});
     key(w, "evidence_bits");
     w.uint(o.evidence_bits);
+}
+
+// [S17] NODE_QUERY `channel`: state of the coordinator (root::CState number), the applied channel and epoch, the
+// current plan id (zero: none yet) and the required / stored / applied / unreachable members by short address.
+void put_set(wire::CborWriter &w, uint64_t mask) {
+    w.array(static_cast<std::size_t>(__builtin_popcountll(mask)));
+    for (unsigned slot = 0; slot < 64; ++slot) {
+        if (((mask >> slot) & 1U) != 0) {
+            w.uint(2U + slot);
+        }
+    }
+}
+
+void put_channel(wire::CborWriter &w, const root::Coordinator::View &v) {
+    w.map(9);
+    key(w, "why");
+    w.uint(static_cast<uint8_t>(v.why));
+    key(w, "epoch");
+    w.uint(v.epoch);
+    key(w, "state");
+    w.uint(static_cast<uint8_t>(v.state));
+    key(w, "applied");
+    put_set(w, v.applied);
+    key(w, "current");
+    w.uint(v.current);
+    key(w, "plan_id");
+    w.bytes(ByteView{v.plan_id});
+    key(w, "deferred");
+    put_set(w, v.deferred);
+    key(w, "required");
+    put_set(w, v.required);
+    key(w, "unreachable");
+    put_set(w, v.unreachable);
 }
 
 // lm_capabilities_t::enabled_bits -> the names of api/openapi.json.
@@ -236,7 +270,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
             const root::Entry &e = led.entry(i);
             n += (node_state(e.state, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
         }
-        w.map(3);
+        w.map(5);
         key(w, "nodes");
         w.array(n);
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
@@ -253,6 +287,38 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
             w.boolean(e.confirmed);
             w.uint(e.address.value());
         }
+        key(w, "power"); // [S16] schedule reports the members made to the root (a hint; a member that never reported is absent)
+        std::size_t npw = 0;
+        power::MemberPower mp;
+        for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
+            uint32_t st = 0;
+            const root::Entry &e = led.entry(i);
+            npw += (node_state(e.state, st) && (!p.has_filter || e.device.bytes == p.filter) &&
+                    engine_.power().member_power(e.address, mp))
+                       ? 1U
+                       : 0U;
+        }
+        w.array(npw);
+        for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
+            uint32_t st = 0;
+            const root::Entry &e = led.entry(i);
+            if (!node_state(e.state, st) || (p.has_filter && e.device.bytes != p.filter) ||
+                !engine_.power().member_power(e.address, mp)) {
+                continue;
+            }
+            w.array(9);
+            w.bytes(e.device.view());
+            w.uint(mp.mode);
+            w.uint(mp.quality);
+            w.uint(mp.kind);
+            w.uint(mp.policy_rev);
+            w.uint(mp.interval_s);
+            w.uint(mp.earliest_s);
+            w.uint(mp.latest_s);
+            w.uint(mp.reported_s);
+        }
+        key(w, "channel"); // [S17] the coordinator's view; sets are short addresses of the members
+        put_channel(w, engine_.coordinator().view());
         key(w, "pending");
         root::PendingJoin pj;
         std::size_t np = 0;
@@ -270,6 +336,59 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         }
         key(w, "revision");
         w.uint(led.expected_revision());
+        break;
+    }
+    case Result::Targets: { // OpenAPI GroupTargetsPage, one lm_group_target_t at a time (no page on the stack)
+        lm_group_progress_t g{};
+        g.struct_size = sizeof(g);
+        g.abi_version = LM_ABI_VERSION;
+        (void)run(CommandKind::GroupProgress, &p.op, sizeof(p.op), ByteView{}, &g, sizeof(g));
+        const std::size_t n = p.page.offset >= g.total ? 0 : std::min<std::size_t>(p.page.limit, g.total - p.page.offset);
+        w.map(7); // deterministic CBOR: keys by length, then bytewise
+        key(w, "total");
+        w.uint(g.total);
+        key(w, "offset");
+        w.uint(p.page.offset);
+        key(w, "targets");
+        w.array(n);
+        for (std::size_t k = 0; k < n; ++k) {
+            group::TargetsRequest rq;
+            lm_group_target_t t{};
+            rq.operation = p.op;
+            std::memcpy(rq.token.data(), g.snapshot_token, 16);
+            rq.offset = p.page.offset + static_cast<uint32_t>(k);
+            rq.out = &t;
+            rq.limit = 1;
+            rq.capacity = 1;
+            (void)run(CommandKind::GroupTargets, &rq, sizeof(rq));
+            w.map(7);
+            key(w, "phase");
+            w.uint(t.phase);
+            key(w, "reason");
+            w.uint(t.reason);
+            key(w, "outcome");
+            w.uint(t.outcome);
+            key(w, "device_id");
+            w.bytes(ByteView{t.device.bytes, 32});
+            key(w, "message_id");
+            w.bytes(ByteView{t.message_id.bytes, 16});
+            key(w, "assignment_generation");
+            w.uint(t.assignment_generation);
+            key(w, "membership_generation");
+            w.uint(t.membership_generation);
+        }
+        key(w, "next_offset");
+        if (p.page.offset + n < g.total) {
+            w.uint(p.page.offset + n);
+        } else {
+            w.null();
+        }
+        key(w, "snapshot_hash");
+        w.bytes(ByteView{g.snapshot_hash, 32});
+        key(w, "snapshot_token");
+        w.bytes(ByteView{g.snapshot_token, 16});
+        key(w, "progress_revision");
+        w.uint(g.progress_revision);
         break;
     }
     case Result::Request:
@@ -411,6 +530,10 @@ Status Bridge::write_event(Slot &s, bool take, MutByteView out, std::size_t &len
             key(w, "operation");
             w.uint(ev.operation);
         }
+    } else if (ev.kind == LM_EVENT_GROUP_PROGRESS) { // S15: the Host reads the pages when it hears of a change
+        w.map(1);
+        key(w, "operation");
+        w.uint(ev.operation);
     } else {
         w.map(2);
         key(w, "peer");

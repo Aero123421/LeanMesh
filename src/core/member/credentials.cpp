@@ -394,6 +394,20 @@ Status check_binding(const DeviceCredential &dc, ByteView dc_cose, const MemberC
     return h == mc.credential_hash ? Status::Ok : Status::AuthRejected;
 }
 
+// ---- withheld signature (SEC-D1) ----
+Status withheld_hash(ByteView cose, Sha256Digest &out) {
+    sec::Sign1View v;
+    LM_TRY(sec::sign1_parse(cose, v));
+    static constexpr std::array<uint8_t, k_signature_bytes> k_zero{};
+    return sec::sha256_parts(cose.first(cose.size() - k_signature_bytes), ByteView{k_zero}, out);
+}
+
+bool signature_withheld(ByteView cose) {
+    sec::Sign1View v;
+    return sec::sign1_parse(cose, v) == Status::Ok &&
+           std::all_of(v.signature.begin(), v.signature.end(), [](uint8_t b) { return b == 0; });
+}
+
 // ---- floors ----
 Status Floors::raise(const DeviceId &device, uint64_t assignment, uint64_t membership) {
     for (std::size_t i = 0; i < count_; ++i) {
@@ -447,7 +461,18 @@ Status apply_revoke(const TrustAnchor &trust, const RootDelegation *delegation, 
 }
 
 DeadlineCheck check_lease(const MemberCredential &mc, const RootTimeBound &now) {
-    return check_deadline(now, RootTime{mc.root_term, mc.lease_expires_root_ms});
+    return check_deadline(now, lease_of(mc));
+}
+
+MonoTime lease_local_end(const RootTimeBound &bound, const RootTime &lease, MonoTime now) {
+    if (lease.ms <= bound.latest_ms) {
+        return now; // not provably before: no time left
+    }
+    const uint64_t left_ms = lease.ms - bound.latest_ms;
+    const uint64_t cap_ms = static_cast<uint64_t>(INT64_MAX / 1000 / 2);
+    const uint64_t ms = left_ms < cap_ms ? left_ms : cap_ms;
+    const uint64_t margin_ms = ms / 1000 + 1; // 1000 ppm + 1 ms
+    return ms > margin_ms ? now + Duration::from_ms(static_cast<int64_t>(ms - margin_ms)) : now;
 }
 
 // ---- bundle ----

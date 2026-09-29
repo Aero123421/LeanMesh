@@ -143,13 +143,16 @@ def group_targets(conn: sqlite3.Connection, principal: str, op_id: bytes, offset
     head = conn.execute("SELECT snapshot_token,snapshot_hash FROM group_targets WHERE operation=? "
                         "LIMIT 1", (op_id,)).fetchone()
     if head is None:
+        kind = conn.execute("SELECT json_extract(request_json,'$.destination.kind') FROM operations "
+                            "WHERE id=?", (op_id,)).fetchone()[0]
+        if kind == "group":  # accepted, but the root's snapshot has not been read yet
+            raise ApiError(409, "CONFLICT", "the group snapshot is not known yet; retry")
         raise invalid("operation is not a group operation")
     if token is not None and token != bytes(head[0]).hex():
         raise ApiError(409, "CONFLICT", "snapshot_token does not match", snapshot_token=bytes(head[0]).hex())
     total = conn.execute("SELECT COUNT(*) FROM group_targets WHERE operation=?", (op_id,)).fetchone()[0]
-    progress = conn.execute(
-        "SELECT COALESCE(SUM(json_array_length(evidence_json)),0)+COALESCE(SUM(phase='FINAL'),0) "
-        "FROM group_targets WHERE operation=?", (op_id,)).fetchone()[0]
+    stored = conn.execute("SELECT value FROM meta WHERE key=?", (f"gprog:{op_id.hex()}",)).fetchone()
+    progress = int.from_bytes(bytes(stored[0]), "big") if stored is not None else 0  # the root's own revision
     targets = []
     for device, ag, mg, mid, phase, outcome, evidence in conn.execute(
             "SELECT device,assignment_generation,membership_generation,message_id,phase,outcome,"

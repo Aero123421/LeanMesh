@@ -7,7 +7,7 @@ import os
 from ctypes import POINTER, Structure, c_int32, c_size_t, c_uint8, c_uint32, c_uint64, c_void_p
 from pathlib import Path
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 
 EVENT_SESSION_UP = 1
 EVENT_SESSION_DOWN = 2
@@ -78,8 +78,10 @@ def load_library(path: Path | None = None) -> ctypes.CDLL:
     lib.lmh_usb_close.restype = None
     lib.lmh_usb_feed.argtypes = [c_void_p, u8p, c_size_t, c_uint64]
     lib.lmh_usb_feed.restype = c_int32
-    lib.lmh_usb_take_tx.argtypes = [c_void_p, u8p, c_size_t]
-    lib.lmh_usb_take_tx.restype = c_size_t
+    lib.lmh_usb_peek_tx.argtypes = [c_void_p, u8p, c_size_t]
+    lib.lmh_usb_peek_tx.restype = c_size_t
+    lib.lmh_usb_consume_tx.argtypes = [c_void_p, c_size_t]
+    lib.lmh_usb_consume_tx.restype = c_int32
     lib.lmh_usb_tick.argtypes = [c_void_p, c_uint64]
     lib.lmh_usb_tick.restype = c_int32
     lib.lmh_usb_deadline_us.argtypes = [c_void_p]

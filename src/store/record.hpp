@@ -38,7 +38,7 @@ inline constexpr std::size_t k_header_bytes = 52;
 inline constexpr std::size_t k_crc_bytes = 4;
 inline constexpr std::size_t k_marker_bytes = 52;
 // Largest sealed payload; larger state is split over several record ids by its owner.
-inline constexpr std::size_t k_max_payload = 512;
+inline constexpr std::size_t k_max_payload = 672; // >= k_journal_max_payload: the journal stages in a RecordJob's buffers
 inline constexpr std::size_t k_max_blob = k_header_bytes + k_max_payload + k_crc_bytes;
 
 // Record ids (the NVS key space). 0 is invalid.
@@ -56,6 +56,27 @@ inline constexpr uint16_t revocation_floors = 10; // S5: member/records.cpp
 inline constexpr uint16_t root_delegation = 11;   // S5: fleet-signed RootDelegation COSE object
 inline constexpr uint16_t assignment_ticket = 12; // S8: signed AssignmentTicket, verbatim
 inline constexpr uint16_t paired_host = 13;       // S10: the root's one paired Host DeviceId (D6)
+inline constexpr uint16_t power_policy = 14;      // S16: the node's PowerPolicy (docs/12 §5: a typed sealed record)
+inline constexpr uint16_t discovery_scope = 15;   // SEC-Da: the optional DiscoveryScopeKey (32 B, factory)
+// One owner per NVS key: two records on one id overwrite and misread each other (ARCH-D7 and SEC-Da each found
+// such a collision). Every id above is listed here; the ledger's entries use 0x100 + slot.
+inline constexpr uint16_t k_all[] = {boot_incarnation, identity, fleet_trust, membership, membership_prepared,
+                                     assignment_high_water, channel_plan, policy, root_ledger, revocation_floors,
+                                     root_delegation, assignment_ticket, paired_host, power_policy, discovery_scope};
+constexpr bool all_distinct() {
+    for (std::size_t i = 0; i < std::size(k_all); ++i) {
+        if (k_all[i] == 0 || k_all[i] >= 0x100) {
+            return false;
+        }
+        for (std::size_t j = i + 1; j < std::size(k_all); ++j) {
+            if (k_all[i] == k_all[j]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+static_assert(all_distinct(), "record ids: unique, non-zero, below the ledger's 0x100");
 } // namespace rec
 inline constexpr uint8_t k_paired_host_active = 1; // record state of an installed pairing
 

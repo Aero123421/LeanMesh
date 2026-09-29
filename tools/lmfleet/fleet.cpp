@@ -2,11 +2,15 @@
 
 #include <algorithm>
 
+#include <memory>
+
 #include "core/wire/cbor.hpp"
 #include "core/wire/control.hpp"
-#include "security/cose_sign1.hpp"
 #include "port/sim/sim_provision.hpp"
+#include "root/ledger.hpp"
+#include "security/cose_sign1.hpp"
 #include "security/crypto.hpp"
+#include "store/record.hpp"
 
 namespace lm::fleet {
 namespace {
@@ -177,7 +181,8 @@ Bytes Fleet::revoke(const DeviceId &device, uint64_t af, uint64_t mf, uint64_t r
 }
 
 Bytes Fleet::ticket(const Kit &dev, const DomainId &source, const DomainId &target,
-                    const Bytes &delegation_cose, uint64_t expected_old, uint64_t new_generation) {
+                    const Bytes &delegation_cose, uint64_t expected_old, uint64_t new_generation, uint8_t mode,
+                    const std::array<uint8_t, 16> *nonce) {
     std::array<uint8_t, 320> buf{};
     CborWriter w{MutByteView{buf}};
     w.array(11);
@@ -190,8 +195,8 @@ Bytes Fleet::ticket(const Kit &dev, const DomainId &source, const DomainId &targ
     w.uint(new_generation);
     const Sha256Digest g = seeded("lmfleet-grant/" + label_, seed_, request_counter_, 0);
     w.bytes(ByteView{g.data(), 16});
-    w.uint(1); // mode 1: one-time grant registered at the device
-    w.bytes(ByteView{g.data() + 16, 16});
+    w.uint(mode); // 1: one-time grant registered at the device; 0: bound to the device's fresh nonce
+    w.bytes(nonce != nullptr ? ByteView{*nonce} : ByteView{g.data() + 16, 16});
     w.bytes(ByteView{hash_of(ByteView{dev.device_cose.data(), dev.device_cose.size()})});
     return sign(envelope(member::k_type_assignment_ticket, target, trust_.key_id, new_generation),
                 w.written());
@@ -284,6 +289,7 @@ NodeKit Network::make_node(uint32_t index, uint16_t address, uint8_t role, const
         s.role = role;
     }
     n.member_cose = issue_member(root, domain, n.kit, s);
+    members.push_back(n);
     return n;
 }
 
@@ -304,7 +310,57 @@ Status provision(sim::SimStore &store, const Network &net, const NodeKit &node, 
         in.member_cose = ByteView{node.member_cose.data(), node.member_cose.size()};
     }
     in.floors = floors;
-    return sim::provision_store(store, in);
+    const bool root = with_membership && node.kit.id == net.root.id;
+    if (root) {
+        in.new_ledger_domain = &net.domain;
+    }
+    LM_TRY(sim::provision_store(store, in));
+    uint64_t used = 0;
+    for (std::size_t i = 0; root && i < net.members.size(); ++i) {
+        uint16_t slot = 0;
+        const Status st = register_member(store, net.members[i], &slot);
+        if (st != Status::Ok && st != Status::InvalidArgument) {
+            return st; // InvalidArgument: an address outside the ledger's slots is never listed
+        }
+        used |= st == Status::Ok ? uint64_t{1} << slot : 0;
+    }
+    if (used == 0) {
+        return Status::Ok;
+    }
+    // Entries first, then the manifest naming their slots (the ledger's own order of a first use, SEC-D5), so
+    // the root loads a consistent ledger and has nothing to repair at boot.
+    root::Manifest m;
+    m.domain = net.domain;
+    m.used = used;
+    auto job = std::make_unique<store::RecordJob>();
+    std::size_t len = 0;
+    LM_TRY(root::encode_manifest(m, MutByteView{job->payload}, len));
+    job->op = store::RecordJob::Op::Commit;
+    job->id = store::rec::root_ledger;
+    job->state = 0;
+    job->payload_len = static_cast<uint32_t>(len);
+    return store::record_commit(store, *job);
+}
+
+Status register_member(sim::SimStore &root_store, const NodeKit &node, uint16_t *slot) {
+    member::Envelope env;
+    ByteView data;
+    member::MemberCredential mc;
+    const ByteView cose{node.member_cose.data(), node.member_cose.size()};
+    LM_TRY(member::peek_signed(cose, member::k_type_member_credential, env, data));
+    LM_TRY(member::decode_member_credential(data, mc));
+    auto job = std::make_unique<store::RecordJob>();
+    std::size_t len = 0;
+    uint16_t id = 0;
+    LM_TRY(root::encode_provisioned_member(mc, cose, id, MutByteView{job->payload}, len));
+    if (slot != nullptr) {
+        *slot = static_cast<uint16_t>(id - root::k_rec_ledger_base);
+    }
+    job->op = store::RecordJob::Op::Commit;
+    job->id = id;
+    job->state = static_cast<uint8_t>(root::EntryState::Active);
+    job->payload_len = static_cast<uint32_t>(len);
+    return store::record_commit(root_store, *job);
 }
 
 } // namespace lm::fleet

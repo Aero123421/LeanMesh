@@ -1,2 +1,7 @@
 # Same optimisation for every target/baseline so map differences stay comparable (docs/16).
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# The SDK's 4 MiB layout (config/partitions_4m.csv): identity/state/journal data partitions and two
+# 1.8 MiB OTA slots. The baseline app keeps IDF's default table; only image bytes are compared.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../config/partitions_4m.csv"

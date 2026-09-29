@@ -8,6 +8,7 @@
 
 #include "capi/context.hpp"
 #include "core/profile.hpp"
+#include "port/sim/sim_pm.hpp"
 #include "port/sim/sim_ports.hpp"
 #include "port/sim/sim_store.hpp"
 
@@ -34,6 +35,11 @@ struct NodeOptions {
     // The mesh module (parent search, registration) runs by itself. Off for the tests of the slices that
     // open sessions and install routes by hand (link, join, delivery, serial); mesh tests turn it on.
     bool mesh = false;
+    // [S16] The node has a sleep port (SimPm). Off: Ports::pm is null, as on a build without one.
+    bool power_port = true;
+    // The channel module (clock, plans, recovery scan, survey) runs. Off for the tests of earlier slices, which
+    // give their nodes a root clock by hand and never change the channel.
+    bool channel = false;
 };
 
 // Counters the simulator itself observes (not device diagnostics).
@@ -57,6 +63,11 @@ class SimNode {
 
     // World callback for a Wake event scheduled at `at_us`; stale (superseded) wakes are ignored.
     void on_wake_event(uint64_t at_us);
+    // [S16] A deep-sleeping node's firmware starts again (app main: lm_init + lm_start) at its wake time.
+    void on_boot_event(uint64_t at_us);
+    // [S16] An external wake source fires (GPIO): a light sleeper wakes in place, a deep sleeper reboots now.
+    void wake_external();
+    [[nodiscard]] bool deep_sleeping() const { return deep_boot_at_us_ != UINT64_MAX; }
     // Asks the world to run the owner as soon as possible (after RX, job done, command).
     void notify();
 
@@ -69,6 +80,7 @@ class SimNode {
     SimRadio radio;
     SimJobs jobs;
     SimStore store;
+    SimPm pm{*this};
     DirectOwnerCall owner_call;
     SerialCounters serial;
 
@@ -83,6 +95,10 @@ class SimNode {
     void request_wake(uint64_t world_at_us);
 
     uint64_t scheduled_wake_us_ = UINT64_MAX; // earliest pending Wake event
+    uint64_t deep_boot_at_us_ = UINT64_MAX;   // [S16] the pending Boot event of a deep sleeper
+    uint64_t deep_slept_at_us_ = 0;
+    uint8_t deep_sources_ = 0;
+    void go_deep();
 };
 
 } // namespace lm::sim

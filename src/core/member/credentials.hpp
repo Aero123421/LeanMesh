@@ -176,6 +176,16 @@ struct TrustAnchor {
 [[nodiscard]] Status check_binding(const DeviceCredential &dc, ByteView dc_cose,
                                    const MemberCredential &mc);
 
+// ---- SEC-D1: a MemberCredential whose signature is withheld until the root's ACTIVE commit ----
+// JoinPrepare carries the COSE_Sign1 with its 64 signature bytes zeroed: every field is final, but no verifier
+// accepts it, so a joiner that stops at PREPARE holds no credential. JoinCommit brings the 64 bytes once the
+// root's ACTIVE entry is durable. The signature of a well-formed COSE_Sign1 is its last 64 bytes.
+inline constexpr std::size_t k_signature_bytes = 64;
+// SHA-256 of `cose` with its signature zeroed (the join's prepare-hash). BadFrame: not a COSE_Sign1.
+[[nodiscard]] Status withheld_hash(ByteView cose, Sha256Digest &out);
+// `cose` is a well-formed COSE_Sign1 whose signature bytes are all zero.
+[[nodiscard]] bool signature_withheld(ByteView cose);
+
 // ---- revocation floors (docs/06 §7) ----
 // Minimum acceptable generations per device, raised only. Bounded: a full table refuses new
 // devices (NoCapacity) instead of forgetting one.
@@ -207,6 +217,13 @@ class Floors {
 // Lease of a member credential on the root clock. Before: provably valid; After: expired;
 // Uncertain: no proof either way (the caller decides, see the link layer).
 [[nodiscard]] DeadlineCheck check_lease(const MemberCredential &mc, const RootTimeBound &now);
+[[nodiscard]] inline RootTime lease_of(const MemberCredential &mc) {
+    return RootTime{mc.root_term, mc.lease_expires_root_ms};
+}
+// SEC-D3: the local time until which `lease` provably holds, given `bound` (for which it is Before) at `now`: its
+// remaining root time from the latest estimate, shortened by 1000 ppm of local clock drift (twice the qualified
+// 500 ppm) and 1 ms. A session authorised by that lease ends then at the latest.
+[[nodiscard]] MonoTime lease_local_end(const RootTimeBound &bound, const RootTime &lease, MonoTime now);
 
 // Credential bundle sent during a link exchange: CBOR [DeviceCredential COSE, MemberCredential COSE].
 struct Bundle {

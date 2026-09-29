@@ -108,13 +108,19 @@ void Proxy::answer_hello(const wire::BootstrapCarrier &hello, MonoTime now) {
     if (!k_proxy_built || is_root() || !engine_.mesh().proxy_capable(now) || now < last_offer_ + k_offer_gap) {
         return; // only an attached relay offers, and a hello flood costs one offer per gap
     }
+    const ByteView scope = engine_.identity().scope_key();
+    OfferHint asked;
+    if (decode_hello(hello.body, asked) != Status::Ok || !scope_ok(scope, k_obj_join_hello, hello.exchange_id, asked)) {
+        return; // SEC-Da: a scoped relay carries only joins of its own scope
+    }
     last_offer_ = now;
     OfferHint h;
     h.depth = engine_.mesh().depth();
     h.expected_revision = engine_.mesh().expected_revision();
-    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 8> frame{};
+    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 14> frame{};
     std::size_t len = 0;
-    if (encode_discovery(true, hello.exchange_id, link::domain_hint_of(engine_.identity().delegation().domain),
+    if (scope_sign(scope, k_obj_join_offer, hello.exchange_id, h) == Status::Ok &&
+        encode_discovery(true, hello.exchange_id, link::domain_hint_of(engine_.identity().delegation().domain),
                          MutByteView{frame}, len, &h) == Status::Ok) {
         (void)engine_.transmit(MacAddr::broadcast(), ByteView{frame.data(), len}, k_tag_proxy | 1U, now);
     }

@@ -3,7 +3,7 @@
 // SIMULATION ONLY: results are protocol evidence, never RF/range/power/hardware evidence.
 //
 //   meshsim [--nodes N] [--topology chain|full|none] [--topology-file F] [--clock virtual|realtime] [--seed S]
-//           [--serial-pty] [--serial-bridge] [--no-boot] [--objects] [--mesh]
+//           [--serial-pty] [--serial-bridge] [--no-boot] [--objects] [--mesh] [--channel]
 #include <poll.h>
 #include <unistd.h>
 
@@ -29,6 +29,8 @@ struct Options {
     bool boot = true;
     bool objects = false; // --objects: every node enables the 4 KiB object transfer (lm_config_t)
     bool mesh = false; // nodes find parents and register by themselves (else links/routes are made by hand)
+    bool leaf_last = false; // --leaf-last: the last node is a LEAF (S16: only a leaf may leave ALWAYS_RX)
+    bool channel = false; // the channel module runs on every node (clock, plans, recovery scan, survey)
     std::string topology_file; // links on top of --topology (usually with `none`)
 };
 
@@ -36,7 +38,7 @@ int usage() {
     std::fprintf(
         stderr,
         "usage: meshsim [--nodes N] [--topology chain|full|none] [--topology-file F]\n"
-        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--serial-bridge] [--no-boot] [--objects] [--mesh]\n");
+        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--serial-bridge] [--no-boot] [--objects] [--mesh] [--channel] [--leaf-last]\n");
     return 2;
 }
 
@@ -66,6 +68,10 @@ bool parse(int argc, char **argv, Options &o) {
             o.objects = true;
         } else if (a == "--mesh") {
             o.mesh = true;
+        } else if (a == "--leaf-last") {
+            o.leaf_last = true;
+        } else if (a == "--channel") {
+            o.channel = true;
         } else if (a == "--no-boot") {
             o.boot = false;
         } else {
@@ -100,9 +106,10 @@ int main(int argc, char **argv) {
     lm::sim::World world(wo);
     for (unsigned i = 0; i < opt.nodes; ++i) {
         lm::sim::NodeOptions no;
-        no.role = i == 0 ? lm::Role::Root : lm::Role::Relay;
+        no.role = i == 0 ? lm::Role::Root : (opt.leaf_last && i + 1 == opt.nodes ? lm::Role::Leaf : lm::Role::Relay);
         no.object_transfer_enabled = opt.objects;
         no.mesh = opt.mesh;
+        no.channel = opt.channel;
         (void)world.add_node(no);
     }
     if (opt.topology == "chain") {

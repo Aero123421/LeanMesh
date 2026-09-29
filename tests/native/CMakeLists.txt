@@ -57,3 +57,14 @@ target_link_libraries(test_sched PRIVATE lm_fleet)
 # MESH slice (S11): formation, registration, leases, repair, queries and delivery over the formed mesh.
 lm_add_test(test_mesh SOURCES test_mesh.cpp LABELS "integration;sim;mesh;scenario")
 target_link_libraries(test_mesh PRIVATE lm_fleet)
+# GROUP slice (S15): GroupSnapshotV2 pages, fan-out from the origin, per-target results, cancel, fixed set.
+lm_add_test(test_group SOURCES test_group.cpp LABELS "integration;sim;group;scenario")
+target_link_libraries(test_group PRIVATE lm_fleet)
+# POWER slice (S16): three power modes, poll/grant, parent mailbox, episodes and budgets, sleep ticket race, session
+# retention, the root's schedule view. Sim time only: no energy, no current.
+lm_add_test(test_power SOURCES test_power.cpp LABELS "integration;sim;power;scenario")
+target_link_libraries(test_power PRIVATE lm_fleet)
+target_compile_definitions(test_power PRIVATE LM_POWER_GOLDEN="${LM_REPO_ROOT}/tests/power_golden.json")
+# CHANNEL slice (S17): time bounds, survey, PREPARE / COMMIT / recovery, freeze, rollback, persisted states.
+lm_add_test(test_channel SOURCES test_channel.cpp LABELS "integration;sim;channel;scenario")
+target_link_libraries(test_channel PRIVATE lm_fleet)

@@ -86,7 +86,8 @@ class Topology {
     [[nodiscard]] Status confirm_ready(ShortAddr node, RootTerm term, PathRevision revision,
                                        uint64_t now_root_ms);
     // Lease refresh for an Active member; returns the current canonical path.
-    [[nodiscard]] Status renew(ShortAddr node, uint64_t now_root_ms, RouteGrant &out);
+    // `lease_ms` 0 = the default lease; the power module asks for the longer lease of a sleepy member (S16).
+    [[nodiscard]] Status renew(ShortAddr node, uint64_t now_root_ms, RouteGrant &out, uint64_t lease_ms = 0);
     // Drops leases and pending requests that ran out; the members stay Admitted.
     void expire(uint64_t now_root_ms);
     // Earliest lease/pending expiry (UINT64_MAX: none): the route service's only timer.

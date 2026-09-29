@@ -18,6 +18,15 @@ void Routes::stop() {
     push_at_ = MonoTime::never();
 }
 
+void Routes::forget(ShortAddr addr) {
+    if (inited_) {
+        (void)topo_.remove(addr); // NotFound: it never registered
+    }
+    if (addr.value() >= 2 && addr.value() - 2U < 64U) {
+        push_mask_ &= ~(1ULL << (addr.value() - 2U));
+    }
+}
+
 // The tree is bound to the root's address and term (its MemberCredential); a changed pair starts a new one.
 void Routes::sync(MonoTime /*now*/) {
     const member::MemberCredential &mc = engine_.identity().member();
@@ -44,26 +53,19 @@ bool Routes::path_to_addr(ShortAddr dest, delivery::PathSpec &out, MonoTime now)
     return true;
 }
 
-// Who is this member? A ledger entry decides when there is one (it may only deny: not Active means no);
-// a member the ledger has no entry for (provisioned at the factory, decision S8-D7) is known by the
-// verified MemberCredential of its end session. Never by an address alone.
+// Who is this member? Its ACTIVE ledger entry, and an end session (if any) of exactly that entry's address and
+// generations (SEC-D2: the ledger admitted it). A device the ledger does not list gets nothing (S8-D7 is gone).
+// Never by an address alone.
 bool Routes::identify(const DeviceId &dev, ShortAddr &addr, uint32_t &gen) {
     const delivery::EndSession *s = engine_.delivery().sessions().find_peer(dev);
     const Entry *e = engine_.ledger().find(dev);
-    if (e != nullptr) {
-        if (e->state != EntryState::Active || (s != nullptr && (e->address != s->peer_addr ||
-                                                                e->membership != s->peer_membership.value()))) {
-            return false;
-        }
-        addr = e->address;
-        gen = static_cast<uint32_t>(e->membership);
-        return true;
-    }
-    if (s == nullptr || !s->rec.active()) {
+    if (e == nullptr || e->state != EntryState::Active ||
+        (s != nullptr && (e->address != s->peer_addr || e->assignment != s->peer_assignment.value() ||
+                          e->membership != s->peer_membership.value()))) {
         return false;
     }
-    addr = s->peer_addr;
-    gen = static_cast<uint32_t>(s->peer_membership.value());
+    addr = e->address;
+    gen = static_cast<uint32_t>(e->membership);
     return true;
 }
 
@@ -73,9 +75,10 @@ bool Routes::path_to(const DeviceId &dest, delivery::PathSpec &out, MonoTime now
     return identify(dest, addr, gen) && path_to_addr(addr, out, now);
 }
 
-void Routes::send_lease(const DeviceId &peer, const delivery::PathSpec &route, route::LeaseRec &l, MonoTime now) {
+void Routes::send_lease(const DeviceId &peer, const delivery::PathSpec &route, route::LeaseRec &l, MonoTime now,
+                        uint32_t lease_ms) {
     l.term = topo_.term().value();
-    l.lease_ms = static_cast<uint32_t>(k_lease_ms);
+    l.lease_ms = lease_ms != 0 ? lease_ms : static_cast<uint32_t>(k_lease_ms);
     l.expected_revision = static_cast<uint32_t>(engine_.ledger().expected_revision());
     std::array<uint8_t, 64> body{};
     std::size_t len = 0;
@@ -102,6 +105,9 @@ void Routes::on_control(const DeviceId &peer, const delivery::PathSpec &reply, B
         break;
     case route::Op::Query:
         on_query(peer, reply, body, now);
+        break;
+    case route::Op::Power: // [S16] the member's schedule hint
+        engine_.power().on_report(peer, addr, body, now);
         break;
     default:
         break;
@@ -174,8 +180,9 @@ void Routes::on_ready(const DeviceId &peer, ShortAddr addr, const delivery::Path
     route::LeaseRec l;
     RouteGrant g;
     Status st = topo_.confirm_ready(addr, RootTerm{r.term}, PathRevision{r.revision}, ms(now));
+    const uint32_t lease = engine_.power().lease_ms_for(addr, now); // [S16] longer for a sleepy member, never unbounded
     if (st == Status::Ok) {
-        st = topo_.renew(addr, ms(now), g);
+        st = topo_.renew(addr, ms(now), g, lease);
     }
     l.status = st;
     if (st == Status::Ok) {
@@ -193,7 +200,7 @@ void Routes::on_ready(const DeviceId &peer, ShortAddr addr, const delivery::Path
             }
         }
     }
-    send_lease(peer, reply, l, now);
+    send_lease(peer, reply, l, now, lease);
 }
 
 void Routes::on_query(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now) {
@@ -255,6 +262,13 @@ void Routes::push_next(MonoTime now) {
     }
     if (push_mask_ != 0) {
         push_at_ = now + k_push_gap;
+    }
+}
+
+void Routes::extend_lease(ShortAddr addr, uint32_t lease_ms, MonoTime now) {
+    RouteGrant g;
+    if (inited_) {
+        (void)topo_.renew(addr, ms(now), g, lease_ms); // not active (yet): nothing to extend, it attaches first
     }
 }
 

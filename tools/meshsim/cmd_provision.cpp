@@ -69,8 +69,15 @@ std::string cmd_provision(Sim &sim, const Args &a) {
     } else {
         return error("role: leaf|relay|root|unjoined");
     }
-    const lm::Status st =
-        lm::fleet::provision(sim.world.node(i).store, net, kit, role != "unjoined");
+    lm::Status st = lm::fleet::provision(sim.world.node(i).store, net, kit, role != "unjoined");
+    // The root lists every provisioned member ACTIVE (SEC-D2: it admits nobody else). Members provisioned
+    // before the root are written by the root's provisioning, later ones here (before `start` of the root).
+    static int root_node = -1;
+    if (st == lm::Status::Ok && role == "root") {
+        root_node = i;
+    } else if (st == lm::Status::Ok && (role == "leaf" || role == "relay") && root_node >= 0) {
+        st = lm::fleet::register_member(sim.world.node(static_cast<uint16_t>(root_node)).store, kit);
+    }
     if (st != lm::Status::Ok) {
         return error(std::string("provision failed: ") + lm::status_name(st));
     }

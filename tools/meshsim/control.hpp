@@ -33,6 +33,9 @@
 //   gen-send / gen-next / send-control / ctl-sink / ctl-recv / frag   the fragment slice (cmd_fragment.cpp):
 //                                           messages and objects with a generated payload, control objects
 //                                           to a device and their sink, fragment counters
+//   group-set / group-send / group-progress / group-targets / group-cancel   the group slice (cmd_group.cpp): the
+//                                           root's group registry, lm_send to a group, progress, per-target
+//                                           results, cancel
 //   mesh <node>                             mesh state (Listen/Search/Attach/Ready/Root), parent, depth, root path and
 //                                           counters of node i; on the root also the approved tree size (cmd_mesh.cpp)
 //   quit
@@ -119,6 +122,13 @@ std::string cmd_msg_cancel(Sim &sim, const Args &a);
 std::string cmd_delivery(Sim &sim, const Args &a);
 // Commands of the mesh slice (cmd_mesh.cpp).
 std::string cmd_mesh(Sim &sim, const Args &a);
+// Commands of the power slice (cmd_power.cpp).
+std::string cmd_power(Sim &sim, const Args &a);
+std::string cmd_power_set(Sim &sim, const Args &a);
+std::string cmd_sleep(Sim &sim, const Args &a);
+std::string cmd_wake(Sim &sim, const Args &a);
+// Commands of the channel slice (cmd_channel.cpp).
+std::string cmd_channel(Sim &sim, const Args &a);
 
 // Commands of the fragment slice (cmd_fragment.cpp).
 std::string cmd_gen_send(Sim &sim, const Args &a);
@@ -127,6 +137,13 @@ std::string cmd_send_control(Sim &sim, const Args &a);
 std::string cmd_ctl_sink(Sim &sim, const Args &a);
 std::string cmd_ctl_recv(Sim &sim, const Args &a);
 std::string cmd_frag(Sim &sim, const Args &a);
+
+// Commands of the group slice (cmd_group.cpp).
+std::string cmd_group_set(Sim &sim, const Args &a);
+std::string cmd_group_send(Sim &sim, const Args &a);
+std::string cmd_group_progress(Sim &sim, const Args &a);
+std::string cmd_group_targets(Sim &sim, const Args &a);
+std::string cmd_group_cancel(Sim &sim, const Args &a);
 
 // Commands of the scheduler slice (cmd_sched.cpp).
 std::string cmd_flood(Sim &sim, const Args &a);

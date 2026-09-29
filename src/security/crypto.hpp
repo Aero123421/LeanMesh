@@ -25,6 +25,11 @@ namespace lm::sec {
 // SHA-256 of `a || b` without joining them (a header and a payload that lives in a pool buffer).
 [[nodiscard]] Status sha256_parts(ByteView a, ByteView b, Sha256Digest &out);
 
+// SHA-256 of `count` chunks in order; chunk i is `next(ctx, i)` (valid until the next call). An empty
+// chunk fails (BadFrame): the caller could not produce that part of the message.
+using ChunkFn = ByteView (*)(void *ctx, std::size_t index);
+[[nodiscard]] Status sha256_chunks(ChunkFn next, void *ctx, std::size_t count, Sha256Digest &out);
+
 // Zeroisation that the optimiser cannot remove (mbedtls_platform_zeroize).
 void secure_zero(MutByteView buf);
 

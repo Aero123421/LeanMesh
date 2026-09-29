@@ -308,7 +308,7 @@ Status Topology::confirm_ready(ShortAddr addr, RootTerm term, PathRevision revis
     return bump_subtree(idx);
 }
 
-Status Topology::renew(ShortAddr addr, uint64_t now, RouteGrant &out) {
+Status Topology::renew(ShortAddr addr, uint64_t now, RouteGrant &out, uint64_t lease_ms) {
     const uint8_t idx = find_addr(addr.value());
     if (idx == k_none || idx == k_root) {
         return Status::NotFound;
@@ -316,7 +316,7 @@ Status Topology::renew(ShortAddr addr, uint64_t now, RouteGrant &out) {
     Chain path{};
     std::size_t len = 0;
     LM_TRY(chain(idx, &now, path, len));
-    nodes_[idx].lease_expires_ms = now + gen::defaults::routing::lease_ms;
+    nodes_[idx].lease_expires_ms = now + (lease_ms != 0 ? lease_ms : gen::defaults::routing::lease_ms);
     fill_grant(path, len, 0, false, nodes_[idx].revision, nodes_[idx].lease_expires_ms, out);
     return Status::Ok;
 }

@@ -43,8 +43,6 @@ inline constexpr std::size_t k_bitmap_bytes = k_object_capable ? wire::k_bitmap_
 inline constexpr std::size_t k_control_done = 4; // control objects remembered after dispatch (dedup)
 // A receipt with a 32 B result is at most 1 + 17 + 34 + 1 + 5 + 5 + 34 B of CBOR.
 inline constexpr std::size_t k_receipt_max = 100;
-// A durable record must fit one journal entry with its fixed fields (delivery_durable.cpp, 145 B).
-inline constexpr std::size_t k_durable_payload_max = 360;
 
 // Where a message payload lives.
 enum class Lane : uint8_t { Pool = 0, Control = 1, Object = 2 };

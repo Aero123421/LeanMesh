@@ -11,14 +11,17 @@
 
 #include <cstdint>
 
+#include "core/channel/channel.hpp"
 #include "core/command.hpp"
 #include "core/delivery/delivery.hpp"
 #include "core/events.hpp"
+#include "core/group/group.hpp"
 #include "core/jobs.hpp"
 #include "core/link/link_layer.hpp"
 #include "core/member/membership.hpp"
 #include "core/member/proxy.hpp"
 #include "core/member/records.hpp"
+#include "core/power/power.hpp"
 #include "core/ports.hpp"
 #include "core/profile.hpp"
 #include "core/radio/peer_registry.hpp"
@@ -28,6 +31,8 @@
 #include "core/route/mesh.hpp"
 #include "core/serial_hook.hpp"
 #include "core/time.hpp"
+#include "root/channel_coordinator.hpp"
+#include "root/groups.hpp"
 #include "root/ledger.hpp"
 #include "root/routes.hpp"
 
@@ -37,6 +42,7 @@ struct Ports {
     port::Clock &clock;
     port::Radio &radio;
     port::Jobs &jobs;
+    port::Pm *pm = nullptr; // [S16] optional: a build without it cannot sleep
     // port::Store is reached only through job bodies on the worker (JobEnv).
 };
 
@@ -68,7 +74,8 @@ inline constexpr std::size_t k_max_app_events = k_build_limits.app_messages;
 inline constexpr int k_max_radio_events_per_step = 8;
 
 // The radio lifecycle the owner drives (Start/Stop commands and watchdog recovery).
-enum class RadioState : uint8_t { Stopped, Running, Recovering, Faulted };
+// Asleep [S16]: the driver is off on purpose (sleep, or a wake the power budget denied); RAM state is kept.
+enum class RadioState : uint8_t { Stopped, Running, Recovering, Faulted, Asleep };
 
 // Radio re-initialisation attempts after an unknown TX result before FAULT is reported.
 inline constexpr int k_radio_recover_attempts = 3;
@@ -128,7 +135,10 @@ class Engine {
     [[nodiscard]] bool push_event(const lm_event_t &ev) { return events_.push(ev); }
     void raise(uint32_t kind, uint32_t reason) { emit(kind, reason); }
     // Root clock estimate from the time slice: feeds deadline checks and credential leases.
-    void set_root_time(const RootTimeBound &t, MonoTime now) { delivery_.set_root_time(t, now); }
+    void set_root_time(const RootTimeBound &t, MonoTime now) {
+        delivery_.set_root_time(t, now);
+        link_.revalidate(delivery_.root_time(now), now); // SEC-D3: every session judged by its peer's lease again
+    }
     // [SLICE:S8] membership: joiner/resume/leave on every device, the ledger on the root only.
     member::Membership &membership() { return membership_; }
     root::LedgerType &ledger() { return ledger_; }
@@ -140,6 +150,28 @@ class Engine {
     // A transmission that never touched the radio (a frame handed to the join tunnel) is over.
     void complete_virtual_tx(uint32_t tag, port::TxResult result, MonoTime now) { on_tx_outcome(TxOutcome{tag, result, now}, now); }
     root::RoutesType &routes() { return routes_; }
+    // [SLICE:S17] channel module (time, plan participant, recovery) on every node; the planner on the root only.
+    channel::Channel &chan() { return chan_; }
+    [[nodiscard]] const channel::Channel &chan() const { return chan_; }
+    root::CoordinatorType &coordinator() { return coord_; }
+    [[nodiscard]] const root::CoordinatorType &coordinator() const { return coord_; }
+    // [SLICE:S15] group fan-out (every role) and the root's group registry (empty stand-in elsewhere).
+    group::Fanout &group() { return group_; }
+    root::GroupsType &groups() { return groups_; }
+    [[nodiscard]] const root::GroupsType &groups() const { return groups_; }
+    // [SLICE:S16] power modes, sleep tickets, poll/grant, mailbox parking (src/core/power).
+    power::Power &power() { return power_; }
+    [[nodiscard]] port::Pm *pm() const { return ports_.pm; }
+    [[nodiscard]] MonoTime clock_now() const { return ports_.clock.now(); }
+    // The driver goes off / comes back with RAM state kept (light sleep, a withheld radio); the peers are
+    // registered again and the channel is kept. Owner thread only.
+    void radio_sleep();
+    void radio_wake(MonoTime now);
+    // The platform woke the CPU (an interrupt, or the port returned from a blocking light sleep).
+    void power_wake(const port::WakeInfo &w, MonoTime now) { power_.wake(w, now); }
+    [[nodiscard]] bool crypto_busy() const { return jobs_.public_key_busy(); }
+    [[nodiscard]] bool flash_busy() const { return jobs_.flash_busy(); }
+    [[nodiscard]] bool jobs_busy() const { return jobs_.busy(); }
     // Time of the step() or command being processed (hooks called from RX handling use it).
     [[nodiscard]] MonoTime step_time() const { return step_now_; }
     // [SLICE:S10] Root-only USB serial adapter (src/serial); nullptr on leaf/relay. Not owned.
@@ -187,6 +219,11 @@ class Engine {
     route::Mesh mesh_{*this};                           // [SLICE:S11]
     root::RoutesType routes_{*this};                    // [SLICE:S11] empty stand-in off the root
     member::Proxy proxy_{*this};                        // [SLICE:S11] join tunnel (relay side and root side)
+    power::Power power_{*this};                         // [SLICE:S16]
+    channel::Channel chan_{*this};                      // [SLICE:S17]
+    root::CoordinatorType coord_{*this};                // [SLICE:S17] empty stand-in off the root
+    root::GroupsType groups_{*this};                    // [SLICE:S15] before the fan-out that reads it
+    group::Fanout group_{*this};                        // [SLICE:S15]
     SerialHook *serial_ = nullptr; // [SLICE:S10]
     RadioState radio_state_ = RadioState::Stopped;
     uint8_t channel_ = 0;

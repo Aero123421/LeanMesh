@@ -35,10 +35,19 @@ int64_t Scheduler::tokens_us(MonoTime now) {
     return tokens_;
 }
 
-bool Scheduler::pick(const std::array<uint16_t, k_classes> &head_bytes, MonoTime now, Class &out, MonoTime &wake) {
+bool Scheduler::pick(const std::array<uint16_t, k_classes> &heads, MonoTime now, Class &out, MonoTime &wake) {
     refill(now);
     roll_window(now);
     wake = MonoTime::never();
+    std::array<uint16_t, k_classes> head_bytes = heads;
+    if (now < hold_until_) { // [S17] only CONTROL may go while the node is planned off its channel
+        for (std::size_t c = 1; c < k_classes; ++c) {
+            if (head_bytes[c] != 0) {
+                wake = hold_until_;
+                head_bytes[c] = 0;
+            }
+        }
+    }
     bool any = false;
     for (std::size_t c = 0; c < k_classes; ++c) {
         if (head_bytes[c] == 0) {
@@ -47,7 +56,7 @@ bool Scheduler::pick(const std::array<uint16_t, k_classes> &head_bytes, MonoTime
         any = any || head_bytes[c] != 0;
     }
     if (!any) {
-        return false;
+        return false; // (wake is the end of a hold when data frames wait behind one)
     }
     drr_pending_ = false;
     // CONTROL reserve: inside its window entitlement a ready control frame goes first, even on empty tokens

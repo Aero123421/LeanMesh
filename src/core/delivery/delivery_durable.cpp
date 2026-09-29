@@ -23,6 +23,9 @@ constexpr uint8_t k_kind_out = 1;
 constexpr uint8_t k_kind_in = 2;
 constexpr std::size_t k_out_fixed = 4 + 2 + 4 + 8 + 32 + 16 + 32 + 2;
 constexpr std::size_t k_in_fixed = 4 + 2 + 4 + 8 + 32 + 16 + 32 + 8 + 4 + 1 + k_result_bytes + 2;
+// A durable 512 B message (the spec's small-message limit) fits one journal entry (FIX2-D6).
+static_assert(k_in_fixed + k_msg_bytes <= store::k_journal_max_payload);
+static_assert(k_out_fixed + k_msg_bytes <= store::k_journal_max_payload);
 
 } // namespace
 
@@ -127,7 +130,7 @@ Status Delivery::durable_fill(void *ctx, const DurableReq &req, MutByteView out,
     w.bytes(e->origin.view());
     w.bytes(ByteView{e->mid});
     w.bytes(ByteView{e->hash});
-    w.u64be(l->origin_assignment);
+    w.u64be(e->assignment);
     w.u32be(e->receipt_seq);
     w.u8(e->result_len);
     w.bytes(ByteView{e->result});
@@ -379,7 +382,7 @@ void Delivery::recovered_in(uint32_t slot, ByteView rec, MonoTime now) {
     r.copy_to(e->origin.bytes);
     r.copy_to(e->mid);
     r.copy_to(e->hash);
-    const uint64_t assignment = r.u64be();
+    e->assignment = r.u64be();
     e->receipt_seq = r.u32be();
     e->result_len = r.u8();
     r.copy_to(e->result);
@@ -412,7 +415,6 @@ void Delivery::recovered_in(uint32_t slot, ByteView rec, MonoTime now) {
         l->app_pending = app_pending;
         l->port = port;
         l->term = term;
-        l->origin_assignment = assignment;
         l->persisted_version = l->version; // durable already
         l->arrival = ++arrival_;
         if (e->st == InEntry::St::Held) {

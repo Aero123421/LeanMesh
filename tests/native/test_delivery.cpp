@@ -486,8 +486,8 @@ LM_TEST("D06 sim: accept-time deadline rules (no clock, past, none only for RECE
     rq.queue_mode = LM_LATEST; // LATEST is best effort + volatile only (docs/08 §1, S14)
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_INVALID_ARGUMENT);
     rq.queue_mode = LM_FIFO;
-    rq.destination.kind = LM_DEST_GROUP;
-    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_UNSUPPORTED);
+    rq.destination.kind = LM_DEST_GROUP; // a group needs its id and revision (S15); the fan-out has its own tests
+    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_INVALID_ARGUMENT);
     rq.destination.kind = LM_DEST_NODE;
     std::memcpy(rq.destination.node.bytes, n.id(0).bytes.data(), 32); // to itself
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_INVALID_ARGUMENT);
@@ -656,14 +656,15 @@ LM_TEST("D04 sim: cancel before anything left is CANCELLED_NOT_SENT, after it le
 // ---- replay, duplicates, tampering (the test plays the attacker with the origin's own state) ----
 namespace {
 
-Bytes craft_record(DNet &n, unsigned from, unsigned to, uint8_t mid_seed, const Bytes &payload, uint64_t ttl_ms) {
+Bytes craft_record(DNet &n, unsigned from, unsigned to, uint8_t mid_seed, const Bytes &payload, uint64_t ttl_ms,
+                   wire::Delivery dk = wire::Delivery::Received) {
     delivery::EndSession *s = n.dv(from).sessions().find_peer(n.id(to));
     LM_CHECK(s != nullptr);
     wire::EndHeader h;
     h.message_id.fill(mid_seed);
     h.app_port = 100;
     h.record_kind = wire::RecordKind::Data;
-    h.flags = wire::make_end_flags(wire::Delivery::Received, wire::Priority::Normal, false);
+    h.flags = wire::make_end_flags(dk, wire::Priority::Normal, false);
     h.expires_root_ms = n.root_ms() + ttl_ms;
     std::array<uint8_t, 250> buf{};
     std::size_t len = 0;
@@ -731,6 +732,46 @@ LM_TEST("S04 sim: duplicate frame, duplicate record, tampered record and conflic
     inject(n, 0, 1, frame_for(n, 0, 1, r1));
     LM_CHECK_EQ(n.dv(1).stats().rx_auth_fail, fails + 1u);
     LM_CHECK_EQ(n.dv(1).stats().delivered, 72u);
+}
+
+LM_TEST("FIX2-D1 sim: the same MessageId and intent after a rejoin (new assignment) is a new message, not a duplicate") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    const Bytes body = payload_of(0x50, 24);
+    const auto rec = [&] { return craft_record(n, 0, 1, 0xD1, body, 60000, wire::Delivery::Applied); };
+    inject(n, 0, 1, frame_for(n, 0, 1, rec()));
+    Received m1;
+    LM_CHECK(n.pop(1, m1, LM_EVENT_MESSAGE));
+    LM_CHECK_EQ(m1.ev.origin_assignment_generation, 1ull);
+    // The origin left and rejoined (assignment 2) and, its store rolled back, issued the same MessageId.
+    delivery::EndSession *s = n.dv(1).sessions().find_peer(n.id(0));
+    LM_CHECK(s != nullptr);
+    s->peer_assignment = AssignmentGen{2};
+    const uint64_t dup = n.dv(1).stats().rx_dup_end;
+    inject(n, 0, 1, frame_for(n, 0, 1, rec()));
+    LM_CHECK_EQ(n.dv(1).stats().rx_dup_end, dup); // not answered from the old assignment's record
+    Received m2;
+    LM_CHECK(n.pop(1, m2, LM_EVENT_MESSAGE));
+    LM_CHECK_EQ(m2.ev.origin_assignment_generation, 2ull);
+    // The application result goes to the assignment named by the reference, and nowhere else.
+    LM_CHECK_EQ(n.report(1, m2.ev, LM_OUTCOME_APPLIED, Bytes{7}), LM_STATUS_OK);
+    lm_operation_t o1{};
+    o1.struct_size = sizeof(o1);
+    o1.abi_version = LM_ABI_VERSION;
+    lm_operation_t o2 = o1;
+    const lm_message_ref_t r1 = n.ref_of_event(m1.ev);
+    const lm_message_ref_t r2 = n.ref_of_event(m2.ev);
+    LM_CHECK_EQ(lm_get_message(n.ctx(1), &r1, &o1), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_get_message(n.ctx(1), &r2, &o2), LM_STATUS_OK);
+    LM_CHECK_EQ(o1.outcome, LM_OUTCOME_RECEIVED); // the old assignment's message is untouched
+    LM_CHECK_EQ(o2.outcome, LM_OUTCOME_APPLIED);
+    lm_message_ref_t r3 = r2;
+    r3.assignment_generation = 3;
+    LM_CHECK_EQ(lm_get_message(n.ctx(1), &r3, &o2), LM_STATUS_NOT_FOUND);
+    lm_operation_id_t opid = 0;
+    LM_CHECK_EQ(lm_report_application_result(n.ctx(1), &r3, LM_OUTCOME_APPLIED, nullptr, 0, &opid), LM_STATUS_NOT_FOUND);
 }
 
 LM_TEST("Q02 device: 100 repeats of one message create one event and bounded work") {
@@ -1105,6 +1146,25 @@ LM_TEST("POWER sim: origin cut after the destination stored it: dedup at the des
         ++events;
     }
     LM_CHECK_EQ(events, 1);
+}
+
+LM_TEST("FIX2-D6 sim: a DURABLE 512 B message is journalled at both ends and survives a destination power cut") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    const Bytes body = payload_of(0x61, 512);
+    const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, body, 100000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_RECEIVED; }, 60000));
+    LM_CHECK((n.op(0, s.op).evidence_bits & persisted) != 0);
+    // The application has not taken it: the destination loses power; the journal brings the whole payload back.
+    n.reboot(1);
+    n.run_ms(500);
+    Received m;
+    LM_CHECK(n.until([&] { return n.pop(1, m, LM_EVENT_MESSAGE); }, 30000));
+    LM_CHECK(m.payload == body);
+    LM_CHECK_EQ(m.ev.reason, 1u); // recovered after a restart: the application may have seen it
 }
 
 LM_TEST("D06 sim: a recovered message with a deadline waits for a clock bound and never outlives its deadline") {

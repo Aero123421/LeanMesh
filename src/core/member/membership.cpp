@@ -58,7 +58,7 @@ Status Membership::start_verify(MonoTime /*now*/) {
     }
     job_slot_ = Handle{0, ++job_gen_};
     LM_TRY(engine_.submit_job(JobOwner::Join, job_slot_, JobClass::PublicKey, &verify_job, this));
-    step_ = Step::VerifyPrepare;
+    step_ = Step::VerifyActivation;
     job_in_flight_ = true;
     return Status::Ok;
 }
@@ -187,9 +187,11 @@ void Membership::begin_discovery(MonoTime now) {
 }
 
 void Membership::send_hello(MonoTime now) {
-    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 1> frame{};
+    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 9> frame{};
     std::size_t len = 0;
-    if (encode_discovery(false, hello_nonce_, 0, MutByteView{frame}, len) != Status::Ok) {
+    OfferHint h; // SEC-Da: a scoped device tags its hello
+    if (scope_sign(engine_.identity().scope_key(), k_obj_join_hello, hello_nonce_, h) != Status::Ok ||
+        encode_discovery(false, hello_nonce_, 0, MutByteView{frame}, len, &h) != Status::Ok) {
         return;
     }
     (void)engine_.transmit(MacAddr::broadcast(), ByteView{frame.data(), len}, k_tag_hello, now);
@@ -201,8 +203,9 @@ void Membership::send_hello(MonoTime now) {
 // 300 ms wins. A higher expected-list revision than the one we were refused at ends a NOT_EXPECTED hold.
 void Membership::discovery(const MacAddr &src, const wire::BootstrapCarrier &c, MonoTime now) {
     OfferHint h;
-    if (phase_ != JoinPhase::Discover || c.object_kind != k_obj_join_offer || decode_offer_hint(c.body, h) != Status::Ok) {
-        return;
+    if (phase_ != JoinPhase::Discover || c.object_kind != k_obj_join_offer || decode_offer_hint(c.body, h) != Status::Ok ||
+        !scope_ok(engine_.identity().scope_key(), k_obj_join_offer, c.exchange_id, h)) {
+        return; // SEC-Da: a scoped device hears only offers of its own scope
     }
     if (disc_.revision_advanced(h.expected_revision)) {
         disc_.clear_suppress();
@@ -396,18 +399,13 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         request_ready(now);
         return;
 
-    case Step::VerifyPrepare:
-        if (s != Status::Ok) {
+    case Step::VerifyActivation:
+        if (s != Status::Ok) { // the signature does not complete what was announced: nothing goes live
             finish_join(s == Status::AuthRejected || s == Status::BadFrame ? Status::AuthRejected : s,
                         LM_OUTCOME_REJECTED, now);
             return;
         }
-        if (phase_ == JoinPhase::Activate) {
-            mc_verified_ = true;
-            activate_commit(now); // resume path: the PREPARED credential is verified before it goes live
-            return;
-        }
-        prepared_verified(now);
+        activate_commit(now);
         return;
 
     case Step::CommitPrepared:
@@ -489,7 +487,6 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         return;
 
     case Step::LeaveCommit:
-    case Step::LeaveFloors:
         leave_flash_done(step, s, now);
         return;
 

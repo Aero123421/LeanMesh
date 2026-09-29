@@ -1,6 +1,7 @@
 #include "core/link/link_layer.hpp"
 
 #include "core/engine.hpp"
+#include "core/route/forward.hpp"
 
 namespace lm::link {
 namespace {
@@ -11,6 +12,18 @@ bool is_session_kind(wire::FrameKind k) {
     return k == wire::FrameKind::Data || k == wire::FrameKind::HopAck ||
            k == wire::FrameKind::Route || k == wire::FrameKind::Control ||
            k == wire::FrameKind::Power;
+}
+
+// A routed DATA body whose end record belongs to an application (app_port 1..65534): data, receipts and fragments
+// of messages. SDK control (port 0: handshake carriers, the join tunnel, mesh and time control) is not.
+bool carries_app_data(ByteView plain) {
+    wire::RouteHeader h;
+    ByteView record;
+    if (wire::decode_route(plain, h, record) != Status::Ok || record.size() < wire::k_end_header_bytes) {
+        return false;
+    }
+    Reader r{record.subspan(28, 2)}; // end header: app_port at offset 28 (docs/09 §4)
+    return r.u16be() != 0;
 }
 
 } // namespace
@@ -85,7 +98,18 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
     Opened op;
     switch (open_frame(*which, h, frame, op)) {
     case Status::Ok:
-        which->rec.accept(h.link_counter); // only after the tag verified (docs/06 §6)
+        if (!admissible(*n, h.kind, op.view())) {
+            // Authentic but not for us / not parseable: the window stays where it is (SEC-D11). DATA still
+            // goes to the delivery layer, which derives the same drop and answers REJECTED.
+            ++stats_.rx_inadmissible;
+            return h.kind == wire::FrameKind::Data ? deliver(*n, h, op, false) : true;
+        }
+        if (n->lease_uncertain && h.kind == wire::FrameKind::Data && carries_app_data(op.view())) {
+            // SEC-D3: not accepted either: the same frame is judged again once the peer's lease is proven.
+            ++stats_.rx_lease_restricted;
+            return deliver(*n, h, op, false, true);
+        }
+        which->rec.accept(h.link_counter); // only after the tag and the minimum checks (docs/06 §6)
         ++stats_.rx_accepted;
         return deliver(*n, h, op, false);
     case Status::Replay:
@@ -107,7 +131,40 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
     }
 }
 
-bool LinkLayer::deliver(const Neighbor &n, const wire::LinkHeader &h, const Opened &op, bool duplicate) {
+// The minimum checks of docs/06 §6 ("AEAD成功と宛先/長さ検査前にwindowを消費しない"), SEC-D11. The frame
+// decoder already fixed the lengths of every kind. DATA must also be a routed body whose header names this
+// node as the next hop of this very sender in the current term (the forwarding decision of docs/04 §4 the
+// delivery layer takes again), with an end record a relay may carry or this node may open; a HOP_ACK must
+// parse. The bodies of ROUTE / CONTROL / POWER are their consumers' formats and are not judged here.
+bool LinkLayer::admissible(const Neighbor &n, wire::FrameKind kind, ByteView plain) const {
+    if (kind == wire::FrameKind::HopAck) {
+        wire::HopAck a;
+        return wire::decode_hop_ack(plain, a) == Status::Ok;
+    }
+    if (kind != wire::FrameKind::Data) {
+        return true;
+    }
+    if (n.join_only || !identity_.is_member()) {
+        return false; // DATA never travels on a JOIN_ONLY session, nor to a device without membership
+    }
+    wire::RouteHeader h;
+    ByteView record;
+    if (wire::decode_route(plain, h, record) != Status::Ok) {
+        return false;
+    }
+    const member::MemberCredential &self = identity_.member();
+    const route::Decision d = route::decide_forward(h, self.address, n.address, self.root_term);
+    if (d.action == route::Action::Drop) {
+        return false;
+    }
+    wire::EndHeader eh;
+    ByteView sealed;
+    return d.action == route::Action::Forward ? record.size() >= wire::k_end_header_bytes
+                                              : wire::decode_end_record(record, eh, sealed) == Status::Ok;
+}
+
+bool LinkLayer::deliver(const Neighbor &n, const wire::LinkHeader &h, const Opened &op, bool duplicate,
+                        bool restricted) {
     if (n.join_only) {
         // JOIN_ONLY carries the join objects and nothing else (docs/06 §9): DATA/ROUTE never pass.
         if (h.kind != wire::FrameKind::Control || shared_.join.join_control == nullptr) {
@@ -146,6 +203,7 @@ bool LinkLayer::deliver(const Neighbor &n, const wire::LinkHeader &h, const Open
     info.address = n.address;
     info.counter = h.link_counter;
     info.duplicate = duplicate;
+    info.restricted = restricted;
     sink_(sink_ctx_, info, op.view());
     return true;
 }
@@ -155,6 +213,9 @@ bool LinkLayer::deliver(const Neighbor &n, const wire::LinkHeader &h, const Open
 MonoTime LinkLayer::rotation_time(const Neighbor &n) const {
     if (!n.cur.active || n.join_only) { // a JOIN_ONLY session is never rotated: it ends with the join
         return MonoTime::never();
+    }
+    if (shared_.engine.power().child_asleep(n.mac, shared_.engine.step_time())) {
+        return MonoTime::never(); // [S16] a sleeping child is not asked for a handshake; its next poll re-arms this
     }
     if (n.rotate_wanted) {
         return MonoTime{0};
@@ -246,6 +307,10 @@ Status LinkLayer::seal(const DeviceId &peer, wire::FrameKind kind, ByteView plai
         ++stats_.tx_refused;
         return Status::SessionRefreshRequired;
     }
+    if (n->lease_uncertain && kind == wire::FrameKind::Data && carries_app_data(plain)) {
+        ++stats_.tx_lease_restricted; // SEC-D3: its authorisation cannot be proven yet
+        return Status::TimeUncertain;
+    }
     const Status st = seal_frame(n->cur, kind, domain_hint_of(identity_.delegation().domain),
                                  n->cur.tx_sid, plain, out);
     if (st != Status::Ok) {
@@ -283,6 +348,36 @@ Status LinkLayer::close_join(const DeviceId &peer) {
     const PeerHandle h = n->peer;
     neighbors_.remove(*n);
     return shared_.engine.release_peer(h);
+}
+
+void LinkLayer::revalidate(const RootTimeBound &bound, MonoTime now) {
+    DeviceId over[k_max_neighbors];
+    std::size_t n = 0;
+    neighbors_.for_each([&](Handle, Neighbor &nb) {
+        if (nb.join_only || !nb.cur.active) {
+            return; // a JOIN_ONLY session holds no member credential
+        }
+        switch (check_deadline(bound, nb.lease)) {
+        case DeadlineCheck::After:
+            if (n < k_max_neighbors) {
+                over[n++] = nb.device;
+            }
+            break;
+        case DeadlineCheck::Before:
+            nb.lease_uncertain = false;
+            nb.cur.valid_until = earliest(nb.cur.valid_until, member::lease_local_end(bound, nb.lease, now));
+            break;
+        case DeadlineCheck::Uncertain:
+            nb.lease_uncertain = true;
+            break;
+        }
+    });
+    for (std::size_t i = 0; i < n; ++i) {
+        if (close(over[i]) == Status::Ok) {
+            ++stats_.sessions_lease_expired;
+        }
+    }
+    exchange_.revalidate_end(bound, now);
 }
 
 Status LinkLayer::close(const DeviceId &peer) {

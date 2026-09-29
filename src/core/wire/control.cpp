@@ -57,7 +57,8 @@ constexpr Field s_member_credential[] = {kId32, kAddr, kU63, kU63, U(0, 2),
 constexpr Field s_expected_set[] = {U(0, 15), U(1, 16), kId32, kEntries};
 constexpr Field s_join_request[] = {Bs(1, 1024), Bs(1, 1024), kId16, kU64};
 constexpr Field s_join_prepare[] = {Bs(1, 1024), kId32, kAddr, kU63, kU32, U(1, 120000)};
-constexpr Field s_hash_gen[] = {kId32, kU63}; // JoinStored, JoinCommit, JoinActive
+constexpr Field s_hash_gen[] = {kId32, kU63}; // JoinStored, JoinActive
+constexpr Field s_join_commit[] = {kId32, kU63, Bs(0, 64)}; // SEC-D1: + the withheld signature (none in a refusal)
 constexpr Field s_revoke[] = {kId32, kU63, kU63, kU32, kU63};
 constexpr Field s_policy[] = {kU63, kU63, kId32, Bs(1, 3072)};
 constexpr Field s_route_register[] = {kId32, kU63, kU63, kU32, kAddr, kAddrs, kU32, kId16};
@@ -95,7 +96,7 @@ constexpr TypeShape k_shapes[] = {
     LM_SHAPE(3, s_assignment_ticket),   LM_SHAPE(4, s_member_credential),
     LM_SHAPE(5, s_expected_set),        LM_SHAPE(6, s_join_request),
     LM_SHAPE(7, s_join_prepare),        LM_SHAPE(8, s_hash_gen),
-    LM_SHAPE(9, s_hash_gen),            LM_SHAPE(10, s_hash_gen),
+    LM_SHAPE(9, s_join_commit),         LM_SHAPE(10, s_hash_gen),
     LM_SHAPE(11, s_revoke),             LM_SHAPE(12, s_policy),
     LM_SHAPE(13, s_route_register),     LM_SHAPE(14, s_route_lease),
     LM_SHAPE(15, s_route_query),        LM_SHAPE(16, s_probe),

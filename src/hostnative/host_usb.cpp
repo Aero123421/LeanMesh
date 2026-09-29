@@ -110,13 +110,17 @@ Status HostUsb::send(gen::SerialKind kind, uint32_t gen, ByteView payload, MonoT
     return st;
 }
 
-std::size_t HostUsb::take_tx(MutByteView out) {
+std::size_t HostUsb::peek_tx(MutByteView out) const {
     const std::size_t n = std::min(out.size(), tx_.size());
     if (n > 0) {
         std::memcpy(out.data(), tx_.data(), n);
-        tx_.erase(tx_.begin(), tx_.begin() + static_cast<std::ptrdiff_t>(n));
     }
     return n;
+}
+
+void HostUsb::consume_tx(std::size_t n) {
+    n = std::min(n, tx_.size());
+    tx_.erase(tx_.begin(), tx_.begin() + static_cast<std::ptrdiff_t>(n));
 }
 
 bool HostUsb::next_event(HostEvent &out, MonoTime now) {

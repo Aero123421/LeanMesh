@@ -303,3 +303,90 @@ Flash (image minus the empty IDF + ESP-NOW baseline): LEAF +178,484 -> +199,528 
 First-party SLOC (sdk set): 21,318 -> 24,260 (+2,942) against a row of 1,200. Cause, by module: `route` +1,715 (mesh state machine 1,148 + wire 351 + stitch), `member` +658 (proxy 415, discovery 119, Membership/join changes), `root` +329 (route service 308, topology now by address), `delivery` +115 (plug points, control lane), `link` +77. The row assumed a mesh that registers, leases and repairs; it did not count the proxy tunnel (415), the listen-first discovery policy shared by joiner and member (119), the root service (308) and the compact wire codecs (351). No tick, no polling loop and no general "engine" was added; the largest single item is the attach/repair state machine (link -> probe -> end session -> REGISTER -> READY, with the failure paths a restarted parent or root needs).
 
 Behaviour: S11-D1..D10 in IMPLEMENTATION.md §13. Formation time on a 21-node/20-hop chain is 35.8 s in the simulator (worker latency 2 ms) and 108 s with a modelled 150 ms per public-key job: the latter is the number to compare with the 120 s target, and it is a model, not a measurement of a C3.
+
+## S15 GROUP report (esp32c3 sizeof, -Os; software only)
+
+Measured on the tree at the end of S15 (`scripts/budget_report.py` probe compiled with the SoC compiler; the
+"before" is HEAD `2029c7e` in a clean worktree). The tree also holds S16/S17 and the security/delivery fixes in
+progress, so only the group rows below are S15; totals of the report are not.
+
+| object (bytes) | LEAF | RELAY | ROOT | S15 row (L / R / Root) |
+|---|---:|---:|---:|---|
+| `group::Fanout` (all of it) | 3,664 | 3,664 | 6,120 | 500 / 500 / 3,500 |
+| - operations: `Op` = 264 B header + 64 x 16 B `Target` (1,288 B each); leaf/relay 1, root 4 | 1,288 | 1,288 | 5,152 | |
+| - DeviceIds of a member origin's snapshot (64 x 32 B; absent from a real ROOT image) | 2,048 | 2,048 | 0 | |
+| - sign/verify job arguments (`Page`; the 16 x 40 B page rows exist on ROOT builds only) | 328 | 328 | 968 | |
+| `root::Groups` registry (8 groups x 64 ledger slots) | 0 | 0 | 648 | |
+| **S15 total** | **3,664** | **3,664** | **6,768** | **+3,164 / +3,164 / +3,268 over the row** |
+| `Delivery` plug points (hooks, child id pointer; not in the total above) | +16 | +16 | +16 | |
+
+Why the row does not hold: the row assumed "64-target compact state" of 500 B on a leaf. docs/22 §4 requires the
+origin to keep the verified full set (64 DeviceIds = 2 KiB; the root's page cache may expire meanwhile) plus the
+per-target results (1 KiB); the minimum for a 64-target member origin is therefore about 3.2 KB. The root row held
+because targets there are ledger slots (16 B per target, DeviceIds read from the ledger), but four operations at
+1.3 KB and the page job arguments exceed 3.5 KB; the root also serves the snapshots of other origins from the same
+four operation slots (no extra RAM). Nothing else is new: the payload is one message-pool buffer, a child is an
+ordinary `Delivery` send, the sign/verify job borrows the exchange's lent 1 KiB scratch, the control page uses S12's
+control buffer. Options for the spec owner, not taken here: a build limit for the targets of a member origin
+(`k_id_slots`; 16 targets = 512 B, saves 1.5 KB per leaf/relay, over-limit snapshots would end NO_CAPACITY before
+acceptance), or root-origin-only groups on leaf/relay (docs/22 §1 says any Node may be the origin).
+
+Flash (object code, riscv32, -Os): `group.cpp` 7.7 KB, `snapshot.cpp` 4.2 KB (4.9 KB ROOT), `capi_group.cpp` 0.5 KB,
+`delivery_group.cpp` 0.3 KB, `groups.cpp` 1.0 KB (ROOT): LEAF +12.8 KB, ROOT +14.5 KB, plus about +2.4 KB in the
+bridge objects (ROOT) and +0.2 KB `sec::sha256_chunks`. The ROOT example image overflows the example's 1 MB app
+partition by 8.9 KB in this shared tree (all slices together; it fit at HEAD).
+
+First-party SLOC (sdk): 1,532 in the new files (`group.hpp` 233, `group.cpp` 643, `snapshot.cpp` 392, `groups.*` 152,
+`capi_group.cpp` 69, `delivery_group.cpp` 43) and about 230 in existing files (bridge: group SEND, GROUP_SET, GROUP_TARGETS, the
+event; engine wiring; delivery hooks; `sha256_chunks`), about 1,760 against a row of 900. Cause: the row counted the
+fan-out; it did not count the signed snapshot protocol both ways (request, sign job, verify job, page assembly, hash,
+retry: 570), the root registry (150), the bridge methods (150) and the C API (70). No general "engine" was added;
+the one duplicated concern that was removed: there is no second per-message state machine, a target *is* a
+`Delivery` send.
+
+Measured (sim, seed 61, worker latency 2 ms): 64 targets from a member that is not the root (8 relays + 56 leaves,
+512 B, RECEIVED) end after 129.8 s virtual time, 4 in flight, 4 snapshot pages; the time is the 64 end-session
+handshakes of a leaf whose session cache holds 4 (`end_sessions` = 4 for leaf/relay): a second fan-out to the same
+64 targets repeats them. With unreachable targets (five members that never started) the eleven reachable ones were
+received after 11.2 s: the dead ones are withdrawn after 5 s and dispatched again, so up to four dead targets delay
+the others by that long, not to their deadline.
+
+## S16 POWER (2026-09-29; `scripts/budget_report.py`, native x86-64 sizeof; the esp32c3 probe was not re-run after the last trim)
+
+Allocation: LEAF 1,024 / RELAY 1,024 / ROOT 1,536 B, 900 SLOC. The mailbox borrows the TX pool (P9: no buffer of its own), the policy record borrows the identity's `RecordJob`, the poll/grant frames are built on the stack. Tables are compiled out where the role cannot exist: the child table (`neighbors / 2` x 56 B) only in RELAY/ROOT images, the member table (64 x 24 B) only in ROOT. SLOC is far over the row: the slice is a state machine with three tables, the sleep transition, the ticket protocol, the budgets and the root's view, plus five small integrations; no general engine, no polling and no second scheduler were added.
+
+Measured: `power::Power` in the workspace 712 B (LEAF) / 1,288 B (RELAY) / 2,816 B (ROOT) against 1,024 / 1,024 / 1,536: LEAF inside, RELAY +264 B (8 child entries of ~72 B), ROOT +1,280 B (the member table alone is the allocation: 64 x 24 B; the children add ~580 B). LEAF static DRAM did not move (17,864 B) and ROOT image links but no longer fits the 1 MiB `factory` partition of `firmware/example_node` (0x104830 B, 0x4830 over: the sum of S11-S17 on ROOT, not S16 alone; the Flash figure of S16's own objects is not separated). SLOC of `src/core/power` 1,847 + `capi_power.cpp` 169 + `idf_pm` 156 = about 2,170 against 900, plus about 130 lines of hooks in existing files: cause in the paragraph above (three tables, the sleep transition, the ticket protocol, budgets, the root view, the PM port); the sdk total in the report is 33,152 (all slices).
+
+## SEC fixes (external review of wave 4, 2026-09-29; esp32c3, -Os; software only)
+
+Measured on HEAD `2029c7e` ("before") and HEAD + the SEC changes alone ("after"), both in clean worktrees (the
+shared tree also holds S15-S17, so its totals are not SEC). Decisions SEC-D1..D15, SEC-Da in IMPLEMENTATION.md §13.
+No allocation row exists for these fixes; they are required behaviour, reported here with their cause.
+
+| fixed RAM (workspace + static DRAM) | LEAF | RELAY (estimate) | ROOT |
+|---|---:|---:|---:|
+| before | 52,928 | 57,008 | 153,356 |
+| after | 53,336 | 57,544 | 155,788 |
+| change | +408 | +536 | +2,432 |
+
+What moved (sizeof): `Neighbor` 224 -> 240 B (the peer's credential lease and its "unproven" flag, SEC-D3: +128 leaf,
++256 relay/root); `EndSession` 200 -> 216 B (the same for end sessions: +64 leaf/relay, +1,024 root with 64 slots);
+`LocalIdentity` +88 B (own leave floor SEC-D8, DiscoveryScopeKey SEC-Da); `Membership` +56 B (the withheld signature
+of the pending join, SEC-D1); handshake slot +32 B (the ECDH output kept in the slot and wiped, SEC-D15); `Ledger`
+(root only) 10,528 -> 11,464 B: the manifest and its staging copy (2 x 200 B, SEC-D5/D7) and the consumed
+generation of every entry (64 x 8 B, SEC-D4). The consumed-generation part (512 B root, about 40 SLOC) is the
+"grant-consumption ledger" of the S18 row and should be charged there. Static DRAM of `libleanmesh.a` is unchanged
+(17,840 / 51,852 B).
+
+Worker stack (SEC-D15): the deepest job, an EDHOC message_2/3 step, measured natively 4,840 -> 4,344 B (-O2),
+4,488 B (-Og), 5,856 -> 5,600 B (-O0). The IDF worker stays 10,240 B in optimised builds; an unoptimised (Debug)
+build now gets 12,288 B, because 2 x 5,600 no longer fits 10 KiB (before, the -O0 depth exceeded half the stack
+unnoticed). Not measured on a target.
+
+Flash (image minus the empty IDF + ESP-NOW baseline): LEAF +216,644 -> +219,752 B (+3,108), ROOT +280,964 ->
++287,280 B (+6,316).
+
+First-party SLOC: sdk 26,005 -> 26,645 (+640: `root` +253 ledger manifest/ExpectedSet set rules/consumption/forget,
+`member` +183 withheld signature and activation check/LEFT tombstone/scope tags, `link` +148 admission, lease
+revalidation and the replay-window order, `security` +25, `core` +14, `delivery` +9 (end-session lease), `port/idf` +6,
+`wire`/`store` +1 each); tests +545, tools +60 (bench provisioning of ledger entries and the manifest), native-only +8.

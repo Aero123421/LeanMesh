@@ -16,6 +16,7 @@ bool hook_responder_open(void *ctx) { return root_role(eng(ctx)) && eng(ctx).led
 bool hook_link_admit(void *ctx, const DeviceId &d, const member::MemberCredential &mc) {
     return !root_role(eng(ctx)) || eng(ctx).ledger().link_admit(d, mc);
 }
+Status hook_admission(void *ctx) { return root_role(eng(ctx)) ? eng(ctx).ledger().admission() : Status::Ok; }
 void hook_session_up(void *ctx, bool initiator, const MacAddr &mac, const DeviceId &peer, ByteView bundle,
                      const Sha256Digest &peer_hash) {
     Engine &e = eng(ctx);
@@ -70,6 +71,7 @@ void Engine::wire_join_hooks() {
     h.ctx = this;
     h.responder_open = &hook_responder_open;
     h.link_admit = &hook_link_admit;
+    h.admission = &hook_admission;
     h.session_up = &hook_session_up;
     h.exchange_failed = &hook_exchange_failed;
     h.discovery = &hook_discovery;
@@ -84,6 +86,7 @@ Engine::Engine(const EngineConfig &config, Ports ports) : config_(config), ports
     link_.set_discovery_sink(&Engine::discovery_sink, this); // [SLICE:S11] mesh beacons
     link_.set_proxy_sink(&Engine::proxy_sink, this);         // [SLICE:S11] frames of a joiner behind us
     mesh_.install();                                         // [SLICE:S11] delivery plug points
+    group_.install();                                        // [SLICE:S15] child hooks and the control sink
 }
 
 bool Engine::proxy_sink(void *ctx, const port::RadioRx &rx, MonoTime now) {
@@ -96,9 +99,21 @@ void Engine::discovery_sink(void *ctx, const MacAddr &src, ByteView body, MonoTi
 
 void Engine::rx_sink(void *ctx, const link::RxInfo &info, ByteView plain) {
     auto *e = static_cast<Engine *>(ctx);
+    if (info.restricted) { // SEC-D3: application DATA while the peer's lease cannot be proven: later, not lost
+        e->delivery_.hop().queue_ack(info.src, info.peer, info.counter, wire::HopAckStatus::Busy, 1000, e->step_now_);
+        return;
+    }
     if (info.kind == wire::FrameKind::Route) { // [SLICE:S11] 1-hop routing control (probes)
         e->mesh_.on_route_frame(info, plain, e->step_now_);
         return;
+    }
+    if (info.kind == wire::FrameKind::Power) { // [SLICE:S16] authenticated poll/grant with the neighbour
+        e->power_.on_frame(info, plain, e->step_now_);
+        return;
+    }
+    e->power_.on_child_frame(info.src, e->step_now_); // [SLICE:S16] a sleepy child that sends is awake
+    if (info.kind == wire::FrameKind::Data && !info.duplicate) {
+        e->power_.note_rx(e->step_now_); // [SLICE:S16] a new frame: a sleep ticket in hand is stale
     }
     e->delivery_.on_link_rx(info, plain, e->step_now_);
 }
@@ -106,6 +121,12 @@ void Engine::rx_sink(void *ctx, const link::RxInfo &info, ByteView plain) {
 MonoTime Engine::step(MonoTime now) {
     ++stats_.steps;
     step_now_ = now;
+    if (power_.asleep()) { // [SLICE:S16] a sleeping owner does one thing: wake at its own timer
+        const MonoTime d = power_.step_asleep(now);
+        if (power_.asleep()) {
+            return d;
+        }
+    }
     port::JobCompletion done;
     while (ports_.jobs.poll(done)) {
         on_job_completion(done, now);
@@ -137,14 +158,24 @@ MonoTime Engine::step(MonoTime now) {
     } else {
         membership_.on_timer(now);
     }
+    power_.on_timer(now); // [SLICE:S16] episode/window ends, poll retry, mailbox expiry, ticket
+    if (power_.asleep()) { // this very step put the node to sleep: nothing else may run on a stopped radio
+        return next_deadline();
+    }
     mesh_.on_timer(now); // [SLICE:S11] discovery, attach, leases, beacons
     proxy_.on_timer(now);
+    group_.on_timer(now); // [SLICE:S15] dispatch, snapshot fetch, progress
+    chan_.on_timer(now);  // [SLICE:S17] clock, plan guard and switch, recovery scan, survey visit
+    if (is_root()) {
+        coord_.on_timer(now); // [SLICE:S17]
+    }
     if (is_root()) {
         routes_.on_timer(now);
     }
     if (serial_ != nullptr) {
         serial_->on_step(now); // [SLICE:S10] port input and USB timers
     }
+    power_.after_step(now); // [SLICE:S16] sleep-prepare progress, radio-time accounting, PM locks
     return next_deadline();
 }
 
@@ -171,6 +202,7 @@ void Engine::on_tx_outcome(const TxOutcome &o, MonoTime now) {
     // (docs/03 §4). The exchange frees its TX slot and retransmits by RTO, not by outcome.
     link_.on_tx_outcome(o, now);
     delivery_.on_tx_outcome(o, now); // [SLICE:S9] its own tags; also pumps the next frame
+    chan_.on_tx_outcome(o, now); // [SLICE:S17] survey probes
     mesh_.on_tx_outcome(o, now); // [SLICE:S11] probe results (the only RF samples the mesh takes from beacons/probes)
     if (member::is_join_tag(o.tag)) { // [SLICE:S8]
         if (is_root()) {
@@ -204,9 +236,14 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
             serial_->on_job_done(origin.slot, c.status, now); // [SLICE:S10]
         }
         return;
+    case JobOwner::Power: // [SLICE:S16]
+        power_.on_job_done(origin.slot, c.status, now);
+        return;
     case JobOwner::Identity:
         ident_.on_job_done(c.status, origin.slot);
         if (ident_.state() == member::LocalIdentity::State::Ready) { // [SLICE:S8]
+            power_.on_identity_ready(now); // [SLICE:S16] the power policy record, before anything runs on it
+            chan_.on_identity_ready(now); // [SLICE:S17] the stored channel is applied before the mesh starts
             if (is_root()) {
                 ledger_.on_identity_ready(now);
             } else {
@@ -229,6 +266,12 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
     case JobOwner::Ledger:
         ledger_.on_job_done(origin.slot, c.status, now);
         return;
+    case JobOwner::Channel: // [SLICE:S17]
+        chan_.on_job_done(origin.slot, c.status, now);
+        return;
+    case JobOwner::Group: // [SLICE:S15]
+        group_.on_job_done(origin.slot, c.status, now);
+        return;
     case JobOwner::Durable: // [SLICE:S9]
         delivery_.on_job_done(origin.owner, origin.slot, c.status, now);
         return;
@@ -239,7 +282,11 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
 }
 
 MonoTime Engine::next_deadline() const {
+    if (power_.asleep()) {
+        return power_.deadline(); // [SLICE:S16] asleep: nothing else may wake the owner
+    }
     MonoTime next = tx_.deadline();
+    next = earliest(next, power_.deadline()); // [SLICE:S16]
     if (radio_state_ == RadioState::Recovering) {
         next = earliest(next, recover_at_);
     }
@@ -249,6 +296,11 @@ MonoTime Engine::next_deadline() const {
     next = earliest(next, is_root() ? ledger_.deadline() : membership_.deadline()); // [SLICE:S8]
     next = earliest(next, mesh_.deadline()); // [SLICE:S11]
     next = earliest(next, proxy_.deadline());
+    next = earliest(next, group_.deadline()); // [SLICE:S15]
+    next = earliest(next, chan_.deadline());  // [SLICE:S17]
+    if (is_root()) {
+        next = earliest(next, coord_.deadline());
+    }
     if (is_root()) {
         next = earliest(next, routes_.deadline());
     }
@@ -265,6 +317,9 @@ Status Engine::transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTi
                         bool queued) {
     if (radio_state_ == RadioState::Recovering || radio_state_ == RadioState::Faulted) {
         return Status::DriverResultUnknown;
+    }
+    if (radio_state_ == RadioState::Asleep) {
+        return Status::Busy; // [SLICE:S16] the driver is off on purpose: local, never RF loss
     }
     if (radio_state_ != RadioState::Running) {
         return Status::Conflict; // radio not started (lm_start not completed)
@@ -350,6 +405,7 @@ Reply Engine::start_radio(MonoTime now) {
         return Reply{s, 0, 0};
     }
     radio_state_ = RadioState::Running;
+    power_.on_start(now); // [SLICE:S16] boot facts and budgets; the policy record loads with the identity
     emit(LM_EVENT_STARTED, 0);
     if (serial_ != nullptr) {
         serial_->on_started(now); // [SLICE:S10]
@@ -365,6 +421,11 @@ Reply Engine::stop_radio() {
     if (serial_ != nullptr) {
         serial_->on_stop(); // [SLICE:S10] the USB session and its secrets go before the identity key
     }
+    coord_.stop(); // [SLICE:S17]
+    chan_.stop();
+    group_.stop(); // [SLICE:S15] payload buffers go back before delivery drops its pools
+    groups_.stop();
+    power_.stop(); // [SLICE:S16] PM locks off, children/tickets forgotten
     proxy_.stop();
     mesh_.stop(); // [SLICE:S11] candidates, leases and the tree go before the sessions they name
     routes_.stop();
@@ -374,7 +435,7 @@ Reply Engine::stop_radio() {
     link_.stop(); // [SLICE:S5] sessions and the exchange go first (their peers are still registered)
     frames_.clear(); // [S14] every owner returned its frames above; a leak would not survive a restart
     ident_.release();
-    const Status s = ports_.radio.stop();
+    const Status s = radio_state_ == RadioState::Asleep ? Status::Ok : ports_.radio.stop(); // [S16] already off
     if (s != Status::Ok) {
         // The driver may still call back into ring buffers: Stopped (and so lm_destroy) is only
         // allowed after a successful teardown. A later lm_stop retries (FIX1-D5).
@@ -421,6 +482,9 @@ void Engine::recover_radio(MonoTime now) {
 Reply Engine::execute(const Command &cmd, MonoTime now) {
     ++stats_.commands;
     step_now_ = now; // hooks and completions reached from a command see the command's time
+    if (group::Fanout::wants(cmd)) { // [SLICE:S15] a send to a group, a group operation id, the group API
+        return group_.execute(cmd, now);
+    }
     switch (cmd.kind) {
     case CommandKind::GetCapabilities:
         return get_capabilities(cmd);
@@ -432,7 +496,8 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
         return stop_radio();
     case CommandKind::Destroy:
         return Reply{radio_state_ == RadioState::Stopped && !delivery_.job_pending() && !membership_.job_pending() &&
-                             !ledger_.job_pending()
+                             !ledger_.job_pending() && !group_.job_pending() && !chan_.job_pending() &&
+                             !power_.job_pending()
                          ? Status::Ok
                          : Status::Busy,
                      0, 0}; // [SLICE:S8] a cancelled join/ledger job still owns borrowed buffers
@@ -447,13 +512,31 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::SendObject: // [SLICE:S12]
     case CommandKind::SendControl:
     case CommandKind::GetOperation:
-    case CommandKind::GetMessage:
     case CommandKind::Cancel:
     case CommandKind::ReportApplicationResult:
     case CommandKind::PayloadCapacity:
     case CommandKind::RootHostSend: // [SLICE:S13]
     case CommandKind::RootHostStoreAck:
         return delivery_.execute(cmd, now);
+    case CommandKind::PowerPolicyGet: // [SLICE:S16]
+    case CommandKind::PowerPolicySet:
+    case CommandKind::PowerGet:
+    case CommandKind::SleepPrepare:
+    case CommandKind::SleepPrepareEx:
+    case CommandKind::SleepTicketGet:
+    case CommandKind::SleepEnter:
+    case CommandKind::SleepAbort:
+        return power_.execute(cmd, now);
+    case CommandKind::ChannelRequest: { // [SLICE:S17] lm_channel_request (request: {action, expected_revision})
+        const auto *rq = static_cast<const std::array<uint64_t, 2> *>(cmd.request);
+        return rq == nullptr || cmd.request_size != sizeof(*rq)
+                   ? Reply{Status::InvalidArgument, 0, 0}
+                   : coord_.request(static_cast<uint32_t>((*rq)[0]), (*rq)[1], now);
+    }
+    case CommandKind::GetMessage: { // [SLICE:S15] the Host's group send is found by its MessageId, too
+        const Reply r = delivery_.execute(cmd, now);
+        return r.status == Status::NotFound ? group_.execute(cmd, now) : r;
+    }
     default:
         // Not implemented in this build: the operation does not exist (no fake success).
         return Reply{Status::Unsupported, 0, 0};
@@ -469,10 +552,16 @@ Reply Engine::get_capabilities(const Command &cmd) const {
     caps.abi_version = LM_ABI_VERSION;
     // build/implemented/qualified/enabled are separate facts (docs/10 §6). Nothing is implemented
     // or qualified yet, so all feature bits are 0; slices set implemented bits as they land.
-    caps.build_bits = 0;
-    caps.implemented_bits = 0;
+    caps.build_bits = LM_FEATURE_GROUP_FANOUT_V2; // [SLICE:S15]
+    caps.implemented_bits = LM_FEATURE_GROUP_FANOUT_V2;
     caps.qualified_bits = 0;
-    caps.enabled_bits = 0;
+    caps.enabled_bits = LM_FEATURE_GROUP_FANOUT_V2;
+    // [SLICE:S16] The power modes are built and implemented; they are enabled only where the platform has a sleep
+    // port, and qualified nowhere (no HIL). RTC secure resume is reserved: implemented and enabled stay false.
+    constexpr uint64_t k_power = LM_FEATURE_POWER_REPORT_ONLY | LM_FEATURE_POWER_WINDOWED_RX | LM_FEATURE_RAM_SESSION_RETAIN;
+    caps.build_bits |= k_power;
+    caps.implemented_bits |= k_power;
+    caps.enabled_bits |= ports_.pm != nullptr ? k_power : 0;
     caps.max_root_depth = gen::limits::root_depth;
     caps.max_path_hops = gen::limits::path_hops;
     caps.max_message_bytes = gen::limits::small_message_bytes;
@@ -481,6 +570,11 @@ Reply Engine::get_capabilities(const Command &cmd) const {
     caps.max_regular_peers = gen::limits::regular_peers;
     // Common lower bound for every supported path (40 hops): 136 - 2*40 (docs/09 §5, docs/10).
     caps.available_single_frame_bytes = 136 - 2 * gen::limits::path_hops;
+    if (chan_.enabled()) { // [SLICE:S17] implemented and running; qualified_bits stay 0 until the RF tests pass
+        caps.build_bits |= LM_FEATURE_AUTO_CHANNEL;
+        caps.implemented_bits |= LM_FEATURE_AUTO_CHANNEL;
+        caps.enabled_bits |= LM_FEATURE_AUTO_CHANNEL;
+    }
     std::memcpy(cmd.response, &caps, sizeof(caps));
     return Reply{Status::Ok, 0, 0};
 }

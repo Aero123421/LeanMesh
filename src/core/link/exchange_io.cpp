@@ -142,6 +142,10 @@ bool Exchange::start_responder(const Frag &f, const Origin &o, MonoTime now) {
         }
         [[fallthrough]];
     case Family::Link:
+        if (o.family == Family::Link && admission() != Status::Ok) {
+            busy_drop(o.family); // SEC-D2: no admission can be decided here yet (or ever: a lost ledger)
+            return false;
+        }
         if (acquire_link_peer(o.mac) != Status::Ok) {
             busy_drop(o.family); // no transient peer slot: a local shortage
             return false;
@@ -150,6 +154,10 @@ bool Exchange::start_responder(const Frag &f, const Origin &o, MonoTime now) {
         break;
     case Family::End:
         if (!s_.identity.is_member() || end_.send == nullptr) {
+            return false;
+        }
+        if (admission() != Status::Ok) {
+            busy_drop(o.family); // SEC-D2
             return false;
         }
         begin_common(Mode::End, false, now);

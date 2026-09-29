@@ -47,7 +47,6 @@ inline constexpr std::size_t k_prepared_head = 16 + 16 + 32; // PREPARED record:
 inline constexpr uint8_t k_prepared_state = 1;            // membership_prepared: PREPARED
 inline constexpr uint8_t k_prepared_consumed = 2;         // membership_prepared: finished or aborted
 inline constexpr uint8_t k_prepared_activated = 4;        // ACTIVE committed, the root's acknowledgement still owed
-inline constexpr uint8_t k_membership_left = 3;           // membership: tombstone after leave
 
 inline constexpr uint32_t k_tag_join = 0x4A4E0000; // "JN": TX completions of the device's join pipe
 inline constexpr uint32_t k_tag_leave = 0x4A4C0000; // "JL": the leave notice
@@ -84,10 +83,10 @@ enum class JoinPhase : uint8_t {
     PersistDelegation, // Flash: root_delegation
     LoadTicket,        // Flash: ticket record
     RequestOut,        // JoinRequest sent, waiting for JoinPrepare / JoinCommit / refusal
-    Verify,            // worker: MemberCredential signature under the delegation
+    Verify,            // JoinPrepare checked (signature withheld, SEC-D1), waiting for the record memory
     PersistPrepared,   // Flash: membership_prepared
     StoredOut,         // JoinStored sent, waiting for JoinCommit
-    Activate,          // Flash chain: load prepared -> commit membership -> consume prepared
+    Activate,          // Flash chain: load prepared -> verify the completed credential -> commit membership
     ActiveOut,         // ACTIVE; JoinActive sent, waiting for the root's final ack
 };
 
@@ -173,11 +172,10 @@ class Membership {
         ActivateCommit,
         ActivateMark,   // membership_prepared -> ACTIVATED (root acknowledgement still owed)
         ConfirmConsume, // membership_prepared -> CONSUMED once the root acknowledged
-        VerifyPrepare,
+        VerifyActivation, // worker: the credential completed by JoinCommit's signature (SEC-D1)
         ConsumePrepared, // refusal or leave of a PREPARED join
         InstallTicket,
         LeaveCommit,
-        LeaveFloors,
     };
     enum class LeavePhase : uint8_t { Idle, Draining, Notifying, Committing };
 
@@ -189,6 +187,7 @@ class Membership {
         uint64_t assignment = 0; // the ticket's new generation
         uint64_t prepared_generation = 0;
         MemberCredential mc;
+        std::array<uint8_t, k_signature_bytes> signature{}; // from JoinCommit: completes the PREPARED credential
         uint32_t reservation_ms = 0;
         uint32_t evidence = 0;
         Status reason = Status::Ok;
@@ -259,7 +258,6 @@ class Membership {
     DomainId target_;                // lm_join_request_t.target_domain when constrain_target
     bool constrain_ = false;
     bool link_resume_ = false;       // RESUME of an ACTIVE member: an ordinary link session, no join
-    bool mc_verified_ = false;       // req_.mc passed the signature check in this run
     bool retry_consume_ = false;
     bool confirm_pending_ = false;   // ACTIVE is durable but the root's acknowledgement is not (LC06)
     bool confirm_consume_ = false;   // the root acknowledged; the PREPARED record still has to be consumed
@@ -304,7 +302,7 @@ class Membership {
     uint32_t job_gen_ = 0;
     bool job_in_flight_ = false;
     bool cancelled_ = false;
-    ByteView verify_input_;          // the MemberCredential COSE inside scratch_
+    ByteView verify_input_;          // PREPARE: the withheld credential in scratch_; activation: the completed one in rec_
     uint64_t op_counter_ = 0;
     uint64_t install_op_ = 0;
     bool boot_failed_ = false;       // reading the PREPARED record failed: unknown state, refuse to join
@@ -321,7 +319,6 @@ class Membership {
     uint8_t leave_attempts_ = 0;
     bool leave_tx_inflight_ = false;
     bool leave_prepared_only_ = false;
-    Status leave_result_ = Status::Ok;
 };
 
 } // namespace lm::member

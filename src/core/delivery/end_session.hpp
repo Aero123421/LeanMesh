@@ -28,6 +28,7 @@ struct EndSession {
     uint32_t rx_sid = 0; // ours: the peer puts it into records addressed to us
     uint32_t tx_sid = 0; // the peer's: we put it into records addressed to it
     MonoTime valid_until = MonoTime::never();
+    RootTime peer_lease; // SEC-D3: the peer credential's lease (the exchange caps valid_until by it and revalidates)
     uint32_t last_use = 0;
     uint32_t epoch = 0;     // changes with every installed session: sealed records remember it
     bool suspect = false;   // a whole message got no answer: the peer may have lost this session
@@ -45,6 +46,7 @@ struct EndSession {
         ctx_hash = Sha256Digest{};
         rx_sid = tx_sid = 0;
         valid_until = MonoTime::never();
+        peer_lease = RootTime{};
         last_use = epoch = 0;
         suspect = false;
     }
@@ -70,7 +72,22 @@ class EndSessions {
     void touch(EndSession &s) { s.last_use = ++tick_; }
     // Distinguishes one installed session from the next of the same peer (records remember it).
     [[nodiscard]] uint32_t next_epoch() { return ++epoch_; }
+    // Every installed session; `f` may remove the one it is given (SEC-D3 revalidation).
+    template <class F> void for_each_used(F &&f) {
+        for (EndSession &s : slots_) {
+            if (s.used) {
+                f(s);
+            }
+        }
+    }
     [[nodiscard]] std::size_t count() const;
+    template <class F> void for_each_active(F &&f) const { // [S16]
+        for (const EndSession &s : slots_) {
+            if (s.used && s.rec.active()) {
+                f(s);
+            }
+        }
+    }
 
   private:
     std::array<EndSession, k_capacity> slots_{};

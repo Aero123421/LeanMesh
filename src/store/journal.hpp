@@ -26,7 +26,8 @@
 
 namespace lm::store {
 
-inline constexpr std::size_t k_journal_max_payload = 512;
+// 145 B fixed fields of a received durable record + 512 B small message (delivery_durable.cpp), 4-aligned.
+inline constexpr std::size_t k_journal_max_payload = 672;
 inline constexpr std::size_t k_journal_header = 20;
 inline constexpr std::size_t k_journal_max_segments = 32; // 128 KiB / 4 KiB
 // Staging memory the owner lends (see Journal): at least one entry of the largest payload; a larger

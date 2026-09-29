@@ -24,6 +24,9 @@ struct RxInfo {
     uint64_t counter = 0;
     // Authentic duplicate (already accepted): re-ACK it if the protocol says so, never re-apply.
     bool duplicate = false;
+    // SEC-D3: application DATA over a session whose peer lease cannot be proven yet. A sink never applies or
+    // forwards it (the engine answers BUSY: a local condition of this node, not RF loss).
+    bool restricted = false;
 };
 using RxSink = void (*)(void *ctx, const RxInfo &info, ByteView plain);
 
@@ -53,6 +56,10 @@ class LinkLayer {
                               SealedFrame &out, MonoTime now);
     // Closes every session with `peer` (revocation, leave). No message is sent.
     [[nodiscard]] Status close(const DeviceId &peer);
+    // SEC-D3: the root-time estimate changed (`bound` is the one for `now`). Every session is judged by its peer's
+    // lease again: provably over ends it, provable caps its life at the lease and lifts the restriction,
+    // unprovable restricts it. Link and end sessions alike.
+    void revalidate(const RootTimeBound &bound, MonoTime now);
 
     // ---- [S8] JOIN_ONLY sessions (docs/07 §4) ----
     // Seals one join control object (frame kind CONTROL) for the JOIN_ONLY session of `peer`. Only
@@ -94,7 +101,9 @@ class LinkLayer {
 
   private:
     [[nodiscard]] bool deliver(const Neighbor &n, const wire::LinkHeader &h, const Opened &op,
-                               bool duplicate);
+                               bool duplicate, bool restricted = false);
+    // SEC-D11: may this fresh authentic frame's counter enter the replay window?
+    [[nodiscard]] bool admissible(const Neighbor &n, wire::FrameKind kind, ByteView plain) const;
     [[nodiscard]] MonoTime rotation_time(const Neighbor &n) const;
 
     member::LocalIdentity &identity_;

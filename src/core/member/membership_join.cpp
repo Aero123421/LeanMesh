@@ -17,10 +17,6 @@ namespace {
 constexpr Duration k_busy_retry = Duration::from_ms(50);   // borrowed memory is taken: try again
 constexpr Duration k_request_wait = Duration::from_s(310); // approval timeout 300 s + margin
 
-bool all_zero(const Sha256Digest &h) {
-    return std::all_of(h.begin(), h.end(), [](uint8_t b) { return b == 0; });
-}
-
 // Refusals that mean "not now": the join may be asked again with the same request.
 bool transient(Status s) { return s == Status::Busy || s == Status::NoCapacity || s == Status::RateLimited; }
 
@@ -54,6 +50,9 @@ void Membership::request_ready(MonoTime now) {
             if (id.floors().at(i).device == id.self() && t.new_generation < id.floors().at(i).assignment) {
                 st = Status::Revoked;
             }
+        }
+        if (t.new_generation < id.own_floor().assignment) {
+            st = Status::Revoked; // SEC-D8: consumed by this device before it left
         }
     }
     if (st != Status::Ok) {
@@ -188,15 +187,23 @@ void Membership::on_prepare(ByteView data, MonoTime now) {
     prep_address_ = p.address;
     prep_term_ = p.root_term;
     verify_input_ = p.member;
-    mc_verified_ = false;
     phase_ = JoinPhase::Verify;
-    if (start_verify(now) != Status::Ok) {
-        finish_join(Status::Busy, LM_OUTCOME_REJECTED, now);
+    // SEC-D1: the credential arrives with its signature withheld, so it is no credential yet. What can be judged
+    // now is its form, its issuer (the root whose delegation this very session verified) and its fields; the
+    // signature JoinCommit brings is verified before anything goes live (activate_loaded).
+    Envelope env;
+    ByteView body;
+    if (!signature_withheld(p.member) || peek_signed(p.member, k_type_member_credential, env, body) != Status::Ok ||
+        env.issuer != peer_.delegation.root || env.domain != peer_.delegation.domain ||
+        decode_member_credential(body, req_.mc) != Status::Ok) {
+        finish_join(Status::AuthRejected, LM_OUTCOME_REJECTED, now);
+        return;
     }
+    prepared_verified(now);
 }
 
-// The credential verified under the delegation: it must be for this device, this assignment and
-// exactly what the JoinPrepare announced; then it is stored (PREPARED, read back by the record layer).
+// The announced credential must be for this device, this assignment and exactly what the JoinPrepare says; then
+// it is stored (PREPARED, read back by the record layer) with its signature still withheld.
 void Membership::prepared_verified(MonoTime now) {
     const MemberCredential &mc = req_.mc;
     const LocalIdentity &id = engine_.identity();
@@ -217,7 +224,6 @@ void Membership::prepared_verified(MonoTime now) {
     std::memcpy(rec_->payload.data() + 16, req_.nonce.data(), 16);
     std::memcpy(rec_->payload.data() + 32, req_.prepare_hash.data(), 32);
     std::memcpy(rec_->payload.data() + k_prepared_head, verify_input_.data(), verify_input_.size());
-    mc_verified_ = true;
     phase_ = JoinPhase::PersistPrepared;
     if (start_flash(Step::CommitPrepared, store::RecordJob::Op::Commit, store::rec::membership_prepared,
                     k_prepared_state, k_prepared_head + verify_input_.size(), now) != Status::Ok) {
@@ -266,14 +272,14 @@ void Membership::stage_ack(uint8_t type, const JoinAckData &a, MonoTime now) {
 }
 
 void Membership::on_commit(ByteView data, MonoTime now) {
-    JoinAckData a;
-    if (decode_join_ack(data, a) != Status::Ok) {
+    JoinCommitData a;
+    if (decode_join_commit(data, a) != Status::Ok) {
         return;
     }
-    if (all_zero(a.prepare_hash)) { // refusal: the value is the reason (S8-D3)
+    if (a.refusal) { // refusal: the value is the reason (S8-D3)
         ++stats_.refusals;
         pipe_.acked();
-        const Status why = a.value <= 0xFFFF ? static_cast<Status>(a.value) : Status::Conflict;
+        const Status why = a.membership <= 0xFFFF ? static_cast<Status>(a.membership) : Status::Conflict;
         if (why == Status::NotFound && !have_prepared_ && phase_ == JoinPhase::RequestOut && now < search_deadline_) {
             not_expected(now); // NOT_EXPECTED is a hold with a re-evaluation, not a rejection (docs/07 §3)
             return;
@@ -292,10 +298,11 @@ void Membership::on_commit(ByteView data, MonoTime now) {
         return;
     }
     if ((phase_ != JoinPhase::StoredOut && phase_ != JoinPhase::RequestOut) || !have_prepared_ ||
-        a.prepare_hash != req_.prepare_hash || a.value != req_.membership) {
+        a.prepare_hash != req_.prepare_hash || a.membership != req_.membership) {
         return;
     }
     pipe_.acked();
+    req_.signature = a.signature; // the root's ACTIVE entry is durable: this completes the stored credential
     activate(now);
 }
 
@@ -311,8 +318,9 @@ void Membership::activate(MonoTime now) {
     }
 }
 
-// The PREPARED record is the source of the credential that goes live: what was stored and read back
-// is what is activated (never a copy that only lives in RAM).
+// The PREPARED record is the source of the credential that goes live: what was stored and read back is what is
+// activated (never a copy that only lives in RAM), completed by JoinCommit's signature and verified under the
+// delegation first (SEC-D1).
 void Membership::activate_loaded(Status s, MonoTime now) {
     if (s != Status::Ok || rec_->state != k_prepared_state || rec_->payload_len <= k_prepared_head ||
         std::memcmp(rec_->payload.data(), req_.id.bytes.data(), 16) != 0 ||
@@ -323,14 +331,17 @@ void Membership::activate_loaded(Status s, MonoTime now) {
     const std::size_t n = rec_->payload_len - k_prepared_head;
     std::memmove(rec_->payload.data(), rec_->payload.data() + k_prepared_head, n);
     rec_->payload_len = static_cast<uint32_t>(n);
-    if (!mc_verified_) {
-        verify_input_ = ByteView{rec_->payload.data(), n};
-        if (start_verify(now) != Status::Ok) {
-            finish_join(Status::Busy, LM_OUTCOME_INDETERMINATE, now);
-        }
+    const ByteView stored{rec_->payload.data(), n};
+    Sha256Digest h{};
+    if (!signature_withheld(stored) || withheld_hash(stored, h) != Status::Ok || h != req_.prepare_hash) {
+        finish_join(Status::RecoveryRequired, LM_OUTCOME_INDETERMINATE, now); // not what JoinPrepare announced
         return;
     }
-    activate_commit(now);
+    std::memcpy(rec_->payload.data() + n - k_signature_bytes, req_.signature.data(), k_signature_bytes);
+    verify_input_ = stored;
+    if (start_verify(now) != Status::Ok) {
+        finish_join(Status::Busy, LM_OUTCOME_INDETERMINATE, now);
+    }
 }
 
 void Membership::activate_commit(MonoTime now) {
@@ -429,7 +440,7 @@ void Membership::parse_activated_record(const store::RecordJob &rec) {
         Sha256Digest h{};
         Sha256Digest stored{};
         std::memcpy(stored.data(), rec.payload.data() + 32, 32);
-        if (sec::sha256(engine_.identity().member_cose(), h) != Status::Ok || h != stored) {
+        if (withheld_hash(engine_.identity().member_cose(), h) != Status::Ok || h != stored) {
             return; // an older, unrelated PREPARED record: ACTIVE outranks it
         }
         std::memcpy(req_.id.bytes.data(), rec.payload.data(), 16);

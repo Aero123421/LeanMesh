@@ -3,8 +3,11 @@
 //   identity          scalar32 || DeviceCredential COSE_Sign1           (secret: NVS encryption)
 //   fleet_trust       fleet_id16 || x32 || y32 || min_credential_generation u64
 //   root_delegation   RootDelegation COSE_Sign1 (verbatim)
-//   membership        MemberCredential COSE_Sign1 (verbatim), record state 1 = ACTIVE
+//   membership        state 1 = ACTIVE: MemberCredential COSE_Sign1 (verbatim);
+//                     state 3 = LEFT: assignment floor u64 || membership floor u64 (SEC-D8: the device's own
+//                     record of what it consumed, one atomic commit with the leave, no floor-table room needed)
 //   revocation_floors count u8 || count * (device32 || assignment u64 || membership u64)
+//   discovery_scope   DiscoveryScopeKey 32 B, optional (SEC-Da; secret: NVS encryption); factory-provisioned
 // The loader runs as one worker job: it reads the records, verifies every signature, imports the
 // private key into PSA and builds the credential bundle. A record that cannot be read or verified
 // fails the load closed (Failed), never "unprovisioned"; only a missing identity record means that.
@@ -30,6 +33,8 @@ class Engine;
 namespace lm::member {
 
 inline constexpr uint8_t k_membership_active = 1;
+inline constexpr uint8_t k_membership_left = 3; // tombstone after leave, carries the own floor (SEC-D8)
+inline constexpr std::size_t k_left_bytes = 16;
 inline constexpr std::size_t k_trust_bytes = 16 + 64 + 8;
 inline constexpr std::size_t k_floor_entry_bytes = 32 + 8 + 8;
 
@@ -87,6 +92,13 @@ class LocalIdentity {
     // NotFound = unpaired (every Host is refused); another error = unreadable (the USB link stays
     // down, the mesh does not). Only the root's serial adapter uses it.
     [[nodiscard]] Status paired_host_status() const { return paired_status_; }
+    // SEC-Da: the optional DiscoveryScopeKey (empty: none, or unreadable: then discovery is not narrowed; it only
+    // filters hints, so its loss never fails the identity).
+    [[nodiscard]] ByteView scope_key() const { return has_scope_ ? ByteView{scope_} : ByteView{}; }
+    // [S16] The node's power policy record, read with the identity so that no other job needs the record memory
+    // at boot. NotFound = never set (defaults); another status = unreadable (the power module fails closed).
+    [[nodiscard]] Status power_policy_status() const { return power_status_; }
+    [[nodiscard]] ByteView power_policy() const { return ByteView{power_policy_.data(), power_len_}; }
     [[nodiscard]] DeviceId paired_host() const {
         DeviceId d;
         std::copy(paired_host_.begin(), paired_host_.end(), d.bytes.begin());
@@ -96,8 +108,12 @@ class LocalIdentity {
     // persisted it). Conflict unless the identity is Ready.
     [[nodiscard]] Status adopt_member(const RootDelegation &delegation, const MemberCredential &mc,
                                       ByteView mc_cose);
-    // Logical erase of the domain membership (leave): identity, trust and floors stay.
-    void drop_member();
+    // Logical erase of the domain membership (leave): identity, trust and floors stay; the generations below
+    // `floor` are consumed for good (the LEFT tombstone holds them durably).
+    void drop_member(const Floors::Entry &floor);
+    // SEC-D8: this device's own floor from its LEFT tombstone (zero: nothing consumed and left). A ticket below
+    // its assignment floor was consumed before; a credential below either floor is dead.
+    [[nodiscard]] const Floors::Entry &own_floor() const { return own_floor_; }
     // Borrow of the record I/O memory (docs/IMPLEMENTATION.md §13: no per-feature buffers). Null while
     // the boot load owns it or another module holds it. The lender returns it after the job's
     // completion was polled.
@@ -119,6 +135,8 @@ class LocalIdentity {
     [[nodiscard]] Status load_record(port::JobEnv &env, uint16_t id);
     [[nodiscard]] Status load_membership(port::JobEnv &env);
     void load_paired_host(port::JobEnv &env);
+    void load_power(port::JobEnv &env);
+    void load_scope(port::JobEnv &env);
     void clear();
 
     State state_ = State::Unloaded;
@@ -138,6 +156,7 @@ class LocalIdentity {
     RootDelegation delegation_;
     MemberCredential mc_;
     Floors floors_;
+    Floors::Entry own_floor_;
     std::array<uint8_t, sec::k_ccs_max_bytes> ccs_{};
     std::size_t ccs_len_ = 0;
     std::array<uint8_t, k_max_bundle> bundle_{};
@@ -147,6 +166,11 @@ class LocalIdentity {
     std::size_t deleg_cose_len_ = 0;
     std::array<uint8_t, k_root_capable ? sizeof(DeviceId) : 0> paired_host_{};
     Status paired_status_ = Status::NotFound;
+    std::array<uint8_t, 32> scope_{}; // SEC-Da DiscoveryScopeKey
+    bool has_scope_ = false;
+    std::array<uint8_t, 80> power_policy_{};
+    uint8_t power_len_ = 0;
+    Status power_status_ = Status::NotFound;
     store::RecordJob rec_;                            // the job's I/O memory
 };
 

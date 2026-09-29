@@ -43,6 +43,7 @@ Status Exchange::start_initiator(const MacAddr &mac, MonoTime now) {
     if (!s_.identity.is_member()) {
         return Status::AuthPending;
     }
+    LM_TRY(admission()); // no handshake whose session this node could not admit (SEC-D2)
     return start_1hop(Mode::Link, mac, now);
 }
 
@@ -264,7 +265,7 @@ void Exchange::after_verify(MonoTime now) {
         pump(now);
         return;
     }
-    const Status st = admit_peer();
+    const Status st = admit_peer(true);
     if (st != Status::Ok) {
         count(Count::CredRejected);
         abort(st);
@@ -283,8 +284,10 @@ void Exchange::after_verify(MonoTime now) {
     pump(now);
 }
 
-// Link and end: may this verified member hold a session with us now?
-Status Exchange::admit_peer() {
+// Link and end: may this verified member hold a session with us now? Asked once the credential chain is
+// verified and again right before the session is installed: the ledger, the floors or the time may have moved
+// during the handshake (`first` counts the time-uncertain case once).
+Status Exchange::admit_peer(bool first, DeadlineCheck *lease) {
     const member::MemberCredential &mc = peer_state_.mc;
     const DeviceId &device = peer_state_.dc.device;
     if (device == s_.identity.self()) {
@@ -294,16 +297,23 @@ Status Exchange::admit_peer() {
         return Status::AuthRejected; // not the peer we asked for / the route ends at another node
     }
     LM_TRY(s_.identity.floors().check(device, mc.assignment, mc.membership));
-    if (mode_ == Mode::Link && !initiator_ && s_.join.link_admit != nullptr &&
-        !s_.join.link_admit(s_.join.ctx, device, mc)) {
-        return Status::Revoked; // [S8] root ledger: not ACTIVE with this membership generation
+    // SEC-D2: the root's ledger decides every Link and End session, whichever side started it (the hook says
+    // yes on every other node).
+    if (s_.join.link_admit != nullptr && !s_.join.link_admit(s_.join.ctx, device, mc)) {
+        return Status::Revoked;
     }
-    const RootTimeBound rt = mode_ == Mode::End ? root_time(s_.engine.step_time()) : s_.root_time;
-    switch (member::check_lease(mc, rt)) {
+    // The estimate as of now for either mode (the link layer's own copy is only the last anchor, SEC-D3).
+    const DeadlineCheck lc = member::check_lease(mc, root_time(s_.engine.step_time()));
+    if (lease != nullptr) {
+        *lease = lc;
+    }
+    switch (lc) {
     case DeadlineCheck::After:
         return Status::Expired;
     case DeadlineCheck::Uncertain:
-        count(Count::TimeUncertain); // no root time yet: the session comes first, time sync follows
+        if (first) {
+            count(Count::TimeUncertain); // no root time yet: the session comes first, time sync follows
+        }
         break;
     case DeadlineCheck::Before:
         break;
@@ -591,7 +601,13 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
     }
     pend_.rec.accept(h.link_counter);
     pend_.tx_sid = sid;
-    Status is = mode_ == Mode::Link ? install_session(now) : install_join_session(now);
+    DeadlineCheck lease = DeadlineCheck::Uncertain;
+    Status is = mode_ == Mode::Link ? admit_peer(false, &lease) : Status::Ok;
+    if (is == Status::Ok) {
+        is = mode_ == Mode::Link ? install_session(now, lease) : install_join_session(now);
+    } else {
+        count(Count::CredRejected);
+    }
     if (is != Status::Ok) {
         abort(is);
         return true;
@@ -621,7 +637,7 @@ Neighbor *Exchange::installed() {
                                : s_.neighbors.find_join(peer_state_.dc.device);
 }
 
-Status Exchange::install_session(MonoTime now) {
+Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
     Neighbors &nb = s_.neighbors;
     const DeviceId &device = peer_state_.dc.device;
     Neighbor *n = nb.find_device(device);
@@ -669,6 +685,13 @@ Status Exchange::install_session(MonoTime now) {
     n->cur = std::move(pend_);
     pend_.wipe();
     n->rotate_wanted = false;
+    // SEC-D3: the session lives no longer than the peer's lease; unprovable, it carries no application DATA.
+    n->lease = member::lease_of(peer_state_.mc);
+    n->lease_uncertain = lease != DeadlineCheck::Before;
+    if (lease == DeadlineCheck::Before) {
+        n->cur.valid_until = earliest(n->cur.valid_until,
+                                      member::lease_local_end(root_time(now), n->lease, now));
+    }
     if (s_.join.link_up != nullptr) {
         s_.join.link_up(s_.join.ctx, n->device,
                         n->role); // [S8] e.g. the root confirmation still owed

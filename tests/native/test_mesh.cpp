@@ -40,7 +40,8 @@ struct Received {
 // index order. Extra radio links (spares) are added by the tests before boot.
 struct MNet {
     // The last `unjoined` nodes hold an identity and no membership (they join through the mesh); provisioned
-    // members take addresses from `addr_base` (join tests keep them clear of the ledger's 2..65).
+    // members take addresses from `addr_base` and are listed ACTIVE in the root's ledger (SEC-D2: the root admits
+    // nobody else), so they must lie in its slots 2..65; a joiner gets the next free slot.
     explicit MNet(unsigned n_nodes, unsigned root_index = 0, uint64_t seed = 41, uint32_t job_latency_us = 2000,
                   unsigned unjoined = 0, uint16_t addr_base = 2)
         : n(n_nodes), root_idx(root_index), net(seed), world(WorldOptions{seed, 0}) {
@@ -254,7 +255,14 @@ struct MNet {
     }
     Status install_control(unsigned i, uint32_t type, const Bytes &obj) {
         lm_operation_id_t op = 0;
-        const lm_status_t s = lm_install_control(ctx(i), type, obj.data(), obj.size(), &op);
+        lm_status_t s = LM_STATUS_BUSY;
+        // BUSY is local (another owner holds the record memory, e.g. at boot): the caller asks again, bounded.
+        (void)until(
+            [&] {
+                s = lm_install_control(ctx(i), type, obj.data(), obj.size(), &op);
+                return s != LM_STATUS_BUSY;
+            },
+            1000, 5);
         if (s != LM_STATUS_OK) {
             return static_cast<Status>(s);
         }
@@ -660,7 +668,7 @@ constexpr unsigned k_far = 20;
 } // namespace
 
 LM_TEST("J01 sim: an unjoined device 19 hops from the root joins through the proxy chain") {
-    MNet n(k_far + 1, 0, 43, 2000, 1, 100);
+    MNet n(k_far + 1, 0, 43, 2000, 1); // relays 2..20 are listed in the ledger (SEC-D2); the joiner gets the next slot
     n.boot_all();
     n.set_time();
     LM_CHECK(n.until([&] { return n.formed(k_far); }, 200'000, 20));
@@ -694,7 +702,7 @@ LM_TEST("J02 sim: a device started before its expected entry exists is not banne
     MNet n(2, 0, 47, 2000, 1, 100);
     n.boot_all();
     n.set_time();
-    LM_CHECK(n.until([&] { return n.eng(0).identity().is_member(); }, 2000, 5));
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 2000, 5));
     n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
     n.grant(1, 1, 1, false); // the ticket is on the device, the root has no expected entry
     const uint64_t op = n.join(1, 0x50);
@@ -717,7 +725,7 @@ LM_TEST("J02 sim: after the search budget the device asks again at once (no fixe
     MNet n(2, 0, 48, 2000, 1, 100);
     n.boot_all();
     n.set_time();
-    LM_CHECK(n.until([&] { return n.eng(0).identity().is_member(); }, 2000, 5));
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 2000, 5));
     n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
     n.grant(1, 1, 1, false);
     const uint64_t op = n.join(1, 0x51, 5000);
@@ -741,7 +749,7 @@ LM_TEST("J03 sim: a forged offer (hint false positive) costs one bounded handsha
     n.boot(1);
     n.t_boot_us = n.world.now_us();
     n.set_time();
-    LM_CHECK(n.until([&] { return n.eng(0).identity().is_member(); }, 2000, 5));
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 2000, 5));
     n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
     n.grant(1, 1, 1);
     const uint64_t op = n.join(1, 0x60);
@@ -761,6 +769,30 @@ LM_TEST("J03 sim: a forged offer (hint false positive) costs one bounded handsha
     LM_CHECK(ls.hs_started <= member::Discovery::k_full_handshakes + 1u); // + the first ordinary link after joining
     LM_CHECK_EQ(n.eng(0).ledger().stats().requests, 1ull); // the root saw one request, from the real device
     LM_CHECK_EQ(n.eng(0).ledger().count(root::EntryState::Active), 1u);
+}
+
+// A member that left is out of the root's tree at once (SEC-D2/SEC-D5 follow-up): no path through it, its children
+// re-register, its end session is gone. Not 180 s later when its route lease would have lapsed.
+LM_TEST("SEC-b sim: a member's leave removes it from the root's tree and its end session immediately") {
+    MNet n(3);
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.formed(); }, 60'000, 20));
+    LM_CHECK(n.eng(0).routes().topology().is_admitted(ShortAddr{n.addr(1)}));
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(1)) != nullptr);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &op), LM_STATUS_OK);
+    n.node(1).notify();
+    LM_CHECK(n.until([&] {
+        const root::Entry *e = n.eng(0).ledger().find(n.id(1));
+        return e != nullptr && e->state == root::EntryState::Left;
+    }, 5000, 5));
+    n.run_ms(5); // the commit's completion is where the root forgets it; well inside any lease
+    LM_CHECK(!n.eng(0).routes().topology().is_admitted(ShortAddr{n.addr(1)}));
+    ShortAddr parent;
+    LM_CHECK(n.eng(0).routes().topology().parent_of(ShortAddr{n.addr(2)}, parent) == Status::NotFound); // orphaned child
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(1)) == nullptr);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr);
 }
 
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {

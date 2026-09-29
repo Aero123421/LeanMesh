@@ -19,7 +19,7 @@ Status Delivery::host_store_ack(const HostStoreAckRequest &rq, MonoTime now) {
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         const Handle h = in_.handle_at(i);
         InEntry *e = in_.get(h);
-        if (e == nullptr || e->mid != rq.mid || e->origin != rq.origin) {
+        if (e == nullptr || e->mid != rq.mid || e->origin != rq.origin || e->assignment != rq.assignment) {
             continue;
         }
         if (e->hash != rq.hash) {

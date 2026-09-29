@@ -100,7 +100,7 @@ void Ledger::stage_ack(Txn &t, uint8_t type, const member::JoinAckData &a, MonoT
     h.type = type;
     h.request = t.request;
     h.domain = engine_.identity().delegation().domain;
-    h.revision = type == member::k_type_join_commit ? t.membership : 0;
+    h.revision = 0;
     h.issuer = engine_.identity().self();
     MutByteView out = t.pipe.stage();
     std::size_t plen = 0;
@@ -117,16 +117,50 @@ void Ledger::stage_ack(Txn &t, uint8_t type, const member::JoinAckData &a, MonoT
     t.pipe.send_staged(t.staged_len, now);
 }
 
+// JoinCommit (SEC-D1): the signature that completes the credential JoinPrepare announced. Sent only once the
+// ACTIVE entry is durable; it is the last 64 bytes of the credential the entry holds (at the scratch tail).
+void Ledger::stage_commit(Txn &t, MonoTime now) {
+    member::JoinCommitData c;
+    c.prepare_hash = t.prepare_hash;
+    c.membership = t.membership;
+    const uint8_t *cose = scratch_.data() + k_cose_off;
+    std::copy_n(cose + t.cose_len - member::k_signature_bytes, member::k_signature_bytes, c.signature.begin());
+    stage_commit_data(t, c, now);
+}
+
+void Ledger::stage_commit_data(Txn &t, const member::JoinCommitData &c, MonoTime now) {
+    member::JoinObjectHeader h;
+    h.type = member::k_type_join_commit;
+    h.request = t.request;
+    h.domain = engine_.identity().delegation().domain;
+    h.revision = c.refusal ? 0 : t.membership;
+    h.issuer = engine_.identity().self();
+    MutByteView out = t.pipe.stage();
+    std::size_t plen = 0;
+    std::size_t dlen = 0;
+    Status st = member::join_object_begin(h, out, plen);
+    if (st == Status::Ok) {
+        st = member::encode_join_commit(c, out.from(plen), dlen);
+    }
+    if (st != Status::Ok) {
+        end_txn(t);
+        return;
+    }
+    t.staged_len = plen + dlen;
+    t.pipe.send_staged(t.staged_len, now);
+}
+
 void Ledger::refuse(Txn &t, Status why, MonoTime now) {
     ++stats_.refused;
     if (why == Status::Conflict) {
         ++stats_.conflicts;
     }
-    member::JoinAckData a; // prepare-hash all zero: a refusal; the value is the reason (S8-D3)
-    a.value = static_cast<uint64_t>(why);
+    member::JoinCommitData c; // prepare-hash all zero and no signature: a refusal; the value is the reason (S8-D3)
+    c.membership = static_cast<uint64_t>(why);
+    c.refusal = true;
     t.state = TxnState::Linger;
     t.deadline = now + k_linger;
-    stage_ack(t, member::k_type_join_commit, a, now);
+    stage_commit_data(t, c, now);
     release(txn_index(&t));
 }
 
@@ -213,6 +247,8 @@ void Ledger::decide_policy(Txn &t, MonoTime now) {
     Status v = Status::Ok;
     if (e != nullptr && e->state == EntryState::Blocked) {
         v = Status::Revoked;
+    } else if (e != nullptr && t.ticket.new_generation <= e->consumed) {
+        v = Status::Conflict; // SEC-D4: that generation was made ACTIVE here already: a consumed grant
     } else if (mode_ == JoinMode::Preapproved) {
         if (e == nullptr || e->state != EntryState::Expected) {
             v = Status::NotFound; // NOT_EXPECTED (docs/07 §3): a hint, not a permanent verdict; a former member
@@ -220,9 +256,6 @@ void Ledger::decide_policy(Txn &t, MonoTime now) {
         } else if (e->assignment != t.ticket.new_generation || e->hash != t.ticket.grant) {
             v = Status::Conflict;
         }
-    } else if (e != nullptr && (e->state == EntryState::Left || e->state == EntryState::Aborted) &&
-               t.ticket.new_generation <= e->assignment) {
-        v = Status::Conflict; // grant already consumed
     }
     const uint64_t next = e != nullptr ? e->membership + 1 : 1;
     if (v == Status::Ok && (next > k_u63_max || engine_.identity().floors().check(t.device,
@@ -318,8 +351,10 @@ void Ledger::start_prepare(Txn &t, MonoTime now) {
     const Entry &old = entries_[slot];
     t.slot = static_cast<uint16_t>(slot);
     t.membership = old.state != EntryState::Free && old.device == t.device ? old.membership + 1 : 1;
-    // What the entry becomes when PREPARED commits (RAM changes only after the commit is durable).
+    // What the entry becomes when PREPARED commits (RAM changes only after the commit is durable). What this
+    // device consumed stays (SEC-D4); a slot taken over from another device starts from nothing.
     job_entry_ = Entry{};
+    job_entry_.consumed = old.state != EntryState::Free && old.device == t.device ? old.consumed : 0;
     job_entry_.device = t.device;
     job_entry_.hash = t.content;
     job_entry_.request = t.request;
@@ -361,7 +396,8 @@ void Ledger::prepare_signed(Txn &t, Status s, MonoTime now) {
         return;
     }
     t.cose_len = sargs_.len;
-    if (sec::sha256(ByteView{scratch_.data() + k_cose_off, t.cose_len}, t.prepare_hash) != Status::Ok) {
+    // SEC-D1: the JoinPrepare carries the credential with its signature withheld; this is the hash of that form.
+    if (member::withheld_hash(ByteView{scratch_.data() + k_cose_off, t.cose_len}, t.prepare_hash) != Status::Ok) {
         refuse(t, Status::RecoveryRequired, now);
         return;
     }
@@ -379,6 +415,10 @@ void Ledger::prepare_committed(Txn &t, Status s, MonoTime now) {
     }
     job_entry_.reserved_until = now + k_reservation;
     entries_[t.slot] = job_entry_;
+    mark_used(t.slot); // entry first, then its manifest bit (SEC-D5)
+    if (man_dirty_ && maint_retry_.is_never()) {
+        maint_retry_ = now + k_busy_retry; // committed once this join gives the record memory back
+    }
     ++stats_.prepared;
     send_prepare(t, now);
 }
@@ -393,7 +433,7 @@ void Ledger::send_prepare(Txn &t, MonoTime now) {
     h.revision = t.membership;
     h.issuer = id.self();
     member::JoinPrepareData p;
-    p.member = ByteView{scratch_.data() + k_cose_off, t.cose_len};
+    p.member = ByteView{scratch_.data() + k_cose_off, t.cose_len}; // the encoder withholds its signature (SEC-D1)
     p.prepare_hash = t.prepare_hash;
     p.address = e.address;
     p.membership = t.membership;
@@ -431,6 +471,7 @@ void Ledger::on_stored(Txn &t, ByteView data, const member::JoinObjectHeader &h,
     t.pipe.acked();
     t.device_generation = a.value;
     job_entry_ = e;
+    job_entry_.consumed = std::max(e.consumed, e.assignment); // durable with the ACTIVE entry (SEC-D4)
     t.state = TxnState::Activating;
     t.deadline = now + Duration::from_s(10);
     if (commit_entry(Step::CommitActive, t.slot, EntryState::Active, false,
@@ -450,12 +491,9 @@ void Ledger::active_committed(Txn &t, Status s, MonoTime now) {
     entries_[t.slot] = job_entry_;
     ++stats_.activated;
     engine_.link().forget_handshake_gate(t.mac); // the device's first ordinary handshake follows (S8-D6)
-    member::JoinAckData a;
-    a.prepare_hash = t.prepare_hash;
-    a.value = t.membership;
     t.state = TxnState::CommitOut;
     t.deadline = now + Duration::from_s(30);
-    stage_ack(t, member::k_type_join_commit, a, now);
+    stage_commit(t, now); // ACTIVE is durable: now the signature may leave the root (SEC-D1)
 }
 
 void Ledger::on_active(Txn &t, ByteView data, const member::JoinObjectHeader &h, MonoTime now) {
@@ -558,7 +596,7 @@ void Ledger::resend_loaded(Txn &t, Status s, MonoTime now) {
     std::memmove(scratch_.data() + k_cose_off, cose.data(), cose.size());
     t.cose_len = cose.size();
     t.membership = loaded.membership;
-    if (sec::sha256(cose, t.prepare_hash) != Status::Ok) {
+    if (member::withheld_hash(ByteView{scratch_.data() + k_cose_off, t.cose_len}, t.prepare_hash) != Status::Ok) {
         refuse(t, Status::RecoveryRequired, now);
         return;
     }
@@ -566,13 +604,11 @@ void Ledger::resend_loaded(Txn &t, Status s, MonoTime now) {
     if (loaded.state == EntryState::Active) {
         e.state = EntryState::Active; // RAM catches up with a commit whose result was lost
         e.confirmed = loaded.confirmed;
+        e.consumed = std::max(e.consumed, loaded.consumed);
         e.reserved_until = MonoTime::never();
-        member::JoinAckData a;
-        a.prepare_hash = t.prepare_hash;
-        a.value = t.membership;
         t.state = TxnState::CommitOut;
         t.deadline = now + Duration::from_s(30);
-        stage_ack(t, member::k_type_join_commit, a, now);
+        stage_commit(t, now); // the ACTIVE record is durable: its signature may be sent (SEC-D1)
         return;
     }
     if (loaded.state != EntryState::Prepared || !(now < e.reserved_until)) {

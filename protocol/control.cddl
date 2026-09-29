@@ -43,12 +43,17 @@ expected-set = [page: 0..15, pages: 1..16, set-hash: id32,
  entries: [* 8 expected-entry]]
 expected-entry = [device: id32, assignment: u63, grant-hash: id32, allowed: bool]
 ; 6-10. ACK includes byte-identical prepare/hash; never silently reallocates ID.
+; join-prepare member = the MemberCredential COSE_Sign1 with its 64 signature bytes withheld (zero), so
+; it is no credential yet; prepare-hash = SHA-256(member) exactly as carried. join-commit carries the 64
+; bytes and is sent only after the root's ACTIVE ledger entry is durable; a refusal (prepare-hash all
+; zero, membership = reason code) carries none.
 join-request = [device-credential: bstr .size (1..1024),
  ticket: bstr .size (1..1024), nonce: id16, capabilities: u64]
 join-prepare = [member: bstr .size (1..1024), prepare-hash: id32,
  address: address, membership: u63, root-term: u32, reservation-ms: 1..120000]
 join-stored = [prepare-hash: id32, record-generation: u63]
-join-commit = [prepare-hash: id32, membership: u63]
+join-commit = [prepare-hash: id32, membership: u63,
+ member-signature: bstr .size 64 / bstr .size 0]
 join-active = [prepare-hash: id32, record-generation: u63]
 ; 11. local_notice and network_refusal are separately observed by receipts.
 revoke-object = [device: id32, assignment-floor: u63,

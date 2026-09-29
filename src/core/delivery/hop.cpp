@@ -21,7 +21,10 @@ HopTx::HopTx(Engine &engine, link::LinkLayer &link)
     : engine_(engine), link_(link), pool_(engine.frames()), frames_(engine.frames().slots()) {}
 
 TxFrame *HopTx::reserve(Handle &h, sched::Class cls, const MacAddr &mac) {
-    TxFrame *f = pool_.reserve(h, cls, mac);
+    // [S16] a sleeping child's mailbox has its own caps (per child, total); CONTROL always finds room.
+    TxFrame *f = cls != sched::Class::Control && !engine_.power().mailbox_admit(mac, engine_.step_time())
+                     ? nullptr
+                     : pool_.reserve(h, cls, mac);
     if (f == nullptr) {
         engine_.sched().note_refused(cls); // class limit, per-peer cap or pool full: local, not RF
     }
@@ -176,6 +179,9 @@ void HopTx::on_timer(MonoTime now) {
         if (f == nullptr || f->st != TxFrame::St::WaitAck || now < f->at) {
             continue;
         }
+        if (f->attempts > 0 && engine_.power().child_asleep(f->mac, now)) {
+            --f->attempts; // [S16] the child's window closed while the frame waited: sleep, not loss
+        }
         if (f->attempts >= k_link_attempts || f->has(TxFrame::Abandoned)) {
             finish(h, *f, HopEnd::Failed, now);
             continue;
@@ -206,6 +212,9 @@ MonoTime HopTx::deadline() const {
 
 void HopTx::pump(MonoTime now) {
     now_ = now;
+    if (engine_.radio_state() == RadioState::Asleep) {
+        return; // [S16] the driver is off on purpose: frames wait, nothing polls
+    }
     if (in_pump_) {
         pump_again_ = true;
         return;
@@ -279,6 +288,21 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
             progress = true;
             return;
         }
+        // [S16] A sleepy child's frames wait for its poll (window, credit). A frame sealed under a link session that
+        // was replaced while it waited cannot be opened any more: it ends, and its origin sends the original again.
+        if (!engine_.power().deliverable(f->mac, now, !f->has(TxFrame::Left))) {
+            continue;
+        }
+        if (!f->has(TxFrame::Left) && engine_.power().child_known(f->mac, now)) {
+            const link::Neighbor *nb = link_.neighbors().find_mac(f->mac);
+            Reader sid{ByteView{f->frame.bytes.data() + wire::layout::link::link_sid_offset, 4}};
+            if (nb == nullptr || !nb->cur.active || nb->cur.tx_sid != sid.u32be()) {
+                ++stats_.aborted;
+                finish(h, *f, HopEnd::Aborted, now);
+                progress = true;
+                return;
+            }
+        }
         const auto c = static_cast<std::size_t>(f->cls);
         const TxFrame *cur = frames_.get(head[c]);
         if (cur == nullptr || static_cast<int16_t>(f->order - cur->order) < 0) {
@@ -335,6 +359,12 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
     } else if (pick->has(TxFrame::Left)) {
         ++stats_.retransmits;
     }
+    if (!pick->has(TxFrame::Left)) {
+        engine_.power().note_handoff(pick->mac); // [S16] one unit of the child's credit per frame, not per retry
+    }
+    if (pick->kind == OwnerKind::Out) {
+        engine_.power().note_uplink(now); // [S16] its answer may come within the receive window after it
+    }
     pick->set(TxFrame::Left);
     pick->set(TxFrame::AfterBusy, false);
     sent = true;
@@ -366,6 +396,31 @@ bool HopTx::withdraw(OwnerKind kind, Handle owner) {
         }
     }
     return none_left;
+}
+
+std::size_t HopTx::queued_for(const MacAddr &mac) const {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < k_frames; ++i) {
+        const TxFrame *f = frames_.get(frames_.handle_at(i));
+        n += (f != nullptr && f->kind != OwnerKind::Borrowed && f->mac == mac) ? 1U : 0U;
+    }
+    return n;
+}
+
+std::size_t HopTx::expire_parked(const MacAddr &mac, MonoTime now) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < k_frames; ++i) {
+        const Handle h = frames_.handle_at(i);
+        TxFrame *f = frames_.get(h);
+        const bool ours = f != nullptr && f->mac == mac && f->st == TxFrame::St::Ready && !f->has(TxFrame::Left) &&
+                          (f->kind == OwnerKind::Forward || f->kind == OwnerKind::Receipt || f->kind == OwnerKind::Mesh);
+        if (ours) {
+            ++stats_.aborted;
+            finish(h, *f, HopEnd::Aborted, now);
+            ++n;
+        }
+    }
+    return n;
 }
 
 void HopTx::clear() {

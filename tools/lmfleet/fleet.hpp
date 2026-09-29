@@ -53,8 +53,10 @@ class Fleet {
                      uint8_t permissions = 3);
     Bytes revoke(const DeviceId &device, uint64_t assignment_floor, uint64_t membership_floor,
                  uint64_t revision = 1);
+    // mode 1: a preissued one-time grant (the nonce field is filler); mode 0: bound to the device's fresh nonce.
     Bytes ticket(const Kit &dev, const DomainId &source, const DomainId &target,
-                 const Bytes &delegation_cose, uint64_t expected_old, uint64_t new_generation);
+                 const Bytes &delegation_cose, uint64_t expected_old, uint64_t new_generation, uint8_t mode = 1,
+                 const std::array<uint8_t, 16> *nonce = nullptr);
     // Generic signed object (negative tests build malformed ones with it).
     Bytes sign(const member::Envelope &env, ByteView data);
     // Negative tests: body says `env.issuer`, the COSE kid is the fleet's real key id (sign1_create
@@ -101,14 +103,23 @@ class Network {
 
     // Root node (address 1) or an ordinary member; device index is unique per node.
     NodeKit make_root();
+    // A member issued outside a join. It is also remembered as one the root's ledger lists (SEC-D2: the root
+    // admits nobody else): provisioning the root writes all members made so far, register_member() a later one.
     NodeKit make_node(uint32_t index, uint16_t address, uint8_t role = 1,
                       const MemberSpec *override_spec = nullptr);
     // Identity + delegation only: a provisioned device that has not joined yet.
     NodeKit make_unjoined(uint32_t index);
+
+    std::vector<NodeKit> members; // every make_node() so far, in order
 };
 
-// Writes the sealed records of `node` into `store` (sim_provision underneath).
+// Writes the sealed records of `node` into `store` (sim_provision underneath). For the root (with its
+// membership) this is the provisioning of a new network: an empty ledger bound to the domain (SEC-D5), then
+// every member of `net.members` listed ACTIVE as if the root had admitted it.
 [[nodiscard]] Status provision(sim::SimStore &store, const Network &net, const NodeKit &node,
                                bool with_membership = true, const member::Floors *floors = nullptr);
+// Bench only: lists `node` ACTIVE in the ledger held by `root_store` (address 2..65 is its slot, out: `slot`).
+// Alone (a member made after the root's provisioning) its manifest bit is repaired when the root loads.
+[[nodiscard]] Status register_member(sim::SimStore &root_store, const NodeKit &node, uint16_t *slot = nullptr);
 
 } // namespace lm::fleet

@@ -16,6 +16,7 @@ Status encode_entry(const Entry &e, bool confirmed, ByteView cose, MutByteView o
     w.u8(confirmed ? 1 : 0);
     w.u64be(e.assignment);
     w.u64be(e.membership);
+    w.u64be(e.consumed);
     w.bytes(e.device.view());
     w.bytes(e.request.view());
     w.bytes(ByteView{e.hash});
@@ -33,6 +34,7 @@ Status decode_entry(const store::RecordJob &rec, Entry &out, ByteView &cose) {
     e.confirmed = r.u8() != 0;
     e.assignment = r.u64be();
     e.membership = r.u64be();
+    e.consumed = r.u64be();
     r.copy_to(e.device.bytes);
     r.copy_to(e.request.bytes);
     r.copy_to(e.hash);
@@ -43,7 +45,61 @@ Status decode_entry(const store::RecordJob &rec, Entry &out, ByteView &cose) {
     return Status::Ok;
 }
 
+Status decode_manifest(ByteView payload, Manifest &out) {
+    Reader r{payload};
+    Manifest m;
+    const uint8_t version = r.u8();
+    r.copy_to(m.domain.bytes);
+    m.expected_revision = r.u64be();
+    m.used = r.u64be();
+    r.copy_to(m.set_hash);
+    m.pages = r.u8();
+    m.received = r.u16be();
+    m.pending = r.u16be();
+    for (auto &d : m.digests) {
+        r.copy_to(d);
+    }
+    LM_TRY(r.finish());
+    if (version != k_manifest_version || m.pages > 16) {
+        return Status::BadFrame;
+    }
+    out = m;
+    return Status::Ok;
+}
+
 } // namespace detail
+
+Status encode_manifest(const Manifest &m, MutByteView out, std::size_t &len) {
+    Writer w{out};
+    w.u8(k_manifest_version);
+    w.bytes(m.domain.view());
+    w.u64be(m.expected_revision);
+    w.u64be(m.used);
+    w.bytes(ByteView{m.set_hash});
+    w.u8(m.pages);
+    w.u16be(m.received);
+    w.u16be(m.pending);
+    for (const auto &d : m.digests) {
+        w.bytes(ByteView{d});
+    }
+    len = w.size();
+    return w.finish();
+}
+
+Status encode_provisioned_member(const member::MemberCredential &mc, ByteView member_cose, uint16_t &record_id,
+                                 MutByteView out, std::size_t &len) {
+    const uint16_t a = mc.address.value();
+    if (a < 2 || a >= 2 + k_ledger_slots || member_cose.size() > member::k_max_member_cose) {
+        return Status::InvalidArgument; // the ledger's slots are addresses 2..65
+    }
+    Entry e;
+    e.device = mc.device;
+    e.assignment = mc.assignment.value();
+    e.membership = mc.membership.value();
+    e.consumed = e.assignment; // an ACTIVE membership consumed its assignment
+    record_id = static_cast<uint16_t>(k_rec_ledger_base + (a - 2U));
+    return detail::encode_entry(e, true, member_cose, out, len);
+}
 
 using detail::decode_entry;
 using detail::encode_entry;
@@ -158,27 +214,37 @@ void Ledger::on_job_done(Handle slot, Status s, MonoTime now) {
     step_done(step, s, now);
 }
 
+// SEC-D5: the manifest must exist and name this root's domain; a slot it lists as used must still hold its
+// record. Anything else is RECOVERY_REQUIRED: a lost or foreign ledger never becomes an empty one (docs/12 §5).
 Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
     auto &l = *static_cast<Ledger *>(arg);
     store::RecordJob &rec = *l.rec_;
     rec.op = store::RecordJob::Op::Load;
     rec.id = store::rec::root_ledger;
     Status st = store::record_load(env.store, rec);
-    if (st == Status::Ok) {
-        Reader r{ByteView{rec.payload.data(), rec.payload_len}};
-        l.expected_revision_ = r.u64be();
-        LM_TRY(r.finish());
-    } else if (st != Status::NotFound) {
-        return st;
+    if (st == Status::NotFound) {
+        return Status::RecoveryRequired; // a domain root without its ledger: only new-network provisioning writes one
+    }
+    LM_TRY(st);
+    if (detail::decode_manifest(ByteView{rec.payload.data(), rec.payload_len}, l.man_) != Status::Ok ||
+        l.man_.domain != l.load_domain_) {
+        return Status::RecoveryRequired; // unreadable, or another domain's ledger
     }
     for (std::size_t i = 0; i < k_ledger_slots; ++i) {
         rec.id = static_cast<uint16_t>(k_rec_ledger_base + i);
         st = store::record_load(env.store, rec);
         if (st == Status::NotFound) {
+            if ((l.man_.used >> i & 1U) != 0) {
+                return Status::RecoveryRequired; // an entry that existed is gone
+            }
             l.entries_[i] = Entry{};
             continue;
         }
         LM_TRY(st); // a quarantined or unreadable record is never "empty" (docs/12 §2)
+        if ((l.man_.used >> i & 1U) == 0) {
+            l.man_.used |= 1ULL << i; // entry committed before its manifest bit (the order of every first use)
+            l.man_dirty_ = true;
+        }
         ByteView cose;
         LM_TRY(decode_entry(rec, l.entries_[i], cose));
         l.entries_[i].address = ShortAddr{static_cast<uint16_t>(2 + i)};
@@ -190,7 +256,8 @@ Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
 }
 
 // Worker. The fleet-signed ticket names this device, its credential and this root's delegation;
-// only initial assignments exist in this slice (source domain zero, expected-old 0).
+// only initial assignments exist in this slice (source domain zero, expected-old 0), and only mode 1 (SEC-D4a:
+// a mode-0 ticket is bound to a device nonce whose freshness nobody here can judge yet).
 Status Ledger::verify_ticket_job(port::JobEnv & /*env*/, void *arg) {
     auto &l = *static_cast<Ledger *>(arg);
     VerifyArgs &v = l.vargs_;
@@ -206,8 +273,8 @@ Status Ledger::verify_ticket_job(port::JobEnv & /*env*/, void *arg) {
         t.root_delegation_hash != v.delegation_hash || t.new_generation <= t.expected_old) {
         return Status::AuthRejected;
     }
-    if (!t.source.is_zero() || t.expected_old != 0) {
-        return Status::Unsupported; // signed replacement (transfer) is the lifecycle slice's
+    if (!t.source.is_zero() || t.expected_old != 0 || t.mode != 1) {
+        return Status::Unsupported; // signed replacement (transfer) is the lifecycle slice's; mode 0: SEC-D4a
     }
     v.out.new_generation = t.new_generation;
     v.out.mode = t.mode;
@@ -237,6 +304,9 @@ void Ledger::on_identity_ready(MonoTime now) {
         return;
     }
     load_pending_ = false;
+    man_ = Manifest{};
+    man_dirty_ = false;
+    load_domain_ = engine_.identity().delegation().domain; // the job reads only its own copies
     if (submit(Step::LoadAll, JobClass::Flash, &load_all_job, this) != Status::Ok) {
         release(-2);
         load_pending_ = true;
@@ -283,32 +353,36 @@ bool Ledger::responder_open() const {
     return std::any_of(txns_.begin(), txns_.end(), [](const Txn &t) { return t.state == TxnState::Free; });
 }
 
-// The ledger only ever *denies*: an entry that is not Active with exactly this membership generation
-// (left, aborted, reserved but not committed) refuses the link. A device the ledger has no entry for
-// is judged by its credential chain and the revocation floors alone (decision S8-D7).
+// SEC-D2 (supersedes S8-D7): every Link and End session of the root, whichever side started it, needs an
+// ACTIVE entry of exactly this device with the credential's address, assignment and membership. A credential
+// the ledger does not list was never issued by this ledger or outlived it (left, aborted, reused slot).
 bool Ledger::link_admit(const DeviceId &device, const member::MemberCredential &mc) const {
     if (!loaded_ || failed_) {
         return false;
     }
     const Entry *e = find(device);
-    if (e == nullptr) {
-        return true;
-    }
-    return e->state == EntryState::Active && e->membership == mc.membership.value() &&
-           e->address.value() == mc.address.value();
+    return e != nullptr && e->state == EntryState::Active && e->address == mc.address &&
+           e->assignment == mc.assignment.value() && e->membership == mc.membership.value();
 }
 
 void Ledger::discovery(const MacAddr & /*src*/, const wire::BootstrapCarrier &c, MonoTime now) {
-    if (c.object_kind != member::k_obj_join_hello || !responder_open() || now < last_offer_ + detail::k_offer_gap) {
+    const ByteView scope = engine_.identity().scope_key();
+    member::OfferHint hello;
+    if (c.object_kind != member::k_obj_join_hello || member::decode_hello(c.body, hello) != Status::Ok ||
+        !member::scope_ok(scope, member::k_obj_join_hello, c.exchange_id, hello)) {
+        return; // SEC-Da: a scoped root answers only hellos of its own scope
+    }
+    if (!responder_open() || now < last_offer_ + detail::k_offer_gap) {
         return; // one offer per gap: a hello flood costs airtime only once
     }
     last_offer_ = now;
     // Offers are broadcast: the joiner picks the source of the first one that echoes its own nonce.
-    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 6> frame{};
+    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 14> frame{};
     std::size_t len = 0;
     member::OfferHint oh;
-    oh.expected_revision = static_cast<uint32_t>(expected_revision_);
-    if (member::encode_discovery(true, c.exchange_id, hint(), MutByteView{frame}, len, &oh) == Status::Ok) {
+    oh.expected_revision = static_cast<uint32_t>(man_.expected_revision);
+    if (member::scope_sign(scope, member::k_obj_join_offer, c.exchange_id, oh) == Status::Ok &&
+        member::encode_discovery(true, c.exchange_id, hint(), MutByteView{frame}, len, &oh) == Status::Ok) {
         (void)engine_.transmit(MacAddr::broadcast(), ByteView{frame.data(), len}, k_tag_offer, now);
     }
 }
@@ -365,6 +439,9 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
         release(-2);
         if (s == Status::Ok) {
             loaded_ = true;
+            if (man_dirty_) {
+                maintenance(now); // make the repaired used bits durable
+            }
         } else {
             failed_ = true; // fail closed: no joins, no admissions, and the application is told
             engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(s), 0, nullptr);
@@ -424,9 +501,16 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
     case Step::CommitFloors:
         release(-2);
         return;
+    case Step::CommitManifest:
+        if (s != Status::Ok) {
+            man_dirty_ = true; // not known to be durable: written again with the next change
+        }
+        release(-2);
+        return;
     case Step::VerifyExpected:
     case Step::CommitExpectedHeader:
     case Step::CommitExpectedEntry:
+    case Step::CommitExpectedDone:
         expected_step_done(step, s, now);
         return;
     case Step::None:
@@ -570,7 +654,36 @@ void Ledger::maintenance(MonoTime now) {
         }
         return;
     }
+    if (man_dirty_) {
+        if (commit_manifest(man_, Step::CommitManifest) != Status::Ok) {
+            release(-2);
+            maint_retry_ = now + k_busy_retry;
+        }
+        return;
+    }
     release(-2);
+}
+
+void Ledger::mark_used(std::size_t slot) {
+    if ((man_.used >> slot & 1U) == 0) {
+        man_.used |= 1ULL << slot;
+        man_dirty_ = true;
+    }
+}
+
+// `m` carries every used bit RAM has (holder -2). man_dirty_ is cleared at submit: a change made while the job
+// runs sets it again, and a failed job sets it again (CommitManifest).
+Status Ledger::commit_manifest(const Manifest &m, Step step) {
+    std::size_t len = 0;
+    LM_TRY(encode_manifest(m, MutByteView{rec_->payload}, len));
+    rec_->op = store::RecordJob::Op::Commit;
+    rec_->id = store::rec::root_ledger;
+    rec_->state = 0;
+    rec_->payload_len = static_cast<uint32_t>(len);
+    job_txn_ = -2;
+    LM_TRY(submit(step, JobClass::Flash, &store::record_job, rec_));
+    man_dirty_ = false;
+    return Status::Ok;
 }
 
 } // namespace lm::root

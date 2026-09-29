@@ -56,6 +56,19 @@ class Mesh {
     void on_tx_outcome(const TxOutcome &o, MonoTime now);
     [[nodiscard]] static bool is_mesh_tag(uint32_t tag) { return (tag & 0xFFFF0000U) == k_tag_mesh; }
 
+    // [S16] power: the approved parent with a live link session (the poll goes there), and the wake after a sleep:
+    // nothing was heard while asleep, and silence over a sleep is not a dead parent.
+    [[nodiscard]] bool parent_link(MacAddr &mac, DeviceId &dev) const;
+    [[nodiscard]] bool parent_link_up() const {
+        MacAddr m;
+        DeviceId d;
+        return parent_link(m, d);
+    }
+    void on_wake(MonoTime now, bool fresh_sessions);
+    // The parent did not answer an authenticated poll twice: it most likely lost the session (a restart). Only
+    // that session is made again, at once, instead of waiting for silent hello intervals (docs/20 §7 row 4).
+    void parent_session_lost(const MacAddr &mac, MonoTime now);
+
     // Bench switch (sim nodes of slices that drive links by hand). Product builds never call it.
     void set_enabled(bool on) { enabled_ = on; }
 
@@ -66,6 +79,28 @@ class Mesh {
     // Route from this node to the root (own path reversed); false while there is none valid.
     [[nodiscard]] bool route_to_root(delivery::PathSpec &out, MonoTime now) const;
     [[nodiscard]] uint32_t expected_revision() const { return expected_rev_; }
+    // [S17] channel module: the parent's radio address (survey probes), a hint request on the channel the node
+    // is tuned to (recovery scan), and whether a beacon of a possible parent arrived since `t`.
+    [[nodiscard]] bool parent_mac(MacAddr &out) const {
+        if (parent_ < 0) {
+            return false;
+        }
+        out = cands_[static_cast<std::size_t>(parent_)].mac;
+        return true;
+    }
+    void hello_now(MonoTime now) {
+        if (state_ != State::Off && state_ != State::Ready && state_ != State::Root) {
+            send_beacon(true, now);
+        }
+    }
+    [[nodiscard]] bool heard_since(MonoTime t) const {
+        for (const Cand &c : cands_) {
+            if (c.used && c.heard >= t) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // ---- observation (tests, diagnostics) ----
     struct Stats {
@@ -161,6 +196,7 @@ class Mesh {
     void on_probe(const link::RxInfo &info, const Probe &p, MonoTime now);
     void heard(Cand &c, MonoTime now);
     void rf_sample(Cand &c, bool ok, MonoTime now);
+    void note(Cand &c, bool ok, MonoTime now); // [S17] one RF attempt: link quality + the channel module's window
 
     // attach / repair
     void search_step(MonoTime now);

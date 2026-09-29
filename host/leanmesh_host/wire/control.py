@@ -32,7 +32,7 @@ SHAPES: dict[int, list[Any]] = {
     6: [("b", 1, 1024), ("b", 1, 1024), _ID16, _U64],
     7: [("b", 1, 1024), _ID32, _ADDR, _U63, _U32, ("u", 1, 120000)],
     8: [_ID32, _U63],
-    9: [_ID32, _U63],
+    9: [_ID32, _U63, ("b", 0, 64)],  # JoinCommit + the withheld member signature (SEC-D1; none in a refusal)
     10: [_ID32, _U63],
     11: [_ID32, _U63, _U63, _U32, _U63],
     12: [_U63, _U63, _ID32, ("b", 1, 3072)],

@@ -25,6 +25,7 @@ Status Exchange::start_end(const DeviceId &peer, const delivery::PathSpec &route
     if (end_.send == nullptr || end_.sessions == nullptr) {
         return Status::Unsupported;
     }
+    LM_TRY(admission()); // SEC-D2
     if (busy()) {
         return Status::Busy;
     }
@@ -72,8 +73,9 @@ void Exchange::on_end_carrier(const delivery::PathSpec &reply, const wire::EndHe
     on_fragment(f, o, now);
 }
 
+// The delivery module's estimate advanced to `now`; without it (a bench without delivery) the last anchor.
 RootTimeBound Exchange::root_time(MonoTime now) const {
-    return end_.root_time != nullptr ? end_.root_time(end_.ctx, now) : RootTimeBound{};
+    return end_.root_time != nullptr ? end_.root_time(end_.ctx, now) : s_.root_time;
 }
 
 // One carrier record with the next fragment of `obj`, built in a pool frame borrowed for the call (no
@@ -223,7 +225,13 @@ void Exchange::on_end_bind(ByteView record, const Origin &o, MonoTime now) {
     }
     pend_.rec.accept(op.header.end_counter);
     pend_.tx_sid = sid;
-    Status is = install_end_session();
+    DeadlineCheck lease = DeadlineCheck::Uncertain;
+    Status is = admit_peer(false, &lease); // the ledger, the floors or the time may have moved during the handshake
+    if (is == Status::Ok) {
+        is = install_end_session(now, lease);
+    } else {
+        count(Count::CredRejected);
+    }
     if (is != Status::Ok) {
         abort(is);
         return;
@@ -253,8 +261,8 @@ void Exchange::on_end_bind(ByteView record, const Origin &o, MonoTime now) {
 }
 
 // A fresh session replaces the old keys of the same peer; records sealed under the old keys are
-// re-sealed (the epoch changes).
-Status Exchange::install_end_session() {
+// re-sealed (the epoch changes). It lives no longer than the peer's lease (SEC-D3).
+Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
     delivery::EndSessions &ss = *end_.sessions;
     const DeviceId &peer = peer_state_.dc.device;
     delivery::EndSession *slot = ss.find_peer(peer);
@@ -274,11 +282,34 @@ Status Exchange::install_end_session() {
     slot->rx_sid = pend_.rx_sid;
     slot->tx_sid = pend_.tx_sid;
     slot->valid_until = pend_.valid_until;
+    slot->peer_lease = member::lease_of(mc);
+    if (lease == DeadlineCheck::Before) {
+        slot->valid_until = earliest(slot->valid_until, member::lease_local_end(root_time(now), slot->peer_lease, now));
+    }
     pend_.wipe();
     slot->epoch = ss.next_epoch();
     slot->suspect = false;
     ss.touch(*slot);
     return Status::Ok;
+}
+
+void Exchange::revalidate_end(const RootTimeBound &bound, MonoTime now) {
+    if (end_.sessions == nullptr) {
+        return;
+    }
+    end_.sessions->for_each_used([&](delivery::EndSession &s) {
+        switch (check_deadline(bound, s.peer_lease)) {
+        case DeadlineCheck::After:
+            end_.sessions->remove(s); // no record under it any more; the peer needs a new credential
+            ++end_stats_.lease_expired;
+            break;
+        case DeadlineCheck::Before:
+            s.valid_until = earliest(s.valid_until, member::lease_local_end(bound, s.peer_lease, now));
+            break;
+        case DeadlineCheck::Uncertain:
+            break; // application DATA is held back per link session (LinkLayer)
+        }
+    });
 }
 
 } // namespace lm::link

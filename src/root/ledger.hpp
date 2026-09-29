@@ -11,6 +11,12 @@
 // Entry state after each cut (docs/12 §4): before the PREPARED commit the ledger is unchanged; after
 // it Prepared; after the ACTIVE commit Active/unconfirmed; the device's own evidence completes it.
 //
+// The ledger is bound to its domain by a manifest record (SEC-D5): a domain root that finds no manifest, or
+// one of another domain, or no record for a slot the manifest says was used, is RECOVERY_REQUIRED and admits
+// nobody (docs/12 §5: a lost ledger never restarts as an empty one). Only the provisioning of a new network
+// writes the first manifest (encode_manifest). Every Link and End session of the root, in either direction,
+// needs an ACTIVE entry of exactly that device, address, assignment and membership (SEC-D2, link_admit()).
+//
 // Shared-resource rules: one join transaction at a time holds the exchange's credential buffer and the
 // identity's record memory (docs/IMPLEMENTATION.md §13), from the JoinRequest until its final
 // acknowledgement; other joiners see Busy (their exchange is dropped, they retry). The worker runs one
@@ -52,6 +58,30 @@ inline constexpr Duration k_approval_timeout = Duration::from_ms(300000);
 inline constexpr Duration k_member_lease = Duration::from_s(15 * 60); // docs/06 §7 (renewal: mesh slice)
 
 enum class EntryState : uint8_t { Free = 0, Expected = 1, Prepared = 2, Active = 3, Left = 4, Aborted = 5, Blocked = 6 };
+static_assert(k_ledger_slots <= 64, "the manifest's used-slot bitmap is 64 bits");
+
+// store::rec::root_ledger (SEC-D5, SEC-D7): version u8 (1) | domain 16 | expected revision u64 | used slots u64
+// (bit i: slot i holds an entry record; set once, never cleared) | set hash 32 | pages u8 | received u16 |
+// pending u16 | 16 x page digest 8. The ExpectedSet revision being installed is one signed set: every page carries
+// its set hash and page count; `received` are the pages applied, `pending` the pages whose entries are being (or
+// were partly) applied, and a page's digest (SHA-256 of its data, first 8 bytes) fixes what that page is.
+struct Manifest {
+    DomainId domain;
+    uint64_t expected_revision = 0;
+    uint64_t used = 0;
+    Sha256Digest set_hash{};
+    uint8_t pages = 0;
+    uint16_t received = 0;
+    uint16_t pending = 0;
+    std::array<std::array<uint8_t, 8>, 16> digests{};
+};
+inline constexpr uint8_t k_manifest_version = 1;
+inline constexpr std::size_t k_manifest_bytes = 1 + 16 + 8 + 8 + 32 + 1 + 2 + 2 + 16 * 8;
+[[nodiscard]] Status encode_manifest(const Manifest &m, MutByteView out, std::size_t &len);
+// Bench provisioning only (tools/lmfleet): the ACTIVE entry record of a member whose credential was issued
+// outside a join (address 2..65 is its slot). Out: the record id and its payload; the record state is Active.
+[[nodiscard]] Status encode_provisioned_member(const member::MemberCredential &mc, ByteView member_cose,
+                                               uint16_t &record_id, MutByteView out, std::size_t &len);
 enum class JoinMode : uint8_t { Closed = 0, External = 1, Preapproved = 2 };
 
 struct Entry {
@@ -60,6 +90,9 @@ struct Entry {
     RequestId request;        // the request that reserved / activated it
     uint64_t assignment = 0;  // Expected: the assignment generation to be granted; else the one issued
     uint64_t membership = 0;  // the last membership generation issued to this device (never reused)
+    // SEC-D4: the highest assignment generation this device ever made ACTIVE here. A ticket at or below it is a
+    // consumed grant, whatever its mode or the join policy; never lowered (expected pages keep it).
+    uint64_t consumed = 0;
     ShortAddr address;        // 2 + slot: the slot is the address
     EntryState state = EntryState::Free;
     bool confirmed = false;   // Active: the device's own JOIN_ACTIVE evidence was recorded
@@ -99,7 +132,12 @@ class Ledger {
     void stop();
     // link::JoinHooks trampolines
     [[nodiscard]] bool responder_open() const;
+    // SEC-D2: may a Link or End session (either direction) with this verified member be installed?
     [[nodiscard]] bool link_admit(const DeviceId &device, const member::MemberCredential &mc) const;
+    // SEC-D2: can any admission be decided? Busy until the ledger is loaded, RecoveryRequired once it is lost.
+    [[nodiscard]] Status admission() const {
+        return failed_ ? Status::RecoveryRequired : (loaded_ ? Status::Ok : Status::Busy);
+    }
     void session_up(const MacAddr &mac, const DeviceId &peer, const Sha256Digest &peer_dc_hash, MonoTime now);
     void discovery(const MacAddr &src, const wire::BootstrapCarrier &c, MonoTime now);
     void join_control(const link::RxInfo &info, ByteView plain, MonoTime now);
@@ -129,11 +167,13 @@ class Ledger {
         Linger,     // refusal / final ack sent: the session ends shortly
     };
     [[nodiscard]] bool ready() const { return loaded_; }
+    [[nodiscard]] bool failed() const { return failed_; }
     [[nodiscard]] bool job_pending() const { return job_in_flight_; } // lm_destroy waits for the worker
     [[nodiscard]] const Entry *find(const DeviceId &d) const;
     [[nodiscard]] const Entry &entry(std::size_t slot) const { return entries_[slot]; }
     [[nodiscard]] std::size_t count(EntryState s) const;
-    [[nodiscard]] uint64_t expected_revision() const { return expected_revision_; }
+    [[nodiscard]] uint64_t expected_revision() const { return man_.expected_revision; }
+    [[nodiscard]] const Manifest &manifest() const { return man_; }
     [[nodiscard]] TxnState txn_state(std::size_t i) const { return txns_[i].state; }
     // [S13] i < k_join_txns; false unless that transaction waits for the operator.
     [[nodiscard]] bool pending_join(std::size_t i, PendingJoin &out) const;
@@ -196,8 +236,10 @@ class Ledger {
         CommitLeft,
         CommitFloors,
         VerifyExpected,
-        CommitExpectedHeader,
+        CommitExpectedHeader, // the page is marked pending (progress durable before any entry changes)
         CommitExpectedEntry,
+        CommitExpectedDone,   // the page is marked received
+        CommitManifest,
     };
 
     struct VerifyArgs { // copied at submit: the worker never reads owner-mutable state
@@ -253,12 +295,22 @@ class Ledger {
     void resend_loaded(Txn &t, Status s, MonoTime now);
     void refuse(Txn &t, Status why, MonoTime now);
     void stage_ack(Txn &t, uint8_t type, const member::JoinAckData &a, MonoTime now);
+    void stage_commit(Txn &t, MonoTime now);
+    void stage_commit_data(Txn &t, const member::JoinCommitData &c, MonoTime now);
     void end_txn(Txn &t);
     void retry_txn(Txn &t, MonoTime now);
     [[nodiscard]] Status pick_slot(const DeviceId &device, std::size_t &slot) const;
     void abort_expired(MonoTime now);
     void maintenance(MonoTime now);
     void leave_committed(Status s, MonoTime now);
+    // A member is gone from the ledger (left): its sessions end and the tree forgets it at once.
+    void forget_member(const DeviceId &device, ShortAddr address);
+    // An entry record now exists for `slot`: the manifest must say so (committed by maintenance).
+    void mark_used(std::size_t slot);
+    [[nodiscard]] Status commit_manifest(const Manifest &m, Step step);
+    // SEC-D7: may this verified page be applied? `applied` = it is applied already (the same bytes again).
+    [[nodiscard]] Status expected_admit(bool &applied);
+    [[nodiscard]] bool expected_room() const;
     void expected_step_done(Step step, Status s, MonoTime now);
     void expected_next(MonoTime now);
     void expected_finish(Status s);
@@ -274,7 +326,9 @@ class Ledger {
     JoinMode mode_ = JoinMode::External;
     bool loaded_ = false;
     bool failed_ = false;
-    uint64_t expected_revision_ = 0;
+    Manifest man_;             // RAM copy of the durable manifest (used bits may run ahead: man_dirty_)
+    bool man_dirty_ = false;   // a used bit or the expected-set progress is not durable yet
+    DomainId load_domain_;     // the delegation's domain, copied for the load job
     std::array<Entry, k_ledger_slots> entries_{};
     std::array<Txn, k_join_txns> txns_;
 
@@ -303,8 +357,9 @@ class Ledger {
     std::size_t exp_next_ = 0;
     uint64_t exp_op_ = 0;
     uint64_t exp_revision_ = 0;
+    std::array<uint8_t, 8> exp_digest_{}; // of the page being installed (verify job)
+    Manifest exp_man_;                    // the manifest the install commits next
     bool exp_active_ = false;
-    Status exp_result_ = Status::Ok;
     // maintenance: a leave/abort waiting for the record memory
     bool leave_pending_ = false;
     // A device's JoinActive over an ordinary link (durable retry of the final acknowledgement)
@@ -337,6 +392,7 @@ struct NoLedger {
     [[nodiscard]] bool job_pending() const { return false; }
     [[nodiscard]] bool responder_open() const { return false; }
     [[nodiscard]] bool link_admit(const DeviceId &, const member::MemberCredential &) const { return true; }
+    [[nodiscard]] Status admission() const { return Status::Ok; }
     void session_up(const MacAddr &, const DeviceId &, const Sha256Digest &, MonoTime) {}
     void discovery(const MacAddr &, const wire::BootstrapCarrier &, MonoTime) {}
     void join_control(const link::RxInfo &, ByteView, MonoTime) {}

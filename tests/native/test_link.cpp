@@ -25,6 +25,7 @@ using Bytes = std::vector<uint8_t>;
 struct Sinked {
     std::vector<Bytes> got;
     std::vector<bool> dup;
+    std::vector<bool> restricted;
     std::vector<DeviceId> from;
     [[nodiscard]] std::size_t fresh() const {
         std::size_t n = 0;
@@ -39,6 +40,7 @@ void sink_fn(void *ctx, const link::RxInfo &info, ByteView plain) {
     auto *s = static_cast<Sinked *>(ctx);
     s->got.emplace_back(plain.begin(), plain.end());
     s->dup.push_back(info.duplicate);
+    s->restricted.push_back(info.restricted);
     s->from.push_back(info.peer);
 }
 
@@ -61,6 +63,8 @@ struct Net {
                 boot(static_cast<uint16_t>(i));
             }
             run_ms(20);
+            // The root takes part once its ledger is loaded (SEC-D2); other owners may hold its record memory first.
+            (void)run_until([&] { return eng(0).ledger().ready(); }, 500);
         }
     }
 
@@ -246,6 +250,45 @@ LM_TEST("S04 link replay: duplicate is flagged and never re-applied, tampered an
     LM_CHECK_EQ(n.sinks[0].fresh(), 72u);
 }
 
+// SEC-D11 (docs/06 §6): a fresh authentic frame enters the replay window only after its minimum checks
+// (DATA: a routed body that names this node as the next hop of this sender). A malformed frame with a high
+// counter must not push earlier, reordered genuine frames out of the 64-frame window.
+LM_TEST("S04 SEC-11 a malformed authentic high-counter DATA frame does not move the replay window") {
+    Net n(2);
+    LM_CHECK_OK(n.connect(1, 0));
+    n.run_ms(2000);
+    LM_CHECK(n.paired(0, 1));
+    // A genuine HOP_ACK sealed first (counter c) and held back: it arrives last (reordered).
+    std::array<uint8_t, 16> ack{};
+    wire::HopAck a;
+    a.acked_link_counter = 7;
+    std::size_t alen = 0;
+    LM_CHECK_OK(wire::encode_hop_ack(a, MutByteView{ack}, alen));
+    link::SealedFrame held;
+    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::HopAck, ByteView{ack.data(), alen}, held, n.now(1)));
+    // 70 counters later the same authenticated peer sends a DATA frame whose routed body does not parse.
+    link::SealedFrame junk;
+    const Bytes garbage(100, 0xFF); // long enough for the frame decoder, not a routed body
+    for (int i = 0; i < 70; ++i) {
+        LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{garbage.data(), garbage.size()}, junk,
+                                  n.now(1)));
+    }
+    n.inject(1, 0, junk);
+    n.run_ms(20);
+    n.inject(1, 0, held);
+    n.run_ms(20);
+    LM_CHECK_EQ(n.lnk(0).stats().rx_replay_old, 0u); // the held frame is still inside the window
+    bool delivered = false;
+    for (std::size_t i = 0; i < n.sinks[0].got.size(); ++i) {
+        delivered = delivered || (!n.sinks[0].dup[i] && n.sinks[0].got[i] == Bytes(ack.begin(), ack.begin() + alen));
+    }
+    LM_CHECK(delivered);
+    // The junk frame never entered the window: the same bytes again are not an authentic "duplicate".
+    n.inject(1, 0, junk);
+    n.run_ms(20);
+    LM_CHECK_EQ(n.lnk(0).stats().rx_replay_dup, 0u);
+}
+
 LM_TEST("S5 glare: both sides connect at once, one exchange wins, one session each") {
     Net n(2);
     LM_CHECK_OK(n.connect(0, 1));
@@ -426,17 +469,149 @@ LM_TEST("S07 wire: an expired lease is refused once root time is known, uncertai
     t.valid = true;
     t.term = RootTerm{1};
     t.earliest_ms = t.latest_ms = 0xFFFFFFFFFFFFULL; // past the credentials' lease
-    n.lnk(0).set_root_time(t);
+    n.eng(0).set_root_time(t, n.now(0)); // the node's estimate (the link layer reads it through delivery)
     LM_CHECK_OK(n.connect(1, 0));
     n.run_ms(6000);
     LM_CHECK(!n.session(0, 1));
     LM_CHECK(n.lnk(0).stats().cred_rejected >= 1u);
     t.earliest_ms = t.latest_ms = 1000; // provably before the lease
-    n.lnk(0).set_root_time(t);
+    n.eng(0).set_root_time(t, n.now(0));
     n.run_s(31); // the per-peer handshake gate
     LM_CHECK_OK(n.connect(1, 0));
     n.run_ms(3000);
     LM_CHECK(n.paired(0, 1));
+}
+
+// ---- SEC-D3: a session is authorised only while its peer's credential lease is ----
+namespace {
+
+RootTimeBound root_at(uint64_t ms) {
+    RootTimeBound t;
+    t.valid = true;
+    t.term = RootTerm{1};
+    t.earliest_ms = t.latest_ms = ms;
+    return t;
+}
+
+// Node 1's credential expires at root time `lease_ms`; the root (node 0) lists it as usual.
+void short_lease(Net &n, uint64_t lease_ms) {
+    fleet::MemberSpec s;
+    s.address = 2;
+    s.role = 1;
+    s.lease_expires_root_ms = lease_ms;
+    n.kits[1] = n.net.make_node(1, 2, 1, &s);
+    LM_CHECK_OK(fleet::provision(n.node(0).store, n.net, n.kits[0]));
+    LM_CHECK_OK(fleet::provision(n.node(1).store, n.net, n.kits[1]));
+    n.boot(0);
+    n.boot(1);
+    n.run_ms(20);
+}
+
+// A routed application DATA body from address `origin` to the neighbour at `final` (one hop), end record with
+// no payload: what the link layer judges before any key of the end session is involved.
+Bytes app_data(uint16_t origin, uint16_t final, uint16_t app_port) {
+    wire::RouteHeader h;
+    h.origin = origin;
+    h.final = final;
+    h.path_len = 1;
+    h.next_index = 0;
+    h.budget = 1;
+    h.root_term = 1;
+    h.path[0] = final;
+    Bytes out(wire::k_route_header_bytes + 2 + wire::k_end_header_bytes + wire::k_tag_bytes);
+    std::size_t rlen = 0;
+    LM_CHECK_OK(wire::encode_route(h, MutByteView{out.data(), out.size()}, rlen));
+    wire::EndHeader eh;
+    eh.end_sid = 7;
+    eh.end_counter = 1;
+    eh.app_port = app_port;
+    eh.record_kind = app_port == 0 ? wire::RecordKind::Control : wire::RecordKind::Data;
+    LM_CHECK_OK(wire::encode_end_header(eh, MutByteView{out.data() + rlen, wire::k_end_header_bytes}));
+    out.resize(rlen + wire::k_end_header_bytes + wire::k_tag_bytes);
+    return out;
+}
+
+} // namespace
+
+LM_TEST("SEC-3 a session admitted while root time was unknown ends once the time proves the peer's lease over") {
+    Net n(2, 11, false);
+    short_lease(n, 5'000'000);
+    LM_CHECK_OK(n.connect(1, 0));
+    n.run_ms(3000);
+    LM_CHECK(n.paired(0, 1)); // nobody could tell the lease: admitted, restricted
+    n.eng(0).set_root_time(root_at(6'000'000), n.now(0));
+    n.world.node(0).notify();
+    n.run_ms(10);
+    LM_CHECK(!n.session(0, 1)); // the lease is provably over: the session is gone at once
+    LM_CHECK(n.lnk(0).stats().sessions_lease_expired >= 1u);
+}
+
+LM_TEST("SEC-3 a session admitted with a provable lease ends with the lease, not with the key lifetime") {
+    Net n(2, 12, false);
+    short_lease(n, 5'000'000);
+    n.eng(0).set_root_time(root_at(4'990'000), n.now(0)); // 10 s of lease left
+    LM_CHECK_OK(n.connect(1, 0));
+    n.run_ms(3000);
+    LM_CHECK(n.paired(0, 1));
+    n.run_ms(9000);
+    LM_CHECK(!n.session(0, 1));
+}
+
+LM_TEST("SEC-3 a time-uncertain session carries no application DATA either way; SDK control passes; time lifts it") {
+    Net n(2, 13);
+    LM_CHECK_OK(n.connect(1, 0));
+    n.run_ms(3000);
+    LM_CHECK(n.paired(0, 1));
+    n.eng(1).set_root_time(root_at(1'000'000), n.now(1)); // node 1 can tell node 0's lease, node 0 cannot tell its
+    const Bytes app = app_data(2, 1, 100);
+    const Bytes ctl = app_data(2, 1, 0);
+    link::SealedFrame f;
+    // Node 0 sends nothing of the application to a peer whose authorisation it cannot prove.
+    LM_CHECK(n.lnk(0).seal(n.id(1), wire::FrameKind::Data, ByteView{app_data(1, 2, 100).data(), app.size()}, f,
+                           n.now(0)) == Status::TimeUncertain);
+    // What node 1 sends: application DATA arrives flagged (the engine answers BUSY), SDK control plainly.
+    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{app.data(), app.size()}, f, n.now(1)));
+    n.inject(1, 0, f);
+    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{ctl.data(), ctl.size()}, f, n.now(1)));
+    n.inject(1, 0, f);
+    n.run_ms(20);
+    LM_CHECK_EQ(n.sinks[0].got.size(), 2u);
+    if (n.sinks[0].got.size() == 2) {
+        LM_CHECK(n.sinks[0].restricted[0] && !n.sinks[0].restricted[1]);
+    }
+    // Once node 0 knows the time and the lease holds, the restriction is gone.
+    n.eng(0).set_root_time(root_at(1'000'000), n.now(0));
+    LM_CHECK_OK(n.lnk(0).seal(n.id(1), wire::FrameKind::Data, ByteView{app_data(1, 2, 100).data(), app.size()}, f,
+                              n.now(0)));
+    LM_CHECK_OK(n.lnk(1).seal(n.id(0), wire::FrameKind::Data, ByteView{app.data(), app.size()}, f, n.now(1)));
+    n.inject(1, 0, f);
+    n.run_ms(20);
+    LM_CHECK(n.sinks[0].got.size() == 3u && !n.sinks[0].restricted.back());
+}
+
+// SEC-D2: the root's ledger decides every Link session, so a root whose ledger is not loaded can decide none. That is
+// this node's own state, not the peer's fault: no handshake is started or answered (BUSY), nothing counts as a
+// rejected credential or a failed exchange, and the same peer links once the ledger is there.
+LM_TEST("SEC-2c a root whose ledger is not loaded starts and answers no link handshake: local BUSY, no rejection") {
+    Net n(2, 14);
+    member::LocalIdentity &id0 = n.eng(0).identity();
+    // Another owner holds the identity's record memory when the ledger loads (at boot: the power and channel
+    // records): the load waits for its retry while the handshake slot is free.
+    LM_CHECK(id0.lend_record() != nullptr);
+    n.eng(0).ledger().on_identity_ready(n.now(0));
+    n.node(0).notify();
+    LM_CHECK(!n.eng(0).ledger().ready() && !n.lnk(0).exchange().busy());
+    LM_CHECK(n.connect(0, 1) == Status::Busy);
+    LM_CHECK_OK(n.connect(1, 0));
+    n.run_ms(40);
+    const link::LinkStats &s0 = n.lnk(0).stats();
+    LM_CHECK(s0.hs_busy_drop >= 1u);
+    LM_CHECK_EQ(s0.hs_started + s0.hs_failed + s0.cred_rejected, 0u);
+    id0.return_record();
+    n.run_ms(4000); // the ledger loads at its retry; the peer's next CredI is answered
+    LM_CHECK(n.eng(0).ledger().ready());
+    LM_CHECK(n.paired(0, 1));
+    LM_CHECK_EQ(s0.hs_failed + s0.cred_rejected + n.lnk(1).stats().cred_rejected, 0u);
 }
 
 LM_TEST("S5 identity: unprovisioned is not failed, a damaged record is not unprovisioned") {
@@ -805,7 +980,8 @@ LM_TEST("measure: worker stack depth of one EDHOC handshake") {
     sec::destroy_key(ka);
     sec::destroy_key(kb);
 #if LM_STACK_PROBE_EXACT
-    LM_CHECK(depth < 5500); // IdfJobs::k_measured_job_depth_bytes (4900) plus slack: a regression guard
+    // SEC-D15: the worker stack of this optimisation level keeps at least twice the deepest job body.
+    LM_CHECK(2 * depth <= port::k_worker_stack_bytes);
 #endif
     delete I;
     delete R;

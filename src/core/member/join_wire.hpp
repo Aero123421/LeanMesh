@@ -5,11 +5,13 @@
 //   JoinRequest  device -> root   [device-credential, ticket, nonce, capabilities]
 //   JoinPrepare  root -> device   [member-credential, prepare-hash, address, membership, term, ms]
 //   JoinStored   device -> root   [prepare-hash, record-generation]   device stored + read back
-//   JoinCommit   root -> device   [prepare-hash, membership]          root ACTIVE ledger committed
+//   JoinCommit   root -> device   [prepare-hash, membership, member-signature]  root ACTIVE ledger committed
 //   JoinActive   device -> root   [prepare-hash, record-generation]   device ACTIVE committed
 //   JoinActive   root -> device   same bytes                          root recorded it (final ack)
-//   JoinCommit   root -> device   prepare-hash all zero, membership = Status code (>0): refusal
+//   JoinCommit   root -> device   prepare-hash all zero, membership = Status code (>0), no signature: refusal
 // (decisions S8-D2/D3: control.cddl has no refusal or final-ack type and types may not be added.)
+// SEC-D1: the member-credential of JoinPrepare has its signature withheld (64 zero bytes; prepare-hash is the
+// SHA-256 of exactly that form) and JoinCommit carries the 64 bytes, sent only after the ACTIVE entry is durable.
 #pragma once
 
 #include <array>
@@ -56,15 +58,21 @@ inline constexpr uint8_t k_obj_join_offer = 0x11; // unicast reply of an open ro
 // [S11] What an offer tells besides "I exist": how deep in the tree the offerer sits (0 = the root itself;
 // a joiner behind a relay paces and waits accordingly) and the low 32 bits of the root's expected-list
 // revision (a higher one than the joiner was refused at ends its NOT_EXPECTED wait, docs/07 §3). Hints only.
+// SEC-Da: a node holding a DiscoveryScopeKey adds its scope tag (member::scope_tag). Bodies:
+//   hello [1] | [3, tag8]      offer [1] (S8) | [2, depth, revision u32] | [4, depth, revision u32, tag8]
 struct OfferHint {
     uint8_t depth = 0;
     uint32_t expected_revision = 0;
+    bool scoped = false;
+    std::array<uint8_t, 8> tag{};
 };
 [[nodiscard]] Status encode_discovery(bool offer, const std::array<uint8_t, 16> &nonce, uint32_t domain_hint,
                                       MutByteView out, std::size_t &len,
                                       const OfferHint *hint = nullptr); // whole link frame
-// A one-byte body (hello, or an offer of S8) reads as depth 0, revision 0.
+// An offer body; a one-byte body (an offer of S8) reads as depth 0, revision 0.
 [[nodiscard]] Status decode_offer_hint(ByteView body, OfferHint &out);
+// A hello body ([1] or, scoped, [3, tag8]).
+[[nodiscard]] Status decode_hello(ByteView body, OfferHint &out);
 
 // ---- object envelope ----
 struct JoinObjectHeader {
@@ -94,7 +102,7 @@ struct JoinRequestData {
 [[nodiscard]] Status decode_join_request(ByteView data, JoinRequestData &out);
 
 struct JoinPrepareData {
-    ByteView member;
+    ByteView member; // COSE_Sign1; the encoder writes its last 64 bytes (the signature) as zero (SEC-D1)
     Sha256Digest prepare_hash{};
     ShortAddr address;
     uint64_t membership = 0;
@@ -104,13 +112,24 @@ struct JoinPrepareData {
 [[nodiscard]] Status encode_join_prepare(const JoinPrepareData &d, MutByteView out, std::size_t &len);
 [[nodiscard]] Status decode_join_prepare(ByteView data, JoinPrepareData &out);
 
-// [prepare-hash, u63]: STORED/ACTIVE carry the record generation, COMMIT the membership.
+// [prepare-hash, u63]: STORED/ACTIVE carry the record generation.
 struct JoinAckData {
     Sha256Digest prepare_hash{};
     uint64_t value = 0;
 };
 [[nodiscard]] Status encode_join_ack(const JoinAckData &d, MutByteView out, std::size_t &len);
 [[nodiscard]] Status decode_join_ack(ByteView data, JoinAckData &out);
+
+// [prepare-hash, membership, member-signature (64 B; empty in a refusal)] (SEC-D1). A refusal has an all-zero
+// prepare-hash and the reason in `membership` (S8-D3).
+struct JoinCommitData {
+    Sha256Digest prepare_hash{};
+    uint64_t membership = 0;
+    std::array<uint8_t, 64> signature{};
+    bool refusal = false;
+};
+[[nodiscard]] Status encode_join_commit(const JoinCommitData &d, MutByteView out, std::size_t &len);
+[[nodiscard]] Status decode_join_commit(ByteView data, JoinCommitData &out);
 
 struct LeaveData {
     DeviceId device;

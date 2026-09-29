@@ -224,7 +224,7 @@ void Delivery::deliver(const link::RxInfo &info, const wire::RouteHeader &h, Byt
             ack = A::Accepted;
             if (rx_open_.header.record_kind == wire::RecordKind::Data) {
                 post_.session = s;
-                mark_resend(s->peer, rx_open_.header.message_id);
+                mark_resend(s->peer, s->peer_assignment.value(), rx_open_.header.message_id);
             }
         } else {
             ++stats_.rx_auth_fail;
@@ -237,11 +237,11 @@ void Delivery::deliver(const link::RxInfo &info, const wire::RouteHeader &h, Byt
 }
 
 // The message is known here: answer with the newest receipt state (once per repeat).
-void Delivery::mark_resend(const DeviceId &origin, const std::array<uint8_t, 16> &mid) {
+void Delivery::mark_resend(const DeviceId &origin, uint64_t assignment, const std::array<uint8_t, 16> &mid) {
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         const Handle h = in_.handle_at(i);
         const InEntry *e = in_.get(h);
-        if (e != nullptr && e->mid == mid && e->origin == origin) {
+        if (e != nullptr && e->mid == mid && e->origin == origin && e->assignment == assignment) {
             ++stats_.rx_dup_end;
             post_.k = Post::K::Resend;
             post_.in = h;
@@ -388,7 +388,7 @@ void Delivery::admit_data(EndSession &s, uint32_t route_term, ByteView payload, 
     const wire::EndHeader &eh = rx_open_.header;
     Post &post = post_;
     const bool finite = eh.expires_root_ms != 0;
-    if (InEntry *e = find_in(s.peer, eh.message_id)) {
+    if (InEntry *e = find_in(s.peer, s.peer_assignment.value(), eh.message_id)) {
         // A new end counter for a message we know (the origin re-sealed it, e.g. after a new session).
         s.rec.accept(eh.end_counter);
         ack = A::Accepted;
@@ -400,7 +400,7 @@ void Delivery::admit_data(EndSession &s, uint32_t route_term, ByteView payload, 
             post.hash = hash;
             return;
         }
-        mark_resend(s.peer, eh.message_id);
+        mark_resend(s.peer, s.peer_assignment.value(), eh.message_id);
         return;
     }
     if (finite) {
@@ -471,7 +471,7 @@ void Delivery::admit_data(EndSession &s, uint32_t route_term, ByteView payload, 
     e->origin = s.peer;
     e->mid = eh.message_id;
     e->hash = hash;
-    l.origin_assignment = s.peer_assignment.value();
+    e->assignment = s.peer_assignment.value();
     e->expires = eh.expires_root_ms;
     l.term = route_term;
     l.port = eh.app_port;
@@ -507,10 +507,10 @@ void Delivery::admit_data(EndSession &s, uint32_t route_term, ByteView payload, 
 }
 
 // ---- dedup cache ----
-InEntry *Delivery::find_in(const DeviceId &origin, const std::array<uint8_t, 16> &mid) {
+InEntry *Delivery::find_in(const DeviceId &origin, uint64_t assignment, const std::array<uint8_t, 16> &mid) {
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         InEntry *e = in_.get(in_.handle_at(i));
-        if (e != nullptr && e->mid == mid && e->origin == origin) {
+        if (e != nullptr && e->mid == mid && e->origin == origin && e->assignment == assignment) {
             e->last_use = ++in_tick_;
             return e;
         }
@@ -667,7 +667,7 @@ Reply Delivery::report_result(const ReportRequest &rq, ByteView result, MonoTime
     InEntry *e = nullptr;
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         InEntry *x = in_.get(in_.handle_at(i));
-        if (x != nullptr && x->mid == mid && x->origin == origin) {
+        if (x != nullptr && x->mid == mid && x->origin == origin && x->assignment == rq.ref.assignment_generation) {
             e = x;
             h = in_.handle_at(i);
         }

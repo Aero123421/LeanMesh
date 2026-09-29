@@ -1,6 +1,62 @@
 #include "core/member/discovery.hpp"
 
+#include <algorithm>
+
+#include "core/codec.hpp"
+#include "security/crypto.hpp"
+
 namespace lm::member {
+
+// HMAC-SHA256 (RFC 2104) from the node's one SHA-256; the key is one block, so no key hashing is needed.
+Status scope_tag(ByteView key, uint8_t kind, const std::array<uint8_t, 16> &nonce, const OfferHint &fields,
+                 std::array<uint8_t, 8> &tag) {
+    if (key.size() != k_scope_key_bytes) {
+        return Status::InvalidArgument;
+    }
+    std::array<uint8_t, 8 + 1 + 16 + 1 + 4> msg{};
+    Writer w{MutByteView{msg}};
+    w.bytes(ByteView{reinterpret_cast<const uint8_t *>("LM1-DISC"), 8});
+    w.u8(kind);
+    w.bytes(ByteView{nonce});
+    if (kind == k_obj_join_offer) {
+        w.u8(fields.depth);
+        w.u32be(fields.expected_revision);
+    }
+    LM_TRY(w.finish());
+    std::array<uint8_t, 64> pad{};
+    Sha256Digest inner{};
+    Sha256Digest outer{};
+    for (std::size_t i = 0; i < pad.size(); ++i) {
+        pad[i] = static_cast<uint8_t>((i < key.size() ? key[i] : 0) ^ 0x36U);
+    }
+    Status st = sec::sha256_parts(ByteView{pad}, w.written(), inner);
+    for (std::size_t i = 0; i < pad.size(); ++i) {
+        pad[i] = static_cast<uint8_t>((i < key.size() ? key[i] : 0) ^ 0x5CU);
+    }
+    if (st == Status::Ok) {
+        st = sec::sha256_parts(ByteView{pad}, ByteView{inner}, outer);
+    }
+    sec::secure_zero(MutByteView{pad});
+    sec::secure_zero(MutByteView{inner});
+    if (st == Status::Ok) {
+        std::copy_n(outer.begin(), tag.size(), tag.begin());
+    }
+    return st;
+}
+
+bool scope_ok(ByteView key, uint8_t kind, const std::array<uint8_t, 16> &nonce, const OfferHint &hint) {
+    if (key.empty()) {
+        return true; // an unscoped node narrows nothing
+    }
+    std::array<uint8_t, 8> expect{};
+    return hint.scoped && scope_tag(key, kind, nonce, hint, expect) == Status::Ok &&
+           sec::ct_equal(ByteView{expect}, ByteView{hint.tag});
+}
+
+Status scope_sign(ByteView key, uint8_t kind, const std::array<uint8_t, 16> &nonce, OfferHint &hint) {
+    hint.scoped = !key.empty();
+    return hint.scoped ? scope_tag(key, kind, nonce, hint, hint.tag) : Status::Ok;
+}
 
 void Discovery::begin(MonoTime now, uint16_t jitter_ms, bool listen_first, Duration budget, bool auto_resume) {
     const Duration jitter = Duration::from_ms(jitter_ms % 400);

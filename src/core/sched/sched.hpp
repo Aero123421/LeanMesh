@@ -87,6 +87,9 @@ class Scheduler {
     // deficit); HOP_ACKs and handshake frames are charged with queued = false (never gated).
     void charge(Class c, std::size_t bytes, MonoTime now, bool queued);
     void note_refused(Class c) { ++stats_.cls[static_cast<std::size_t>(c)].refused; }
+    // [S17] Planned off-channel time (channel switch guard, survey visit): no frame of a data class is
+    // picked before `t`; CONTROL keeps flowing. The queued frames wait, they are not lost or aborted.
+    void hold_until(MonoTime t) { hold_until_ = t; }
     [[nodiscard]] const Stats &stats() const { return stats_; }
     [[nodiscard]] int64_t tokens_us(MonoTime now);
 
@@ -97,6 +100,7 @@ class Scheduler {
     [[nodiscard]] bool control_due() const { return win_ctrl_us_ < k_window_us * k_reserve_percent / 100; }
 
     Stats stats_;
+    MonoTime hold_until_{};
     std::array<int32_t, k_classes> deficit_{};
     int64_t tokens_ = k_burst_us;
     MonoTime tokens_at_;

@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "core/member/records.hpp"
+#include "root/ledger.hpp"
 #include "store/record.hpp"
 
 namespace lm::sim {
@@ -42,6 +43,12 @@ Status provision_store(port::Store &store, const ProvisionInput &in) {
     }
     if (!in.member_cose.empty()) {
         LM_TRY(commit(store, *job, store::rec::membership, member::k_membership_active, in.member_cose));
+    }
+    if (in.new_ledger_domain != nullptr) {
+        root::Manifest m;
+        m.domain = *in.new_ledger_domain;
+        LM_TRY(root::encode_manifest(m, MutByteView{buf}, len));
+        LM_TRY(commit(store, *job, store::rec::root_ledger, 0, ByteView{buf.data(), len}));
     }
     return Status::Ok;
 }

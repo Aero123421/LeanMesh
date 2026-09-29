@@ -71,6 +71,7 @@ struct HostSendRequest {
 // Root only: what a Host acknowledgement names (docs/19 §4 HOST_STORE_ACK).
 struct HostStoreAckRequest {
     DeviceId origin;
+    uint64_t assignment = 0; // the origin's assignment_generation: part of the message identity
     std::array<uint8_t, 16> mid{};
     Sha256Digest hash{};
 };
@@ -125,6 +126,15 @@ struct Op {
     std::array<uint8_t, k_result_bytes> result{};
     Handle active; // none once the send is over
     bool report = false; // created by lm_report_application_result, not a send
+    bool group = false;  // [S15] one target of a group operation: its events are the group's
+};
+
+// [S15] What the group fan-out plugs into delivery: a child's outcome changed (final, or a late upgrade),
+// and the generations of the peer an end session was made with (false: not the target the snapshot names).
+struct GroupHooks {
+    void *ctx = nullptr;
+    void (*child)(void *ctx, const Op &op, MonoTime now) = nullptr;
+    bool (*gate)(void *ctx, const Op &op, uint64_t assignment, uint64_t membership) = nullptr;
 };
 
 struct Active {
@@ -183,6 +193,7 @@ struct InEntry {
     uint32_t receipt_seq = 0;
     uint32_t last_use = 0;
     uint64_t expires = 0;
+    uint64_t assignment = 0;      // origin's assignment_generation: part of the message identity (docs/08 §2)
     DeviceId origin;
     std::array<uint8_t, 16> mid{};
     Sha256Digest hash{};
@@ -205,7 +216,6 @@ struct InLive {
     uint32_t persisted_version = 0;
     uint32_t due_version = 0;
     uint32_t arrival = 0;         // MESSAGE events are re-queued in arrival order
-    uint64_t origin_assignment = 0;
     Handle msg;                   // payload buffer while Committing/Held
 };
 
@@ -233,6 +243,13 @@ struct DeliveryStats {
     uint64_t superseded = 0;       // [S14] LATEST sends replaced before anything left the node
     uint64_t admit_refused = 0;    // [S14] sends refused by the class share of the operation slots
     uint64_t journal_puts = 0;
+};
+
+// [S16] What a sleep would cut (Delivery::settle_state, src/core/power/delivery_power.cpp).
+struct Settle {
+    uint16_t active = 0;      // sends in progress
+    uint16_t uncommitted = 0; // journal records not durable yet
+    uint16_t owed = 0;        // received messages whose event the application has not taken
 };
 
 class Delivery {
@@ -283,6 +300,23 @@ class Delivery {
         frag_.sink_ctx = ctx;
     }
     [[nodiscard]] const FragStats &frag_stats() const { return frag_.stats; }
+    // ---- [S15] group fan-out plug points (delivery_group.cpp) ----
+    // A group target is an ordinary send with a MessageId the group reserved (a repeated call with the
+    // same id is the same operation) whose events and generation check belong to the group.
+    void set_group_hooks(const GroupHooks &h) { group_ = h; }
+    [[nodiscard]] Reply send_child(const lm_send_request_t &rq, ByteView payload, const std::array<uint8_t, 16> &mid,
+                                   MonoTime now);
+    [[nodiscard]] bool probe(const DeviceId &dest, const std::array<uint8_t, 16> &mid, lm_operation_t &out);
+    [[nodiscard]] Reply cancel_child(const DeviceId &dest, const std::array<uint8_t, 16> &mid, MonoTime now);
+    // Ok / Expired / TimeUncertain, as a send with this deadline would be judged now.
+    [[nodiscard]] Status deadline_status(uint64_t expires, uint32_t term);
+    struct SeqBlock {
+        uint64_t incarnation = 0;
+        uint64_t first = 0;
+    };
+    // n consecutive message sequences of this boot (no other message gets one of them).
+    [[nodiscard]] SeqBlock reserve_sequences(uint32_t n);
+    [[nodiscard]] Pool<MsgBuf, k_build_limits.app_messages> &messages() { return msgs_; }
     // ---- [S11] mesh plug points (delivery_mesh.cpp) ----
     void set_mesh(const MeshHooks &h) { mesh_ = h; }
     [[nodiscard]] bool has_session(const DeviceId &peer, MonoTime now);
@@ -301,6 +335,11 @@ class Delivery {
     // Paths changed (repair, new lease): sends that waited for a route go on now.
     void routes_changed(MonoTime now) { kick_all_waiting(now); }
     void invalidate_routes() { routes_.clear(); }
+
+    // ---- [S16] power (delivery_power.cpp) ----
+    [[nodiscard]] Settle settle_state() const;
+    [[nodiscard]] Duration min_key_life(MonoTime now) const; // shortest remaining key life of any session
+    void sleep_gap(Duration gap);                            // waiting timers do not run into a sleep
 
     // ---- routes (S11 resolves them; until then a bench/provisioning call) ----
     [[nodiscard]] Status install_route(const DeviceId &dest, const PathSpec &route, MonoTime expires);
@@ -414,12 +453,12 @@ class Delivery {
     void on_end_data(EndSession &s, uint32_t route_term, MonoTime now, wire::HopAckStatus &ack,
                      uint16_t &retry_ms);
     void run_post(MonoTime now);
-    void mark_resend(const DeviceId &origin, const std::array<uint8_t, 16> &mid);
+    void mark_resend(const DeviceId &origin, uint64_t assignment, const std::array<uint8_t, 16> &mid);
     void send_receipt(InEntry &e, ReceiptEv ev, uint32_t reason, MonoTime now);
     void send_receipt_for(const DeviceId &origin, const std::array<uint8_t, 16> &mid, const Sha256Digest &hash,
                           ReceiptEv ev, uint32_t reason, uint32_t seq, uint64_t expires, ByteView result,
                           MonoTime now);
-    [[nodiscard]] InEntry *find_in(const DeviceId &origin, const std::array<uint8_t, 16> &mid);
+    [[nodiscard]] InEntry *find_in(const DeviceId &origin, uint64_t assignment, const std::array<uint8_t, 16> &mid);
     [[nodiscard]] Handle alloc_in();
     // live slots of the dedup cache (P1)
     [[nodiscard]] InLive *live_of(InEntry &e) { return e.live == k_no_live ? nullptr : &lives_[e.live]; }
@@ -522,6 +561,8 @@ class Delivery {
     SendMode send_mode_ = SendMode::Api; // [S12] set only while send_mode() runs send()
     std::array<uint8_t, wire::data_capacity(1)> frag_plain_{}; // prefix + bytes of the fragment being sealed
     const HostSendRequest *host_tag_ = nullptr; // set only while host_send() runs send()
+    const std::array<uint8_t, 16> *child_mid_ = nullptr; // [S15] set only while send_child() runs send()
+    GroupHooks group_;
     bool host_gate_ = false;
     bool ready_ = false;
     bool recovering_ = false;

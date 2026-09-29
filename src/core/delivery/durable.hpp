@@ -97,6 +97,7 @@ class Durable {
     // journal jobs borrow it instead of adding their own: the record is built in its payload and
     // staged by the journal in its scratch (declared before journal_, which holds a view of it).
     store::BootJob boot_;
+    static_assert(store::k_journal_min_scratch <= store::k_max_blob && store::k_journal_max_payload <= store::k_max_payload);
     store::Journal journal_;
     store::JournalOp op_;
     DurableReq req_;

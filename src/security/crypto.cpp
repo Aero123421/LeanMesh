@@ -59,6 +59,26 @@ Status sha256_parts(ByteView a, ByteView b, Sha256Digest &out) {
     return len == out.size() ? Status::Ok : Status::RecoveryRequired;
 }
 
+Status sha256_chunks(ChunkFn next, void *ctx, std::size_t count, Sha256Digest &out) {
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    psa_status_t st = psa_hash_setup(&op, PSA_ALG_SHA_256);
+    bool bad = false;
+    for (std::size_t i = 0; i < count && st == PSA_SUCCESS && !bad; ++i) {
+        const ByteView c = next(ctx, i);
+        bad = c.empty();
+        st = bad ? PSA_SUCCESS : psa_hash_update(&op, c.data(), c.size());
+    }
+    std::size_t len = 0;
+    if (st == PSA_SUCCESS && !bad) {
+        st = psa_hash_finish(&op, out.data(), out.size(), &len);
+    }
+    if (st != PSA_SUCCESS || bad) {
+        (void)psa_hash_abort(&op);
+        return bad ? Status::BadFrame : from_psa(st);
+    }
+    return len == out.size() ? Status::Ok : Status::RecoveryRequired;
+}
+
 void secure_zero(MutByteView buf) {
     if (!buf.empty()) {
         mbedtls_platform_zeroize(buf.data(), buf.size());

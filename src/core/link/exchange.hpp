@@ -82,6 +82,10 @@ struct LinkStats {
     uint64_t rx_replay_dup = 0;  // authentic duplicate (delivered to the sink flagged)
     uint64_t rx_replay_old = 0;  // outside the window
     uint64_t rx_accepted = 0;
+    uint64_t rx_inadmissible = 0; // authentic, but failed the minimum checks: the window did not move
+    uint64_t rx_lease_restricted = 0; // application DATA over a time-uncertain session (SEC-D3)
+    uint64_t tx_lease_restricted = 0;
+    uint64_t sessions_lease_expired = 0; // closed because the peer's lease is provably over (SEC-D3)
     uint64_t rx_no_consumer = 0;
     uint64_t tx_sealed = 0;
     uint64_t tx_refused = 0;    // no session / refresh required
@@ -114,6 +118,7 @@ struct EndStats {
     uint64_t cred_time_uncertain = 0;
     uint64_t bind_bad = 0;
     uint64_t send_deferred = 0; // TX pool full / radio busy at a fragment: retried, never lost
+    uint64_t lease_expired = 0; // sessions closed because the peer's lease is provably over (SEC-D3)
 };
 
 // Minimum interval between full handshakes with one peer (docs/06 §8): keyed by MAC for links, by
@@ -171,10 +176,13 @@ struct JoinHooks {
     void *ctx = nullptr;
     // Root: may a JOIN_PROXY handshake from an unjoined device start now (policy + a free slot)?
     bool (*responder_open)(void *ctx) = nullptr;
-    // Root: a link handshake with an ACTIVE-credential member: does the ledger still list it as
-    // ACTIVE with exactly this membership generation? (Left/revoked devices are refused.)
+    // Root (SEC-D2): a Link or End session with a verified member, whichever side started it: does the
+    // ledger list it ACTIVE with exactly this address, assignment and membership? (Everyone else: yes.)
     bool (*link_admit)(void *ctx, const DeviceId &device,
                        const member::MemberCredential &mc) = nullptr;
+    // Root (SEC-D2): can admission be decided at all? Busy while the ledger is not loaded yet, RecoveryRequired
+    // when it is lost. Until Ok no Link/End exchange is started or answered: this node's state, not the peer's.
+    Status (*admission)(void *ctx) = nullptr;
     // The JOIN_ONLY session exists (both roles). `peer_bundle` (joiner: [DC, RootDelegation] as the
     // root sent it) aliases the exchange scratch and is valid only during the call.
     // `peer_dc_hash` = SHA-256 of the peer's DeviceCredential COSE (bound into the session
@@ -286,6 +294,8 @@ class Exchange {
                phase_ != Phase::Zombie;
     }
     [[nodiscard]] const EndStats &end_stats() const { return end_stats_; }
+    // SEC-D3: the end sessions judged by their peers' leases again (LinkLayer::revalidate).
+    void revalidate_end(const RootTimeBound &bound, MonoTime now);
 
     // Owner, SID-0 bootstrap carrier body (EDHOC kind for links, JOIN_PROXY kind for joins).
     void on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now, bool via_join = false);
@@ -372,6 +382,9 @@ class Exchange {
     void busy_drop(Family f) {
         ++(f == Family::End ? end_stats_.busy_drop : s_.stats.hs_busy_drop);
     }
+    [[nodiscard]] Status admission() const {
+        return s_.join.admission != nullptr ? s_.join.admission(s_.join.ctx) : Status::Ok;
+    }
 
     // lifecycle (exchange.cpp)
     void begin_common(Mode mode, bool initiator, MonoTime now);
@@ -393,7 +406,7 @@ class Exchange {
     [[nodiscard]] Status run_verify();
     [[nodiscard]] Status run_hs(sec::HsStep step, ByteView input = ByteView{});
     void after_verify(MonoTime now);
-    [[nodiscard]] Status admit_peer();
+    [[nodiscard]] Status admit_peer(bool first, DeadlineCheck *lease = nullptr);
     void after_hs(MonoTime now);
     void start_hs(sec::HsRole role, ByteView msg1, MonoTime now);
     [[nodiscard]] Status stage(ObjKind kind, ByteView bytes);
@@ -410,7 +423,7 @@ class Exchange {
     [[nodiscard]] Status seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce);
     [[nodiscard]] bool check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &sid,
                                        std::array<uint8_t, 16> &nonce) const;
-    [[nodiscard]] Status install_session(MonoTime now);
+    [[nodiscard]] Status install_session(MonoTime now, DeadlineCheck lease);
     [[nodiscard]] Neighbor *installed();
 
     // join mode (exchange_join.cpp)
@@ -424,7 +437,7 @@ class Exchange {
     [[nodiscard]] Status seal_end_bind(sec::RecordSession &rec, const Sha256Digest &ctx_hash,
                                        uint32_t own_sid);
     void on_end_bind(ByteView record, const Origin &o, MonoTime now);
-    [[nodiscard]] Status install_end_session();
+    [[nodiscard]] Status install_end_session(MonoTime now, DeadlineCheck lease);
     [[nodiscard]] Status send_end_chunk(ByteView obj, MonoTime now);
 
     // transmit (exchange_io.cpp)

@@ -51,7 +51,15 @@ class HostUsb final : private serial::UsbEnv, private serial::UsbSink {
     void tick(MonoTime now);
     [[nodiscard]] MonoTime deadline() const { return link_.deadline(); }
     // Encoded bytes queued for the port (pull; nothing is written from inside the library).
-    [[nodiscard]] std::size_t take_tx(MutByteView out);
+    // The port write may be partial (FIX2-D14): peek copies, consume drops exactly what the OS accepted.
+    // take_tx = peek + consume (tests that have no port).
+    [[nodiscard]] std::size_t peek_tx(MutByteView out) const;
+    void consume_tx(std::size_t n);
+    [[nodiscard]] std::size_t take_tx(MutByteView out) {
+        const std::size_t n = peek_tx(out);
+        consume_tx(n);
+        return n;
+    }
     // peek copies the oldest event without consuming it; next_event consumes it (and, for a
     // record, returns its credit).
     [[nodiscard]] bool peek_event(HostEvent &out) const {

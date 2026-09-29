@@ -137,9 +137,70 @@ Status Mesh::to_root(ByteView body, const delivery::PathSpec &route, MonoTime no
     return engine_.delivery().send_control(root_id(), route, body, now);
 }
 
+// ---- power (S16) ----
+bool Mesh::parent_link(MacAddr &mac, DeviceId &dev) const {
+    if (state_ != State::Ready || parent_ < 0) {
+        return false;
+    }
+    const Cand &c = cands_[static_cast<std::size_t>(parent_)];
+    const link::Neighbor *n = neighbor_of(c);
+    if (n == nullptr || !linked(c)) {
+        return false;
+    }
+    mac = n->mac;
+    dev = n->device;
+    return true;
+}
+
+// After a sleep: candidates were not heard because nobody listened, an interrupted attach starts its step over,
+// and when the sessions were dropped (fresh EDHOC) the registered parent is asked for again at once. Lease renewal
+// and Trickle stay on their own (absolute) timers: they run at this wake, not for it (docs/20 §11).
+void Mesh::on_wake(MonoTime now, bool fresh_sessions) {
+    if (state_ == State::Off || is_root()) {
+        return;
+    }
+    for (Cand &c : cands_) {
+        if (c.used) {
+            c.heard = now;
+            c.probe_wait = MonoTime::never();
+            c.probe_miss = 0;
+            c.rf_streak = 0;
+        }
+    }
+    asks_ = {};
+    if (att_.step != Step::Idle) {
+        att_.tries = 0;
+        att_.next_at = now;
+    }
+    if (state_ == State::Search) {
+        attempt_at_ = now;
+        disc_.wake(now, 0);
+    } else if (state_ == State::Ready && fresh_sessions && parent_ >= 0) {
+        lose_path(now);
+    }
+    trickle_reset(now);
+}
+
+void Mesh::parent_session_lost(const MacAddr &mac, MonoTime now) {
+    Cand *c = find_cand(mac);
+    if (c == nullptr || state_ == State::Off || is_root()) {
+        return;
+    }
+    drop_link(*c);
+    c->avoid_until = MonoTime{}; // a lost session is not a dead link: no 30 s hold
+    disc_.wake(now, 0);          // a fresh handshake budget for this one attach
+    if (state_ == State::Ready && parent_ == index_of(c)) {
+        lose_path(now);
+    } else if (state_ == State::Search) {
+        attempt_at_ = now;
+    }
+}
+
 // ---- lifecycle ----
 void Mesh::sync(MonoTime now) {
-    const bool on = enabled_ && engine_.identity().is_member() && engine_.radio_state() == RadioState::Running;
+    // [S17] not before the stored channel is applied (a root does not publish a term on the wrong channel)
+    const bool on = enabled_ && engine_.identity().is_member() && engine_.radio_state() == RadioState::Running &&
+                    !engine_.chan().holds_mesh();
     if (on && state_ == State::Off) {
         begin(now);
     } else if (!on && state_ != State::Off) {
@@ -156,6 +217,7 @@ void Mesh::begin(MonoTime now) {
         return;
     }
     state_ = State::Listen;
+    engine_.chan().on_lost(now); // [S17] no parent yet: arms the recovery search
     disc_.begin(now, jitter(400), true, member::Discovery::k_budget, true);
 }
 
@@ -214,7 +276,7 @@ void Mesh::on_timer(MonoTime now) {
             state_ = State::Search;
             attempt_at_ = now;
         }
-        if (act == member::Discovery::Act::Hello && state_ == State::Search) {
+        if (act == member::Discovery::Act::Hello && state_ == State::Search && engine_.power().search_allowed(now)) {
             send_beacon(true, now); // listen-first hint request (docs/07 §3)
         }
         if (act == member::Discovery::Act::Resumed) {
@@ -533,8 +595,18 @@ void Mesh::on_probe(const link::RxInfo &info, const Probe &p, MonoTime now) {
 
 void Mesh::heard(Cand &c, MonoTime now) { c.heard = now; }
 
-void Mesh::rf_sample(Cand &c, bool ok, MonoTime now) {
+void Mesh::note(Cand &c, bool ok, MonoTime now) {
     c.q.record_attempt(ok);
+    if (index_of(&c) == parent_) {
+        engine_.chan().on_link_sample(ok, now);
+    }
+}
+
+void Mesh::rf_sample(Cand &c, bool ok, MonoTime now) {
+    if (!ok && engine_.chan().planned_gap(now)) {
+        return; // planned off-channel time (switch guard, survey visit) is not RF loss (docs/03 §4)
+    }
+    note(c, ok, now);
     c.rf_streak = ok ? 0 : static_cast<uint8_t>(std::min<int>(c.rf_streak + 1, 250));
     if (!ok && index_of(&c) == parent_ && c.rf_streak >= k_rf_failures) {
         suspect(now);
@@ -664,6 +736,9 @@ void Mesh::search_step(MonoTime now) {
     if (att_.step != Step::Idle) {
         return;
     }
+    if (!engine_.power().search_allowed(now)) {
+        return; // [S16] the episode's search budget or this hour's offline radio time is used up: next wake
+    }
     if (!engine_.delivery().ready()) {
         attempt_at_ = now + Duration::from_ms(100); // boot records still loading (once per boot)
         return;
@@ -697,6 +772,14 @@ void Mesh::attach_step(MonoTime now) {
         return;
     }
     Cand &c = cands_[static_cast<std::size_t>(att_.cand)];
+    if (!engine_.power().handshake_allowed(now)) { // [S16] a step that no longer fits the episode is not started
+        att_ = Attach{};
+        if (state_ == State::Attach) {
+            state_ = State::Search;
+        }
+        attempt_at_ = MonoTime::never();
+        return;
+    }
     if (!linked(c)) {
         const bool budget = att_.switching || disc_.may_handshake();
         if (att_.step == Step::Link && now < att_.next_at) {
@@ -925,6 +1008,10 @@ void Mesh::on_slot_free(MonoTime now) {
 
 // ---- root records ----
 void Mesh::on_control(const DeviceId &peer, const delivery::PathSpec &reply, ByteView body, MonoTime now) {
+    if (state_ != State::Off && channel::is_record(body)) { // [S17] plan, clock, survey and receipts
+        engine_.chan().on_record(peer, reply, body, now);
+        return;
+    }
     if (state_ == State::Off || !is_mesh_record(body)) {
         return;
     }
@@ -1057,6 +1144,8 @@ void Mesh::commit(const LeaseRec &l, MonoTime now) {
         engine_.delivery().invalidate_routes(); // stitched routes were built on the old path
     }
     engine_.delivery().routes_changed(now);
+    engine_.power().on_parent_ready(now); // [S16] the poll of this episode
+    engine_.chan().on_ready(now); // [S17] clock, state report, end of a recovery scan
 }
 
 void Mesh::renew(MonoTime now) {
@@ -1094,6 +1183,7 @@ void Mesh::lose_path(MonoTime now) {
     state_ = State::Search;
     lease_until_ = MonoTime{};
     lease_lapsed_ = true;
+    engine_.chan().on_lost(now); // [S17]
     begin_attach(ci, false, now);
 }
 
@@ -1112,6 +1202,7 @@ void Mesh::suspect(MonoTime now) {
     state_ = State::Search;
     lease_until_ = MonoTime{}; // the old path serves no more: sends wait for the new one
     lease_lapsed_ = true;
+    engine_.chan().on_lost(now); // [S17]
     att_ = Attach{};
     disc_.wake(now, 0);
     attempt_at_ = now;
@@ -1133,17 +1224,17 @@ void Mesh::on_frame_done(const delivery::FrameDone &f, delivery::HopEnd end, Mon
         return;
     }
     if (end == delivery::HopEnd::Accepted) {
-        for (uint8_t i = 1; i < f.attempts && i < 3; ++i) {
-            c->q.record_attempt(false); // earlier attempts of this frame got no HOP_ACK
+        for (uint8_t i = 1; i < f.attempts && i < 3 && !engine_.chan().planned_gap(now); ++i) {
+            note(*c, false, now); // earlier attempts of this frame got no HOP_ACK
         }
-        c->q.record_attempt(true);
+        note(*c, true, now);
         c->rf_streak = 0;
         heard(*c, now);
-    } else if (end == delivery::HopEnd::Failed && f.attempts >= 3) {
+    } else if (end == delivery::HopEnd::Failed && f.attempts >= 3 && !engine_.chan().planned_gap(now)) {
         // Three attempts, no HOP_ACK: targeted RF failures. (Failed after BUSY deferrals has fewer
         // attempts and is not counted.)
         for (int i = 0; i < 3; ++i) {
-            c->q.record_attempt(false);
+            note(*c, false, now);
         }
         c->rf_streak = static_cast<uint8_t>(std::min<int>(c->rf_streak + 3, 250));
         if (index_of(c) == parent_ && c->rf_streak >= k_rf_failures) {

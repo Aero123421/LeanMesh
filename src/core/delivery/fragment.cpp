@@ -348,14 +348,14 @@ void Delivery::on_end_fragment(EndSession &s, uint32_t term, MonoTime now, wire:
     if (p.object_class == wire::ObjectClass::Object && !object_enabled()) {
         return frag_refuse(s, p.intent_hash, ReceiptEv::Refused, Status::Unsupported, ack);
     }
-    if ((!data && p.total_len > k_control_bytes) || (data && eh.durable() && p.total_len > k_durable_payload_max)) {
+    if (!data && p.total_len > k_control_bytes) {
         return frag_refuse(s, p.intent_hash, ReceiptEv::Refused,
                            data ? Status::PayloadTooLarge : Status::NoCapacity, ack);
     }
     // A transfer that already completed here.
     bool done = false;
     if (data) {
-        if (const InEntry *e = find_in(s.peer, eh.message_id)) {
+        if (const InEntry *e = find_in(s.peer, s.peer_assignment.value(), eh.message_id)) {
             s.rec.accept(eh.end_counter);
             ack = A::Accepted;
             if (e->hash != p.intent_hash) {
@@ -366,7 +366,7 @@ void Delivery::on_end_fragment(EndSession &s, uint32_t term, MonoTime now, wire:
                 post_.hash = p.intent_hash;
                 return;
             }
-            mark_resend(s.peer, eh.message_id); // the newest receipt again
+            mark_resend(s.peer, s.peer_assignment.value(), eh.message_id); // the newest receipt again
             done = true;
         }
     } else if (p.original_kind == wire::RecordKind::Control) {

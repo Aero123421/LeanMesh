@@ -28,6 +28,9 @@ enum class JobOwner : uint8_t {
     Serial = 8,   // S10: root USB serial (credential verify, EDHOC purpose 3)
     Join = 12,    // S8: joiner (Flash chain, MemberCredential check)
     Ledger = 13,  // S8: root ledger (Flash, ticket check, MemberCredential signature)
+    Group = 15,   // S15: snapshot page signature (root) / verification (origin)
+    Power = 14,   // S16: power policy record (load at boot, commit on lm_power_policy_set)
+    Channel = 16, // S17: channel record (load at boot, PREPARED / COMMITTED / current channel)
 };
 
 // Public-key jobs share one global slot (docs/06 §8 "同時P-256 jobs1"); Flash jobs are separate.
@@ -61,6 +64,8 @@ template <std::size_t N> class JobTable {
                 entries_[i] = Entry{true, cls, next_job_id_, JobOrigin{owner, slot}};
                 if (cls == JobClass::PublicKey) {
                     public_key_running_ = true;
+                } else {
+                    ++flash_running_;
                 }
                 out = JobTicket{static_cast<uint16_t>(i), next_job_id_};
                 return Status::Ok;
@@ -83,6 +88,8 @@ template <std::size_t N> class JobTable {
 
     [[nodiscard]] uint32_t stale_completions() const { return stale_completions_; }
     [[nodiscard]] bool public_key_busy() const { return public_key_running_; }
+    [[nodiscard]] bool flash_busy() const { return flash_running_ != 0; } // [S16] PM locks, sleep quiescence
+    [[nodiscard]] bool busy() const { return public_key_running_ || flash_running_ != 0; }
 
   private:
     struct Entry {
@@ -101,6 +108,8 @@ template <std::size_t N> class JobTable {
         }
         if (entries_[index].cls == JobClass::PublicKey) {
             public_key_running_ = false;
+        } else if (flash_running_ != 0) {
+            --flash_running_;
         }
         entries_[index] = Entry{};
         return true;
@@ -110,6 +119,7 @@ template <std::size_t N> class JobTable {
     uint32_t next_job_id_ = 0;
     uint32_t stale_completions_ = 0;
     bool public_key_running_ = false;
+    uint16_t flash_running_ = 0;
 };
 
 } // namespace lm

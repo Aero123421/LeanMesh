@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define LMH_ABI_VERSION 1u
+#define LMH_ABI_VERSION 2u
 #define LMH_EXPORT __attribute__((visibility("default")))
 
 typedef struct lmh_usb lmh_usb_t;
@@ -42,7 +42,10 @@ LMH_EXPORT int32_t lmh_usb_self(lmh_usb_t *h, uint8_t out[32]);
 LMH_EXPORT int32_t lmh_usb_open(lmh_usb_t *h, uint64_t now_us);   /* port opened (or reopened) */
 LMH_EXPORT void lmh_usb_close(lmh_usb_t *h);                       /* port lost: sessions dropped */
 LMH_EXPORT int32_t lmh_usb_feed(lmh_usb_t *h, const uint8_t *data, size_t len, uint64_t now_us);
-LMH_EXPORT size_t lmh_usb_take_tx(lmh_usb_t *h, uint8_t *out, size_t cap);
+/* Encoded bytes for the port. peek copies without removing; consume removes exactly the `n` bytes the OS
+ * accepted (a write may be partial: bytes are never dropped before that is known). */
+LMH_EXPORT size_t lmh_usb_peek_tx(lmh_usb_t *h, uint8_t *out, size_t cap);
+LMH_EXPORT int32_t lmh_usb_consume_tx(lmh_usb_t *h, size_t n);
 LMH_EXPORT int32_t lmh_usb_tick(lmh_usb_t *h, uint64_t now_us);
 /* Absolute time of the next required tick in the same clock, UINT64_MAX = none. */
 LMH_EXPORT uint64_t lmh_usb_deadline_us(lmh_usb_t *h);

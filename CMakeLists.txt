@@ -77,7 +77,10 @@ add_executable(meshsim
     tools/meshsim/cmd_delivery.cpp
     tools/meshsim/cmd_fragment.cpp
     tools/meshsim/cmd_sched.cpp
+    tools/meshsim/cmd_group.cpp
     tools/meshsim/cmd_mesh.cpp
+    tools/meshsim/cmd_power.cpp
+    tools/meshsim/cmd_channel.cpp
     tools/meshsim/topology.cpp
     tools/meshsim/pty.cpp)
 target_compile_options(meshsim PRIVATE ${LM_CXX_WARNINGS})

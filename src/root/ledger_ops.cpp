@@ -65,7 +65,7 @@ void Ledger::confirm_loaded(Status s, MonoTime now) {
     ByteView cose;
     Sha256Digest h{};
     if (s != Status::Ok || detail::decode_entry(*rec_, loaded, cose) != Status::Ok || loaded.state != EntryState::Active ||
-        loaded.request != confirm_.request || sec::sha256(cose, h) != Status::Ok || h != confirm_.hash) {
+        loaded.request != confirm_.request || member::withheld_hash(cose, h) != Status::Ok || h != confirm_.hash) {
         confirm_pending_ = false;
         release(-2);
         return;
@@ -142,7 +142,7 @@ void Ledger::leave_committed(Status s, MonoTime now) {
     e.confirmed = false;
     ++stats_.left;
     const DeviceId device = e.device;
-    (void)engine_.link().close(device);
+    forget_member(device, e.address);
     engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
     member::Floors &floors = engine_.identity().floors();
     std::size_t len = 0;
@@ -159,6 +159,16 @@ void Ledger::leave_committed(Status s, MonoTime now) {
     if (submit(Step::CommitFloors, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
         release(-2);
     }
+}
+
+// Left is durable: nothing of the member may keep serving it. Its link session and its end session end now and
+// the approved tree forgets its address (its children re-register); a lease would only lapse it within 180 s.
+void Ledger::forget_member(const DeviceId &device, ShortAddr address) {
+    (void)engine_.link().close(device);
+    if (delivery::EndSession *s = engine_.delivery().sessions().find_peer(device)) {
+        engine_.delivery().sessions().remove(*s);
+    }
+    engine_.routes().forget(address);
 }
 
 // ---- expected entries (docs/07 §2, docs/21 §4) ----
@@ -192,7 +202,8 @@ Status Ledger::install_expected(ByteView cose, MonoTime /*now*/, uint64_t &opera
     return Status::Ok;
 }
 
-// Worker. The page is signed by the fleet or by this root's delegation (approve permission).
+// Worker. The page is signed by the fleet or by this root's delegation (approve permission), lies inside its own
+// set (page < pages) and is identified by the digest of its data (SEC-D7).
 Status Ledger::verify_expected_job(port::JobEnv & /*env*/, void *arg) {
     auto &l = *static_cast<Ledger *>(arg);
     LM_TRY(member::check_expected_set(l.vargs_.trust, &l.vargs_.delegation, l.vargs_.ticket_cose, l.exp_));
@@ -202,6 +213,12 @@ Status Ledger::verify_expected_job(port::JobEnv & /*env*/, void *arg) {
     if (env.domain != l.vargs_.delegation.domain && !env.domain.is_zero()) {
         return Status::NetworkMismatch;
     }
+    if (l.exp_.page >= l.exp_.pages) {
+        return Status::BadFrame; // a page outside the set it names
+    }
+    Sha256Digest h{};
+    LM_TRY(sec::sha256(data, h));
+    std::copy_n(h.begin(), l.exp_digest_.size(), l.exp_digest_.begin());
     l.exp_revision_ = env.revision;
     return Status::Ok;
 }
@@ -212,52 +229,124 @@ void Ledger::expected_finish(Status s) {
     engine_.emit_event(LM_EVENT_OPERATION, static_cast<uint32_t>(s), exp_op_, nullptr);
 }
 
+// SEC-D7: a revision is one signed set. A page of an older revision, of this revision with another set hash or
+// page count, or a page number already taken with other content is CONFLICT; the same page again is the same
+// answer (applied: Ok at once; pending: applied again, which completes it). A newer revision starts a new set.
+// Ok: the page is to be applied (exp_man_ holds the manifest that marks it pending), unless `applied`.
+Status Ledger::expected_admit(bool &applied) {
+    const uint16_t bit = static_cast<uint16_t>(1U << exp_.page);
+    applied = false;
+    exp_man_ = man_;
+    if (exp_revision_ < man_.expected_revision) {
+        return Status::Conflict;
+    }
+    if (exp_revision_ == man_.expected_revision && man_.pages != 0) {
+        if (exp_.pages != man_.pages || exp_.set_hash != man_.set_hash) {
+            return Status::Conflict;
+        }
+        const bool known = ((man_.received | man_.pending) & bit) != 0;
+        if (known && man_.digests[exp_.page] != exp_digest_) {
+            return Status::Conflict;
+        }
+        if ((man_.received & bit) != 0) {
+            applied = true; // nothing to do: this very page is applied
+            return Status::Ok;
+        }
+    } else {
+        exp_man_.expected_revision = exp_revision_;
+        exp_man_.set_hash = exp_.set_hash;
+        exp_man_.pages = exp_.pages;
+        exp_man_.received = exp_man_.pending = 0;
+        exp_man_.digests = {};
+    }
+    if (!expected_room()) {
+        return Status::NoCapacity; // refused before anything changes
+    }
+    exp_man_.pending |= bit;
+    exp_man_.digests[exp_.page] = exp_digest_;
+    return Status::Ok;
+}
+
+// Room for every device of the page that needs a slot of its own, counted before the first entry changes.
+bool Ledger::expected_room() const {
+    std::size_t need = 0;
+    for (std::size_t i = 0; i < exp_.count; ++i) {
+        bool seen = find(exp_.entries[i].device) != nullptr;
+        for (std::size_t j = 0; j < i && !seen; ++j) {
+            seen = exp_.entries[j].device == exp_.entries[i].device;
+        }
+        need += seen ? 0 : 1;
+    }
+    std::size_t room = 0;
+    const member::Floors &f = engine_.identity().floors();
+    for (const Entry &e : entries_) {
+        const bool reusable = (e.state == EntryState::Left || e.state == EntryState::Aborted) &&
+                              f.check(e.device, AssignmentGen{e.assignment}, MembershipGen{e.membership}) ==
+                                  Status::Revoked;
+        room += e.state == EntryState::Free || reusable ? 1 : 0;
+    }
+    return room >= need;
+}
+
 void Ledger::expected_step_done(Step step, Status s, MonoTime now) {
     if (!exp_active_) {
         return;
     }
     if (s != Status::Ok) {
-        expected_finish(s);
+        if (step == Step::CommitExpectedHeader || step == Step::CommitExpectedDone) {
+            man_dirty_ = true; // the manifest carried the used bits too: written again with the next change
+        }
+        if (step == Step::CommitExpectedHeader) {
+            expected_finish(s); // no entry was touched
+            return;
+        }
+        // An entry may have changed already: authorisation moved and the page is pending. The same page again
+        // completes it (SEC-D7); an ordinary refusal would hide the change.
+        expected_finish(Status::RecoveryRequired);
         return;
     }
-    if (step == Step::VerifyExpected) {
-        if (exp_revision_ < expected_revision_) {
-            expected_finish(Status::Conflict); // an older revision never replaces a newer one
+    switch (step) {
+    case Step::VerifyExpected: {
+        bool applied = false;
+        const Status a = expected_admit(applied);
+        if (a != Status::Ok || applied) {
+            expected_finish(a);
             return;
         }
-        if (exp_revision_ > expected_revision_) {
-            Writer w{MutByteView{rec_->payload}};
-            w.u64be(exp_revision_);
-            rec_->op = store::RecordJob::Op::Commit;
-            rec_->id = store::rec::root_ledger;
-            rec_->state = 0;
-            rec_->payload_len = static_cast<uint32_t>(w.size());
-            job_txn_ = -2;
-            if (submit(Step::CommitExpectedHeader, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
-                expected_finish(Status::Busy);
-            }
-            return;
+        exp_man_.used = man_.used;
+        if (commit_manifest(exp_man_, Step::CommitExpectedHeader) != Status::Ok) {
+            expected_finish(Status::Busy);
         }
-    } else if (step == Step::CommitExpectedHeader) {
-        expected_revision_ = exp_revision_;
-    } else { // CommitExpectedEntry
-        entries_[job_slot_index_] = job_entry_;
-        ++exp_next_;
+        return;
     }
-    if (step == Step::VerifyExpected || step == Step::CommitExpectedHeader) {
+    case Step::CommitExpectedHeader:
+        man_ = exp_man_; // the page is pending durably: from here on a failure is RECOVERY_REQUIRED
         exp_next_ = 0;
+        break;
+    case Step::CommitExpectedEntry:
+        entries_[job_slot_index_] = job_entry_;
+        mark_used(job_slot_index_);
+        ++exp_next_;
+        break;
+    case Step::CommitExpectedDone:
+        man_ = exp_man_;
+        expected_finish(Status::Ok);
+        return;
+    default:
+        return;
     }
     expected_next(now);
 }
 
-// One entry per commit. An entry that is Prepared or Active is never demoted by an expected page.
+// One entry per commit. An entry that is Prepared or Active is never demoted by an expected page. After the last
+// entry the page is marked received.
 void Ledger::expected_next(MonoTime /*now*/) {
     while (exp_next_ < exp_.count) {
         const member::ExpectedEntry &x = exp_.entries[exp_next_];
         std::size_t slot = 0;
         const Entry *old = find(x.device);
-        if (pick_slot(x.device, slot) != Status::Ok) { // the same slot policy as a join: existing, free, or a
-            expected_finish(Status::NoCapacity);        // departed device whose credential is below its floor
+        if (pick_slot(x.device, slot) != Status::Ok) { // counted before the page started (expected_room): a
+            expected_finish(Status::RecoveryRequired);  // shortage here means the ledger changed under it
             return;
         }
         if (old != nullptr) {
@@ -276,11 +365,17 @@ void Ledger::expected_next(MonoTime /*now*/) {
         job_txn_ = -2;
         if (commit_entry(Step::CommitExpectedEntry, slot, x.allowed ? EntryState::Expected : EntryState::Blocked,
                          false, ByteView{}, -2) != Status::Ok) {
-            expected_finish(Status::Busy);
+            expected_finish(Status::RecoveryRequired); // the page is pending: the same page completes it
         }
         return;
     }
-    expected_finish(Status::Ok);
+    const uint16_t bit = static_cast<uint16_t>(1U << exp_.page);
+    exp_man_ = man_;
+    exp_man_.received |= bit;
+    exp_man_.pending &= static_cast<uint16_t>(~bit);
+    if (commit_manifest(exp_man_, Step::CommitExpectedDone) != Status::Ok) {
+        expected_finish(Status::RecoveryRequired);
+    }
 }
 
 } // namespace lm::root
