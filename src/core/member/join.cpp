@@ -20,7 +20,29 @@ void JoinPipe::bind(const MacAddr &mac, const DeviceId &peer, uint32_t domain_hi
     bound_ = true;
 }
 
+MutByteView JoinPipe::stage() {
+    if (engine_ == nullptr) {
+        return MutByteView{};
+    }
+    TxFrame *f = engine_->frames().get(stage_h_);
+    if (f == nullptr) {
+        f = engine_->frames().borrow(stage_h_); // stale after a node stop: a fresh frame
+    }
+    return f != nullptr ? MutByteView{f->frame.bytes} : MutByteView{};
+}
+
+void JoinPipe::send_staged(std::size_t len, MonoTime now) {
+    const TxFrame *f = engine_ != nullptr ? engine_->frames().get(stage_h_) : nullptr;
+    if (f != nullptr && len <= f->frame.bytes.size()) {
+        send(ByteView{f->frame.bytes.data(), len}, now);
+    }
+}
+
 void JoinPipe::reset() {
+    if (engine_ != nullptr) {
+        (void)engine_->frames().release(stage_h_); // the staged object is gone with the session
+    }
+    stage_h_ = Handle{};
     bound_ = false;
     tx_obj_ = ByteView{};
     tx_off_ = 0;
@@ -49,8 +71,8 @@ void JoinPipe::send(ByteView object, MonoTime now) {
 }
 
 void JoinPipe::pump(MonoTime now) {
-    if (!bound_ || tx_inflight_) {
-        return;
+    if (!bound_ || tx_inflight_ || (!retry_at_.is_never() && now < retry_at_)) {
+        return; // [S11] the inter-fragment gap / busy radio: on_timer pumps again then
     }
     std::array<uint8_t, k_join_chunk_header + k_join_chunk_bytes> buf{};
     std::size_t len = 0;
@@ -104,6 +126,11 @@ void JoinPipe::on_tx_outcome(const TxOutcome &o, MonoTime now) {
     tx_inflight_ = false;
     if (tx_active_ && tx_off_ >= tx_obj_.size() && rto_at_.is_never()) {
         rto_at_ = now + engine_->link().policy().rto; // whole object is out: wait for the answer
+    }
+    const Duration gap = engine_->link().policy().tx_gap;
+    if (gap.us > 0 && (tx_active_ || ack_id_ != 0)) {
+        retry_at_ = now + gap; // [S11] a relay in the path needs a moment per frame
+        return;
     }
     pump(now);
 }

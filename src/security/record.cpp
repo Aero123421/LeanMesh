@@ -282,6 +282,67 @@ Status RecordSession::seal(uint64_t counter, ByteView aad, ByteView plaintext, M
     return len == plaintext.size() + k_aead_tag_bytes ? Status::Ok : Status::RecoveryRequired;
 }
 
+Status RecordSession::seal_in_place(uint64_t counter, ByteView aad, MutByteView buf) {
+    if (!active_) {
+        return Status::RecoveryRequired;
+    }
+    if (counter == 0 || counter > tx_reserved_ || counter <= tx_sealed_) {
+        return Status::InvalidArgument;
+    }
+    if (buf.size() < k_aead_tag_bytes) {
+        return Status::BufferTooSmall;
+    }
+    tx_sealed_ = counter;
+    OneShotKey key{keys_.tx, PSA_KEY_USAGE_ENCRYPT};
+    LM_TRY(from_psa(key.status()));
+    const auto nonce = make_nonce(keys_.tx, counter);
+    const std::size_t pt_len = buf.size() - k_aead_tag_bytes;
+    std::array<uint8_t, 64 + 16> bounce{};
+    std::size_t w = 0;
+    psa_aead_operation_t op = PSA_AEAD_OPERATION_INIT;
+    psa_status_t st = psa_aead_encrypt_setup(&op, key.id(), PSA_ALG_GCM);
+    if (st == PSA_SUCCESS) {
+        st = psa_aead_set_nonce(&op, nonce.data(), nonce.size());
+    }
+    if (st == PSA_SUCCESS) {
+        st = psa_aead_update_ad(&op, aad.data(), aad.size());
+    }
+    for (std::size_t r = 0; st == PSA_SUCCESS && r < pt_len; r += 64) {
+        const std::size_t n = pt_len - r < 64 ? pt_len - r : 64;
+        std::size_t out = 0;
+        st = psa_aead_update(&op, buf.data() + r, n, bounce.data(), bounce.size(), &out);
+        if (st == PSA_SUCCESS && w + out <= r + n) {
+            std::memcpy(buf.data() + w, bounce.data(), out); // never behind unread plaintext
+            w += out;
+        } else if (st == PSA_SUCCESS) {
+            st = PSA_ERROR_CORRUPTION_DETECTED;
+        }
+    }
+    if (st == PSA_SUCCESS) {
+        std::array<uint8_t, k_aead_tag_bytes> tag{};
+        std::size_t out = 0;
+        std::size_t tag_len = 0;
+        st = psa_aead_finish(&op, bounce.data(), bounce.size(), &out, tag.data(), tag.size(), &tag_len);
+        if (st == PSA_SUCCESS && w + out == pt_len && tag_len == k_aead_tag_bytes) {
+            std::memcpy(buf.data() + w, bounce.data(), out);
+            std::memcpy(buf.data() + pt_len, tag.data(), k_aead_tag_bytes);
+            w += out;
+        } else if (st == PSA_SUCCESS) {
+            st = PSA_ERROR_CORRUPTION_DETECTED;
+        }
+    }
+    psa_aead_abort(&op);
+    secure_zero(MutByteView{bounce.data(), bounce.size()});
+    if (key.destroy() != PSA_SUCCESS) {
+        st = PSA_ERROR_CORRUPTION_DETECTED;
+    }
+    if (st != PSA_SUCCESS) {
+        secure_zero(buf); // half-encrypted bytes are neither plaintext nor a frame
+        return from_psa(st);
+    }
+    return Status::Ok;
+}
+
 Status RecordSession::open(uint64_t counter, ByteView aad, ByteView ciphertext,
                            MutByteView plaintext, std::size_t &plaintext_len,
                            ReplayVerdict &verdict) {

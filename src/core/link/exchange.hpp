@@ -64,6 +64,7 @@ struct LinkPolicy {
     Duration exchange_deadline = Duration::from_s(30); // registry session_binding.timeout_ms
     Duration rto = Duration::from_ms(1000); // 1-hop carriers (end mode: route round timeout)
     uint8_t max_attempts = 3;               // registry session_binding.max_attempts
+    Duration tx_gap{};                      // [S11] pause between streamed fragments (a joiner behind a relay)
     Duration join_session_life =
         Duration::from_s(420);             // [S8-D1] JOIN_ONLY: approval 300 s + prepared 120 s
     Duration linger = Duration::from_s(5); // responder keeps its ACK for bind repeats (1 hop)
@@ -196,7 +197,6 @@ struct JoinHooks {
 struct EndPort {
     void *ctx = nullptr;
     delivery::EndSessions *sessions = nullptr;
-    MutByteView record_buf; // where a carrier record is built (the delivery module's TX scratch)
     // The root clock estimate advanced to `now` (credential lease check).
     RootTimeBound (*root_time)(void *ctx, MonoTime now) = nullptr;
     // Sends one built end record along `route`. Busy/NoCapacity: retried shortly (never RF loss).
@@ -259,6 +259,12 @@ class Exchange {
     // incoming CredI is dropped: local shortage, never RF loss). Empty view when busy.
     [[nodiscard]] MutByteView lend_scratch();
     void return_scratch() { lent_ = false; }
+    // [S13, decision S13-D10] The HandshakeSlot of an idle exchange, lent to the root's USB link for
+    // one EDHOC attempt (one slot per node, ARCH-D1). nullptr = taken: the caller is then first in line
+    // (usb_reserved_: no new initiator and no new foreign CredI takes the slot) until return_slot().
+    // The lender holds it, and job_pending() reports it, until its worker job completed.
+    [[nodiscard]] sec::HandshakeSlot *lend_slot();
+    void return_slot() { slot_lent_ = usb_reserved_ = false; }
     [[nodiscard]] Mode mode() const { return mode_; }
 
     // [S9] End mode: installed once by the delivery module.
@@ -296,10 +302,10 @@ class Exchange {
     // The slot is taken. A lingering responder (only keeping its ACK for bind retransmits) is free:
     // a new exchange replaces it and forgets the cached ACK.
     [[nodiscard]] bool busy() const {
-        return (phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_;
+        return (phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_ || slot_lent_ || usb_reserved_;
     }
     // A worker job still runs on the exchange's memory (also after stop(): lm_destroy must wait).
-    [[nodiscard]] bool job_pending() const { return job_ != Job::None; }
+    [[nodiscard]] bool job_pending() const { return job_ != Job::None || slot_lent_; }
     [[nodiscard]] Phase phase() const { return phase_; }
     [[nodiscard]] bool initiator() const { return initiator_; }
     [[nodiscard]] Status last_failure() const { return last_failure_; }
@@ -323,7 +329,7 @@ class Exchange {
         BindBad
     };
     // The staged object: an EDHOC message, a sealed 1-hop bind frame (<= 250 B) or a bind record.
-    static constexpr std::size_t k_stage_bytes = sec::k_edhoc_max_message;
+    static constexpr std::size_t k_stage_bytes = wire::k_max_frame_bytes; // one pool frame
     // A sealed SESSION_BIND[_ACK] end record (117 B in practice).
     static constexpr std::size_t k_bind_record_max = 192;
     static constexpr std::size_t k_end_obj_header = member::k_join_chunk_header;
@@ -390,7 +396,10 @@ class Exchange {
     [[nodiscard]] Status admit_peer();
     void after_hs(MonoTime now);
     void start_hs(sec::HsRole role, ByteView msg1, MonoTime now);
-    void stage(ObjKind kind, ByteView bytes);
+    [[nodiscard]] Status stage(ObjKind kind, ByteView bytes);
+    // The staged object lives in a frame borrowed from the node's pool while the exchange is active (P9).
+    [[nodiscard]] FrameBuf *stage_buf();
+    void stage_release();
     void finish_keys(MonoTime now);
     static Status job_entry(port::JobEnv &env, void *arg);
     static Status verify_body(Exchange &x);
@@ -446,6 +455,8 @@ class Exchange {
     Phase phase_ = Phase::Idle;
     Mode mode_ = Mode::Link;
     bool lent_ = false; // rx_ is borrowed by a join module
+    bool slot_lent_ = false;     // hs_ is borrowed by the USB link
+    bool usb_reserved_ = false;  // the USB link waits for the slot
     JoinPeerOut *join_out_ = nullptr;
     std::size_t own_len_ = 0; // JoinResp: length of the bundle staged in rx_
     bool initiator_ = false;
@@ -487,7 +498,7 @@ class Exchange {
     std::size_t tx_off_ = 0;
     bool tx_inflight_ = false;
     uint64_t tx_seq_ = 0;
-    std::array<uint8_t, k_stage_bytes> stage_{}; // EDHOC message, or the sealed bind frame/record
+    Handle stage_h_; // pool frame holding the EDHOC message, or the sealed bind frame/record
     std::size_t stage_len_ = 0;
     ObjKind staged_ = ObjKind::Msg1;
 

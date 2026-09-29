@@ -119,6 +119,29 @@ def test_node_to_host_message_is_committed_before_the_root_hears_the_ack(bench: 
 
 @pytest.mark.e2e
 @pytest.mark.scenario("H04")
+def test_volatile_message_taken_by_the_bridge_is_sent_again_after_a_host_crash(bench: Callable[..., Bench]) -> None:
+    """S13-D11: the bridge keeps no copy of an event's payload. A volatile message the Host committed but did
+    not acknowledge (killed right after the inbox commit) is still held by the root's message pool and is read
+    from there when the event is sent again: the restarted Host stores it once and only then settles it."""
+    b = bench(33)
+    b.link_and_routes()
+    b.start_host(crash="after_commit:commit_inbox")
+    b.await_root()
+    now_ms = int(b.sim.ok("status")["now_us"]) // 1000
+    b.sim.ok(f"send 1 root received volatile 201 1 {now_ms + 120_000} 0a0b")
+    assert b.host.proc.wait(timeout=30) == 9
+    assert len(db_rows(b.host.db, "SELECT 1 FROM inbox WHERE payload=?", bytes.fromhex("0a0b"))) == 1
+    assert b.sim.ok("serial-status")["bridge"]["ring_used"] == 1  # taken, sent, never acknowledged
+    b.start_host()
+    b.await_root()
+    wait_for(lambda: b.sim.ok("serial-status")["bridge"]["ring_used"] == 0, 30, "root ring settled after the resend")
+    assert len(db_rows(b.host.db, "SELECT 1 FROM inbox WHERE payload=?", bytes.fromhex("0a0b"))) == 1  # not twice
+    got = [e for e in b.events()["events"] if e["kind"] == "MESSAGE_RECEIVED"]
+    assert len([e for e in got if base64.b64decode(e["payload_b64"]) == bytes.fromhex("0a0b")]) == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("H04")
 def test_host_crash_between_claim_and_send_is_never_resent(bench: Callable[..., Bench]) -> None:
     b = bench(33)
     b.link_and_routes()

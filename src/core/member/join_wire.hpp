@@ -53,8 +53,18 @@ struct JoinBundle {
 inline constexpr uint8_t k_obj_join_hello = 0x10; // broadcast by an unjoined device; exchange_id = nonce
 inline constexpr uint8_t k_obj_join_offer = 0x11; // unicast reply of an open root/proxy; echoes the nonce
 // Hints only: neither is an authorisation (docs/07 §3). The body is one version byte.
+// [S11] What an offer tells besides "I exist": how deep in the tree the offerer sits (0 = the root itself;
+// a joiner behind a relay paces and waits accordingly) and the low 32 bits of the root's expected-list
+// revision (a higher one than the joiner was refused at ends its NOT_EXPECTED wait, docs/07 §3). Hints only.
+struct OfferHint {
+    uint8_t depth = 0;
+    uint32_t expected_revision = 0;
+};
 [[nodiscard]] Status encode_discovery(bool offer, const std::array<uint8_t, 16> &nonce, uint32_t domain_hint,
-                                      MutByteView out, std::size_t &len); // whole link frame
+                                      MutByteView out, std::size_t &len,
+                                      const OfferHint *hint = nullptr); // whole link frame
+// A one-byte body (hello, or an offer of S8) reads as depth 0, revision 0.
+[[nodiscard]] Status decode_offer_hint(ByteView body, OfferHint &out);
 
 // ---- object envelope ----
 struct JoinObjectHeader {

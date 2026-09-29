@@ -44,6 +44,9 @@ Status validate_config(const lm_config_t *config) {
     if (config->role > LM_ROLE_ROOT) {
         return Status::InvalidArgument;
     }
+    if (config->object_transfer_enabled != 0 && !delivery::k_object_capable) {
+        return Status::Unsupported; // the 4 KiB object lane is not part of this build (LM_OBJECT_TRANSFER)
+    }
     if (!build_supports(static_cast<Role>(config->role))) {
         return Status::RoleNotAllowed;
     }

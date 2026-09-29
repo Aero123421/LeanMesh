@@ -26,6 +26,7 @@
 #include "core/jobs.hpp"
 #include "core/link/exchange.hpp"
 #include "core/member/credentials.hpp"
+#include "core/member/discovery.hpp"
 #include "core/member/join.hpp"
 #include "core/member/join_wire.hpp"
 #include "core/pool.hpp"
@@ -147,6 +148,7 @@ class Membership {
     [[nodiscard]] bool job_pending() const { return job_in_flight_; }
     [[nodiscard]] bool confirm_pending() const { return confirm_pending_; } // ACTIVE durable, root ack owed
     [[nodiscard]] const RequestId &request_id() const { return req_.id; }
+    [[nodiscard]] const std::array<uint8_t, 16> &hello_nonce() const { return hello_nonce_; } // bench: a forged offer needs it
     [[nodiscard]] uint32_t evidence() const { return req_.evidence; }
     [[nodiscard]] Status reason() const { return req_.reason; }
     [[nodiscard]] const JoinPipe &pipe() const { return pipe_; }
@@ -204,6 +206,9 @@ class Membership {
 
     // join steps
     void begin_discovery(MonoTime now);
+    void choose_offer(MonoTime now);
+    void apply_pacing(uint8_t depth);
+    void not_expected(MonoTime now);
     void send_hello(MonoTime now);
     void try_connect(MonoTime now);
     void request_ready(MonoTime now);   // ticket loaded: build and send JoinRequest
@@ -270,8 +275,18 @@ class Membership {
     std::array<uint8_t, 16> hello_nonce_{};
     MacAddr cand_;
     bool have_cand_ = false;
-    uint8_t handshakes_ = 0;
-    MonoTime hello_at_ = MonoTime::never();
+    Discovery disc_;                          // [S11] listen-first timing, budgets, NOT_EXPECTED hold
+    struct Offer {                            // up to three offers of one search (docs/07 §3: candidates 3)
+        bool used = false, tried = false;
+        MacAddr mac;
+        uint8_t depth = 0;                    // 0: the root itself
+        uint32_t revision = 0;                // its expected-list revision hint
+    };
+    std::array<Offer, 3> offers_{};
+    MonoTime collect_until_ = MonoTime::never(); // a shallower offer may still arrive
+    uint32_t cand_revision_ = 0;
+    bool budget_default_ = true;              // lm_join without an explicit search budget
+    uint8_t not_expected_ = 0;                // consecutive NOT_EXPECTED refusals (hold 10 s, 20 s ... 60 s)
     MonoTime search_deadline_ = MonoTime::never();
     MonoTime retry_at_ = MonoTime::never();   // busy scratch / rate gate / radio: try again then
     MonoTime request_deadline_ = MonoTime::never();

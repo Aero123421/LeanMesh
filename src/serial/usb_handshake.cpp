@@ -29,7 +29,7 @@ Status parse_creds(ByteView in, bool with_delegation, ByteView &device, ByteView
 // ---- job plumbing ----
 Status UsbLink::job_entry(port::JobEnv &env, void *arg) {
     auto *l = static_cast<UsbLink *>(arg);
-    return l->job_ == Job::Verify ? l->verify_body() : sec::HandshakeSlot::run_job(env, &l->hs_);
+    return l->job_ == Job::Verify ? l->verify_body() : sec::HandshakeSlot::run_job(env, l->hs_);
 }
 
 // Worker: checks the peer's credential chain. Root: the Host's DeviceCredential must be fleet-signed
@@ -68,7 +68,7 @@ Status UsbLink::verify_body() {
 
 Status UsbLink::start_job(Job job, sec::HsStep step, ByteView input, MonoTime now) {
     if (job == Job::Hs) {
-        LM_TRY(hs_.prepare(step, input));
+        LM_TRY(hs_->prepare(step, input));
         hs_step_ = step;
     }
     job_ = job;
@@ -84,7 +84,7 @@ Status UsbLink::start_job(Job job, sec::HsStep step, ByteView input, MonoTime no
     if (st != Status::Ok) {
         job_ = Job::None;
         if (job == Job::Hs) {
-            hs_.unprepare();
+            hs_->unprepare();
         }
     }
     return st;
@@ -138,22 +138,42 @@ void UsbLink::abort_attempt(Status why, MonoTime now) {
     bind_ping_due_ = false;
     attempt_deadline_ = MonoTime::never();
     if (job_deferred_) {
-        hs_.unprepare(); // armed but never submitted: nothing will complete
+        if (hs_ != nullptr) {
+            hs_->unprepare(); // armed but never submitted: nothing will complete
+        }
         job_ = Job::None;
         job_deferred_ = false;
         job_retry_at_ = MonoTime::never();
     }
-    (void)hs_.cancel(); // Busy while a job is in flight: wiped by its completion (zombie rule)
+    if (hs_ != nullptr) {
+        (void)hs_->cancel(); // Busy while a job is in flight: wiped by its completion (zombie rule)
+    }
     phase_ = job_ != Job::None ? Phase::Zombie : Phase::Idle;
+    if (phase_ == Phase::Idle) {
+        release_slot(); // else after the completion: the worker still runs on the slot's memory
+    }
+}
+
+// The slot goes back to the node once nothing (no job, no secret of ours) is left in it.
+void UsbLink::release_slot() {
+    if (hs_ != nullptr || slot_wait_) { // slot_wait_: only the reservation is held
+        if (slot_wait_) {
+            job_retry_at_ = MonoTime::never();
+        }
+        hs_ = nullptr;
+        slot_wait_ = false;
+        env_.slot_release();
+    }
 }
 
 void UsbLink::on_job_done(Handle slot, Status job_status, MonoTime now) {
     if (phase_ == Phase::Zombie) {
-        if (job_ == Job::Hs) {
-            (void)hs_.complete(job_status); // wipes the cancelled slot
+        if (job_ == Job::Hs && hs_ != nullptr) {
+            (void)hs_->complete(job_status); // wipes the cancelled slot
         }
         job_ = Job::None;
         phase_ = Phase::Idle;
+        release_slot();
         pump(now);
         return;
     }
@@ -164,7 +184,7 @@ void UsbLink::on_job_done(Handle slot, Status job_status, MonoTime now) {
     job_ = Job::None;
     if (job_status != Status::Ok) {
         if (j == Job::Hs) {
-            (void)hs_.complete(job_status); // aborts the handshake and wipes the secrets
+            (void)hs_->complete(job_status); // aborts the handshake and wipes the secrets
         } else {
             ++stats_.hs_rejected;
         }
@@ -285,9 +305,17 @@ void UsbLink::handle_edhoc(uint32_t sid, ByteView payload, MonoTime now) {
 }
 
 void UsbLink::after_verify(MonoTime now) {
+    if (hs_ == nullptr) {
+        hs_ = env_.slot_acquire();
+    }
+    if (hs_ == nullptr) { // the node's slot is taken: first in line, bounded by the attempt deadline
+        slot_wait_ = true;
+        job_retry_at_ = now + timing_.job_retry;
+        return;
+    }
     const sec::HsRole hr = role_ == UsbRole::Root ? sec::HsRole::Responder : sec::HsRole::Initiator;
     const ByteView peers[1] = {ByteView{peer_.ccs.data(), peer_.ccs_len}};
-    Status st = hs_.begin(hr, key_, ByteView{ccs_.data(), ccs_len_}, peers, 1);
+    Status st = hs_->begin(hr, key_, ByteView{ccs_.data(), ccs_len_}, peers, 1);
     if (st == Status::Ok) {
         if (role_ == UsbRole::Root) {
             stage(Obj::CredR, ByteView{own_cred_.data(), own_cred_len_}, false);
@@ -321,7 +349,7 @@ Status UsbLink::make_context() {
 
 void UsbLink::after_hs(MonoTime now) {
     const sec::HsStep step = hs_step_;
-    Status st = hs_.complete(Status::Ok);
+    Status st = hs_->complete(Status::Ok);
     if (st != Status::Ok) {
         abort_attempt(st, now);
         return;
@@ -330,7 +358,7 @@ void UsbLink::after_hs(MonoTime now) {
     const bool root = role_ == UsbRole::Root;
     switch (step) {
     case S::M1Compose: // Host
-        stage(Obj::Msg1, hs_.output(), false);
+        stage(Obj::Msg1, hs_->output(), false);
         phase_ = Phase::AwaitMsg;
         expect_ = Obj::Msg2;
         break;
@@ -339,7 +367,7 @@ void UsbLink::after_hs(MonoTime now) {
         st = start_job(Job::Hs, S::M3Compose, ByteView{}, now);
         break;
     case S::M3Compose: // Host
-        stage(Obj::Msg3, hs_.output(), false);
+        stage(Obj::Msg3, hs_->output(), false);
         phase_ = Phase::AwaitMsg;
         expect_ = Obj::Msg4;
         break;
@@ -348,7 +376,7 @@ void UsbLink::after_hs(MonoTime now) {
         st = start_job(Job::Hs, S::M2Compose, ByteView{}, now);
         break;
     case S::M2Compose: // root
-        stage(Obj::Msg2, hs_.output(), false);
+        stage(Obj::Msg2, hs_->output(), false);
         phase_ = Phase::AwaitMsg;
         expect_ = Obj::Msg3;
         break;
@@ -356,16 +384,16 @@ void UsbLink::after_hs(MonoTime now) {
     case S::M4Process: // Host
         st = make_context();
         if (st == Status::Ok) {
-            st = hs_.set_context(ctx_);
+            st = hs_->set_context(ctx_);
         }
         if (st == Status::Ok) {
-            ctx_hash_ = hs_.context_hash();
+            ctx_hash_ = hs_->context_hash();
             phase_ = Phase::Hs;
             st = start_job(Job::Hs, root ? S::M4Compose : S::Export, ByteView{}, now);
         }
         break;
     case S::M4Compose: // root: held back until the keys exist, so the Host's first PING finds them
-        stage(Obj::Msg4, hs_.output(), true);
+        stage(Obj::Msg4, hs_->output(), true);
         phase_ = Phase::Hs;
         st = start_job(Job::Hs, S::Export, ByteView{}, now);
         break;
@@ -383,7 +411,7 @@ void UsbLink::after_hs(MonoTime now) {
 
 void UsbLink::finish_keys(MonoTime now) {
     sec::RecordKeys keys; // move-only, wipes itself
-    Status st = hs_.take_keys(keys);
+    Status st = hs_->take_keys(keys);
     if (st == Status::Ok) {
         const int slot = act_ == 0 ? 1 : 0;
         keys_[slot].wipe();
@@ -399,6 +427,7 @@ void UsbLink::finish_keys(MonoTime now) {
         abort_attempt(st, now);
         return;
     }
+    release_slot(); // the secrets left the slot (take_keys): the node's exchange may use it again
     phase_ = Phase::AwaitBind;
     if (role_ == UsbRole::Host) {
         bind_ping_due_ = true;

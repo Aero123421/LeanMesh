@@ -496,7 +496,7 @@ LM_TEST("S05 cold boot: old SID and old ciphertext are refused, fresh EDHOC give
     LM_CHECK(n.nb(0, 1)->cur.rx_sid != old_sid_at_0);
     LM_CHECK(n.nb(1, 0)->cur.rx_sid != old_sid_at_1);
     // The old session survives at node 1 only as a short receive-only grace (no overlap forever).
-    LM_CHECK(n.nb(1, 0)->prev.active);
+    LM_CHECK(n.lnk(1).neighbors().has_grace(n.nb(1, 0)->mac));
     n.inject(0, 1, f_to1); // node 0's pre-reboot frame: authentic duplicate inside the grace
     n.run_ms(50);
     LM_CHECK_EQ(n.sinks[1].fresh(), 1u); // never applied twice
@@ -506,7 +506,7 @@ LM_TEST("S05 cold boot: old SID and old ciphertext are refused, fresh EDHOC give
     n.run_ms(50);
     LM_CHECK_EQ(n.sinks[0].fresh(), 2u);
     n.run_s(11); // grace over
-    LM_CHECK(!n.nb(1, 0)->prev.active);
+    LM_CHECK(!n.lnk(1).neighbors().has_grace(n.nb(1, 0)->mac));
     const uint64_t before = n.lnk(1).stats().rx_unknown_sid;
     n.inject(0, 1, f_to1);
     n.run_ms(50);
@@ -620,7 +620,7 @@ LM_TEST("S10 rotation: lower DeviceId rotates at 50 min, old session receives a 
     LM_CHECK_EQ(n.lnk(lower).stats().rotations_started, 1u);
     LM_CHECK(n.paired(0, 1));
     LM_CHECK(n.nb(lower, higher)->cur.rx_sid != old_sid);
-    LM_CHECK(!n.nb(0, 1)->prev.active && !n.nb(1, 0)->prev.active); // grace is over
+    LM_CHECK(!n.lnk(0).neighbors().has_grace(n.nb(0, 1)->mac) && !n.lnk(1).neighbors().has_grace(n.nb(1, 0)->mac)); // grace is over
     LM_CHECK_EQ(n.lnk(0).stats().sessions_replaced + n.lnk(1).stats().sessions_replaced, 2u);
     LM_CHECK_EQ(n.lnk(0).stats().hs_failed + n.lnk(1).stats().hs_failed, 0u);
 }

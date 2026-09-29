@@ -27,7 +27,6 @@ Status seal_frame(SessionKeys &k, wire::FrameKind kind, uint32_t domain_hint, ui
                       MutByteView{f.bytes.data() + wire::k_link_header_bytes,
                                   total - wire::k_link_header_bytes}));
     f.len = static_cast<uint16_t>(total);
-    f.counter = counter;
     wire::LinkHeader check;
     ByteView body;
     if (wire::decode_link_frame(f.view(), check, body) != Status::Ok) {

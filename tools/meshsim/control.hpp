@@ -28,6 +28,13 @@
 //   route / root-time / send / op / msg-next / msg-report / msg-cancel / delivery   the delivery slice
 //                                           (cmd_delivery.cpp): static route, root clock, lm_send, operation
 //                                           state, next message + application result, counters
+//   flood / sched                           the scheduler slice (cmd_sched.cpp): a burst of best-effort sends of one
+//                                           class or LATEST key, scheduler + admission counters
+//   gen-send / gen-next / send-control / ctl-sink / ctl-recv / frag   the fragment slice (cmd_fragment.cpp):
+//                                           messages and objects with a generated payload, control objects
+//                                           to a device and their sink, fragment counters
+//   mesh <node>                             mesh state (Listen/Search/Attach/Ready/Root), parent, depth, root path and
+//                                           counters of node i; on the root also the approved tree size (cmd_mesh.cpp)
 //   quit
 // Stdout carries only protocol lines; diagnostics go to stderr.
 #pragma once
@@ -110,6 +117,20 @@ std::string cmd_msg_next(Sim &sim, const Args &a);
 std::string cmd_msg_report(Sim &sim, const Args &a);
 std::string cmd_msg_cancel(Sim &sim, const Args &a);
 std::string cmd_delivery(Sim &sim, const Args &a);
+// Commands of the mesh slice (cmd_mesh.cpp).
+std::string cmd_mesh(Sim &sim, const Args &a);
+
+// Commands of the fragment slice (cmd_fragment.cpp).
+std::string cmd_gen_send(Sim &sim, const Args &a);
+std::string cmd_gen_next(Sim &sim, const Args &a);
+std::string cmd_send_control(Sim &sim, const Args &a);
+std::string cmd_ctl_sink(Sim &sim, const Args &a);
+std::string cmd_ctl_recv(Sim &sim, const Args &a);
+std::string cmd_frag(Sim &sim, const Args &a);
+
+// Commands of the scheduler slice (cmd_sched.cpp).
+std::string cmd_flood(Sim &sim, const Args &a);
+std::string cmd_sched(Sim &sim, const Args &a);
 
 // --topology-file: one `link <a> <b> [loss_permille] [delay_ms] [ack_loss_permille]` per line,
 // `#` starts a comment. False with `err` set on the first bad line (nothing is half-applied).

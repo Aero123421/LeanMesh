@@ -3,7 +3,7 @@
 // SIMULATION ONLY: results are protocol evidence, never RF/range/power/hardware evidence.
 //
 //   meshsim [--nodes N] [--topology chain|full|none] [--topology-file F] [--clock virtual|realtime] [--seed S]
-//           [--serial-pty] [--serial-bridge] [--no-boot]
+//           [--serial-pty] [--serial-bridge] [--no-boot] [--objects] [--mesh]
 #include <poll.h>
 #include <unistd.h>
 
@@ -27,6 +27,8 @@ struct Options {
     bool serial_pty = false;
     bool serial_bridge = false;
     bool boot = true;
+    bool objects = false; // --objects: every node enables the 4 KiB object transfer (lm_config_t)
+    bool mesh = false; // nodes find parents and register by themselves (else links/routes are made by hand)
     std::string topology_file; // links on top of --topology (usually with `none`)
 };
 
@@ -34,7 +36,7 @@ int usage() {
     std::fprintf(
         stderr,
         "usage: meshsim [--nodes N] [--topology chain|full|none] [--topology-file F]\n"
-        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--serial-bridge] [--no-boot]\n");
+        "               [--clock virtual|realtime] [--seed S] [--serial-pty] [--serial-bridge] [--no-boot] [--objects] [--mesh]\n");
     return 2;
 }
 
@@ -60,6 +62,10 @@ bool parse(int argc, char **argv, Options &o) {
             o.serial_pty = true;
         } else if (a == "--serial-bridge") {
             o.serial_bridge = true;
+        } else if (a == "--objects") {
+            o.objects = true;
+        } else if (a == "--mesh") {
+            o.mesh = true;
         } else if (a == "--no-boot") {
             o.boot = false;
         } else {
@@ -95,6 +101,8 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < opt.nodes; ++i) {
         lm::sim::NodeOptions no;
         no.role = i == 0 ? lm::Role::Root : lm::Role::Relay;
+        no.object_transfer_enabled = opt.objects;
+        no.mesh = opt.mesh;
         (void)world.add_node(no);
     }
     if (opt.topology == "chain") {

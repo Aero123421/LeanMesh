@@ -70,6 +70,9 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
     req_.reason = Status::Ok;
     ++stats_.joins_started;
     begin_discovery(now);
+    disc_.clear_suppress();
+    not_expected_ = 0;
+    budget_default_ = a.search_budget_ms == 0;
     search_deadline_ = now + budget;
     emit_state(0);
     return Status::Ok;

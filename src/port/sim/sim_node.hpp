@@ -31,6 +31,9 @@ struct NodeOptions {
     int32_t clock_drift_ppm = 0;
     StoreGeometry store;
     bool object_transfer_enabled = false;
+    // The mesh module (parent search, registration) runs by itself. Off for the tests of the slices that
+    // open sessions and install routes by hand (link, join, delivery, serial); mesh tests turn it on.
+    bool mesh = false;
 };
 
 // Counters the simulator itself observes (not device diagnostics).

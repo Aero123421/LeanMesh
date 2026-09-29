@@ -55,6 +55,7 @@ class EndSessions {
     static constexpr std::size_t k_capacity = k_build_limits.end_sessions;
 
     [[nodiscard]] EndSession *find_peer(const DeviceId &d);
+    [[nodiscard]] EndSession *find_addr(ShortAddr a); // [S11] by the lookup hint of a verified credential
     [[nodiscard]] EndSession *find_rx_sid(uint32_t sid);
     [[nodiscard]] bool sid_in_use(uint32_t sid) const;
     // A free entry, else the least recently used one is wiped and reused (its peer only needs a

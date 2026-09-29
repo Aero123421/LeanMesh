@@ -32,7 +32,8 @@ Status Delivery::host_store_ack(const HostStoreAckRequest &rq, MonoTime now) {
             e->gated = false;
             send_receipt(*e, ReceiptEv::EndReceived, 0, now);
         }
-        if (e->st == InEntry::St::Held && !e->event_owed) {
+        const InLive *l = live_of(*e);
+        if (e->st == InEntry::St::Held && l != nullptr && !l->event_owed) {
             finish_take(h, *e, now); // the application (the bridge) took it earlier and kept it for the Host
         }
         return Status::Ok;

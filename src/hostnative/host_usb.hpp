@@ -71,6 +71,8 @@ class HostUsb final : private serial::UsbEnv, private serial::UsbSink {
     std::size_t write(ByteView out) override;
     void random(MutByteView out) override;
     Status submit(Handle slot, JobClass cls, port::JobFn fn, void *arg) override;
+    sec::HandshakeSlot *slot_acquire() override { return &hs_; }
+    void slot_release() override {}
     void on_session(bool up, uint32_t gen, serial::UsbDown why) override;
     void on_record(gen::SerialKind kind, uint8_t lane, uint32_t frame_bytes, ByteView payload,
                    uint32_t gen) override;
@@ -85,6 +87,7 @@ class HostUsb final : private serial::UsbEnv, private serial::UsbSink {
     };
 
     serial::UsbLink link_;
+    sec::HandshakeSlot hs_; // no mesh exchange on the Host: its own slot
     std::array<uint8_t, 32> scalar_{};
     sec::KeyHandle key_;
     std::array<uint8_t, sec::k_ccs_max_bytes> ccs_{};

@@ -3,21 +3,28 @@
 // it runs on the mesh owner as the sink of the ACTIVE USB session and calls Engine::execute() directly,
 // so it needs no OwnerCall and no thread of its own.
 //
-// Ownership and limits (no queue is unbounded):
+// Ownership and limits (no queue is unbounded; nothing is copied into a second buffer):
 //   pending_  replies owed for REQUEST records (<= the data-lane window; a request's credit returns when
-//             its reply left); results of read-only methods are computed when the reply is sent
-//   ring_     events taken from the engine's app queue and not yet settled by the Host (8 slots).
-//             A MESSAGE settles only at HOST_STORE_ACK (the Host's DB commit, docs/11 §5); every other
-//             event at EVENT_ACK. Unsettled events are sent again on a new session and on a slow timer.
-//             When the ring is full the bridge stops taking events: the engine's own queue then bounds
-//             them and reports a GAP, the Host reconciles by GET_MESSAGE. Nothing is dropped silently.
+//             its reply left). It holds the method's status and small inputs of the result; the result
+//             itself is written into the USB transmit buffer when the reply is sent (read-only methods
+//             read the core at that moment)
+//   ring_     events taken from the engine's app queue and not yet settled by the Host (8 slots). A slot
+//             is a reference: the event header only. The body, and a MESSAGE's payload (which the core
+//             keeps in its message pool until HOST_STORE_ACK, S13-D11), is built into the transmit buffer
+//             at every (re)send. A MESSAGE settles only at HOST_STORE_ACK (the Host's DB commit,
+//             docs/11 §5); every other event at EVENT_ACK. Unsettled events are sent again on a new
+//             session and on a slow timer. When the ring is full the bridge stops taking events: the
+//             engine's own queue then bounds them and reports a GAP, the Host reconciles by GET_MESSAGE.
+//             Nothing is dropped silently.
 // Evidence is never invented: a result carries what the core reports (accepted / persisted / sent /
 // HOP_ACCEPTED / END_RECEIVED / APP_*) and methods whose module does not exist answer UNSUPPORTED.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include "core/engine.hpp"
 #include "core/ring.hpp"
@@ -34,17 +41,72 @@ struct BridgeStats {
     uint64_t events_sent = 0;
     uint64_t events_resent = 0;
     uint64_t events_settled = 0;
+    uint64_t events_gone = 0;     // a MESSAGE whose payload the core no longer holds: not sent, GET_MESSAGE
     uint64_t host_store_acks = 0;
     uint64_t send_accepted = 0;
     uint64_t send_refused = 0;
+};
+
+// What a snapshot result needs of lm_operation_t (the rest is not on the wire).
+struct OpSnap {
+    uint32_t phase = 0;
+    uint32_t reason = 0;
+    uint32_t outcome = 0;
+    uint32_t evidence_bits = 0;
+    std::array<uint8_t, 16> message_id{};
+    std::array<uint8_t, 32> intent_hash{};
+
+    static OpSnap of(const lm_operation_t &o) {
+        OpSnap s;
+        s.phase = o.phase;
+        s.reason = o.reason;
+        s.outcome = o.outcome;
+        s.evidence_bits = o.evidence_bits;
+        std::memcpy(s.message_id.data(), o.message_id.bytes, 16);
+        std::memcpy(s.intent_hash.data(), o.intent_hash, 32);
+        return s;
+    }
+};
+
+// The part of lm_event_t an event's body is built from: what a ring slot keeps (a reference, not the payload).
+struct EvRef {
+    uint32_t kind = 0;
+    uint32_t reason = 0;
+    uint64_t operation = 0;
+    uint64_t assignment = 0; // origin_assignment_generation
+    uint16_t app_port = 0;
+    std::array<uint8_t, 32> peer{};
+    std::array<uint8_t, 16> message_id{};
+    std::array<uint8_t, 32> intent_hash{};
+
+    static EvRef of(const lm_event_t &e) {
+        EvRef r;
+        r.kind = e.kind;
+        r.reason = e.reason;
+        r.operation = e.operation_id;
+        r.assignment = e.origin_assignment_generation;
+        r.app_port = e.app_port;
+        std::memcpy(r.peer.data(), e.peer.bytes, 32);
+        std::memcpy(r.message_id.data(), e.message_id.bytes, 16);
+        std::memcpy(r.intent_hash.data(), e.intent_hash, 32);
+        return r;
+    }
+    // For the core's lookups (Delivery::event_payload names a MESSAGE by kind, origin and MessageId).
+    [[nodiscard]] lm_event_t event() const {
+        lm_event_t e{};
+        e.struct_size = sizeof(e);
+        e.abi_version = LM_ABI_VERSION;
+        e.kind = kind;
+        std::memcpy(e.peer.bytes, peer.data(), 32);
+        std::memcpy(e.message_id.bytes, message_id.data(), 16);
+        return e;
+    }
 };
 
 class Bridge final : public BridgeHook {
   public:
     static constexpr std::size_t k_ring = 8;
     static constexpr std::size_t k_pending = RootUsb::k_pending_replies;
-    static constexpr std::size_t k_event_body = 736;
-    static constexpr std::size_t k_scratch = 4608;
     static constexpr Duration k_event_retry = Duration::from_s(5);
 
     Bridge(Engine &engine, RootUsb &usb, uint64_t boot_id);
@@ -74,24 +136,21 @@ class Bridge final : public BridgeHook {
         bool has_op = false;
         uint64_t op = 0;
         Result result = Result::None;
-        lm_operation_t snap{};
-        bool has_filter = false;
-        std::array<uint8_t, 32> filter{};   // NODE_QUERY
-        std::array<uint8_t, 16> request{};  // GET_REQUEST
+        bool has_filter = false; // NODE_QUERY: `filter` names one device
+        union {
+            OpSnap snap;                      // Snapshot, Request
+            std::array<uint8_t, 32> filter;   // Nodes
+        };
+        Pending() : snap() {}
     };
     struct Slot {
         bool used = false;
         bool acked = false;       // EVENT_ACK covered it
-        bool needs_store = false; // MESSAGE: settles only at HOST_STORE_ACK
-        bool stored = false;
+        bool stored = false;      // MESSAGE: HOST_STORE_ACK arrived
         uint32_t sent_gen = 0;    // session generation it was last sent under (0: not sent)
         MonoTime sent_at = MonoTime::never();
         uint64_t seq = 0;
-        uint32_t kind = 0;
-        uint16_t len = 0;
-        std::array<uint8_t, 32> origin{};
-        std::array<uint8_t, 16> mid{};
-        std::array<uint8_t, k_event_body> body{};
+        EvRef ev;                 // the reference: MESSAGE payloads stay in the core's message pool
     };
 
     // request handling (bridge_methods.cpp)
@@ -112,15 +171,14 @@ class Bridge final : public BridgeHook {
     void snapshot_of(Pending &p, uint64_t op);
 
     // reply / event encoding and transmission (bridge.cpp)
+    [[nodiscard]] Status write_reply(const Pending &p, MutByteView out, std::size_t &len);
+    [[nodiscard]] Status write_event(Slot &s, bool take, MutByteView out, std::size_t &len);
     [[nodiscard]] std::size_t encode_result(const Pending &p, MutByteView out);
     void flush();
     void flush_replies();
     void flush_events();
-    void drain_events();
-    void take_event(const lm_event_t &ev, ByteView payload);
     [[nodiscard]] Slot *free_slot();
     void settle(Slot &s);
-    [[nodiscard]] Status send_record(SerialKind kind, ByteView head, ByteView body);
 
     Engine &engine_;
     RootUsb &usb_;
@@ -133,8 +191,6 @@ class Bridge final : public BridgeHook {
     uint64_t next_seq_ = 1;
     BoundedQueue<Pending, k_pending> pending_;
     std::array<Slot, k_ring> ring_{};
-    std::array<uint8_t, k_scratch> scratch_{};
-    std::array<uint8_t, 512> ev_payload_{};
 };
 
 } // namespace lm::serial

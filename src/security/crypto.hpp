@@ -22,6 +22,8 @@ namespace lm::sec {
 [[nodiscard]] Status crypto_init();
 
 [[nodiscard]] Status sha256(ByteView data, Sha256Digest &out);
+// SHA-256 of `a || b` without joining them (a header and a payload that lives in a pool buffer).
+[[nodiscard]] Status sha256_parts(ByteView a, ByteView b, Sha256Digest &out);
 
 // Zeroisation that the optimiser cannot remove (mbedtls_platform_zeroize).
 void secure_zero(MutByteView buf);

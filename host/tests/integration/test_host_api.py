@@ -203,7 +203,8 @@ def test_control_rules_permissions_capabilities_and_revision(tmp_path: Path) -> 
 
 
 def test_idempotency_replay_isolation_and_epochs(tmp_path: Path) -> None:
-    """Q02 (host part) and H01: 100 replays of one key are one operation, one outbox row, one event."""
+    """Q02 (host part) and H01: 100 replays of one key are one operation, one outbox row, one event.
+    (The request-rate limit is off in these tests: it is covered in test_host_limits.py.)"""
     with running(make_settings(tmp_path)) as h:
         e = h.epoch()
         first = h.post("/v1/messages", message(e), "same")

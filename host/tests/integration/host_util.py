@@ -118,6 +118,9 @@ def auth(name: str) -> dict[str, str]:
 def make_settings(tmp: Path, principals: dict[str, list[str]] | None = None, **overrides: Any) -> Settings:
     write_tokens(tmp / "tokens.json", principals or {"alice": ALL_PERMS, "bob": ALL_PERMS,
                                                      "reader": ["READ"]})
+    # The request-rate limit (test_host_limits.py) is off unless a test asks for it: most tests send
+    # hundreds of requests in a burst to reach a capacity limit.
+    overrides = {"principal_rps": 0.0, "global_rps": 0.0, **overrides}
     return Settings(db_path=tmp / "host.db", tokens_path=tmp / "tokens.json",
                     schema_path=REPO / "db" / "schema.sql", **overrides)
 
@@ -191,7 +194,7 @@ class HostProc:
         self.db = workdir / "host.db"
         write_tokens(workdir / "tokens.json", {"alice": ALL_PERMS, "bob": ALL_PERMS})
         self.env = dict(os.environ, LEANMESH_DB=str(self.db), LEANMESH_TOKENS=str(workdir / "tokens.json"),
-                        PYTHONPATH=str(REPO / "host"), **limits)
+                        PYTHONPATH=str(REPO / "host"), LEANMESH_PRINCIPAL_RPS="0", LEANMESH_GLOBAL_RPS="0", **limits)
         if crash:
             self.env["LEANMESH_CRASH"] = crash
         self.proc: subprocess.Popen[bytes] | None = None

@@ -2,9 +2,12 @@
 // approves parent links one request at a time against the current tree, so concurrent parent
 // choices on stale advertisements can never put a cycle into the approved tree (R03).
 //
-// State per member (bounded table, profile root members = 64, owner: the root mesh owner):
-//   Admitted  the ledger accepted the member (DeviceId, short address, generations) but it has no
-//             approved parent. It never appears on a path.
+// State per member (bounded table, profile root members = 64, owner: the root mesh owner). The
+// table holds routing state only: the member's identity (DeviceId, generations) lives in the ledger
+// entry of the same short address (S11-D9, P6: no second DeviceId table); the route service checks
+// them there and keeps this table in step through admit/remove/reset.
+//   Admitted  the ledger lists the address as an Active member but it has no approved parent. It
+//             never appears on a path.
 //   Active    approved parent link, path_revision and a lease. Paths are derived on demand from
 //             the parent links (root -> ... -> node), so a subtree move needs no per-descendant
 //             path rewrite and no path storage.
@@ -31,9 +34,7 @@ inline constexpr std::size_t k_max_depth = gen::limits::root_depth;
 inline constexpr std::size_t k_max_route = gen::limits::path_hops;
 
 struct RouteRequest {
-    DeviceId device{};
-    AssignmentGen assignment{};
-    MembershipGen membership{};
+    ShortAddr node{}; // the registering member (its DeviceId and generations were checked by the caller)
     RootTerm term{};
     ShortAddr parent{};
     const uint16_t *candidate_path = nullptr; // root first, device last (control.cddl route-register)
@@ -60,16 +61,21 @@ class Topology {
   public:
     Topology(ShortAddr root_addr, RootTerm term) : root_addr_(root_addr), term_(term) {}
 
-    // Ledger side. Same device+generations: idempotent. Newer generations or another device at
-    // the address replace the member (its direct children lose their approved link). Older
-    // generation: Conflict. Device already at another address: Conflict. Full: NoCapacity.
-    [[nodiscard]] Status admit(const DeviceId &id, ShortAddr addr, AssignmentGen ag,
-                               MembershipGen mg);
+    // Ledger side (via the route service). admit: the address is an Active member of membership
+    // generation `gen` (low 32 bits, a change detector and not an identity); idempotent for the same
+    // generation, another generation resets the slot; InvalidArgument for the root address or an
+    // invalid one, NoCapacity when the table is full. reset: the address now means another membership
+    // generation: its approved link and its direct children's links are void, the slot stays
+    // admitted. remove: the member is gone.
+    [[nodiscard]] Status admit(ShortAddr addr, uint32_t gen = 0);
+    // Re-initialises in place (no whole-table temporary on the owner stack): root address, term.
+    void init(ShortAddr root_addr, RootTerm term);
+    [[nodiscard]] Status reset(ShortAddr addr);
     [[nodiscard]] Status remove(ShortAddr addr);
     // New root_term (must be larger): every approved link is dropped, membership stays.
     [[nodiscard]] Status begin_term(RootTerm term);
 
-    // NetworkMismatch (term), NotFound (device), TargetGenerationChanged, Conflict (older or
+    // NetworkMismatch (term), NotFound (address not admitted), Conflict (older or
     // different replay of a sequence, cycle, depth), InvalidArgument (path shape), NoRoute
     // (parent not usable or the candidate path is stale). Same sequence + same content: the same
     // grant again (ACK lost), no new revision.
@@ -77,17 +83,35 @@ class Topology {
                                         RouteGrant &out);
     // ROUTE_READY: applies the pending link. Repeating it for the applied revision is Ok.
     // NoRoute: the parent changed since the grant; the pending request is dropped (re-register).
-    [[nodiscard]] Status confirm_ready(const DeviceId &id, RootTerm term, PathRevision revision,
+    [[nodiscard]] Status confirm_ready(ShortAddr node, RootTerm term, PathRevision revision,
                                        uint64_t now_root_ms);
     // Lease refresh for an Active member; returns the current canonical path.
-    [[nodiscard]] Status renew(const DeviceId &id, uint64_t now_root_ms, RouteGrant &out);
+    [[nodiscard]] Status renew(ShortAddr node, uint64_t now_root_ms, RouteGrant &out);
     // Drops leases and pending requests that ran out; the members stay Admitted.
     void expire(uint64_t now_root_ms);
+    // Earliest lease/pending expiry (UINT64_MAX: none): the route service's only timer.
+    [[nodiscard]] uint64_t next_expiry_ms() const;
+    // Direct and indirect descendants of `node`: calls f(addr) for each Active one (bounded scan of
+    // the table). Used to push a moved subtree its new paths.
+    template <class F> void for_each_descendant(ShortAddr node, F &&f) const {
+        const uint8_t idx = find_addr(node.value());
+        for (std::size_t j = 0; idx != k_none && j < nodes_.size(); ++j) {
+            if (nodes_[j].used && j != idx && distance_below(static_cast<uint8_t>(j), idx) != 0) {
+                f(ShortAddr{nodes_[j].addr});
+            }
+        }
+    }
+    [[nodiscard]] bool is_admitted(ShortAddr addr) const {
+        const uint8_t i = find_addr(addr.value());
+        return i != k_none && i != k_root;
+    }
 
     // Tree-path between two Active members / the root (lowest common ancestor join).
     [[nodiscard]] Status route_between(ShortAddr src, ShortAddr dst, uint64_t now_root_ms,
                                        SourceRoute &out) const;
     [[nodiscard]] Status path_from_root(ShortAddr node, uint64_t now_root_ms, RouteGrant &out) const;
+    // Revision of an Active member's approved path (NotFound otherwise).
+    [[nodiscard]] Status path_revision(ShortAddr node, PathRevision &out) const;
     // Approved parent of an Active member (NotFound otherwise); the root itself has none.
     [[nodiscard]] Status parent_of(ShortAddr node, ShortAddr &parent) const;
 
@@ -111,15 +135,12 @@ class Topology {
         uint32_t pending_parent_revision = 0;
         uint32_t last_seq = 0;
         uint16_t addr = 0;
+        uint32_t gen = 0;
         uint64_t lease_expires_ms = 0;
         uint64_t pending_expires_ms = 0;
-        AssignmentGen assignment{};
-        MembershipGen membership{};
-        DeviceId id{};
     };
 
     [[nodiscard]] uint8_t find_addr(uint16_t addr) const; // k_root, index or k_none
-    [[nodiscard]] uint8_t find_id(const DeviceId &id) const;
     [[nodiscard]] uint32_t revision_of(uint8_t idx) const;
     // Root-first chain of a node whose whole ancestry is Active (leases checked when `now` set).
     [[nodiscard]] Status chain(uint8_t idx, const uint64_t *now,

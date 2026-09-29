@@ -241,3 +241,65 @@ for formation time (docs/16 §3 "全21台cold boot").
 - P1–P9 are mandatory in their owning slices; every slice reports `scripts/budget_report.py` against its allocation row above.
 - **ROOT on ESP32-C3 is not a supported configuration** until a HIL measurement shows minimum-ever free heap ≥ 48 KiB with Wi-Fi up. ROOT is built and CI-checked on all four SoCs, but the supported root SoCs are S3/C5/C6. C3 remains fully supported as leaf and relay. No PSRAM may be used to hide this.
 - The SLOC line is raised to **28k** for the specified feature set (core+idf+root/serial), with the per-slice caps above as hard limits. Over-cap slices need a line here with cause.
+
+## S14 SCHED with P1, P7, P9 (2026-09-29, esp32c3 sizeof / build as `scripts/budget_report.py` measures it)
+
+Measured against HEAD `cf49d12` built in a clean worktree ("before") and the shared working tree at the
+end of S14 ("after"; the tree also holds S11-S13 work in progress, so the totals of the report are not
+S14 alone; the per-object rows below are). Software measurements only.
+
+| object (bytes) | LEAF before | LEAF after | RELAY before | RELAY after | ROOT before | ROOT after |
+|---|---:|---:|---:|---:|---:|---:|
+| TX pool + `HopTx` (P7: 328 -> 288 B per frame; P9: ACK seal buffer gone) | 3,368 | 2,784 | 4,704 | 3,960 | 8,712 | 7,488 |
+| dedup cache: `InEntry` 192 -> 136 B, plus `InLive` 48 B x (`app_messages` + 2) (P1) | 6,144 | 4,640 | 6,144 | 4,640 | 24,576 | 18,272 |
+| exchange staged object (P9) | 6,616 | 6,360 | 6,616 | 6,360 | 6,616 | 6,360 |
+| join pipe staging (P9; root: 4 pipes in the ledger) | 304 | 120 | 304 | 120 | 11,264 (ledger) | 10,528 (ledger) |
+| delivery TX scratch, 288 B (P9) | 288 | 0 | 288 | 0 | 288 | 0 |
+| scheduler state (S14) | 0 | 136 | 0 | 136 | 0 | 136 |
+| LATEST key + flag per `Active` (S14; measured with S12's own `Active` growth, so an upper bound) | 0 | <= 64 | 0 | <= 64 | 0 | <= 256 |
+| **P1 + P7 + P9 + S14 state** | | **-2,616** | | **-2,776** | | **-8,672** |
+
+Against the allocation row (LEAF/RELAY/ROOT 200 B): the scheduler is 136 B; with the LATEST key of every
+operation slot (8 B + flag, 16 x 16 B on the root) the S14 state is 200 / 200 / 392 B. The root is 192 B
+over its row: the key must be compared in full (a 64-bit value chosen by the application), so it cannot
+be hashed to fewer bytes, and it lives in the operation slot that owns it. The consolidations more than
+pay for it (the row of the table above is the net). P1 saves less than estimated (-1.5 KB leaf / -6.3 KB
+root against -2.0 / -9.0): the terminal record keeps the origin and message id in full (dedup is a security
+property), the 32-byte result and the expiry a receipt repeats, and an owed APPLIED result keeps a live slot.
+P9 saves 992 B (leaf) and 1,544 B (root) against 1.0 / 1.8 KB. P7 matches (320 / 480 / 960 B).
+
+Static DRAM of `libleanmesh.a` does not change for LEAF/RELAY (17,840 / 18,960 B): S14 adds no static
+buffer (the scheduler and the pool live in the workspace). ROOT static DRAM moved for S13's reasons.
+
+Object code of S14's files (riscv32, -Os): `sched.cpp` 1.3 KB, `delivery_sched.cpp` 0.9 KB, `hop.cpp`
++1.0 KB, `engine.cpp` +0.5 KB, `join.cpp` +0.7 KB, `exchange.cpp` +0.7 KB; the changes to `delivery*.cpp`
+are mixed with S12 and not separable. First-party SLOC of new S14 files: 394 (`src/core/sched` 190,
+`radio/tx_pool.hpp` 132, `delivery/delivery_sched.cpp` 72) against the 450 cap; the plumbing of P1/P7/P9
+in existing files adds about 130 more (hop, engine, exchange staging, join staging, dedup slots): S14 is
+about 520 SLOC in all, 70 over its row, because the consolidations are code (leases, live slots) as well
+as deletions.
+
+Behaviour that changed (decisions S14-D1..D10 in IMPLEMENTATION.md §13): a node can hold or owe results for
+at most `app_messages + 2` received messages at a time (the seventh arrival at a leaf is answered BUSY until
+one is taken or its result reported; before, only `durable_pending` limited owed results); a send that finds
+the TX pool without a free frame retries after 50 ms as before, but a BULK send is refused earlier (half of
+the pool and of the operation slots).
+
+## S11 MESH report (measured on `cf49d12` and `cf49d12` + S11 alone, esp32c3, -Os; software only)
+
+Fixed RAM (workspace + static DRAM), bytes:
+
+| | LEAF | RELAY | ROOT |
+|---|---:|---:|---:|
+| before | 53,208 | 58,656 | 180,348 |
+| after | 53,680 | 58,504 | 175,348 |
+| change | +472 | -152 | -5,000 |
+| S11 row | 800 | 1,000 | 4,000 |
+
+What moved (sizeof): `Mesh` +952 (3 candidates with their advertised root path 3 x ~115 B, one attach with its granted path, 2 query slots, timers), `Proxy` +176 / +704 / +768 (a leaf build keeps no frame buffers; a relay and the root two 250 B frames), `Membership` +120 (offers, discovery policy), `Routes` +3,168 on the root (64 routing slots of 48 B: no DeviceId, no generations, P6). P2: `Neighbor` 368 -> 224 B, -848 B leaf and -2,000 B relay/root (two shared grace slots). P6: the root's route cache 64 -> 8 entries, `delivery` 80,768 -> 72,736 B. Gross additions of S11 are 1.25 KB (leaf), 1.9 KB (relay), 4.3 KB (root: mesh, proxy, routes); the row is met net of P2/P6 in all three, not gross for the leaf (1.25 KB against 800 B). Static DRAM of `libleanmesh.a` is unchanged (17,840 / 18,960 / 67,332 B): the mesh lives in the workspace.
+
+Flash (image minus the empty IDF + ESP-NOW baseline): LEAF +178,484 -> +199,528 B, RELAY +178,554 -> +201,680 B, ROOT +231,376 -> +262,278 B. The ROOT image is 134 B over the 256 KiB target (below the 320 KiB review line): S11 code is about 21-31 KB of it.
+
+First-party SLOC (sdk set): 21,318 -> 24,260 (+2,942) against a row of 1,200. Cause, by module: `route` +1,715 (mesh state machine 1,148 + wire 351 + stitch), `member` +658 (proxy 415, discovery 119, Membership/join changes), `root` +329 (route service 308, topology now by address), `delivery` +115 (plug points, control lane), `link` +77. The row assumed a mesh that registers, leases and repairs; it did not count the proxy tunnel (415), the listen-first discovery policy shared by joiner and member (119), the root service (308) and the compact wire codecs (351). No tick, no polling loop and no general "engine" was added; the largest single item is the attach/repair state machine (link -> probe -> end session -> REGISTER -> READY, with the failure paths a restarted parent or root needs).
+
+Behaviour: S11-D1..D10 in IMPLEMENTATION.md §13. Formation time on a 21-node/20-hop chain is 35.8 s in the simulator (worker latency 2 ms) and 108 s with a modelled 150 ms per public-key job: the latter is the number to compare with the 120 s target, and it is a model, not a measurement of a C3.

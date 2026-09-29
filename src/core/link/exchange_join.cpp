@@ -42,6 +42,19 @@ MutByteView Exchange::lend_scratch() {
     return MutByteView{rx_.data(), rx_.size()};
 }
 
+sec::HandshakeSlot *Exchange::lend_slot() {
+    if ((phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_ || slot_lent_) {
+        usb_reserved_ = true;
+        return nullptr;
+    }
+    if (phase_ == Phase::Linger) {
+        finish_idle(); // the cached ACK is forgotten: a repeated bind of that peer fails and retries
+    }
+    usb_reserved_ = false;
+    slot_lent_ = true;
+    return &hs_;
+}
+
 uint32_t Exchange::hint() const {
     if (mode_ == Mode::JoinInit) {
         return join_out_ != nullptr && join_out_->known ? domain_hint_of(join_out_->delegation.domain) : 0;

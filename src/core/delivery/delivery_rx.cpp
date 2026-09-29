@@ -132,7 +132,7 @@ void Delivery::forward(const link::RxInfo &info, wire::RouteHeader &h, ByteView 
     }
     std::memcpy(body.data() + rlen, record.data(), record.size());
     Handle fh;
-    TxFrame *f = hop_.reserve(fh);
+    TxFrame *f = hop_.reserve(fh, record_class(record), nb->mac);
     if (f == nullptr) {
         ++stats_.rx_busy; // our buffer, not RF loss: the sender waits and repeats the same frame
         answer(A::Busy, k_busy_retry_ms);
@@ -171,6 +171,12 @@ void Delivery::deliver(const link::RxInfo &info, const wire::RouteHeader &h, Byt
             post_.k = Post::K::Carrier;
             post_.carrier = record.subspan(wire::k_end_header_bytes, eh.plaintext_length);
         }
+    } else if (eh.end_sid == k_tunnel_sid) {
+        if (eh.record_kind == wire::RecordKind::Control && eh.app_port == 0 && mesh_.tunnel != nullptr) {
+            ack = A::Accepted; // [S11] join tunnel chunk: the joiner's own EDHOC/AEAD protects the content
+            post_.k = Post::K::Tunnel;
+            post_.carrier = record.subspan(wire::k_end_header_bytes, eh.plaintext_length);
+        }
     } else if ((s = sessions_.find_rx_sid(eh.end_sid)) == nullptr) {
         ++stats_.rx_no_session;
     } else if (rx_reply_.dest != s->peer_addr || !(now < s->valid_until)) {
@@ -190,9 +196,27 @@ void Delivery::deliver(const link::RxInfo &info, const wire::RouteHeader &h, Byt
                 s->rec.accept(rx_open_.header.end_counter);
                 ack = A::Accepted;
                 post_.k = Post::K::Receipt;
+                post_.carrier = rx_open_.view();
+                break;
+            case wire::RecordKind::Fragment: // [S12]
+                on_end_fragment(*s, h.root_term, now, ack, retry_ms);
+                break;
+            case wire::RecordKind::TransferBitmap:
+                s->rec.accept(rx_open_.header.end_counter);
+                ack = A::Accepted;
+                post_.k = Post::K::Bitmap;
+                break;
+            case wire::RecordKind::Control: // [S11] mesh records of the node<->root end session
+                if (mesh_.control != nullptr && rx_open_.header.app_port == 0) {
+                    s->rec.accept(rx_open_.header.end_counter);
+                    ack = A::Accepted;
+                    post_.k = Post::K::MeshControl;
+                } else {
+                    ++stats_.rx_unsupported;
+                }
                 break;
             default:
-                ++stats_.rx_unsupported; // fragment / bitmap / control: later slices
+                ++stats_.rx_unsupported; // a single-frame CONTROL record: the control slice's
                 break;
             }
         } else if (st == Status::Replay && rx_open_.verdict == sec::ReplayVerdict::Duplicate) {
@@ -236,14 +260,30 @@ void Delivery::run_post(MonoTime now) {
         link_.exchange().on_end_carrier(rx_reply_, rx_open_.header, post_.carrier, rx_open_, now);
         break;
     case Post::K::Receipt:
-        on_receipt(*post_.session, rx_open_, now);
+        on_receipt(*post_.session, rx_open_.header.message_id, post_.carrier, now);
+        break;
+    case Post::K::Bitmap:
+        on_bitmap(*post_.session, rx_open_, now);
+        break;
+    case Post::K::Control:
+        ++frag_.stats.control_rx;
+        if (frag_.sink != nullptr) {
+            frag_.sink(frag_.sink_ctx, post_.session->peer, rx_open_.header.message_id, post_.carrier, now);
+        }
+        break;
+    case Post::K::MeshControl: // [S11]
+        mesh_.control(mesh_.ctx, post_.session->peer, rx_reply_, rx_open_.view(), now);
+        break;
+    case Post::K::Tunnel:
+        mesh_.tunnel(mesh_.ctx, rx_reply_, post_.carrier, now);
         break;
     case Post::K::Resend: {
         InEntry *e = in_.get(post_.in);
         if (e != nullptr && e->delivery != LM_BEST_EFFORT && e->st != InEntry::St::Committing && !e->gated) {
+            const InLive *l = live_of(*e);
             const ReceiptEv v = e->st == InEntry::St::Applied      ? ReceiptEv::AppApplied
                                 : e->st == InEntry::St::AppRejected ? ReceiptEv::AppRejected
-                                : e->app_pending                    ? ReceiptEv::AppPending
+                                : (l != nullptr && l->app_pending)  ? ReceiptEv::AppPending
                                                                     : ReceiptEv::EndReceived;
             send_receipt(*e, v, 0, now);
         }
@@ -269,37 +309,27 @@ void Delivery::run_post(MonoTime now) {
     case Post::K::NewDurable: {
         InEntry *e = in_.get(post_.in);
         if (e != nullptr) {
-            e->due_ev = static_cast<uint8_t>(ReceiptEv::EndReceived);
-            e->due_version = e->version;
-            want_in_commit(post_.in, *e, now);
+            if (InLive *l = live_of(*e)) { // a record that was just admitted always has one
+                l->due_ev = static_cast<uint8_t>(ReceiptEv::EndReceived);
+                l->due_version = l->version;
+                want_in_commit(post_.in, *e, now);
+            }
         }
         break;
     }
     }
+    if (post_.free_slot != 0) { // [S12] the reassembled payload has been used
+        frag_release(frag_.slots[post_.free_slot - 1U]);
+        post_.free_slot = 0;
+    }
+    if (post_.bitmap_owed && post_.session != nullptr) {
+        post_.bitmap_owed = false;
+        send_bitmap(*post_.session, rx_open_.header, post_.bitmap, now);
+    }
 }
 
-void Delivery::on_end_data(EndSession &s, uint32_t route_term, MonoTime now, wire::HopAckStatus &ack,
-                           uint16_t &retry_ms) {
-    using A = wire::HopAckStatus;
-    const OpenedEnd &o = rx_open_;
-    const wire::EndHeader &eh = o.header;
-    Post &post = post_;
-    if (!ready_ || recovering_) {
-        ++stats_.rx_busy;
-        ack = A::Busy; // our records are not loaded yet: the sender repeats, nothing is lost
-        retry_ms = k_busy_retry_ms;
-        return;
-    }
-    const bool finite = eh.expires_root_ms != 0;
-    if (!finite && !(eh.delivery() == wire::Delivery::Received && eh.durable())) {
-        ++stats_.rx_refused; // no-deadline commands are not allowed (docs/08 §5): refuse, do not act
-        s.rec.accept(eh.end_counter);
-        ack = A::Accepted;
-        post.k = Post::K::Refuse;
-        post.ev = ReceiptEv::Refused;
-        post.reason = static_cast<uint32_t>(Status::InvalidArgument);
-        return;
-    }
+IntentFields Delivery::rx_fields(const EndSession &s, const wire::EndHeader &eh, uint32_t route_term,
+                                 ByteView payload) const {
     IntentFields f;
     f.origin = s.peer;
     f.target = identity_.self();
@@ -310,11 +340,54 @@ void Delivery::on_end_data(EndSession &s, uint32_t route_term, MonoTime now, wir
     f.priority = static_cast<uint8_t>(eh.priority());
     f.root_term = route_term;
     f.expires_root_ms = eh.expires_root_ms;
-    f.payload = o.view();
+    f.payload = payload;
+    return f;
+}
+
+// The checks every DATA message (one frame or reassembled) passes before its payload is looked at.
+// False: `ack`/`retry_ms`/post_ already say what happens (BUSY, or accepted + refusal receipt).
+bool Delivery::data_gate(EndSession &s, const wire::EndHeader &eh, wire::HopAckStatus &ack, uint16_t &retry_ms) {
+    using A = wire::HopAckStatus;
+    if (!ready_ || recovering_) {
+        ++stats_.rx_busy;
+        ack = A::Busy; // our records are not loaded yet: the sender repeats, nothing is lost
+        retry_ms = k_busy_retry_ms;
+        return false;
+    }
+    if (eh.expires_root_ms == 0 && !(eh.delivery() == wire::Delivery::Received && eh.durable())) {
+        ++stats_.rx_refused; // no-deadline commands are not allowed (docs/08 §5): refuse, do not act
+        s.rec.accept(eh.end_counter);
+        ack = A::Accepted;
+        post_.k = Post::K::Refuse;
+        post_.ev = ReceiptEv::Refused;
+        post_.reason = static_cast<uint32_t>(Status::InvalidArgument);
+        return false;
+    }
+    return true;
+}
+
+void Delivery::on_end_data(EndSession &s, uint32_t route_term, MonoTime now, wire::HopAckStatus &ack,
+                           uint16_t &retry_ms) {
+    if (!data_gate(s, rx_open_.header, ack, retry_ms)) {
+        return;
+    }
     Sha256Digest hash{};
-    if (intent_hash(f, hash) != Status::Ok) {
+    if (intent_hash(rx_fields(s, rx_open_.header, route_term, rx_open_.view()), hash) != Status::Ok) {
         return; // Rejected
     }
+    admit_data(s, route_term, rx_open_.view(), Lane::Pool, Handle{}, hash, now, ack, retry_ms);
+}
+
+// A DATA message whose payload and hash are known: dedup, deadline, capacity, buffers, then it is
+// stored (Held / Committing). `held` is a message-pool buffer that already contains the payload (a
+// reassembled message: the slot's buffer moves to the entry, and stays the caller's on BUSY or a
+// refusal); Lane::Object payloads stay in the object buffer.
+void Delivery::admit_data(EndSession &s, uint32_t route_term, ByteView payload, Lane lane, Handle held,
+                          const Sha256Digest &hash, MonoTime now, wire::HopAckStatus &ack, uint16_t &retry_ms) {
+    using A = wire::HopAckStatus;
+    const wire::EndHeader &eh = rx_open_.header;
+    Post &post = post_;
+    const bool finite = eh.expires_root_ms != 0;
     if (InEntry *e = find_in(s.peer, eh.message_id)) {
         // A new end counter for a message we know (the origin re-sealed it, e.g. after a new session).
         s.rec.accept(eh.end_counter);
@@ -367,9 +440,17 @@ void Delivery::on_end_data(EndSession &s, uint32_t route_term, MonoTime now, wir
         post.hash = hash;
         return;
     }
-    // Buffers are reserved before the HOP_ACK says ACCEPTED (docs/08 §6): no room -> BUSY.
-    const Handle mb = msgs_.acquire();
-    if (mb.is_none()) {
+    // Buffers are reserved before the HOP_ACK says ACCEPTED (docs/08 §6): no room -> BUSY. A live slot of
+    // the dedup cache is one of them (P1); it is checked first so a refusal never recycles a finished record.
+    if (std::none_of(lives_.begin(), lives_.end(), [](const InLive &l) { return !l.used; })) {
+        ++stats_.rx_busy;
+        ack = A::Busy;
+        retry_ms = k_busy_retry_ms;
+        return;
+    }
+    const bool own = lane == Lane::Pool && held.is_none();
+    const Handle mb = own ? msgs_.acquire() : held;
+    if (lane == Lane::Pool && mb.is_none()) {
         ++stats_.rx_busy;
         ack = A::Busy;
         retry_ms = k_busy_retry_ms;
@@ -377,38 +458,45 @@ void Delivery::on_end_data(EndSession &s, uint32_t route_term, MonoTime now, wir
     }
     const Handle ih = alloc_in();
     if (ih.is_none()) {
-        (void)msgs_.release(mb);
+        if (own) {
+            (void)msgs_.release(mb);
+        }
         ++stats_.rx_busy;
         ack = A::Busy;
         retry_ms = k_busy_retry_ms;
         return;
     }
     InEntry *e = in_.get(ih);
+    InLive &l = *take_live(*e); // a free slot was checked above
     e->origin = s.peer;
     e->mid = eh.message_id;
     e->hash = hash;
-    e->origin_assignment = s.peer_assignment.value();
+    l.origin_assignment = s.peer_assignment.value();
     e->expires = eh.expires_root_ms;
-    e->term = route_term;
-    e->port = eh.app_port;
-    e->len = static_cast<uint16_t>(o.len);
+    l.term = route_term;
+    l.port = eh.app_port;
+    l.len = static_cast<uint16_t>(payload.size());
     e->delivery = static_cast<uint8_t>(eh.delivery());
-    e->priority = static_cast<uint8_t>(eh.priority());
+    l.priority = static_cast<uint8_t>(eh.priority());
     e->durable = eh.durable();
-    e->msg = mb;
+    l.obj = lane == Lane::Object;
+    l.msg = mb;
     e->last_use = ++in_tick_;
-    e->arrival = ++arrival_;
+    l.arrival = ++arrival_;
     e->st = e->durable ? InEntry::St::Committing : InEntry::St::Held;
     if (e->durable && !alloc_jslot(in_j_, e->jslot)) {
-        (void)msgs_.release(mb);
+        if (own) {
+            (void)msgs_.release(mb);
+        }
+        drop_live(*e);
         (void)in_.release(ih);
         ++stats_.rx_busy;
         ack = A::Busy;
         retry_ms = k_busy_retry_ms;
         return;
     }
-    if (o.len > 0) {
-        std::memcpy(msgs_.get(mb)->data.data(), o.plain.data(), o.len);
+    if (own && !payload.empty()) {
+        std::memcpy(msgs_.get(mb)->data.data(), payload.data(), payload.size());
     }
     s.rec.accept(eh.end_counter);
     ack = A::Accepted;
@@ -442,10 +530,9 @@ Handle Delivery::alloc_in() {
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         const Handle c = in_.handle_at(i);
         const InEntry *e = in_.get(c);
-        const bool finished = e != nullptr &&
+        const bool finished = e != nullptr && e->live == k_no_live && // settled: nothing left to do
                               (e->st == InEntry::St::Delivered || e->st == InEntry::St::Applied ||
-                               e->st == InEntry::St::AppRejected) &&
-                              !e->commit_wanted && e->persisted_version >= e->version && !e->event_owed;
+                               e->st == InEntry::St::AppRejected);
         if (finished && (best == nullptr || static_cast<int32_t>(e->last_use - best->last_use) < 0)) {
             best = e;
             victim = c;
@@ -459,6 +546,40 @@ Handle Delivery::alloc_in() {
     }
     (void)in_.release(victim);
     return in_.acquire();
+}
+
+InLive *Delivery::take_live(InEntry &e) {
+    for (std::size_t i = 0; i < k_in_live; ++i) {
+        if (!lives_[i].used) {
+            lives_[i] = InLive{};
+            lives_[i].used = true;
+            e.live = static_cast<uint8_t>(i);
+            return &lives_[i];
+        }
+    }
+    return nullptr;
+}
+
+void Delivery::drop_live(InEntry &e) {
+    if (e.live != k_no_live) {
+        lives_[e.live] = InLive{};
+        e.live = k_no_live;
+    }
+}
+
+// The record has nothing left to do: its live slot goes back and it stays as dedup memory. A message
+// whose application still owes a result (APPLIED) is not finished.
+void Delivery::settle(InEntry &e) {
+    const InLive *l = live_of(e);
+    if (l == nullptr) {
+        return;
+    }
+    const bool done = e.st == InEntry::St::Applied || e.st == InEntry::St::AppRejected ||
+                      (e.st == InEntry::St::Delivered && e.delivery != LM_APPLIED);
+    if (done && l->msg.is_none() && !l->event_owed && !l->commit_wanted && l->due_ev == 0xFF &&
+        (!e.durable || l->persisted_version >= l->version)) {
+        drop_live(e);
+    }
 }
 
 // ---- receipts (destination) ----
@@ -490,12 +611,21 @@ void Delivery::send_receipt_for(const DeviceId &origin, const std::array<uint8_t
     if (r.result_len > 0) {
         std::memcpy(r.result.data(), result.data(), r.result_len);
     }
-    // Plaintext in the first 96 B of the shared TX buffer, the sealed record after it.
-    uint8_t *const rec_at = tx_scratch_.data() + k_rec_off;
+    // The plaintext (a receipt is at most 96 B) is encoded on the stack, the sealed record goes into a
+    // pool frame borrowed for this receipt, right behind the room for the route header.
+    std::array<uint8_t, 96> plain{};
     std::size_t plen = 0;
-    if (encode_receipt(r, MutByteView{tx_scratch_.data(), k_rec_off}, plen) != Status::Ok ||
-        plen > wire::data_capacity(ps.len)) {
-        ++stats_.receipts_dropped; // does not fit one frame at this depth: needs the fragment slice
+    if (encode_receipt(r, MutByteView{plain}, plen) != Status::Ok) {
+        ++stats_.receipts_dropped;
+        return;
+    }
+    if (plen > wire::data_capacity(ps.len)) { // [S12] does not fit one frame at this depth: fragments
+        if (send_receipt_fragments(*s, ps, mid, ByteView{plain.data(), plen}, expires, now) != Status::Ok) {
+            ++stats_.receipts_dropped; // some fragments may be out; the origin's next round asks again
+            retry_kick_ = earliest(retry_kick_, now + Duration::from_ms(100));
+            return;
+        }
+        ++stats_.receipts_sent;
         return;
     }
     wire::EndHeader eh;
@@ -505,9 +635,11 @@ void Delivery::send_receipt_for(const DeviceId &origin, const std::array<uint8_t
     eh.flags = wire::make_end_flags(wire::Delivery::BestEffort, wire::Priority::Control, false);
     eh.expires_root_ms = expires;
     std::size_t rlen = 0;
-    Status st = seal_end_record(*s, s->tx_sid, ps.term, eh, ByteView{tx_scratch_.data(), plen},
-                                MutByteView{rec_at, k_record_bytes}, rlen);
-    if (st != Status::Ok || !build_and_send(ps, ByteView{rec_at, rlen}, OwnerKind::Receipt, Handle{}, now, st)) {
+    Lease scratch{engine_.frames()};
+    Status st = scratch.ok() ? seal_end_record(*s, s->tx_sid, ps.term, eh, ByteView{plain.data(), plen},
+                                               record_area(scratch, ps.len), rlen)
+                             : Status::NoCapacity;
+    if (st != Status::Ok || !build_and_send(ps, scratch, rlen, OwnerKind::Receipt, Handle{}, now, st)) {
         ++stats_.receipts_dropped; // TX pool full or no link: never blocks the owner, never RF loss
         retry_kick_ = earliest(retry_kick_, now + Duration::from_ms(100));
         return;
@@ -561,6 +693,10 @@ Reply Delivery::report_result(const ReportRequest &rq, ByteView result, MonoTime
                           (result.empty() || std::memcmp(e->result.data(), result.data(), result.size()) == 0);
         return same ? reply(Status::Ok) : reply(Status::Conflict); // an outcome is never changed
     }
+    InLive *l = live_of(*e); // a delivered APPLIED message keeps its live slot until the result is settled
+    if (l == nullptr) {
+        return reply(Status::Busy);
+    }
     Op *op = alloc_op();
     if (op == nullptr) {
         return reply(Status::NoCapacity);
@@ -573,19 +709,19 @@ Reply Delivery::report_result(const ReportRequest &rq, ByteView result, MonoTime
     op->dest = origin;
     op->mid = to_message_id(mid); // the origin's message id (this is the destination's record)
     op->hash = hash;
-    op->port = e->port;
+    op->port = l->port;
     op->delivery = e->delivery;
     op->outcome = static_cast<uint8_t>(rq.outcome);
     op->phase = Phase::Final;
     op->evidence = ev::accepted;
     op->accepted_ms = op->last_evidence_ms = now.to_ms();
     if (rq.outcome == LM_OUTCOME_PENDING) {
-        e->app_pending = true;
+        l->app_pending = true;
         op->phase = Phase::Pending;
         send_receipt(*e, ReceiptEv::AppPending, 0, now);
         return reply(Status::Ok, op->id);
     }
-    e->app_pending = false;
+    l->app_pending = false;
     e->st = static_cast<InEntry::St>(want);
     e->result_len = static_cast<uint8_t>(result.size());
     if (!result.empty()) {
@@ -594,11 +730,12 @@ Reply Delivery::report_result(const ReportRequest &rq, ByteView result, MonoTime
     const ReceiptEv rev = rq.outcome == LM_OUTCOME_APPLIED ? ReceiptEv::AppApplied : ReceiptEv::AppRejected;
     if (e->durable) {
         // The result is persisted before the receipt that claims it (accepted != persisted != sent).
-        e->due_ev = static_cast<uint8_t>(rev);
-        e->due_version = ++e->version;
+        l->due_ev = static_cast<uint8_t>(rev);
+        l->due_version = ++l->version;
         want_in_commit(h, *e, now);
     } else {
         send_receipt(*e, rev, 0, now);
+        settle(*e); // volatile: the result is in the record, nothing else is owed
     }
     return reply(Status::Ok, op->id);
 }

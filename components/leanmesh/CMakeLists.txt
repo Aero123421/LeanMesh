@@ -43,6 +43,9 @@ idf_component_register(
 set_source_files_properties(${LM_EDHOC_SOURCES} PROPERTIES COMPILE_OPTIONS "${LM_EDHOC_OPTIONS}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_BUILD_PROFILE_${lm_profile}
                                                     ${LM_EDHOC_DEFINITIONS})
+if(CONFIG_LEANMESH_OBJECT_TRANSFER)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_OBJECT_TRANSFER=1)
+endif()
 # First-party code is C++17 without exceptions/RTTI; libedhoc/zcbor are C11 (docs/15 §2).
 target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17 -fno-exceptions -fno-rtti -Wshadow>

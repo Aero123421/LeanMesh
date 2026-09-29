@@ -11,18 +11,15 @@
 
 #include "core/bytes.hpp"
 #include "core/link/neighbors.hpp"
+#include "core/radio/tx_pool.hpp"
 #include "core/wire/frame.hpp"
 
 namespace lm::link {
 
-// One ready-to-transmit frame. A retransmission sends these very bytes: the counter (nonce) of
-// a sealed frame is never reused for a different ciphertext (docs/06 §6).
-struct SealedFrame {
-    std::array<uint8_t, wire::k_max_frame_bytes> bytes{};
-    uint16_t len = 0;
-    uint64_t counter = 0;
-    [[nodiscard]] ByteView view() const { return ByteView{bytes.data(), len}; }
-};
+// One ready-to-transmit frame (radio/tx_pool.hpp). A retransmission sends these very bytes: the
+// counter (nonce) of a sealed frame is never reused for a different ciphertext (docs/06 §6); it is
+// read back from the header with counter().
+using SealedFrame = FrameBuf;
 
 // `header_sid` is what goes into the link header: the peer-assigned SID for normal frames, the
 // sender's own reserved SID for the two SESSION_BIND frames (docs/IMPLEMENTATION.md S5-D3).

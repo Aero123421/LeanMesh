@@ -24,8 +24,17 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
         ++stats_.rx_malformed;
         return true;
     }
+    if (proxy_sink_ != nullptr && proxy_sink_(proxy_ctx_, rx, now)) {
+        return true; // [S11] carried for a joiner behind us
+    }
     if (h.kind == wire::FrameKind::Discovery) {
-        return false; // hints and beacons belong to the mesh slice
+        if (disc_sink_ == nullptr) {
+            return false;
+        }
+        if (identity_.is_member() && h.domain_hint == domain_hint_of(identity_.delegation().domain)) {
+            disc_sink_(disc_ctx_, rx.src, payload, now); // [S11] a hint of our own domain
+        }
+        return true;
     }
     if (h.kind == wire::FrameKind::JoinProxy) {
         // [S8] Unjoined device <-> root carrier. Discovery hints go to the join module, everything

@@ -17,9 +17,15 @@ Duration clamp(Duration d, Duration lo, Duration hi) { return d < lo ? lo : (d >
 
 } // namespace
 
-TxFrame *HopTx::reserve(Handle &h) {
-    h = frames_.acquire();
-    return h.is_none() ? nullptr : frames_.get(h);
+HopTx::HopTx(Engine &engine, link::LinkLayer &link)
+    : engine_(engine), link_(link), pool_(engine.frames()), frames_(engine.frames().slots()) {}
+
+TxFrame *HopTx::reserve(Handle &h, sched::Class cls, const MacAddr &mac) {
+    TxFrame *f = pool_.reserve(h, cls, mac);
+    if (f == nullptr) {
+        engine_.sched().note_refused(cls); // class limit, per-peer cap or pool full: local, not RF
+    }
+    return f;
 }
 
 void HopTx::submit(Handle h, OwnerKind kind, Handle owner, const MacAddr &mac, MonoTime now) {
@@ -28,10 +34,10 @@ void HopTx::submit(Handle h, OwnerKind kind, Handle owner, const MacAddr &mac, M
         return;
     }
     f->kind = kind;
-    f->owner = owner;
+    f->set_owner(owner);
     f->mac = mac;
     f->st = TxFrame::St::Ready;
-    f->not_before = now;
+    f->at = now;
     f->order = ++order_;
     pump(now);
 }
@@ -76,11 +82,11 @@ void HopTx::rtt_sample(Duration r) {
 void HopTx::finish(Handle h, TxFrame &f, HopEnd end, MonoTime now) {
     FrameDone d;
     d.kind = f.kind;
-    d.owner = f.owner;
+    d.owner = f.owner();
     d.mac = f.mac;
     d.attempts = f.attempts;
-    d.left = f.left;
-    d.counter = f.frame.counter;
+    d.left = f.has(TxFrame::Left);
+    d.counter = f.frame.counter();
     frames_.release(h);
     if (hooks_.done != nullptr && d.kind != OwnerKind::None) {
         hooks_.done(hooks_.ctx, d, end, now);
@@ -90,8 +96,10 @@ void HopTx::finish(Handle h, TxFrame &f, HopEnd end, MonoTime now) {
 void HopTx::apply_ack(Handle h, TxFrame &f, wire::HopAckStatus st, uint16_t retry_after_ms, MonoTime now) {
     switch (st) {
     case wire::HopAckStatus::Accepted:
-        if (f.attempts == 1 && f.busy_defers == 0 && now >= f.handoff_at) {
-            rtt_sample(now - f.handoff_at); // Karn: only unambiguous samples
+        if (f.attempts == 1 && f.busy_defers == 0) {
+            // Karn: only unambiguous samples. The hand-off time is kept as 16 bits of milliseconds.
+            const auto ms = static_cast<uint16_t>(static_cast<uint16_t>(now.to_ms()) - f.handoff_ms);
+            rtt_sample(Duration::from_ms(ms));
         }
         finish(h, f, HopEnd::Accepted, now);
         return;
@@ -102,17 +110,16 @@ void HopTx::apply_ack(Handle h, TxFrame &f, wire::HopAckStatus st, uint16_t retr
     case wire::HopAckStatus::Busy:
         // The next hop is out of buffers: its capacity, not RF loss. Defer without using an attempt.
         ++stats_.ack_busy;
-        if (f.abandoned || ++f.busy_defers > k_max_busy_defers) {
+        if (f.has(TxFrame::Abandoned) || ++f.busy_defers > k_max_busy_defers) {
             finish(h, f, HopEnd::Failed, now);
             return;
         }
         if (f.attempts > 0) {
             --f.attempts; // the peer had no buffer: this hand-off does not count as a link attempt
         }
-        f.after_busy = true;
+        f.set(TxFrame::AfterBusy);
         f.st = TxFrame::St::Ready;
-        f.rto_at = MonoTime::never();
-        f.not_before = now + clamp(Duration::from_ms(retry_after_ms), k_busy_min, k_busy_max);
+        f.at = now + clamp(Duration::from_ms(retry_after_ms), k_busy_min, k_busy_max);
         f.order = ++order_;
         return;
     }
@@ -122,8 +129,8 @@ bool HopTx::on_ack(const MacAddr &src, const wire::HopAck &ack, MonoTime now) {
     for (std::size_t i = 0; i < k_frames; ++i) {
         const Handle h = frames_.handle_at(i);
         TxFrame *f = frames_.get(h);
-        if (f == nullptr || f->st == TxFrame::St::Reserved || !f->left ||
-            f->frame.counter != ack.acked_link_counter || f->mac != src) {
+        if (f == nullptr || f->st == TxFrame::St::Reserved || !f->has(TxFrame::Left) ||
+            f->frame.counter() != ack.acked_link_counter || f->mac != src) {
             continue;
         }
         // Matched by (peer, link counter), whatever the TX callback did yet: an ACK that beats the
@@ -155,7 +162,7 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
                 ++stats_.tx_unknown;
             }
             f->st = TxFrame::St::WaitAck;
-            f->rto_at = now + rto_for(f->attempts);
+            f->at = now + rto_for(f->attempts);
             break;
         }
     }
@@ -166,16 +173,15 @@ void HopTx::on_timer(MonoTime now) {
     for (std::size_t i = 0; i < k_frames; ++i) {
         const Handle h = frames_.handle_at(i);
         TxFrame *f = frames_.get(h);
-        if (f == nullptr || f->st != TxFrame::St::WaitAck || now < f->rto_at) {
+        if (f == nullptr || f->st != TxFrame::St::WaitAck || now < f->at) {
             continue;
         }
-        if (f->attempts >= k_link_attempts || f->abandoned) {
+        if (f->attempts >= k_link_attempts || f->has(TxFrame::Abandoned)) {
             finish(h, *f, HopEnd::Failed, now);
             continue;
         }
         f->st = TxFrame::St::Ready; // retransmit the same bytes (deadline is re-checked in pump)
-        f->rto_at = MonoTime::never();
-        f->not_before = now;
+        f->at = now;
         f->order = ++order_;
     }
     if (now >= retry_at_) {
@@ -191,10 +197,8 @@ MonoTime HopTx::deadline() const {
         if (f == nullptr) {
             continue;
         }
-        if (f->st == TxFrame::St::WaitAck) {
-            next = earliest(next, f->rto_at);
-        } else if (f->st == TxFrame::St::Ready && !(f->not_before <= now_)) {
-            next = earliest(next, f->not_before);
+        if (f->st == TxFrame::St::WaitAck || (f->st == TxFrame::St::Ready && !(f->at <= now_))) {
+            next = earliest(next, f->at);
         }
     }
     return next;
@@ -236,12 +240,13 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
         ack.retry_after_ms = a.retry_after_ms;
         std::array<uint8_t, wire::k_hop_ack_body_bytes> plain{};
         std::size_t plen = 0;
-        Status st = wire::encode_hop_ack(ack, MutByteView{plain}, plen);
+        Lease buf{pool_}; // the seal buffer is a pool frame borrowed for this one ACK (P9)
+        Status st = buf.ok() ? wire::encode_hop_ack(ack, MutByteView{plain}, plen) : Status::NoCapacity;
         if (st == Status::Ok) {
-            st = link_.seal(a.peer, wire::FrameKind::HopAck, ByteView{plain.data(), plen}, ack_buf_, now);
+            st = link_.seal(a.peer, wire::FrameKind::HopAck, ByteView{plain.data(), plen}, buf.buf(), now);
         }
-        if (st == Status::Ok) {
-            st = engine_.transmit(a.mac, ack_buf_.view(), k_tag_ack | ack_seq_, now);
+        if (st == Status::Ok) { // never gated by the scheduler: the ACK frees the sender's buffer
+            st = engine_.transmit(a.mac, buf.buf().view(), k_tag_ack | ack_seq_, now, sched::Class::Control, false);
         }
         if (st == Status::Busy || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
             ++stats_.local_busy;
@@ -258,28 +263,56 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
         }
         return;
     }
-    Handle best;
-    TxFrame *pick = nullptr;
+    // The oldest ready frame of every class is what the scheduler chooses between. A frame the owner
+    // withdrew ends at once: it needs no airtime.
+    std::array<Handle, sched::k_classes> head{};
+    std::array<uint16_t, sched::k_classes> head_bytes{};
     for (std::size_t i = 0; i < k_frames; ++i) {
         const Handle h = frames_.handle_at(i);
         TxFrame *f = frames_.get(h);
-        if (f != nullptr && f->st == TxFrame::St::Ready && f->not_before <= now &&
-            (pick == nullptr || static_cast<int32_t>(f->order - pick->order) < 0)) {
-            pick = f;
-            best = h;
+        if (f == nullptr || f->st != TxFrame::St::Ready || !(f->at <= now)) {
+            continue;
+        }
+        if (f->has(TxFrame::Abandoned)) {
+            ++stats_.aborted;
+            finish(h, *f, HopEnd::Aborted, now);
+            progress = true;
+            return;
+        }
+        const auto c = static_cast<std::size_t>(f->cls);
+        const TxFrame *cur = frames_.get(head[c]);
+        if (cur == nullptr || static_cast<int16_t>(f->order - cur->order) < 0) {
+            head[c] = h;
+            head_bytes[c] = f->frame.len;
         }
     }
+    sched::Class cls = sched::Class::Control;
+    MonoTime wake;
+    bool ready = false;
+    for (uint16_t b : head_bytes) {
+        ready = ready || b != 0;
+    }
+    if (!ready) {
+        return;
+    }
+    if (!engine_.sched().pick(head_bytes, now, cls, wake)) {
+        retry_at_ = earliest(retry_at_, wake); // airtime tokens: the frame waits, nothing is lost
+        sent = true;
+        return;
+    }
+    const Handle best = head[static_cast<std::size_t>(cls)];
+    TxFrame *pick = frames_.get(best);
     if (pick == nullptr) {
         return;
     }
-    if (pick->abandoned || (hooks_.may_send != nullptr && hooks_.may_send(hooks_.ctx, *pick, now) != Status::Ok)) {
+    if (hooks_.may_send != nullptr && hooks_.may_send(hooks_.ctx, *pick, now) != Status::Ok) {
         ++stats_.aborted;
         finish(best, *pick, HopEnd::Aborted, now);
         progress = true;
         return;
     }
     const uint16_t seq = ++air_seq_;
-    const Status st = engine_.transmit(pick->mac, pick->frame.view(), k_tag_frame | seq, now);
+    const Status st = engine_.transmit(pick->mac, pick->frame.view(), k_tag_frame | seq, now, pick->cls, true);
     if (st == Status::Busy || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
         ++stats_.local_busy; // not an attempt, not a loss (Busy, NO_MEM, isolated radio)
         retry_at_ = now + k_pump_retry;
@@ -293,23 +326,24 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
     }
     pick->air_seq = seq;
     pick->st = TxFrame::St::OnAir;
-    pick->handoff_at = now;
+    pick->at = MonoTime::never();
+    pick->handoff_ms = static_cast<uint16_t>(now.to_ms());
     ++pick->attempts;
     ++stats_.frames;
-    if (pick->after_busy) {
+    if (pick->has(TxFrame::AfterBusy)) {
         ++stats_.busy_resends;
-    } else if (pick->left) {
+    } else if (pick->has(TxFrame::Left)) {
         ++stats_.retransmits;
     }
-    pick->left = true;
-    pick->after_busy = false;
+    pick->set(TxFrame::Left);
+    pick->set(TxFrame::AfterBusy, false);
     sent = true;
 }
 
 bool HopTx::has_left(OwnerKind kind, Handle owner) const {
     for (std::size_t i = 0; i < k_frames; ++i) {
         const TxFrame *f = frames_.get(frames_.handle_at(i));
-        if (f != nullptr && f->kind == kind && f->owner == owner && f->left) {
+        if (f != nullptr && f->kind == kind && f->owner() == owner && f->has(TxFrame::Left)) {
             return true;
         }
     }
@@ -321,13 +355,13 @@ bool HopTx::withdraw(OwnerKind kind, Handle owner) {
     for (std::size_t i = 0; i < k_frames; ++i) {
         const Handle h = frames_.handle_at(i);
         TxFrame *f = frames_.get(h);
-        if (f == nullptr || f->kind != kind || f->owner != owner) {
+        if (f == nullptr || f->kind != kind || f->owner() != owner) {
             continue;
         }
-        if (!f->left) {
+        if (!f->has(TxFrame::Left)) {
             frames_.release(h);
         } else {
-            f->abandoned = true;
+            f->set(TxFrame::Abandoned);
             none_left = false;
         }
     }
@@ -336,7 +370,11 @@ bool HopTx::withdraw(OwnerKind kind, Handle owner) {
 
 void HopTx::clear() {
     for (std::size_t i = 0; i < k_frames; ++i) {
-        (void)frames_.release(frames_.handle_at(i));
+        const Handle h = frames_.handle_at(i);
+        const TxFrame *f = frames_.get(h);
+        if (f != nullptr && f->kind != OwnerKind::Borrowed) {
+            (void)frames_.release(h); // borrowed buffers belong to their borrowers (Engine::stop_radio sweeps)
+        }
     }
     PendingAck a;
     while (acks_.pop(a)) {

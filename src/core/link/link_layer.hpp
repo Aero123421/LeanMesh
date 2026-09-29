@@ -72,6 +72,18 @@ class LinkLayer {
         sink_ = sink;
         sink_ctx_ = ctx;
     }
+    // [S11] DISCOVERY frames (SID 0 hints and beacons) go to the mesh; they authorise nothing.
+    // [S11] A frame of a device that is not a neighbour (a joiner behind us): true = the relay took it.
+    using ProxySink = bool (*)(void *ctx, const port::RadioRx &rx, MonoTime now);
+    void set_proxy_sink(ProxySink sink, void *ctx) {
+        proxy_sink_ = sink;
+        proxy_ctx_ = ctx;
+    }
+    using DiscoverySink = void (*)(void *ctx, const MacAddr &src, ByteView body, MonoTime now);
+    void set_discovery_sink(DiscoverySink sink, void *ctx) {
+        disc_sink_ = sink;
+        disc_ctx_ = ctx;
+    }
     void set_root_time(const RootTimeBound &t) { shared_.root_time = t; }
     LinkPolicy &policy() { return policy_; }
     [[nodiscard]] const LinkPolicy &policy() const { return policy_; }
@@ -94,6 +106,10 @@ class LinkLayer {
     Exchange exchange_;
     RxSink sink_ = nullptr;
     void *sink_ctx_ = nullptr;
+    ProxySink proxy_sink_ = nullptr;
+    void *proxy_ctx_ = nullptr;
+    DiscoverySink disc_sink_ = nullptr;
+    void *disc_ctx_ = nullptr;
     MonoTime rotation_retry_ = MonoTime{0};
 };
 

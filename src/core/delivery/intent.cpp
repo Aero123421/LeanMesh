@@ -8,14 +8,14 @@
 namespace lm::delivery {
 namespace {
 // CBOR head bytes of the array + fixed fields, plus one bstr head for the payload.
-constexpr std::size_t k_intent_fixed = 1 + 34 + 34 + 18 + 3 + 1 + 1 + 1 + 5 + 9 + 3;
+constexpr std::size_t k_intent_fixed = 1 + 34 + 34 + 18 + 3 + 1 + 1 + 1 + 5 + 9 + 3 + 1;
 } // namespace
 
 Status intent_hash(const IntentFields &f, Sha256Digest &out) {
-    if (f.payload.size() > wire::data_capacity(1)) {
+    if (f.payload.size() > gen::limits::object_bytes) {
         return Status::NoCapacity;
     }
-    std::array<uint8_t, k_intent_fixed + wire::data_capacity(1)> buf{};
+    std::array<uint8_t, k_intent_fixed> buf{};
     wire::CborWriter w{MutByteView{buf}};
     w.array(10);
     w.bytes(f.origin.view());
@@ -27,9 +27,30 @@ Status intent_hash(const IntentFields &f, Sha256Digest &out) {
     w.uint(f.priority);
     w.uint(f.expires_root_ms == 0 ? 0 : f.root_term);
     w.uint(f.expires_root_ms);
-    w.bytes(f.payload);
+    w.bytes_head(f.payload.size()); // the payload bytes follow the head: hashed from where they are
     LM_TRY(w.finish());
-    return sec::sha256(w.written(), out);
+    return sec::sha256_parts(w.written(), f.payload, out);
+}
+
+Status object_hash(const DeviceId &origin, const DeviceId &target, const DomainId &domain, wire::RecordKind kind,
+                   uint8_t flags, uint32_t root_term, uint64_t expires_root_ms, ByteView payload, Sha256Digest &out) {
+    if (payload.size() > gen::limits::object_bytes) {
+        return Status::NoCapacity;
+    }
+    std::array<uint8_t, k_intent_fixed> buf{};
+    wire::CborWriter w{MutByteView{buf}};
+    w.array(9);
+    w.bytes(origin.view());
+    w.bytes(target.view());
+    w.bytes(domain.view());
+    w.uint(0); // app_port: receipts and control objects are SDK control (port 0)
+    w.uint(static_cast<uint8_t>(kind));
+    w.uint(flags);
+    w.uint(expires_root_ms == 0 ? 0 : root_term);
+    w.uint(expires_root_ms);
+    w.bytes_head(payload.size());
+    LM_TRY(w.finish());
+    return sec::sha256_parts(w.written(), payload, out);
 }
 
 // receipt = [message-id bstr16, intent-hash bstr32, evidence 0..6, reason u32, sequence u32,

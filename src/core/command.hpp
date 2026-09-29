@@ -55,6 +55,7 @@ enum class CommandKind : uint8_t {
     RootHostStoreAck,
     RootGroupSnapshot,
     RootSleepWindow,
+    SendControl,  // [S12] internal: a control object to a device (delivery::ControlSendRequest)
     RootHostSend, // [S13] lm_send with the Host's MessageId and intent_hash (see delivery::HostSendRequest)
 };
 
@@ -72,6 +73,10 @@ struct Reply {
     Status status = Status::Unsupported;
     uint64_t operation_id = 0;      // for accepted asynchronous operations
     std::size_t required_bytes = 0; // for BufferTooSmall
+    // [S14] Admission refusals (NoCapacity/Busy from the scheduler) say why and when to try again:
+    // the diagnostics and the Host's 429/503 use them. 0 = not stated.
+    uint32_t retry_after_ms = 0;
+    uint16_t queue_depth = 0; // live operations in the class or pool that refused
 };
 
 // Platform glue that runs a command on the owner thread and waits for the reply. IDF: bounded

@@ -274,6 +274,10 @@ void Membership::on_commit(ByteView data, MonoTime now) {
         ++stats_.refusals;
         pipe_.acked();
         const Status why = a.value <= 0xFFFF ? static_cast<Status>(a.value) : Status::Conflict;
+        if (why == Status::NotFound && !have_prepared_ && phase_ == JoinPhase::RequestOut && now < search_deadline_) {
+            not_expected(now); // NOT_EXPECTED is a hold with a re-evaluation, not a rejection (docs/07 §3)
+            return;
+        }
         req_.reason = why;
         req_.outcome = why == Status::Expired ? LM_OUTCOME_EXPIRED : LM_OUTCOME_REJECTED;
         if (have_prepared_ && !transient(why)) {
@@ -340,7 +344,8 @@ void Membership::active_out(MonoTime now) {
     engine_.identity().return_record();
     rec_ = nullptr;
     phase_ = JoinPhase::ActiveOut;
-    final_wait_until_ = now + Duration::from_s(5);
+    // 5 s for a neighbour; a proxied join adds three of its (longer) retransmission periods.
+    final_wait_until_ = now + Duration::from_s(5) + Duration{3 * (engine_.link().policy().rto - link::LinkPolicy{}.rto).us};
     JoinAckData a;
     a.prepare_hash = req_.prepare_hash;
     a.value = activated_generation_;
@@ -391,8 +396,9 @@ void Membership::finish_join(Status why, uint32_t outcome, MonoTime now) {
     req_.reason = why;
     req_.outcome = outcome;
     phase_ = JoinPhase::Idle;
-    retry_at_ = hello_at_ = search_deadline_ = request_deadline_ = prepared_until_ = final_wait_until_ =
-        MonoTime::never();
+    disc_.stop();
+    collect_until_ = MonoTime::never();
+    retry_at_ = search_deadline_ = request_deadline_ = prepared_until_ = final_wait_until_ = MonoTime::never();
     retry_consume_ = false;
     resume_ = false;
     release_join();

@@ -304,9 +304,11 @@ void Ledger::discovery(const MacAddr & /*src*/, const wire::BootstrapCarrier &c,
     }
     last_offer_ = now;
     // Offers are broadcast: the joiner picks the source of the first one that echoes its own nonce.
-    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 1> frame{};
+    std::array<uint8_t, wire::k_link_header_bytes + wire::k_bootstrap_header_bytes + 6> frame{};
     std::size_t len = 0;
-    if (member::encode_discovery(true, c.exchange_id, hint(), MutByteView{frame}, len) == Status::Ok) {
+    member::OfferHint oh;
+    oh.expected_revision = static_cast<uint32_t>(expected_revision_);
+    if (member::encode_discovery(true, c.exchange_id, hint(), MutByteView{frame}, len, &oh) == Status::Ok) {
         (void)engine_.transmit(MacAddr::broadcast(), ByteView{frame.data(), len}, k_tag_offer, now);
     }
 }

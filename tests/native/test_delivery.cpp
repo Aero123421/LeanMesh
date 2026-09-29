@@ -141,7 +141,7 @@ struct DNet {
     };
     // ttl_ms 0 = no deadline (RECEIVED+DURABLE only).
     Sent send(unsigned from, unsigned to, uint32_t delivery_kind, uint32_t storage, const Bytes &payload,
-              uint64_t ttl_ms = 30000, uint16_t port = 100) {
+              uint64_t ttl_ms = 30000, uint16_t port = 100, bool strict = false) {
         lm_send_request_t rq{};
         rq.struct_size = sizeof(rq);
         rq.abi_version = LM_ABI_VERSION;
@@ -152,6 +152,7 @@ struct DNet {
         rq.storage = static_cast<uint8_t>(storage);
         rq.priority = LM_PRIORITY_NORMAL;
         rq.queue_mode = LM_FIFO;
+        rq.strict_single_frame = strict ? 1 : 0;
         rq.root_term = ttl_ms == 0 ? 0 : 1;
         rq.expires_root_ms = ttl_ms == 0 ? 0 : root_ms() + ttl_ms;
         Sent s;
@@ -482,8 +483,8 @@ LM_TEST("D06 sim: accept-time deadline rules (no clock, past, none only for RECE
     rq.priority = LM_PRIORITY_CONTROL;
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_INVALID_ARGUMENT);
     rq.priority = LM_PRIORITY_NORMAL;
-    rq.queue_mode = LM_LATEST;
-    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_UNSUPPORTED);
+    rq.queue_mode = LM_LATEST; // LATEST is best effort + volatile only (docs/08 §1, S14)
+    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_INVALID_ARGUMENT);
     rq.queue_mode = LM_FIFO;
     rq.destination.kind = LM_DEST_GROUP;
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_UNSUPPORTED);
@@ -492,7 +493,9 @@ LM_TEST("D06 sim: accept-time deadline rules (no clock, past, none only for RECE
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_INVALID_ARGUMENT);
     std::memcpy(rq.destination.node.bytes, n.id(1).bytes.data(), 32);
     const Bytes big(300, 1);
+    rq.strict_single_frame = 1; // without it the message is fragmented (S12)
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, big.data(), big.size(), &op), LM_STATUS_PAYLOAD_TOO_LARGE);
+    rq.strict_single_frame = 0;
     const Bytes huge(513, 1);
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, huge.data(), huge.size(), &op), LM_STATUS_PAYLOAD_TOO_LARGE);
     LM_CHECK_EQ(lm_send_object(n.ctx(0), &rq, p.data(), p.size(), &op), LM_STATUS_UNSUPPORTED);
@@ -883,9 +886,10 @@ LM_TEST("D08 sim: payload capacity per destination (134 / 96 / 56) and NO_ROUTE 
     LM_CHECK_EQ(lm_payload_capacity(n.ctx(0), &d, &bytes, &hops), LM_STATUS_NO_ROUTE);
     d.kind = LM_DEST_GROUP;
     LM_CHECK_EQ(lm_payload_capacity(n.ctx(0), &d, &bytes, &hops), LM_STATUS_UNSUPPORTED);
-    // A payload above the known route's capacity is refused at acceptance (until fragmentation lands).
-    LM_CHECK_EQ(n.send(0, 5, LM_RECEIVED, LM_VOLATILE, Bytes(127, 1), 30000).st, LM_STATUS_PAYLOAD_TOO_LARGE);
-    LM_CHECK_EQ(n.send(0, 5, LM_RECEIVED, LM_VOLATILE, Bytes(126, 1), 30000).st, LM_STATUS_OK);
+    // strict_single_frame: a payload above the known route's capacity is refused at acceptance (the
+    // default fragments it, S12).
+    LM_CHECK_EQ(n.send(0, 5, LM_RECEIVED, LM_VOLATILE, Bytes(127, 1), 30000, 100, true).st, LM_STATUS_PAYLOAD_TOO_LARGE);
+    LM_CHECK_EQ(n.send(0, 5, LM_RECEIVED, LM_VOLATILE, Bytes(126, 1), 30000, 100, true).st, LM_STATUS_OK);
 }
 
 LM_TEST("R01 sim: 20 hops, an APPLIED message with the 96-byte maximum, end session over the whole path") {
@@ -893,7 +897,7 @@ LM_TEST("R01 sim: 20 hops, an APPLIED message with the 96-byte maximum, end sess
     n.set_time();
     n.routes(0, 20);
     const Bytes body = payload_of(0x21, 96);
-    LM_CHECK_EQ(n.send(0, 20, LM_APPLIED, LM_VOLATILE, Bytes(97, 1), 120000).st, LM_STATUS_PAYLOAD_TOO_LARGE);
+    LM_CHECK_EQ(n.send(0, 20, LM_APPLIED, LM_VOLATILE, Bytes(97, 1), 120000, 100, true).st, LM_STATUS_PAYLOAD_TOO_LARGE);
     const auto s = n.send(0, 20, LM_APPLIED, LM_VOLATILE, body, 120000);
     LM_CHECK_EQ(s.st, LM_STATUS_OK);
     Received m;
@@ -1316,7 +1320,7 @@ LM_TEST("D08 sim: an empty payload is a valid message") {
     LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_APPLIED; }, 10000));
 }
 
-LM_TEST("R02 sim: 40 hops carry the end-session set-up, a 56-byte message and its receipt; a result does not fit yet") {
+LM_TEST("R02 sim: 40 hops carry the end-session set-up, a 56-byte message and its receipt; a receipt with a result is fragmented") {
     DNet n(41);
     n.set_time();
     n.routes(0, 40);
@@ -1327,22 +1331,20 @@ LM_TEST("R02 sim: 40 hops carry the end-session set-up, a 56-byte message and it
     LM_CHECK(n.until([&] { return n.pop(40, m, LM_EVENT_MESSAGE); }, 120000));
     LM_CHECK(m.payload == payload_of(1, 56));
     LM_CHECK_EQ(n.op(0, b.op).outcome, static_cast<uint32_t>(LM_OUTCOME_SUBMITTED));
-    LM_CHECK_EQ(n.send(0, 40, LM_BEST_EFFORT, LM_VOLATILE, Bytes(57, 1), 120000).st, LM_STATUS_PAYLOAD_TOO_LARGE);
+    LM_CHECK_EQ(n.send(0, 40, LM_BEST_EFFORT, LM_VOLATILE, Bytes(57, 1), 120000, 100, true).st, LM_STATUS_PAYLOAD_TOO_LARGE);
     LM_CHECK_EQ(n.dv(0).end_stats().completed, 1u); // SESSION_BIND (117 B) travelled as fragments
     // RECEIVED: the delivery receipt is exactly 56 B, the whole payload capacity of a 40-hop frame.
     const auto r = n.send(0, 40, LM_RECEIVED, LM_VOLATILE, payload_of(2, 56), 60000);
     LM_CHECK(n.until([&] { return n.op(0, r.op).outcome == LM_OUTCOME_RECEIVED; }, 90000));
     LM_CHECK(n.pop(40, m, LM_EVENT_MESSAGE));
-    // APPLIED with a result: receipt + result exceed one 40-hop frame. It is dropped and counted (the
-    // fragment slice will split receipts, docs/09 §6); the origin never claims APPLIED without it.
-    const auto a = n.send(0, 40, LM_APPLIED, LM_VOLATILE, payload_of(3, 56), 40000);
+    // APPLIED with a result: the receipt exceeds one 40-hop frame and travels as fragments (S12); the
+    // origin gets the result. It is never claimed without it.
+    const auto a = n.send(0, 40, LM_APPLIED, LM_VOLATILE, payload_of(3, 56), 120000);
     LM_CHECK(n.until([&] { return n.pop(40, m, LM_EVENT_MESSAGE); }, 60000));
     LM_CHECK_EQ(n.report(40, m.ev, LM_OUTCOME_APPLIED, Bytes(8, 7)), LM_STATUS_OK);
-    LM_CHECK(n.until([&] { return n.op(0, a.op).phase == static_cast<uint32_t>(delivery::Phase::Final); }, 60000));
-    LM_CHECK(n.dv(40).stats().receipts_dropped >= 1u);
-    LM_CHECK_EQ(n.op(0, a.op).outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE));
-    LM_CHECK((n.op(0, a.op).evidence_bits & end_received) != 0);
-    LM_CHECK((n.op(0, a.op).evidence_bits & app_applied) == 0);
+    LM_CHECK(n.until([&] { return n.op(0, a.op).outcome == LM_OUTCOME_APPLIED; }, 100000));
+    LM_CHECK((n.op(0, a.op).evidence_bits & app_applied) != 0);
+    LM_CHECK_EQ(n.dv(40).stats().receipts_dropped, 0u);
 }
 
 LM_TEST("ME05 sim: an idle node with delivery state schedules no wakes") {

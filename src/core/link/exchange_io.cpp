@@ -43,10 +43,14 @@ void Exchange::on_bootstrap(const MacAddr &src, ByteView carrier, MonoTime now, 
 // from what was staged, and assembles objects in order.
 void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
     const bool cred = f.kind == ObjKind::CredI || f.kind == ObjKind::CredR;
-    if (lent_) {
+    if (lent_ || slot_lent_) {
         if (cred) {
-            busy_drop(o.family); // the credential buffer is borrowed by a join module
+            busy_drop(o.family); // the credential buffer / the slot is borrowed (join module, USB link)
         }
+        return;
+    }
+    if (usb_reserved_ && cred && (phase_ == Phase::Idle || phase_ == Phase::Linger)) {
+        busy_drop(o.family); // the USB link is next for the slot (S13-D10)
         return;
     }
     if (o.family != Family::End && !cred && !(f.offset == 0 && f.body.size() == f.total)) {
@@ -286,7 +290,8 @@ ByteView Exchange::tx_object() const {
     if (tx_kind_ == ObjKind::CredI || tx_kind_ == ObjKind::CredR) {
         return own_bundle();
     }
-    return ByteView{stage_.data(), stage_len_};
+    const TxFrame *f = s_.engine.frames().get(stage_h_);
+    return f != nullptr ? ByteView{f->frame.bytes.data(), stage_len_} : ByteView{};
 }
 
 void Exchange::arm_rto(MonoTime now) {
@@ -306,6 +311,9 @@ void Exchange::arm_rto(MonoTime now) {
 void Exchange::pump(MonoTime now) {
     if (!tx_active_ || tx_inflight_ || phase_ == Phase::Idle || phase_ == Phase::Zombie) {
         return;
+    }
+    if (!retry_at_.is_never() && now < retry_at_) {
+        return; // a busy radio or the inter-fragment gap of a proxied join: on_timer pumps again then
     }
     const ByteView obj = tx_object();
     if (obj.empty()) {
@@ -360,6 +368,10 @@ void Exchange::on_tx_outcome(const TxOutcome &o, MonoTime now) {
         tx_inflight_ = false;
         if (o.result == port::TxResult::MacFailed) {
             ++s_.stats.tx_rf_failed; // the only RF-loss sample; recovery is by RTO, not here
+        }
+        if (s_.policy.tx_gap.us > 0 && tx_active_) {
+            retry_at_ = now + s_.policy.tx_gap; // [S11] a relay in the path needs a moment per frame
+            return;
         }
     }
     pump(now);

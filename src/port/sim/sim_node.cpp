@@ -34,6 +34,7 @@ Status SimNode::boot() {
     clock.on_boot(world_.now_us());
     jobs.set_epoch(epoch_);
     LM_TRY(capi::init_context(at, ws.bytes, &cfg, Ports{clock, radio, jobs}, owner_call, opts_.rf, &ctx_));
+    ctx_->engine.mesh().set_enabled(opts_.mesh);
     notify();
     return Status::Ok;
 }

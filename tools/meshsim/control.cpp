@@ -178,6 +178,10 @@ const Entry k_commands[] = {
     {"route", cmd_route}, {"root-time", cmd_root_time}, {"send", cmd_send}, {"op", cmd_op},
     {"msg-next", cmd_msg_next}, {"msg-report", cmd_msg_report}, {"msg-cancel", cmd_msg_cancel},
     {"delivery", cmd_delivery},
+    {"gen-send", cmd_gen_send}, {"gen-next", cmd_gen_next}, {"send-control", cmd_send_control},
+    {"ctl-sink", cmd_ctl_sink}, {"ctl-recv", cmd_ctl_recv}, {"frag", cmd_frag},
+    {"flood", cmd_flood},         {"sched", cmd_sched},
+    {"mesh", cmd_mesh},
 };
 
 } // namespace

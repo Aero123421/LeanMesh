@@ -3,6 +3,8 @@ list(APPEND LM_COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/credentials.cpp
     ${CMAKE_CURRENT_LIST_DIR}/records.cpp
     ${CMAKE_CURRENT_LIST_DIR}/join_wire.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/discovery.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/proxy.cpp
     ${CMAKE_CURRENT_LIST_DIR}/join.cpp
     ${CMAKE_CURRENT_LIST_DIR}/membership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/membership_join.cpp

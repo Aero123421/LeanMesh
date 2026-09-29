@@ -49,17 +49,40 @@ Status join_bundle_parse(ByteView in, JoinBundle &out) {
     return Status::Ok;
 }
 
+Status decode_offer_hint(ByteView body, OfferHint &out) {
+    OfferHint h;
+    if (body.size() == 6 && body[0] == 2) {
+        Reader r{body};
+        (void)r.u8();
+        h.depth = r.u8();
+        h.expected_revision = r.u32be();
+    } else if (body.size() != 1 || body[0] != 1) {
+        return Status::BadFrame;
+    }
+    out = h;
+    return Status::Ok;
+}
+
 Status encode_discovery(bool offer, const std::array<uint8_t, 16> &nonce, uint32_t domain_hint,
-                        MutByteView out, std::size_t &len) {
-    const uint8_t version = 1;
-    std::array<uint8_t, wire::k_bootstrap_header_bytes + 1> carrier{};
+                        MutByteView out, std::size_t &len, const OfferHint *hint) {
+    std::array<uint8_t, 6> body{1};
+    std::size_t blen = 1;
+    if (hint != nullptr) {
+        Writer w{MutByteView{body}};
+        w.u8(2);
+        w.u8(hint->depth);
+        w.u32be(hint->expected_revision);
+        LM_TRY(w.finish());
+        blen = w.size();
+    }
+    std::array<uint8_t, wire::k_bootstrap_header_bytes + 6> carrier{};
     std::size_t clen = 0;
     wire::BootstrapCarrier c;
     c.exchange_id = nonce;
     c.object_kind = offer ? k_obj_join_offer : k_obj_join_hello;
-    c.total = 1;
+    c.total = static_cast<uint16_t>(blen);
     c.offset = 0;
-    c.body = ByteView{&version, 1};
+    c.body = ByteView{body.data(), blen};
     LM_TRY(wire::encode_bootstrap(c, MutByteView{carrier}, clen));
     wire::LinkHeader h;
     h.kind = wire::FrameKind::JoinProxy;

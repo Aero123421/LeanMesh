@@ -37,6 +37,8 @@ void hook_discovery(void *ctx, const MacAddr &src, const wire::BootstrapCarrier 
     Engine &e = eng(ctx);
     if (root_role(e)) {
         e.ledger().discovery(src, c, e.step_time());
+    } else if (c.object_kind == member::k_obj_join_hello) {
+        e.proxy().answer_hello(c, e.step_time()); // [SLICE:S11] an attached relay offers to carry the join
     } else {
         e.membership().discovery(src, c, e.step_time());
     }
@@ -56,6 +58,7 @@ bool hook_link_control(void *ctx, const link::RxInfo &info, ByteView plain) {
 }
 void hook_link_up(void *ctx, const DeviceId &peer, uint8_t role) {
     Engine &e = eng(ctx);
+    e.mesh().on_link_up(peer, e.step_time()); // [SLICE:S11]
     if (!root_role(e)) {
         e.membership().link_up(peer, role, e.step_time());
     }
@@ -78,10 +81,25 @@ void Engine::wire_join_hooks() {
 Engine::Engine(const EngineConfig &config, Ports ports) : config_(config), ports_(ports) {
     link_.set_sink(&Engine::rx_sink, this); // [SLICE:S9] DATA / HOP_ACK go to delivery
     wire_join_hooks();                      // [SLICE:S8]
+    link_.set_discovery_sink(&Engine::discovery_sink, this); // [SLICE:S11] mesh beacons
+    link_.set_proxy_sink(&Engine::proxy_sink, this);         // [SLICE:S11] frames of a joiner behind us
+    mesh_.install();                                         // [SLICE:S11] delivery plug points
+}
+
+bool Engine::proxy_sink(void *ctx, const port::RadioRx &rx, MonoTime now) {
+    return static_cast<Engine *>(ctx)->proxy_.from_joiner(rx, now);
+}
+
+void Engine::discovery_sink(void *ctx, const MacAddr &src, ByteView body, MonoTime now) {
+    static_cast<Engine *>(ctx)->mesh_.on_beacon(src, body, now);
 }
 
 void Engine::rx_sink(void *ctx, const link::RxInfo &info, ByteView plain) {
     auto *e = static_cast<Engine *>(ctx);
+    if (info.kind == wire::FrameKind::Route) { // [SLICE:S11] 1-hop routing control (probes)
+        e->mesh_.on_route_frame(info, plain, e->step_now_);
+        return;
+    }
     e->delivery_.on_link_rx(info, plain, e->step_now_);
 }
 
@@ -119,6 +137,11 @@ MonoTime Engine::step(MonoTime now) {
     } else {
         membership_.on_timer(now);
     }
+    mesh_.on_timer(now); // [SLICE:S11] discovery, attach, leases, beacons
+    proxy_.on_timer(now);
+    if (is_root()) {
+        routes_.on_timer(now);
+    }
     if (serial_ != nullptr) {
         serial_->on_step(now); // [SLICE:S10] port input and USB timers
     }
@@ -148,6 +171,7 @@ void Engine::on_tx_outcome(const TxOutcome &o, MonoTime now) {
     // (docs/03 §4). The exchange frees its TX slot and retransmits by RTO, not by outcome.
     link_.on_tx_outcome(o, now);
     delivery_.on_tx_outcome(o, now); // [SLICE:S9] its own tags; also pumps the next frame
+    mesh_.on_tx_outcome(o, now); // [SLICE:S11] probe results (the only RF samples the mesh takes from beacons/probes)
     if (member::is_join_tag(o.tag)) { // [SLICE:S8]
         if (is_root()) {
             ledger_.on_tx_outcome(o, now);
@@ -223,6 +247,11 @@ MonoTime Engine::next_deadline() const {
     next = earliest(next, link_.deadline());
     next = earliest(next, delivery_.deadline()); // [SLICE:S9]
     next = earliest(next, is_root() ? ledger_.deadline() : membership_.deadline()); // [SLICE:S8]
+    next = earliest(next, mesh_.deadline()); // [SLICE:S11]
+    next = earliest(next, proxy_.deadline());
+    if (is_root()) {
+        next = earliest(next, routes_.deadline());
+    }
     if (serial_ != nullptr) {
         next = earliest(next, serial_->deadline()); // [SLICE:S10]
     }
@@ -232,17 +261,25 @@ MonoTime Engine::next_deadline() const {
     return next;
 }
 
-Status Engine::transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTime now) {
+Status Engine::transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTime now, sched::Class cls,
+                        bool queued) {
     if (radio_state_ == RadioState::Recovering || radio_state_ == RadioState::Faulted) {
         return Status::DriverResultUnknown;
     }
     if (radio_state_ != RadioState::Running) {
         return Status::Conflict; // radio not started (lm_start not completed)
     }
+    if (k_root_capable && proxy_.owns(dst)) { // [SLICE:S11] a joiner behind a relay: through the tunnel, not the radio
+        return proxy_.transmit(dst, frame, tag, now);
+    }
     if (!dst.is_broadcast() && !peers_.has(dst)) {
         return Status::InvalidArgument; // register the peer first (docs/03 §3)
     }
-    return tx_.begin(ports_.radio, dst, frame, tag, now);
+    const Status st = tx_.begin(ports_.radio, dst, frame, tag, now);
+    if (st == Status::Ok) {
+        sched_.charge(cls, frame.size(), now, queued); // the one accounting point of the node's airtime
+    }
+    return st;
 }
 
 Status Engine::set_channel(uint8_t channel) {
@@ -328,10 +365,14 @@ Reply Engine::stop_radio() {
     if (serial_ != nullptr) {
         serial_->on_stop(); // [SLICE:S10] the USB session and its secrets go before the identity key
     }
+    proxy_.stop();
+    mesh_.stop(); // [SLICE:S11] candidates, leases and the tree go before the sessions they name
+    routes_.stop();
     delivery_.stop(); // [SLICE:S9] operations, end sessions and their frames go before the link
     membership_.stop(); // [SLICE:S8] join session and borrowed buffers go back before link/identity
     ledger_.stop();
     link_.stop(); // [SLICE:S5] sessions and the exchange go first (their peers are still registered)
+    frames_.clear(); // [S14] every owner returned its frames above; a leak would not survive a restart
     ident_.release();
     const Status s = ports_.radio.stop();
     if (s != Status::Ok) {
@@ -403,6 +444,8 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::RootJoinDecide:
         return execute_membership(cmd, now);
     case CommandKind::Send: // [SLICE:S9]
+    case CommandKind::SendObject: // [SLICE:S12]
+    case CommandKind::SendControl:
     case CommandKind::GetOperation:
     case CommandKind::GetMessage:
     case CommandKind::Cancel:

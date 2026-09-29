@@ -18,6 +18,8 @@
 #include "core/pool.hpp"
 #include "core/profile.hpp"
 #include "core/radio/tx_manager.hpp"
+#include "core/radio/tx_pool.hpp"
+#include "core/sched/sched.hpp"
 #include "core/ring.hpp"
 #include "core/delivery/types.hpp"
 
@@ -30,31 +32,25 @@ class LinkLayer;
 
 namespace lm::delivery {
 
-enum class OwnerKind : uint8_t { None, Out, Receipt, Forward, Exchange };
+using lm::OwnerKind;
+using lm::TxFrame;
+
+// Scheduling class of a routed frame: the priority bits of the end-record header (docs/09 §4). A relay
+// reads them without any key; a malformed record counts as NORMAL (the decode that follows
+// refuses it anyway).
+[[nodiscard]] inline sched::Class record_class(ByteView end_record) {
+    if (end_record.size() < wire::k_end_header_bytes) {
+        return sched::Class::Normal;
+    }
+    const uint8_t flags = end_record[wire::layout::end::flags_offset];
+    return sched::class_of(static_cast<wire::Priority>((flags >> 2U) & 3U));
+}
+
 enum class HopEnd : uint8_t {
     Accepted, // the next hop reserved a buffer
     Rejected, // the next hop refused (no route/session/capacity to forward)
     Failed,   // 3 attempts without HOP_ACK, or too many BUSY deferrals
     Aborted,  // the owner withdrew the frame before/at a retry (deadline, cancel)
-};
-
-struct TxFrame {
-    enum class St : uint8_t { Reserved, Ready, OnAir, WaitAck };
-    St st = St::Reserved;
-    OwnerKind kind = OwnerKind::None;
-    Handle owner;
-    link::SealedFrame frame;
-    MacAddr mac;
-    uint16_t air_seq = 0;
-    uint8_t attempts = 0;    // physical handoffs so far
-    uint8_t busy_defers = 0; // HOP_ACK BUSY answers
-    bool abandoned = false;  // no more retransmissions (cancel after the frame left)
-    bool left = false;       // handed to the radio at least once (it may have arrived)
-    bool after_busy = false; // the next handoff repeats a frame the peer deferred (not an attempt)
-    uint32_t order = 0;      // FIFO among ready frames
-    MonoTime not_before;
-    MonoTime rto_at = MonoTime::never();
-    MonoTime handoff_at;
 };
 
 // What the owner of a finished frame needs to know (the frame's bytes are not copied around).
@@ -64,7 +60,7 @@ struct FrameDone {
     MacAddr mac;
     uint8_t attempts = 0;
     bool left = false; // handed to the radio at least once
-    uint64_t counter = 0;
+    uint64_t counter = 0; // link counter of the frame (read from its header)
 };
 
 struct HopStats {
@@ -85,7 +81,7 @@ struct HopStats {
 
 class HopTx {
   public:
-    static constexpr std::size_t k_frames = k_build_limits.tx_frames;
+    static constexpr std::size_t k_frames = TxPool::k_frames;
     static constexpr std::size_t k_acks = 4;
     static constexpr uint8_t k_max_busy_defers = 16;
     static constexpr uint32_t k_tag_frame = 0x44540000; // "DT"
@@ -101,15 +97,17 @@ class HopTx {
         void (*done)(void *ctx, const FrameDone &f, HopEnd end, MonoTime now) = nullptr;
     };
 
-    HopTx(Engine &engine, link::LinkLayer &link) : engine_(engine), link_(link) {}
+    HopTx(Engine &engine, link::LinkLayer &link);
     void set_hooks(const Hooks &h) { hooks_ = h; }
 
-    // Reserves a pool entry to seal into (Reserved: never sent until submit()). None = full.
-    [[nodiscard]] TxFrame *reserve(Handle &h);
-    void release(Handle h) { (void)frames_.release(h); }
+    // Reserves a pool entry to seal into (Reserved: never sent until submit()) as a frame of class
+    // `cls` for next hop `mac`. nullptr = refused by the class limit, the per-peer cap or a full pool
+    // (counted per class; a local shortage, never RF loss).
+    [[nodiscard]] TxFrame *reserve(Handle &h, sched::Class cls, const MacAddr &mac);
+    void release(Handle h) { (void)pool_.release(h); }
     // The frame in `h` is sealed: queue it for `mac` and try to send.
     void submit(Handle h, OwnerKind kind, Handle owner, const MacAddr &mac, MonoTime now);
-    [[nodiscard]] std::size_t free_frames() const { return k_frames - frames_.in_use(); }
+    [[nodiscard]] std::size_t free_frames() const { return k_frames - pool_.in_use(); }
 
     // HOP_ACK for a DATA frame received from `peer` (answered under that peer's link session).
     void queue_ack(const MacAddr &mac, const DeviceId &peer, uint64_t counter, wire::HopAckStatus st,
@@ -130,7 +128,7 @@ class HopTx {
 
     [[nodiscard]] const HopStats &stats() const { return stats_; }
     [[nodiscard]] Duration rto() const { return rto_; }
-    [[nodiscard]] std::size_t in_use() const { return frames_.in_use(); }
+    [[nodiscard]] std::size_t in_use() const { return pool_.in_use(); }
 
   private:
     struct PendingAck {
@@ -150,15 +148,15 @@ class HopTx {
     Engine &engine_;
     link::LinkLayer &link_;
     Hooks hooks_;
-    Pool<TxFrame, k_frames> frames_;
+    TxPool &pool_;                               // the node's one frame pool (Engine::frames())
+    Pool<TxFrame, k_frames> &frames_;            // its slots: queued frames and borrowed buffers
     BoundedQueue<PendingAck, k_acks> acks_;
-    link::SealedFrame ack_buf_; // the HOP_ACK being sealed (keeps 264 B off the owner stack)
     HopStats stats_;
     Duration rto_ = Duration::from_ms(static_cast<int64_t>(gen::defaults::delivery::rto_initial_ms));
     int64_t srtt_us_ = 0;
     int64_t rttvar_us_ = 0;
     bool rtt_valid_ = false;
-    uint32_t order_ = 0;
+    uint16_t order_ = 0;
     uint16_t air_seq_ = 0;
     uint16_t ack_seq_ = 0;
     MonoTime retry_at_ = MonoTime::never();

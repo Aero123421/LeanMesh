@@ -145,6 +145,10 @@ class RecordSession {
     // Seals `plaintext` with a counter obtained from next_counter(), strictly increasing per call
     // (each counter is sealed at most once). out = ciphertext || tag, size = plaintext + 16.
     [[nodiscard]] Status seal(uint64_t counter, ByteView aad, ByteView plaintext, MutByteView out);
+    // seal() for large records without a second buffer: buf[0, buf.size() - 16) holds the plaintext
+    // and is replaced by ciphertext, the tag follows it. Same counter rule as seal(); chunked through
+    // a small stack buffer for the same PSA no-overlap reason as open_in_place().
+    [[nodiscard]] Status seal_in_place(uint64_t counter, ByteView aad, MutByteView buf);
 
     // Verifies and decrypts. Ok only for a fresh, authentic record. The window is NOT advanced: the
     // caller runs its destination/length/identity checks on the plaintext and then calls accept()

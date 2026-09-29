@@ -1,9 +1,10 @@
 // Authenticated one-hop neighbours and their link sessions (docs/06 §5-§7, docs/09 §2).
 //
 // A Neighbor is a peer whose credentials were verified and with which a link session (EDHOC
-// purpose 1 + SESSION_BIND) exists. It holds up to two sessions: `cur` for TX and RX and `prev`,
-// which only receives for a short grace after a replacement (rotation), so frames already in the
-// air under the old key are not lost and no overlap is unbounded (S10).
+// purpose 1 + SESSION_BIND) exists (`cur`, TX and RX). A replaced session only receives for a short
+// grace, so frames already in the air under the old key are not lost and no overlap is unbounded
+// (S10). The replaced sessions of all neighbours share two grace slots (S11-D8, P2: rotations are
+// rare and 10 s long); when both are busy the one that ends first is dropped.
 // Identity of a frame's sender = (MAC, SID) -> session -> full DeviceId. The SID is a receiver-
 // assigned handle and never authorises anything alone; AEAD under the session key does.
 #pragma once
@@ -47,7 +48,6 @@ struct Neighbor {
     uint8_t role = 0;
     PeerHandle peer;
     SessionKeys cur;
-    SessionKeys prev;
     bool rotate_wanted = false; // tx record threshold reached (seal() sets it)
     // [S8-D1] JOIN_ONLY session (docs/06 §4 membership 0): carries the join control objects only,
     // never DATA/ROUTE, never rotates, and is invisible to find_device(). One per joining device.
@@ -71,6 +71,10 @@ class Neighbors {
     [[nodiscard]] Neighbor *by_tx_sid(const MacAddr &mac, uint32_t sid);
     [[nodiscard]] bool sid_in_use(uint32_t sid) const;
 
+    // A replaced session keeps receiving until `until` (receive-only, shared slots).
+    void retire(const MacAddr &mac, SessionKeys &&old, MonoTime until);
+    [[nodiscard]] bool has_grace(const MacAddr &mac) const;
+
     // Allocates the neighbour entry (NoCapacity when the table is full: nothing is evicted).
     [[nodiscard]] Neighbor *acquire();
     void remove(Neighbor &n);
@@ -84,7 +88,13 @@ class Neighbors {
     [[nodiscard]] std::size_t count() const { return table_.in_use(); }
 
   private:
+    static constexpr std::size_t k_grace_slots = 2;
+    struct Grace {
+        MacAddr mac;
+        SessionKeys keys;
+    };
     Table table_;
+    std::array<Grace, k_grace_slots> grace_{};
 };
 
 } // namespace lm::link

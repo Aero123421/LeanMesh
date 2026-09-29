@@ -12,11 +12,25 @@
 namespace lm::serial {
 namespace {
 
-constexpr std::size_t k_head = 64; // room in front of a body for the record header
+constexpr std::size_t k_head = 48; // room in front of a body for the record header
+// NextEvent copies an event's payload to the caller: the tail of the transmit buffer takes the copy that
+// is never used (the message stays in the core's pool and is read from there while the body is built).
+constexpr std::size_t k_dump = gen::limits::small_message_bytes;
+
+// The body stands at out[k_head, k_head + n): the record head goes right in front of it.
+Status place(MutByteView out, ByteView head, std::size_t n, std::size_t &len) {
+    if (head.size() > k_head) {
+        return Status::BufferTooSmall;
+    }
+    std::memmove(out.data() + head.size(), out.data() + k_head, n);
+    std::memcpy(out.data(), head.data(), head.size());
+    len = head.size() + n;
+    return Status::Ok;
+}
 
 template <std::size_t N> void key(wire::CborWriter &w, const char (&s)[N]) { w.text(wire::ascii(s)); }
 
-void put_snapshot(wire::CborWriter &w, const lm_operation_t &o, uint64_t op) {
+void put_snapshot(wire::CborWriter &w, const OpSnap &o, uint64_t op) {
     w.map(7);
     key(w, "phase");
     w.uint(o.phase);
@@ -27,9 +41,9 @@ void put_snapshot(wire::CborWriter &w, const lm_operation_t &o, uint64_t op) {
     key(w, "operation");
     w.uint(op);
     key(w, "message_id");
-    w.bytes(ByteView{o.message_id.bytes, 16});
+    w.bytes(ByteView{o.message_id});
     key(w, "intent_hash");
-    w.bytes(ByteView{o.intent_hash, 32});
+    w.bytes(ByteView{o.intent_hash});
     key(w, "evidence_bits");
     w.uint(o.evidence_bits);
 }
@@ -82,7 +96,7 @@ bool node_state(root::EntryState s, uint32_t &out) {
 } // namespace
 
 Bridge::Bridge(Engine &engine, RootUsb &usb, uint64_t boot_id) : engine_(engine), usb_(usb), boot_(boot_id) {
-    engine_.delivery().set_host_gate(true); // the Host's DB commit is the terminal store of ROOT_APP messages
+    engine_.delivery().set_host_gate(true); // the Host's DB commit is the terminal store of every MESSAGE
     usb_.set_bridge(this);
 }
 
@@ -137,7 +151,6 @@ void Bridge::on_step(MonoTime now) {
                 ++stats_.events_resent;
             }
         }
-        drain_events();
     }
     work_due_ = false;
     flush();
@@ -270,15 +283,30 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
     return w.finish() == Status::Ok ? w.size() : 0;
 }
 
-// The record header goes right before the body already placed at scratch_[k_head...].
-Status Bridge::send_record(SerialKind kind, ByteView head, ByteView body) {
-    (void)body; // documentation of the contract: `body` is scratch_[k_head, k_head + size)
-    if (head.size() > k_head) {
-        return Status::BufferTooSmall;
+// RESPONSE = [request id, status, operation / nil, result bytes / nil]. The result is computed here,
+// at send time, directly in the transmit buffer (a Busy send builds it again from the same state).
+Status Bridge::write_reply(const Pending &p, MutByteView out, std::size_t &len) {
+    Status status = p.status;
+    const std::size_t n = encode_result(p, MutByteView{out.data() + k_head, out.size() - k_head});
+    if (n == 0 && p.result != Result::None) {
+        status = Status::PayloadTooLarge; // does not fit the bounds: reported, never a made-up result
     }
-    const std::size_t start = k_head - head.size();
-    std::memcpy(scratch_.data() + start, head.data(), head.size());
-    return usb_.link().send(kind, gen_, ByteView{scratch_.data() + start, head.size() + body.size()}, usb_.now());
+    std::array<uint8_t, k_head> hb{};
+    wire::CborWriter w{MutByteView{hb}};
+    w.array(4);
+    w.bytes(ByteView{p.request_id});
+    w.uint(static_cast<uint32_t>(status));
+    if (p.has_op) {
+        w.uint(p.op);
+    } else {
+        w.null();
+    }
+    if (n == 0) {
+        w.null();
+    } else {
+        w.bytes_head(n);
+    }
+    return place(out, w.written(), n, len);
 }
 
 void Bridge::flush_replies() {
@@ -287,31 +315,15 @@ void Bridge::flush_replies() {
         if (f == nullptr) {
             return;
         }
-        const Pending p = *f;
-        const std::size_t n = encode_result(p, MutByteView{scratch_.data() + k_head, scratch_.size() - k_head});
-        std::array<uint8_t, k_head> hb{};
-        wire::CborWriter w{MutByteView{hb}};
-        w.array(4);
-        w.bytes(ByteView{p.request_id});
-        w.uint(static_cast<uint32_t>(p.status));
-        if (p.has_op) {
-            w.uint(p.op);
-        } else {
-            w.null();
-        }
-        if (n == 0) {
-            w.null();
-        } else {
-            w.bytes_head(n);
-        }
-        const Status st = send_record(SerialKind::Response, w.written(), ByteView{scratch_.data() + k_head, n});
+        WriterFn rw{[this, f](MutByteView out, std::size_t &len) { return write_reply(*f, out, len); }};
+        const Status st = usb_.link().send_built(SerialKind::Response, gen_, rw, usb_.now());
         if (st == Status::Busy) {
             return; // no credit / TX busy: on_tx_ready() retries
         }
         Pending done;
         (void)pending_.pop(done);
         ++(st == Status::Ok ? stats_.replies : stats_.replies_dropped);
-        usb_.link().release(p.lane, 1, p.frame_bytes, usb_.now());
+        usb_.link().release(done.lane, 1, done.frame_bytes, usb_.now());
     }
 }
 
@@ -326,43 +338,48 @@ Bridge::Slot *Bridge::free_slot() {
 }
 
 void Bridge::settle(Slot &s) {
-    if (s.used && (s.needs_store ? s.stored : s.acked)) {
+    if (s.used && (s.ev.kind == LM_EVENT_MESSAGE ? s.stored : s.acked)) {
         s.used = false;
         ++stats_.events_settled;
     }
 }
 
-// Takes engine events while a slot is free. Without an ACTIVE session nothing is taken: the engine's own
-// bounded queue (and, for durable messages, the root's journal) keeps them.
-void Bridge::drain_events() {
-    while (active_ && free_slot() != nullptr) {
-        lm_event_t ev{};
-        ev.struct_size = sizeof(ev);
-        ev.abi_version = LM_ABI_VERSION;
+// EVENT = [boot, seq, kind, body bytes]. With take the slot is free and the next event of the engine's
+// queue is taken into it (only here, with the transmit buffer and credit at hand, so a Busy never
+// leaves an event that has nowhere to go). Without it the slot's event is sent again.
+Status Bridge::write_event(Slot &s, bool take, MutByteView out, std::size_t &len) {
+    if (take) {
+        lm_event_t e{};
+        e.struct_size = sizeof(e);
+        e.abi_version = LM_ABI_VERSION;
         Command cmd;
         cmd.kind = CommandKind::NextEvent;
-        cmd.response = &ev;
-        cmd.response_size = sizeof(ev);
-        cmd.response_payload = MutByteView{ev_payload_};
+        cmd.response = &e;
+        cmd.response_size = sizeof(e);
+        cmd.response_payload = MutByteView{out.data() + out.size() - k_dump, k_dump};
         const Reply r = engine_.execute(cmd, usb_.now());
         if (r.status != Status::Ok) {
-            return; // NOT_FOUND: nothing queued
+            return r.status; // NOT_FOUND: nothing queued
         }
-        take_event(ev, ByteView{ev_payload_.data(), r.required_bytes});
+        s = Slot{};
+        s.used = true;
+        s.seq = next_seq_++;
+        s.ev = EvRef::of(e);
+        ++stats_.events_queued;
     }
-}
-
-void Bridge::take_event(const lm_event_t &ev, ByteView payload) {
-    Slot *s = free_slot();
-    if (s == nullptr) {
-        return; // unreachable: drain_events() checked
-    }
-    *s = Slot{};
-    wire::CborWriter w{MutByteView{s->body}};
+    const EvRef &ev = s.ev;
+    wire::CborWriter w{MutByteView{out.data() + k_head, out.size() - k_head}};
     if (ev.kind == LM_EVENT_MESSAGE) {
+        ByteView payload;
+        if (!engine_.delivery().event_payload(ev.event(), payload)) {
+            s.used = false; // the core no longer holds it (expired): the Host asks GET_MESSAGE
+            ++stats_.events_gone;
+            work_due_ = true;
+            return Status::NotFound;
+        }
         w.map(7);
         key(w, "origin");
-        w.bytes(ByteView{ev.peer.bytes, 32});
+        w.bytes(ByteView{ev.peer});
         key(w, "payload");
         w.bytes(payload);
         key(w, "app_port");
@@ -370,22 +387,19 @@ void Bridge::take_event(const lm_event_t &ev, ByteView payload) {
         key(w, "recovered");
         w.boolean(ev.reason == 1);
         key(w, "message_id");
-        w.bytes(ByteView{ev.message_id.bytes, 16});
+        w.bytes(ByteView{ev.message_id});
         key(w, "intent_hash");
-        w.bytes(ByteView{ev.intent_hash, 32});
+        w.bytes(ByteView{ev.intent_hash});
         key(w, "assignment_generation");
-        w.uint(ev.origin_assignment_generation);
-        s->needs_store = true;
-        std::memcpy(s->origin.data(), ev.peer.bytes, 32);
-        std::memcpy(s->mid.data(), ev.message_id.bytes, 16);
+        w.uint(ev.assignment);
     } else if (ev.kind == LM_EVENT_OPERATION) {
         lm_operation_t o{};
         o.struct_size = sizeof(o);
         o.abi_version = LM_ABI_VERSION;
-        const bool message_op = (ev.operation_id & member::k_op_tag) == 0;
-        if (message_op && run(CommandKind::GetOperation, &ev.operation_id, sizeof(ev.operation_id), ByteView{}, &o,
+        const bool message_op = (ev.operation & member::k_op_tag) == 0;
+        if (message_op && run(CommandKind::GetOperation, &ev.operation, sizeof(ev.operation), ByteView{}, &o,
                               sizeof(o)).status == Status::Ok) {
-            put_snapshot(w, o, ev.operation_id);
+            put_snapshot(w, OpSnap::of(o), ev.operation);
         } else { // membership/control operation: the reason is the status of the step that ended it
             w.map(4);
             key(w, "phase");
@@ -395,23 +409,26 @@ void Bridge::take_event(const lm_event_t &ev, ByteView payload) {
             key(w, "outcome");
             w.uint(ev.reason == 0 ? LM_OUTCOME_APPLIED : LM_OUTCOME_REJECTED);
             key(w, "operation");
-            w.uint(ev.operation_id);
+            w.uint(ev.operation);
         }
     } else {
         w.map(2);
         key(w, "peer");
-        w.bytes(ByteView{ev.peer.bytes, 32});
+        w.bytes(ByteView{ev.peer});
         key(w, "reason");
         w.uint(ev.reason);
     }
     if (w.finish() != Status::Ok) {
-        return; // cannot happen: bodies are bounded above; the slot stays unused
+        return Status::PayloadTooLarge; // cannot happen: bodies are bounded (payload <= 512 B)
     }
-    s->used = true;
-    s->kind = ev.kind;
-    s->seq = next_seq_++;
-    s->len = static_cast<uint16_t>(w.size());
-    ++stats_.events_queued;
+    std::array<uint8_t, k_head> hb{};
+    wire::CborWriter h{MutByteView{hb}};
+    h.array(4);
+    h.uint(boot_);
+    h.uint(s.seq);
+    h.uint(ev.kind);
+    h.bytes_head(w.size());
+    return place(out, h.written(), w.size(), len);
 }
 
 void Bridge::flush_events() {
@@ -422,23 +439,20 @@ void Bridge::flush_events() {
                 next = &s;
             }
         }
-        if (next == nullptr) {
-            return;
+        const bool take = next == nullptr;
+        if (take) {
+            next = free_slot(); // a full ring stops here: the engine's queue and its GAP bound the rest
+            if (next == nullptr) {
+                return;
+            }
         }
-        std::memcpy(scratch_.data() + k_head, next->body.data(), next->len);
-        std::array<uint8_t, k_head> hb{};
-        wire::CborWriter w{MutByteView{hb}};
-        w.array(4);
-        w.uint(boot_);
-        w.uint(next->seq);
-        w.uint(next->kind);
-        w.bytes_head(next->len);
-        const Status st = send_record(SerialKind::Event, w.written(), ByteView{scratch_.data() + k_head, next->len});
-        if (st == Status::Busy) {
-            return;
+        WriterFn ew{[this, next, take](MutByteView out, std::size_t &len) { return write_event(*next, take, out, len); }};
+        const Status st = usb_.link().send_built(SerialKind::Event, gen_, ew, usb_.now());
+        if (st == Status::NotFound && !take) {
+            continue; // that event is gone (counted); look at the next
         }
         if (st != Status::Ok) {
-            return; // session gone: on_session() re-arms everything
+            return; // Busy: on_tx_ready() retries; NotFound: nothing queued; else the session is gone
         }
         next->sent_gen = gen_;
         next->sent_at = usb_.now();

@@ -76,10 +76,15 @@ RootTimeBound Exchange::root_time(MonoTime now) const {
     return end_.root_time != nullptr ? end_.root_time(end_.ctx, now) : RootTimeBound{};
 }
 
-// One carrier record with the next fragment of `obj`, built in the delivery module's TX buffer (no
+// One carrier record with the next fragment of `obj`, built in a pool frame borrowed for the call (no
 // big locals on the owner stack). Busy: TX pool/radio shortage, the fragment is tried again.
 Status Exchange::send_end_chunk(ByteView obj, MonoTime now) {
-    const MutByteView rec = end_.record_buf;
+    Lease frame{s_.engine.frames()};
+    if (!frame.ok()) {
+        ++end_stats_.send_deferred; // every pool frame is in use: local, retried, never counted as loss
+        return Status::Busy;
+    }
+    const MutByteView rec{frame.data(), Lease::size()};
     const std::size_t cap = wire::data_capacity(route_.len);
     if (cap <= k_end_obj_header ||
         rec.size() < wire::k_end_header_bytes + cap + wire::k_tag_bytes) {
@@ -167,8 +172,12 @@ Status Exchange::seal_end_bind(sec::RecordSession &rec, const Sha256Digest &ctx_
     h.record_kind = wire::RecordKind::Control;
     h.flags = wire::make_end_flags(wire::Delivery::BestEffort, wire::Priority::Control, false);
     std::size_t len = 0;
+    FrameBuf *b = stage_buf();
+    if (b == nullptr) {
+        return Status::NoCapacity;
+    }
     LM_TRY(delivery::seal_end_record(rec, ctx_hash, own_sid, route_.term, h, w.written(),
-                                     MutByteView{stage_.data(), k_bind_record_max}, len));
+                                     MutByteView{b->bytes.data(), k_bind_record_max}, len));
     stage_len_ = len;
     staged_ = initiator_ ? ObjKind::Bind : ObjKind::BindAck;
     return Status::Ok;
@@ -207,7 +216,7 @@ void Exchange::on_end_bind(ByteView record, const Origin &o, MonoTime now) {
     std::array<uint8_t, 16> nonce{};
     const bool ok = op.header.record_kind == wire::RecordKind::Control && op.header.app_port == 0 &&
                     check_bind_body(op.view(), op.header.end_sid, sid, nonce) &&
-                    sid != delivery::k_handshake_sid && (!initiator_ || nonce == bind_nonce_);
+                    !delivery::is_reserved_sid(sid) && (!initiator_ || nonce == bind_nonce_);
     if (!ok) {
         count(Count::BindBad);
         return;

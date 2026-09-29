@@ -12,11 +12,10 @@ namespace lm::member {
 namespace {
 
 constexpr Duration k_default_budget = Duration::from_s(30);   // docs/07 §3: one search, at most 30 s
-constexpr Duration k_hello_gap = Duration::from_s(1);
+constexpr Duration k_collect = Duration::from_ms(300);       // wait for a shallower offer than the first
 constexpr Duration k_busy_retry = Duration::from_ms(50);      // borrowed memory is taken: try again
 constexpr Duration k_connect_retry = Duration::from_ms(500);
 constexpr Duration k_request_wait = Duration::from_s(310);    // approval timeout 300 s + margin
-constexpr uint8_t k_max_handshakes = 2;                       // docs/07 §3: full-handshake candidates
 
 } // namespace
 
@@ -97,7 +96,8 @@ void Membership::stop() {
     } else {
         release_join();
     }
-    hello_at_ = search_deadline_ = retry_at_ = request_deadline_ = prepared_until_ = MonoTime::never();
+    disc_.stop();
+    collect_until_ = search_deadline_ = retry_at_ = request_deadline_ = prepared_until_ = MonoTime::never();
     final_wait_until_ = leave_deadline_ = leave_tx_wait_ = MonoTime::never();
     have_prepared_ = false;
     resume_ = false;
@@ -120,6 +120,7 @@ void Membership::release_join() {
     }
     have_cand_ = false;
     peer_ = link::JoinPeerOut{};
+    apply_pacing(0); // the policy of a proxied join ends with it
 }
 
 // ---- boot ----
@@ -175,11 +176,13 @@ void Membership::begin_discovery(MonoTime now) {
     phase_ = JoinPhase::Discover;
     engine_.random(MutByteView{hello_nonce_});
     have_cand_ = false;
-    handshakes_ = 0;
+    offers_ = {};
+    collect_until_ = MonoTime::never();
     std::array<uint8_t, 2> j{};
     engine_.random(MutByteView{j});
-    // Jitter 0..399 ms before the first hello (docs/07 §3; the 800 ms listen-first is the mesh slice's).
-    hello_at_ = now + Duration::from_ms((uint32_t{j[0]} << 8U | j[1]) % 400);
+    // Listen 800 ms without transmitting, then the first hello after 0..399 ms of jitter (docs/07 §3). The
+    // operation's own budget (search_deadline_) ends the search; the policy object only paces it.
+    disc_.begin(now, static_cast<uint16_t>((uint32_t{j[0]} << 8U | j[1]) % 400), true, Duration::from_s(3600));
     retry_at_ = MonoTime::never();
 }
 
@@ -189,20 +192,74 @@ void Membership::send_hello(MonoTime now) {
     if (encode_discovery(false, hello_nonce_, 0, MutByteView{frame}, len) != Status::Ok) {
         return;
     }
-    const Status st = engine_.transmit(MacAddr::broadcast(), ByteView{frame.data(), len}, k_tag_hello, now);
-    hello_at_ = now + (st == Status::Busy || st == Status::DriverResultUnknown ? Duration::from_ms(20)
-                                                                                : k_hello_gap);
+    (void)engine_.transmit(MacAddr::broadcast(), ByteView{frame.data(), len}, k_tag_hello, now);
+    // A busy radio only costs this hello: the policy object sends the next one a second later.
 }
 
+// Offers are hints (docs/07 §3): nothing they say authorises anything, every candidate goes through the full
+// bounded handshake. The root itself (depth 0) is taken at once; otherwise the shallowest of the first
+// 300 ms wins. A higher expected-list revision than the one we were refused at ends a NOT_EXPECTED hold.
 void Membership::discovery(const MacAddr &src, const wire::BootstrapCarrier &c, MonoTime now) {
-    if (phase_ != JoinPhase::Discover || c.object_kind != k_obj_join_offer || have_cand_ ||
-        c.exchange_id != hello_nonce_) {
-        return; // an offer is a hint; only the first answer to our own hello is followed
+    OfferHint h;
+    if (phase_ != JoinPhase::Discover || c.object_kind != k_obj_join_offer || decode_offer_hint(c.body, h) != Status::Ok) {
+        return;
+    }
+    if (disc_.revision_advanced(h.expected_revision)) {
+        disc_.clear_suppress();
+        disc_.wake(now, 0);
+        not_expected_ = 0;
+    }
+    if (have_cand_ || c.exchange_id != hello_nonce_) {
+        return; // only answers to our own hello are followed
     }
     ++stats_.offers_seen;
-    cand_ = src;
+    Offer *slot = nullptr;
+    for (Offer &o : offers_) {
+        if (o.used && o.mac == src) {
+            slot = &o;
+        }
+    }
+    for (Offer &o : offers_) {
+        if (slot == nullptr && !o.used) {
+            slot = &o;
+        }
+    }
+    if (slot == nullptr) {
+        return; // three candidates are enough
+    }
+    *slot = Offer{true, false, src, h.depth, h.expected_revision};
+    if (h.depth == 0) {
+        choose_offer(now);
+    } else if (collect_until_.is_never()) {
+        collect_until_ = now + k_collect;
+    }
+}
+
+// The proxied joiner speaks slower and in smaller steps: a relay needs a moment per frame and each round
+// trip crosses `depth` more hops. Bounded (docs/07 §3 does not lengthen the 30 s search).
+void Membership::apply_pacing(uint8_t depth) {
+    link::LinkPolicy &p = engine_.link().policy();
+    const link::LinkPolicy defaults;
+    p.rto = depth == 0 ? defaults.rto : Duration::from_ms(1000 + 200 * std::min<int>(depth, 20));
+    p.tx_gap = depth == 0 ? defaults.tx_gap : Duration::from_ms(60);
+}
+
+void Membership::choose_offer(MonoTime now) {
+    collect_until_ = MonoTime::never();
+    Offer *best = nullptr;
+    for (Offer &o : offers_) {
+        if (o.used && !o.tried && (best == nullptr || o.depth < best->depth)) {
+            best = &o;
+        }
+    }
+    if (best == nullptr) {
+        return;
+    }
+    best->tried = true;
+    cand_ = best->mac;
+    cand_revision_ = best->revision;
     have_cand_ = true;
-    hello_at_ = MonoTime::never(); // a candidate exists: no more hellos until it fails
+    apply_pacing(best->depth);
     try_connect(now);
 }
 
@@ -215,7 +272,7 @@ void Membership::try_connect(MonoTime now) {
     }
     if (st == Status::Ok) {
         phase_ = JoinPhase::Connect;
-        ++handshakes_;
+        disc_.note_handshake();
         retry_at_ = MonoTime::never();
         return;
     }
@@ -234,13 +291,36 @@ void Membership::exchange_failed(Status why, MonoTime now) {
     if (phase_ != JoinPhase::Connect) {
         return;
     }
-    if (handshakes_ >= k_max_handshakes) {
+    apply_pacing(0);
+    have_cand_ = false;
+    const bool another = std::any_of(offers_.begin(), offers_.end(), [](const Offer &o) { return o.used && !o.tried; });
+    if (!disc_.may_handshake() && !another) {
         finish_join(why, LM_OUTCOME_REJECTED, now);
         return;
     }
-    phase_ = JoinPhase::Discover; // one more candidate within the search budget
-    have_cand_ = false;
-    hello_at_ = now + k_hello_gap;
+    phase_ = JoinPhase::Discover; // one more candidate within the search budget: the next offer, or the next hello
+    if (another && disc_.may_handshake()) {
+        choose_offer(now);
+    }
+}
+
+// The root does not expect this device (yet): a hint, not a verdict (docs/07 §3). No hello for 10..60 s, then
+// asked again; a higher expected revision heard meanwhile ends the hold at once (J02).
+void Membership::not_expected(MonoTime now) {
+    release_join();
+    phase_ = JoinPhase::Discover;
+    offers_ = {};
+    collect_until_ = MonoTime::never();
+    // The hold is at least the 30 s full-handshake gate towards this root (docs/06 §8: asking again earlier would
+    // only be RATE_LIMITED); the next search gets its own budget after the hold. 30 s, then 60 s.
+    const Duration hold = Duration::from_s(not_expected_ == 0 ? 30 : 60);
+    ++not_expected_;
+    disc_.not_expected(now, hold, cand_revision_);
+    disc_.wake(now, 0);
+    if (budget_default_) { // a caller who gave no budget waits for the next search; an explicit budget is kept
+        search_deadline_ = now + hold + k_default_budget;
+    }
+    emit_state(static_cast<uint32_t>(Status::NotFound));
 }
 
 void Membership::session_up(bool initiator, const MacAddr &mac, const DeviceId &peer, ByteView bundle,
@@ -291,6 +371,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         if (resume_) { // docs/07 §10: ask the root again about the same request, no new approval
             begin_discovery(now);
             search_deadline_ = now + k_default_budget;
+            not_expected_ = 0;
             emit_state(0);
         }
         return;
@@ -420,7 +501,8 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
 MonoTime Membership::deadline() const {
     MonoTime next = earliest(pipe_.deadline(), retry_at_);
     if (phase_ == JoinPhase::Discover) {
-        next = earliest(next, earliest(hello_at_, search_deadline_));
+        next = earliest(next, earliest(disc_.deadline(), search_deadline_));
+        next = earliest(next, collect_until_);
     }
     next = earliest(next, earliest(request_deadline_, prepared_until_));
     next = earliest(next, final_wait_until_);
@@ -449,8 +531,11 @@ void Membership::on_timer(MonoTime now) {
             finish_join(Status::Expired, LM_OUTCOME_EXPIRED, now); // budget spent: not a device fault
             return;
         }
-        if (!have_cand_ && now >= hello_at_) {
+        if (disc_.poll(now) == Discovery::Act::Hello && !have_cand_ && collect_until_.is_never()) {
             send_hello(now);
+        }
+        if (!have_cand_ && !collect_until_.is_never() && now >= collect_until_) {
+            choose_offer(now);
         }
         if (have_cand_ && now >= retry_at_) {
             try_connect(now);

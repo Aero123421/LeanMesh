@@ -71,9 +71,14 @@ void Delivery::want_in_commit(Handle h, InEntry &e, MonoTime now) {
     r.op = DurableReq::Op::Put;
     r.id = k_id_in | e.jslot;
     r.gen = h.generation;
-    r.version = e.version;
-    e.commit_wanted = durable_.enqueue(r, now);
-    if (!e.commit_wanted) {
+    InLive *lp = live_of(e); // only a record with work to do is written
+    if (lp == nullptr) {
+        return;
+    }
+    InLive &l = *lp;
+    r.version = l.version;
+    l.commit_wanted = durable_.enqueue(r, now);
+    if (!l.commit_wanted) {
         retry_kick_ = earliest(retry_kick_, now + Duration::from_ms(50)); // worker queue full: again soon
     }
 }
@@ -105,8 +110,9 @@ Status Delivery::durable_fill(void *ctx, const DurableReq &req, MutByteView out,
         len = w.size();
         return w.finish();
     }
-    const InEntry *e = d->find_in_j(slot, req.gen, h);
-    if (e == nullptr) {
+    InEntry *e = d->find_in_j(slot, req.gen, h);
+    const InLive *l = e != nullptr ? d->live_of(*e) : nullptr;
+    if (l == nullptr) {
         return Status::NotFound;
     }
     const bool with_payload = e->st == InEntry::St::Committing || e->st == InEntry::St::Held;
@@ -114,20 +120,20 @@ Status Delivery::durable_fill(void *ctx, const DurableReq &req, MutByteView out,
     w.u8(k_rec_version);
     w.u8(k_kind_in);
     w.u8(static_cast<uint8_t>(shown));
-    w.u8(static_cast<uint8_t>(e->delivery | (e->priority << 2U) | (e->app_pending ? 0x10U : 0U)));
-    w.u16be(e->port);
-    w.u32be(e->term);
+    w.u8(static_cast<uint8_t>(e->delivery | (l->priority << 2U) | (l->app_pending ? 0x10U : 0U)));
+    w.u16be(l->port);
+    w.u32be(l->term);
     w.u64be(e->expires);
     w.bytes(e->origin.view());
     w.bytes(ByteView{e->mid});
     w.bytes(ByteView{e->hash});
-    w.u64be(e->origin_assignment);
+    w.u64be(l->origin_assignment);
     w.u32be(e->receipt_seq);
     w.u8(e->result_len);
     w.bytes(ByteView{e->result});
-    w.u16be(with_payload ? e->len : 0);
+    w.u16be(with_payload ? l->len : 0);
     if (with_payload) {
-        w.bytes(ByteView{d->msgs_.get(e->msg)->data.data(), e->len});
+        w.bytes(ByteView{d->msgs_.get(l->msg)->data.data(), l->len});
     }
     len = w.size();
     return w.finish();
@@ -174,18 +180,19 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
         return;
     }
     InEntry *e = d->find_in_j(slot, req.gen, h);
-    if (e == nullptr) {
+    InLive *l = e != nullptr ? d->live_of(*e) : nullptr;
+    if (l == nullptr) {
         return;
     }
-    e->commit_wanted = st == Status::Ok && req.version < e->version; // a newer write is queued
+    l->commit_wanted = st == Status::Ok && req.version < l->version; // a newer write is queued
     if (st == Status::Busy) {
         d->want_in_commit(h, *e, now);
         return;
     }
-    const uint8_t due = e->due_ev;
-    const bool due_now = due != 0xFF && (st != Status::Ok || req.version >= e->due_version);
+    const uint8_t due = l->due_ev;
+    const bool due_now = due != 0xFF && (st != Status::Ok || req.version >= l->due_version);
     if (st == Status::Ok) {
-        e->persisted_version = req.version > e->persisted_version ? req.version : e->persisted_version;
+        l->persisted_version = req.version > l->persisted_version ? req.version : l->persisted_version;
     }
     if (e->st == InEntry::St::Committing) {
         if (st != Status::Ok) {
@@ -195,8 +202,9 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
             const Sha256Digest hash = e->hash;
             const uint64_t expires = e->expires;
             const bool ack = e->delivery != LM_BEST_EFFORT;
-            (void)d->msgs_.release(e->msg);
+            (void)d->msgs_.release(l->msg);
             d->in_j_[e->jslot] = false;
+            d->drop_live(*e);
             (void)d->in_.release(h);
             ++d->stats_.rx_refused;
             if (ack) {
@@ -208,7 +216,7 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
         e->st = InEntry::St::Held; // durable: END_RECEIVED and the application event may follow
     }
     if (due_now) {
-        e->due_ev = 0xFF;
+        l->due_ev = 0xFF;
         if (static_cast<ReceiptEv>(due) == ReceiptEv::EndReceived) {
             if (d->gate_receipt(*e)) {
                 e->gated = true; // [S13] the Host's DB commit is the terminal store: HOST_STORE_ACK sends it
@@ -222,6 +230,7 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
             d->send_receipt(*e, static_cast<ReceiptEv>(due), 0, now);
         }
     }
+    d->settle(*e); // the marker / result is durable and nothing else is owed: the live slot goes back
 }
 
 // ---- boot and recovery ----
@@ -362,15 +371,15 @@ void Delivery::recovered_in(uint32_t slot, ByteView rec, MonoTime now) {
     e->durable = true;
     e->jslot = static_cast<uint16_t>(slot);
     e->delivery = flags & 3U;
-    e->priority = static_cast<uint8_t>((flags >> 2U) & 3U);
-    e->app_pending = (flags & 0x10U) != 0;
-    e->port = r.u16be();
-    e->term = r.u32be();
+    const auto priority = static_cast<uint8_t>((flags >> 2U) & 3U);
+    const bool app_pending = (flags & 0x10U) != 0;
+    const uint16_t port = r.u16be();
+    const uint32_t term = r.u32be();
     e->expires = r.u64be();
     r.copy_to(e->origin.bytes);
     r.copy_to(e->mid);
     r.copy_to(e->hash);
-    e->origin_assignment = r.u64be();
+    const uint64_t assignment = r.u64be();
     e->receipt_seq = r.u32be();
     e->result_len = r.u8();
     r.copy_to(e->result);
@@ -383,26 +392,39 @@ void Delivery::recovered_in(uint32_t slot, ByteView rec, MonoTime now) {
         return;
     }
     in_j_[slot] = true;
-    e->persisted_version = e->version; // durable already
     e->last_use = ++in_tick_;
-    e->arrival = ++arrival_;
-    if (e->st == InEntry::St::Held) {
-        const Handle mb = msgs_.acquire();
-        if (mb.is_none()) {
+    // A held payload or an owed result is work: it gets a live slot. The other states are dedup memory.
+    if (e->st == InEntry::St::Held || (e->st == InEntry::St::Delivered && e->delivery == LM_APPLIED)) {
+        InLive *l = take_live(*e);
+        Handle mb;
+        if (l != nullptr && e->st == InEntry::St::Held) {
+            mb = msgs_.acquire();
+        }
+        if (l == nullptr || (e->st == InEntry::St::Held && mb.is_none())) {
+            drop_live(*e);
             (void)in_.release(ih);
             in_j_[slot] = false;
             recovering_ = false;
             engine_.raise(LM_EVENT_FAULT, static_cast<uint32_t>(Status::NoCapacity));
             return;
         }
-        e->msg = mb;
-        e->len = len;
-        if (len > 0) {
-            std::memcpy(msgs_.get(mb)->data.data(), payload.data(), len);
+        l->priority = priority;
+        l->app_pending = app_pending;
+        l->port = port;
+        l->term = term;
+        l->origin_assignment = assignment;
+        l->persisted_version = l->version; // durable already
+        l->arrival = ++arrival_;
+        if (e->st == InEntry::St::Held) {
+            l->msg = mb;
+            l->len = len;
+            if (len > 0) {
+                std::memcpy(msgs_.get(mb)->data.data(), payload.data(), len);
+            }
+            l->recovered = true; // the application may have handled it before the power cut
+            l->event_owed = true; // re-queued by flush_events() once recovery is over
+            e->gated = gate_receipt(*e); // [S13] the Host may not have stored it: its ACK releases it
         }
-        e->recovered = true; // the application may have handled it before the power cut
-        e->event_owed = true; // re-queued by flush_events() once recovery is over
-        e->gated = gate_receipt(*e); // [S13] the Host may not have stored it: its ACK releases it
     }
     (void)now;
 }

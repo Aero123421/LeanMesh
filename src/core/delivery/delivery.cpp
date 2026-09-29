@@ -37,7 +37,6 @@ Delivery::Delivery(Engine &engine, member::LocalIdentity &identity, link::LinkLa
     link::EndPort ep; // end sessions are set up by the node's single exchange in end mode
     ep.ctx = this;
     ep.sessions = &sessions_;
-    ep.record_buf = MutByteView{tx_scratch_.data() + k_rec_off, k_record_bytes};
     ep.root_time = &exchange_root_time;
     ep.send = &exchange_send;
     ep.done = &exchange_done;
@@ -206,12 +205,14 @@ void Delivery::stop() {
     for (std::size_t i = 0; i < k_in_entries; ++i) {
         (void)in_.release(in_.handle_at(i));
     }
+    lives_ = {};
     for (std::size_t i = 0; i < k_build_limits.app_messages; ++i) {
         (void)msgs_.release(msgs_.handle_at(i));
     }
     ops_ = {};
     routes_.clear();
     accepted_ = {};
+    frag_.reset(); // [S12] reassembly slots (their pool buffers went above); the control sink stays
     out_j_ = {};
     out_retire_ = {};
     in_j_ = {};
@@ -220,6 +221,7 @@ void Delivery::stop() {
     recovering_ = false;
     retry_kick_ = MonoTime::never();
     slot_wait_ = false;
+    // mesh_ stays: the hooks belong to the engine's modules, which outlive a start/stop cycle
 }
 
 void Delivery::on_tx_outcome(const TxOutcome &o, MonoTime now) {
@@ -237,16 +239,21 @@ void Delivery::on_job_done(JobOwner owner, Handle slot, Status s, MonoTime now) 
 void Delivery::on_timer(MonoTime now) {
     refresh_bound(now);
     hop_.on_timer(now);
+    frag_expire(now); // [S12]
     if (slot_wait_ && !link_.exchange().busy()) {
         slot_wait_ = false; // a link/join exchange ended: sends waiting for the slot go on
         kick_all_waiting(now);
+        if (mesh_.slot_free != nullptr) {
+            mesh_.slot_free(mesh_.ctx, now); // [S11]
+        }
     }
     if (now >= retry_kick_) {
         retry_kick_ = MonoTime::never();
         for (std::size_t i = 0; i < k_in_entries; ++i) {
             const Handle ih = in_.handle_at(i);
             InEntry *e = in_.get(ih);
-            if (e != nullptr && e->durable && !e->commit_wanted && e->persisted_version < e->version) {
+            const InLive *l = e != nullptr ? live_of(*e) : nullptr;
+            if (l != nullptr && e->durable && !l->commit_wanted && l->persisted_version < l->version) {
                 want_in_commit(ih, *e, now); // the worker queue was full: ask again
             }
         }
@@ -276,7 +283,7 @@ MonoTime Delivery::deadline() const {
     if (slot_wait_ && !link_.exchange().busy()) {
         return MonoTime{0}; // known pending work (the slot is free), not a poll
     }
-    MonoTime next = earliest(hop_.deadline(), retry_kick_);
+    MonoTime next = earliest(earliest(hop_.deadline(), retry_kick_), frag_deadline());
     for (std::size_t i = 0; i < k_actives; ++i) {
         const Active *a = actives_.get(actives_.handle_at(i));
         if (a != nullptr) {
@@ -296,11 +303,19 @@ bool Delivery::event_payload(const lm_event_t &ev, ByteView &out) const {
         for (std::size_t i = 0; i < k_in_entries; ++i) {
             const InEntry *e = in_.get(in_.handle_at(i));
             if (e != nullptr && e->st == InEntry::St::Held && e->origin == origin && e->mid == mid) {
-                const MsgBuf *b = msgs_.get(e->msg);
+                const InLive *l = live_of(*e);
+                if (l == nullptr) {
+                    return false;
+                }
+                if (l->obj) { // [S12] a received object stays in the object buffer until it is taken
+                    out = ByteView{frag_.obj_buf.data(), l->len};
+                    return true;
+                }
+                const MsgBuf *b = msgs_.get(l->msg);
                 if (b == nullptr) {
                     return false;
                 }
-                out = ByteView{b->data.data(), e->len};
+                out = ByteView{b->data.data(), l->len};
                 return true;
             }
         }
@@ -318,19 +333,24 @@ bool Delivery::event_payload(const lm_event_t &ev, ByteView &out) const {
 }
 
 void Delivery::queue_message_event(Handle h, InEntry &e, MonoTime now) {
+    InLive *lp = live_of(e); // a record that is announced holds its payload, so it has a live slot
+    if (lp == nullptr) {
+        return;
+    }
+    InLive &l = *lp;
     lm_event_t ev{};
     ev.struct_size = sizeof(ev);
     ev.abi_version = LM_ABI_VERSION;
     ev.kind = LM_EVENT_MESSAGE;
-    ev.reason = e.recovered ? 1U : 0U; // 1: recovered after a restart, the application may have seen it
+    ev.reason = l.recovered ? 1U : 0U; // 1: recovered after a restart, the application may have seen it
     ev.observed_mono_ms = now.to_ms();
     ev.peer = abi_dev(e.origin);
     ev.message_id = abi_mid(e.mid);
-    ev.origin_assignment_generation = e.origin_assignment;
+    ev.origin_assignment_generation = l.origin_assignment;
     std::memcpy(ev.intent_hash, e.hash.data(), 32);
-    ev.app_port = e.port;
-    ev.payload_bytes = e.len;
-    e.event_owed = !engine_.push_event(ev);
+    ev.app_port = l.port;
+    ev.payload_bytes = l.len;
+    l.event_owed = !engine_.push_event(ev);
     (void)h;
 }
 
@@ -348,8 +368,9 @@ void Delivery::on_event_taken(const lm_event_t &ev, MonoTime now) {
         if (e == nullptr || e->st != InEntry::St::Held || e->origin != origin || e->mid != mid) {
             continue;
         }
-        if (gate_receipt(*e)) {
-            return; // [S13] the Host has not stored it yet: the payload and journal record stay
+        if (host_gate_) {
+            return; // [S13-D11] the Host has not stored it yet: the payload (and a durable message's journal
+                    // record) stay in the pool and are read from there at every (re)send until HOST_STORE_ACK
         }
         finish_take(h, *e, now);
         return;
@@ -357,29 +378,40 @@ void Delivery::on_event_taken(const lm_event_t &ev, MonoTime now) {
 }
 
 void Delivery::finish_take(Handle h, InEntry &e, MonoTime now) {
-    (void)msgs_.release(e.msg);
-    e.msg = Handle{};
+    InLive *lp = live_of(e);
+    if (lp == nullptr) {
+        return;
+    }
+    InLive &l = *lp;
+    (void)msgs_.release(l.msg);
+    l.msg = Handle{};
+    frag_.obj_held = frag_.obj_held && !l.obj; // [S12] the object buffer is free again
+    l.obj = false;
     e.st = InEntry::St::Delivered;
-    e.len = 0;
+    l.len = 0;
     if (e.durable && e.delivery != LM_APPLIED) {
         // Marker: the application has it, the payload is no longer kept. An APPLIED message keeps
         // its journal record until the application reports a result, so a power cut in between
         // brings it back (flagged "recovered") for reconciliation instead of losing it.
-        ++e.version;
+        ++l.version;
         want_in_commit(h, e, now);
     }
+    settle(e); // nothing left to do for a volatile message that needs no result
 }
 
 void Delivery::flush_events(MonoTime now) {
     for (;;) {
         InEntry *best = nullptr;
+        uint32_t best_arrival = 0;
         Handle bh;
         for (std::size_t i = 0; i < k_in_entries; ++i) {
             const Handle h = in_.handle_at(i);
             InEntry *e = in_.get(h);
-            if (e != nullptr && e->event_owed && e->st == InEntry::St::Held &&
-                (best == nullptr || static_cast<int32_t>(e->arrival - best->arrival) < 0)) {
+            const InLive *l = e != nullptr ? live_of(*e) : nullptr;
+            if (l != nullptr && l->event_owed && e->st == InEntry::St::Held &&
+                (best == nullptr || static_cast<int32_t>(l->arrival - best_arrival) < 0)) {
                 best = e;
+                best_arrival = l->arrival;
                 bh = h;
             }
         }
@@ -387,7 +419,7 @@ void Delivery::flush_events(MonoTime now) {
             return;
         }
         queue_message_event(bh, *best, now);
-        if (best->event_owed) {
+        if (live_of(*best)->event_owed) {
             return; // still full
         }
     }
@@ -422,8 +454,20 @@ void Delivery::learn_route(const EndSession &s) {
 }
 
 bool Delivery::route_for(const DeviceId &dest, PathSpec &out, MonoTime now) {
+    if (mesh_.route_of != nullptr) { // [S11] own root path / root topology first: they are the fresh ones
+        const Status m = mesh_.route_of(mesh_.ctx, dest, out, now);
+        if (m == Status::Ok) {
+            return true;
+        }
+        if (m == Status::Busy) {
+            return false; // known destination, no usable path while the mesh repairs: wait, don't guess
+        }
+    }
     route::CachedRoute r;
     if (routes_.lookup(dest, local_term(), now, r) != Status::Ok) {
+        if (mesh_.want_route != nullptr) {
+            mesh_.want_route(mesh_.ctx, dest, now); // [S11] ask the root (rate-limited there)
+        }
         return false; // none, or a stale term / lease: the resolver must supply a new one
     }
     out.origin = self_addr();
@@ -445,22 +489,33 @@ link::Neighbor *Delivery::neighbor_at(uint16_t addr) {
     return found;
 }
 
-// Frames a sealed end record for `ps` and queues it (docs/09 §3). The route header is written
-// right before the record in the shared TX buffer (no copy of the record when it was built there).
-bool Delivery::build_and_send(const PathSpec &ps, ByteView record, OwnerKind kind, Handle owner,
-                              MonoTime now, Status &why) {
-    const std::size_t hdr_len = wire::k_route_header_bytes + 2U * ps.len;
-    if (ps.len < 1 || ps.len > wire::k_max_path || record.size() > k_record_bytes) {
+// Frames a sealed end record for `ps` and queues it (docs/09 §3). The route header and path are
+// written right before the record in a pool frame borrowed for the call (P9).
+bool Delivery::build_and_send(const PathSpec &ps, ByteView record, OwnerKind kind, Handle owner, MonoTime now,
+                              Status &why) {
+    Lease scratch{engine_.frames()};
+    if (!scratch.ok()) {
+        why = Status::NoCapacity; // every pool frame is in use: local shortage, retried shortly
+        return false;
+    }
+    const std::size_t room = route_room(ps.len);
+    if (ps.len < 1 || ps.len > wire::k_max_path || room + record.size() > Lease::size()) {
         why = Status::PayloadTooLarge;
         return false;
     }
-    uint8_t *const rec_at = tx_scratch_.data() + k_rec_off;
-    if (record.data() != rec_at) {
-        std::memmove(rec_at, record.data(), record.size());
+    std::memcpy(scratch.data() + room, record.data(), record.size());
+    return build_and_send(ps, scratch, record.size(), kind, owner, now, why);
+}
+
+bool Delivery::build_and_send(const PathSpec &ps, Lease &scratch, std::size_t record_len, OwnerKind kind,
+                              Handle owner, MonoTime now, Status &why) {
+    const std::size_t hdr_len = route_room(ps.len);
+    if (ps.len < 1 || ps.len > wire::k_max_path || hdr_len + record_len > Lease::size()) {
+        why = Status::PayloadTooLarge;
+        return false;
     }
-    uint8_t *const start = rec_at - hdr_len;
     std::size_t rlen = 0;
-    why = wire::encode_route(ps.header(), MutByteView{start, hdr_len}, rlen);
+    why = wire::encode_route(ps.header(), MutByteView{scratch.data(), hdr_len}, rlen);
     if (why != Status::Ok) {
         return false;
     }
@@ -469,13 +524,14 @@ bool Delivery::build_and_send(const PathSpec &ps, ByteView record, OwnerKind kin
         why = Status::NoRoute; // no link session with the first hop
         return false;
     }
+    const ByteView plain{scratch.data(), hdr_len + record_len};
     Handle fh;
-    TxFrame *f = hop_.reserve(fh);
+    TxFrame *f = hop_.reserve(fh, record_class(plain.subspan(hdr_len, record_len)), nb->mac);
     if (f == nullptr) {
-        why = Status::NoCapacity; // TX pool full: local shortage, never an RF loss
+        why = Status::NoCapacity; // TX pool full or the class limit: local shortage, never an RF loss
         return false;
     }
-    why = link_.seal(nb->device, wire::FrameKind::Data, ByteView{start, hdr_len + record.size()}, f->frame, now);
+    why = link_.seal(nb->device, wire::FrameKind::Data, plain, f->frame, now);
     if (why != Status::Ok) {
         hop_.release(fh);
         return false;
@@ -525,6 +581,16 @@ Reply Delivery::execute(const Command &cmd, MonoTime now) {
             return Reply{Status::InvalidArgument, 0, 0};
         }
         return Reply{host_store_ack(*static_cast<const HostStoreAckRequest *>(cmd.request), now), 0, 0};
+    case CommandKind::SendObject: // [S12]
+        if (cmd.request == nullptr || cmd.request_size != sizeof(lm_send_request_t)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        return send_mode(SendMode::Object, *static_cast<const lm_send_request_t *>(cmd.request), cmd.payload, now);
+    case CommandKind::SendControl:
+        if (cmd.request == nullptr || cmd.request_size != sizeof(ControlSendRequest)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        return send_control(*static_cast<const ControlSendRequest *>(cmd.request), cmd.payload, now);
     case CommandKind::PayloadCapacity:
         if (cmd.request == nullptr || cmd.request_size != sizeof(CapacityRequest)) {
             return Reply{Status::InvalidArgument, 0, 0};

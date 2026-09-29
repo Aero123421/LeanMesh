@@ -417,6 +417,9 @@ struct FakeRoot final : serial::UsbEnv {
             b = static_cast<uint8_t>(seed >> 56U);
         }
     }
+    sec::HandshakeSlot hs;
+    sec::HandshakeSlot *slot_acquire() override { return &hs; }
+    void slot_release() override {}
     Status submit(Handle s, JobClass, port::JobFn f, void *a) override {
         slot = s;
         fn = f;
@@ -556,6 +559,35 @@ LM_TEST("S09-sim fake host is refused by the root (unpaired, foreign fleet, no p
             LM_CHECK_EQ(r.root->stats().unsupported_replies, 0u);
             std::printf("    %s: root %s\n", c.name, status_name(r.root->link().last_failure()));
         }
+    }
+}
+
+LM_TEST("S13-D10 sim: the USB handshake waits for the node's exchange slot, takes it next and gives it back") {
+    {
+        Rig r(60);
+        link::Exchange &x = r.eng().link().exchange();
+        LM_CHECK(!x.lend_scratch().empty()); // a join module holds the node's one handshake slot
+        LM_CHECK(!r.until([&] { return r.root->link().active(); }, 2500)); // credentials verified, waiting
+        LM_CHECK(x.busy());
+        x.return_scratch();
+        LM_CHECK(r.until([&] { return r.both_active(); }, 3000));
+        LM_CHECK(!x.busy() && !x.job_pending()); // the slot is back with the exchange
+        LM_CHECK_EQ(r.root->link().stats().hs_failed, uint64_t{0});
+    }
+    {
+        Rig r(61);
+        link::Exchange &x = r.eng().link().exchange();
+        LM_CHECK(!x.lend_scratch().empty());
+        // Held longer than the 4 s attempt: it fails (Expired) while the slot is still taken.
+        LM_CHECK(r.until([&] { return r.root->link().stats().hs_failed >= 1; }, 8000));
+        LM_CHECK(!r.root->link().active());
+        r.host->close(); // no second attempt (which would queue for the slot again) while we look
+        LM_CHECK(!r.until([&] { return r.root->link().active(); }, 50));
+        x.return_scratch();
+        LM_CHECK(!x.busy()); // the failed attempt left no reservation behind
+        r.host->open(r.hnow());
+        LM_CHECK(r.until([&] { return r.both_active(); }, 40000)); // the Host retries and gets the slot
+        LM_CHECK(!x.busy() && !x.job_pending());
     }
 }
 

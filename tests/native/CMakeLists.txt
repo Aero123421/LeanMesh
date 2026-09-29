@@ -48,3 +48,12 @@ target_link_libraries(test_delivery PRIVATE lm_fleet)
 # JOIN slice (S8): Join/resume/leave over the simulated medium, power-cut sweep over every join record commit.
 lm_add_test(test_join SOURCES test_join.cpp LABELS "integration;sim;join;scenario")
 target_link_libraries(test_join PRIVATE lm_fleet)
+# FRAGMENT slice (S12): FRAGMENT / TRANSFER_BITMAP, reassembly slots, control objects, the 4 KiB object.
+lm_add_test(test_fragment SOURCES test_fragment.cpp LABELS "integration;sim;delivery;scenario")
+target_link_libraries(test_fragment PRIVATE lm_fleet)
+# SCHED slice (S14): DRR / control reserve / airtime bucket decisions, TX-pool admission, owner under a join storm.
+lm_add_test(test_sched SOURCES test_sched.cpp LABELS "integration;sim;sched;scenario")
+target_link_libraries(test_sched PRIVATE lm_fleet)
+# MESH slice (S11): formation, registration, leases, repair, queries and delivery over the formed mesh.
+lm_add_test(test_mesh SOURCES test_mesh.cpp LABELS "integration;sim;mesh;scenario")
+target_link_libraries(test_mesh PRIVATE lm_fleet)

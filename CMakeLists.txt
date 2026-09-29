@@ -56,7 +56,8 @@ target_compile_options(lm_edhoc PRIVATE ${LM_EDHOC_OPTIONS})
 set(LM_CXX_WARNINGS -Wall -Wextra -Wshadow $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor> -Werror)
 add_library(lm_sdk STATIC ${LM_COMMON_SOURCES} ${LM_ROOT_SOURCES})
 target_include_directories(lm_sdk PUBLIC "${LM_REPO_ROOT}/api" "${LM_REPO_ROOT}/src" "${LM_GEN_DIR}")
-target_compile_definitions(lm_sdk PUBLIC LM_BUILD_PROFILE_SIM)
+# The protocol bench carries the optional 4 KiB object lane (docs/09 §6); firmware opts in by Kconfig.
+target_compile_definitions(lm_sdk PUBLIC LM_BUILD_PROFILE_SIM LM_OBJECT_TRANSFER=1)
 target_compile_options(lm_sdk PRIVATE ${LM_CXX_WARNINGS} $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
 target_link_libraries(lm_sdk PUBLIC lm_psa lm_edhoc)
 
@@ -74,6 +75,9 @@ add_executable(meshsim
     tools/meshsim/cmd_serial.cpp
     tools/meshsim/cmd_join.cpp
     tools/meshsim/cmd_delivery.cpp
+    tools/meshsim/cmd_fragment.cpp
+    tools/meshsim/cmd_sched.cpp
+    tools/meshsim/cmd_mesh.cpp
     tools/meshsim/topology.cpp
     tools/meshsim/pty.cpp)
 target_compile_options(meshsim PRIVATE ${LM_CXX_WARNINGS})

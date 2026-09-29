@@ -22,6 +22,9 @@ inline constexpr std::size_t k_msg_bytes = gen::limits::small_message_bytes; // 
 inline constexpr std::size_t k_result_bytes = LM_MAX_APP_RESULT_BYTES;      // 32
 // Reserved end_sid of the unauthenticated end-handshake carrier (S9-D2). No session gets it.
 inline constexpr uint32_t k_handshake_sid = 0xFFFFFFFFU;
+// [S11] Reserved end_sid of the join-tunnel carriers (a proxy relaying an unjoined device's frames).
+inline constexpr uint32_t k_tunnel_sid = 0xFFFFFFFEU;
+[[nodiscard]] constexpr bool is_reserved_sid(uint32_t sid) { return sid >= k_tunnel_sid; }
 
 inline constexpr uint8_t k_link_attempts = static_cast<uint8_t>(gen::defaults::delivery::link_attempts);
 inline constexpr uint8_t k_e2e_rounds = static_cast<uint8_t>(gen::defaults::delivery::e2e_rounds);
@@ -67,9 +70,16 @@ struct IntentFields {
     ByteView payload;
 };
 // SHA-256 over deterministic CBOR [origin, target, domain, port, delivery, storage, priority,
-// effective_root_term, expires_root_ms, payload]. NoCapacity when the payload exceeds one frame
-// (S12 extends it to reassembled messages).
+// effective_root_term, expires_root_ms, payload]. NoCapacity above 4096 B (the payload may be a
+// reassembled message: it is hashed where it lives).
 [[nodiscard]] Status intent_hash(const IntentFields &f, Sha256Digest &out);
+
+// Hash of a fragmented RECEIPT / CONTROL object (docs/09 §6): SHA-256 over deterministic CBOR
+// [origin, target, domain, app_port = 0, original_record_kind, flags, effective_root_term,
+// expires_root_ms, complete_payload]; `flags` is the end-header flags byte.
+[[nodiscard]] Status object_hash(const DeviceId &origin, const DeviceId &target, const DomainId &domain,
+                                 wire::RecordKind kind, uint8_t flags, uint32_t root_term, uint64_t expires_root_ms,
+                                 ByteView payload, Sha256Digest &out);
 
 // delivery-receipt (control.cddl 25) as carried in a RECEIPT end record.
 struct Receipt {

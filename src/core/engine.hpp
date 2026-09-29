@@ -17,14 +17,19 @@
 #include "core/jobs.hpp"
 #include "core/link/link_layer.hpp"
 #include "core/member/membership.hpp"
+#include "core/member/proxy.hpp"
 #include "core/member/records.hpp"
 #include "core/ports.hpp"
 #include "core/profile.hpp"
 #include "core/radio/peer_registry.hpp"
 #include "core/radio/tx_manager.hpp"
+#include "core/radio/tx_pool.hpp"
+#include "core/sched/sched.hpp"
+#include "core/route/mesh.hpp"
 #include "core/serial_hook.hpp"
 #include "core/time.hpp"
 #include "root/ledger.hpp"
+#include "root/routes.hpp"
 
 namespace lm {
 
@@ -90,12 +95,19 @@ class Engine {
     // Transmits one frame (<= 250 B) to a registered peer or broadcast. The outcome arrives later
     // through the TX manager (on_tx_outcome). Busy = a TX is in flight or the driver has no room;
     // DriverResultUnknown = isolated after a watchdog. Neither is RF loss.
-    [[nodiscard]] Status transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTime now);
+    // Every transmission is charged to the scheduler's airtime bucket as `cls`; `queued` frames came
+    // out of its DRR pick (HopTx), the others (HOP_ACK, handshake, join, discovery) are control-plane.
+    [[nodiscard]] Status transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTime now,
+                                  sched::Class cls = sched::Class::Control, bool queued = false);
     // Changes the channel with readback semantics of the port (channel plan slice).
     [[nodiscard]] Status set_channel(uint8_t channel);
     PeerRegistry &peers() { return peers_; }
     [[nodiscard]] const PeerRegistry &peers() const { return peers_; }
     [[nodiscard]] const TxManager &tx() const { return tx_; }
+    // [S14] The node's one frame pool (queued frames and borrowed buffers) and the TX scheduler.
+    [[nodiscard]] TxPool &frames() { return frames_; }
+    [[nodiscard]] sched::Scheduler &sched() { return sched_; }
+    [[nodiscard]] const sched::Scheduler &sched() const { return sched_; }
     // Registers/frees a driver peer through the registry (NoCapacity = local shortage, not loss).
     [[nodiscard]] Status acquire_peer(const MacAddr &mac, PeerClass cls, PeerHandle &out) {
         return peers_.acquire(ports_.radio, mac, cls, out);
@@ -122,6 +134,12 @@ class Engine {
     root::LedgerType &ledger() { return ledger_; }
     // Membership/operation events: like raise() but with the operation id and the peer they concern.
     void emit_event(uint32_t kind, uint32_t reason, uint64_t operation, const DeviceId *peer);
+    // [SLICE:S11] mesh: parent search, registration, leases, path queries; the tree exists on the root only.
+    route::Mesh &mesh() { return mesh_; }
+    member::Proxy &proxy() { return proxy_; }
+    // A transmission that never touched the radio (a frame handed to the join tunnel) is over.
+    void complete_virtual_tx(uint32_t tag, port::TxResult result, MonoTime now) { on_tx_outcome(TxOutcome{tag, result, now}, now); }
+    root::RoutesType &routes() { return routes_; }
     // Time of the step() or command being processed (hooks called from RX handling use it).
     [[nodiscard]] MonoTime step_time() const { return step_now_; }
     // [SLICE:S10] Root-only USB serial adapter (src/serial); nullptr on leaf/relay. Not owned.
@@ -143,6 +161,8 @@ class Engine {
     Reply get_capabilities(const Command &cmd) const;
     Reply next_event(const Command &cmd, MonoTime now);
     static void rx_sink(void *ctx, const link::RxInfo &info, ByteView plain); // [SLICE:S9]
+    static void discovery_sink(void *ctx, const MacAddr &src, ByteView body, MonoTime now); // [SLICE:S11]
+    static bool proxy_sink(void *ctx, const port::RadioRx &rx, MonoTime now);               // [SLICE:S11]
     // [SLICE:S8] link::JoinHooks trampolines: the root routes to the ledger, everything else to the
     // membership module.
     [[nodiscard]] bool is_root() const { return k_root_capable && config_.role == Role::Root; }
@@ -156,12 +176,17 @@ class Engine {
     AppEventQueue<k_max_app_events> events_;
     PeerRegistry peers_;
     TxManager tx_;
+    TxPool frames_;         // [S14] before every module that borrows from it
+    sched::Scheduler sched_; // [S14]
     member::LocalIdentity ident_; // [SLICE:S5]
     link::LinkLayer link_{*this, ident_};
     delivery::Delivery delivery_{*this, ident_, link_}; // [SLICE:S9]
     MonoTime step_now_;                                 // [SLICE:S9] time of the running step()
     member::Membership membership_{*this};              // [SLICE:S8]
     root::LedgerType ledger_{*this};                    // [SLICE:S8] empty stand-in off the root
+    route::Mesh mesh_{*this};                           // [SLICE:S11]
+    root::RoutesType routes_{*this};                    // [SLICE:S11] empty stand-in off the root
+    member::Proxy proxy_{*this};                        // [SLICE:S11] join tunnel (relay side and root side)
     SerialHook *serial_ = nullptr; // [SLICE:S10]
     RadioState radio_state_ = RadioState::Stopped;
     uint8_t channel_ = 0;

@@ -114,9 +114,36 @@ class UsbEnv {
     // Queues `fn(arg)` on the slow-job worker; the completion must reach
     // UsbLink::on_job_done(slot, status, now). Busy = worker/slot unavailable (job does not exist).
     [[nodiscard]] virtual Status submit(Handle slot, JobClass cls, port::JobFn fn, void *arg) = 0;
+    // The handshake memory of one attempt (decision S13-D10, ARCH-D1: one HandshakeSlot per node). The
+    // root lends the node's exchange slot; nullptr = taken, and the caller is then first in line (other
+    // exchanges are refused until slot_release()). The Host helper has a slot of its own.
+    [[nodiscard]] virtual sec::HandshakeSlot *slot_acquire() = 0;
+    // Gives the slot back (and cancels a reservation). Only after its job completed.
+    virtual void slot_release() = 0;
 
   protected:
     ~UsbEnv() = default;
+};
+
+// Writes a record's plaintext straight into the link's transmit buffer (no second copy of it).
+class PayloadWriter {
+  public:
+    // Fills `out` (its size is the record limit) and sets `len`. Called at send time, possibly again
+    // after a Busy: it may consume state only when it also remembers it (the bridge keeps its events).
+    [[nodiscard]] virtual Status write(MutByteView out, std::size_t &len) = 0;
+
+  protected:
+    ~PayloadWriter() = default;
+};
+
+// PayloadWriter around a callable `Status(MutByteView out, std::size_t &len)`.
+template <class F> class WriterFn final : public PayloadWriter {
+  public:
+    explicit WriterFn(F f) : f_(f) {}
+    Status write(MutByteView out, std::size_t &len) override { return f_(out, len); }
+
+  private:
+    F f_;
 };
 
 class UsbSink {
@@ -166,6 +193,7 @@ class UsbLink {
     static constexpr std::size_t k_plain_bytes = gen::limits::serial_payload_bytes;
     static constexpr std::size_t k_tx_bytes = k_cobs_headroom + gen::limits::serial_decoded_bytes + 2;
     static constexpr std::size_t k_cred_bytes = 960;
+    static constexpr std::size_t k_send_max = 6144; // RESPONSE / EVENT plaintext limit (docs/19 §3)
 
     UsbLink(UsbRole role, UsbEnv &env, UsbSink *sink, uint64_t boot_id, bool auto_release);
     UsbLink(const UsbLink &) = delete;
@@ -198,6 +226,9 @@ class UsbLink {
     // REQUEST / RESPONSE / EVENT of the session `gen`. Conflict: that session is gone (never
     // re-addressed to the new one). Busy: TX buffer occupied or no credit (local flow control).
     [[nodiscard]] Status send(SerialKind kind, uint32_t gen, ByteView payload, MonoTime now);
+    // send() with the plaintext produced by `w` directly in the transmit buffer and sealed in place.
+    // Same results as send(); a writer error is returned as it is. `now` is the send time.
+    [[nodiscard]] Status send_built(SerialKind kind, uint32_t gen, PayloadWriter &w, MonoTime now);
     // Returns receive credit for records the sink consumed.
     void release(uint8_t lane, uint32_t frames, uint32_t bytes, MonoTime now);
 
@@ -270,6 +301,7 @@ class UsbLink {
     [[nodiscard]] Status start_job(Job job, sec::HsStep step, ByteView input, MonoTime now);
     void after_verify(MonoTime now);
     void retry_job(MonoTime now);
+    void release_slot();
     void maybe_start_attempt(MonoTime now);
     void after_hs(MonoTime now);
     void finish_keys(MonoTime now);
@@ -319,6 +351,7 @@ class UsbLink {
     Phase phase_ = Phase::Idle;
     Job job_ = Job::None;
     bool job_deferred_ = false; // armed but the worker was busy: retried at job_retry_at_
+    bool slot_wait_ = false;    // the credentials verified, the node's handshake slot is still taken
     MonoTime job_retry_at_ = MonoTime::never();
     sec::HsStep hs_step_ = sec::HsStep::None;
     Handle handle_;
@@ -335,7 +368,7 @@ class UsbLink {
     std::array<uint8_t, k_cred_bytes> cred_rx_{};
     std::size_t cred_rx_len_ = 0;
     Peer peer_;
-    sec::HandshakeSlot hs_;
+    sec::HandshakeSlot *hs_ = nullptr; // borrowed from the env for one attempt (UsbEnv::slot_acquire)
     sec::SessionContext ctx_{};
     Sha256Digest ctx_hash_{};
     std::array<uint8_t, 8 + k_cred_bytes> stage_{};

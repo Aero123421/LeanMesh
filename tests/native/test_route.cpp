@@ -310,13 +310,6 @@ LM_TEST("path cache by identity: one entry per destination device, a move replac
 
 namespace {
 
-DeviceId dev(unsigned i) {
-    DeviceId d;
-    d.bytes[0] = static_cast<uint8_t>(i >> 8);
-    d.bytes[1] = static_cast<uint8_t>(i);
-    d.bytes[31] = 1;
-    return d;
-}
 uint16_t addr_of(unsigned i) { return static_cast<uint16_t>(i + 2); } // 1 is the root
 
 // One register request built from the parent's current approved path; then READY.
@@ -335,9 +328,7 @@ Status attach(Topology &t, unsigned node, uint16_t parent, uint32_t seq, uint64_
     std::vector<uint16_t> cand(path.path.begin(), path.path.begin() + path.len);
     cand.push_back(addr_of(node));
     RouteRequest rq;
-    rq.device = dev(node);
-    rq.assignment = AssignmentGen{1};
-    rq.membership = MembershipGen{1};
+    rq.node = ShortAddr{addr_of(node)};
     rq.term = t.term();
     rq.parent = ShortAddr{parent};
     rq.candidate_path = cand.data();
@@ -348,12 +339,12 @@ Status attach(Topology &t, unsigned node, uint16_t parent, uint32_t seq, uint64_
     if (grant_out != nullptr) {
         *grant_out = g;
     }
-    return ready ? t.confirm_ready(dev(node), t.term(), g.revision, now) : Status::Ok;
+    return ready ? t.confirm_ready(ShortAddr{addr_of(node)}, t.term(), g.revision, now) : Status::Ok;
 }
 
 void admit_n(Topology &t, unsigned n) {
     for (unsigned i = 0; i < n; ++i) {
-        LM_CHECK_OK(t.admit(dev(i), ShortAddr{addr_of(i)}, AssignmentGen{1}, MembershipGen{1}));
+        LM_CHECK_OK(t.admit(ShortAddr{addr_of(i)}));
     }
 }
 
@@ -412,23 +403,21 @@ LM_TEST("topology: pending until READY, lost-ACK replay, stale advertisement, se
     LM_CHECK_OK(attach(t, 0, k_root_addr, 1, 10, false, &g2));
     LM_CHECK_EQ(g2.revision.value(), g1.revision.value());
     LM_CHECK(attach(t, 0, k_root_addr, 0, 10, false) == Status::Conflict); // older sequence
-    LM_CHECK_OK(t.confirm_ready(dev(0), RootTerm{5}, g1.revision, 20));
-    LM_CHECK_OK(t.confirm_ready(dev(0), RootTerm{5}, g1.revision, 30)); // duplicate READY
+    LM_CHECK_OK(t.confirm_ready(ShortAddr{addr_of(0)}, RootTerm{5}, g1.revision, 20));
+    LM_CHECK_OK(t.confirm_ready(ShortAddr{addr_of(0)}, RootTerm{5}, g1.revision, 30)); // duplicate READY
     LM_CHECK_OK(t.parent_of(ShortAddr{addr_of(0)}, parent));
     LM_CHECK_EQ(parent.value(), k_root_addr);
     LM_CHECK_OK(attach(t, 0, k_root_addr, 1, 40, false, &g2)); // replay after READY
     LM_CHECK_EQ(g2.revision.value(), g1.revision.value());
-    LM_CHECK(t.confirm_ready(dev(0), RootTerm{5}, PathRevision{999}, 30) == Status::Conflict);
-    LM_CHECK(t.confirm_ready(dev(0), RootTerm{4}, g1.revision, 30) == Status::NetworkMismatch);
+    LM_CHECK(t.confirm_ready(ShortAddr{addr_of(0)}, RootTerm{5}, PathRevision{999}, 30) == Status::Conflict);
+    LM_CHECK(t.confirm_ready(ShortAddr{addr_of(0)}, RootTerm{4}, g1.revision, 30) == Status::NetworkMismatch);
 
     // Stale advertisement: node 1 registers under node 0 with the path node 0 had before it moved.
     LM_CHECK_OK(attach(t, 2, k_root_addr, 1, 50, true));
     LM_CHECK_OK(attach(t, 0, addr_of(2), 2, 50, true)); // 0 moves below 2
     const std::vector<uint16_t> stale{k_root_addr, addr_of(0), addr_of(1)};
     RouteRequest rq;
-    rq.device = dev(1);
-    rq.assignment = AssignmentGen{1};
-    rq.membership = MembershipGen{1};
+    rq.node = ShortAddr{addr_of(1)};
     rq.term = RootTerm{5};
     rq.parent = ShortAddr{addr_of(0)};
     rq.candidate_path = stale.data();
@@ -438,11 +427,8 @@ LM_TEST("topology: pending until READY, lost-ACK replay, stale advertisement, se
     LM_CHECK(t.register_route(rq, 60, g) == Status::NoRoute);
     rq.term = RootTerm{4};
     LM_CHECK(t.register_route(rq, 60, g) == Status::NetworkMismatch);
-    rq.term = RootTerm{5};
-    rq.membership = MembershipGen{2};
-    LM_CHECK(t.register_route(rq, 60, g) == Status::TargetGenerationChanged);
     // Renewal keeps the lease, expiry removes only the link.
-    LM_CHECK_OK(t.renew(dev(2), 100000, g));
+    LM_CHECK_OK(t.renew(ShortAddr{addr_of(2)}, 100000, g));
     LM_CHECK_EQ(g.lease_expires_ms, 100000U + 180000U);
     t.expire(100000U + 180000U);
     RouteGrant none;
@@ -460,9 +446,7 @@ LM_TEST("R03 simultaneous parent choice on old paths never closes a cycle") {
     // A now wants B as parent using B's path from before it moved below A (B was at [root, B]).
     const std::vector<uint16_t> old_b{k_root_addr, addr_of(1), addr_of(0)};
     RouteRequest rq;
-    rq.device = dev(0);
-    rq.assignment = AssignmentGen{1};
-    rq.membership = MembershipGen{1};
+    rq.node = ShortAddr{addr_of(0)};
     rq.term = RootTerm{1};
     rq.parent = ShortAddr{addr_of(1)};
     rq.candidate_path = old_b.data();
@@ -474,7 +458,7 @@ LM_TEST("R03 simultaneous parent choice on old paths never closes a cycle") {
     LM_CHECK(t.path_from_root(ShortAddr{addr_of(1)}, 0, ga) == Status::Ok); // still [root,A,B]
     LM_CHECK_EQ(ga.len, 3);
     LM_CHECK(attach(t, 0, addr_of(1), 3, 0, false) != Status::Ok); // cycle: 1 is below 0
-    LM_CHECK_OK(t.confirm_ready(dev(1), RootTerm{1}, gb.revision, 0));
+    LM_CHECK_OK(t.confirm_ready(ShortAddr{addr_of(1)}, RootTerm{1}, gb.revision, 0));
     LM_CHECK_OK(attach(t, 0, addr_of(1), 3, 0, true)); // fine now: [root,B] is B's real path
     ShortAddr p;
     LM_CHECK_OK(t.parent_of(ShortAddr{addr_of(0)}, p));
@@ -497,8 +481,8 @@ LM_TEST("R03 simultaneous parent choice on old paths never closes a cycle") {
         const unsigned lead = static_cast<unsigned>(first);
         const RouteGrant &g1 = lead == 0 ? a : b;
         const RouteGrant &g2 = lead == 0 ? b : a;
-        LM_CHECK_OK(u.confirm_ready(dev(lead), RootTerm{1}, g1.revision, 1));
-        LM_CHECK(u.confirm_ready(dev(1 - lead), RootTerm{1}, g2.revision, 1) == Status::NoRoute);
+        LM_CHECK_OK(u.confirm_ready(ShortAddr{addr_of(lead)}, RootTerm{1}, g1.revision, 1));
+        LM_CHECK(u.confirm_ready(ShortAddr{addr_of(1 - lead)}, RootTerm{1}, g2.revision, 1) == Status::NoRoute);
         RouteGrant path;
         LM_CHECK_OK(u.path_from_root(ShortAddr{addr_of(lead)}, 1, path));
         LM_CHECK_EQ(path.len, 3); // the leader sits below the other one; the other stays at the root
@@ -507,7 +491,7 @@ LM_TEST("R03 simultaneous parent choice on old paths never closes a cycle") {
     }
 }
 
-LM_TEST("topology: address reuse, older generation and full table") {
+LM_TEST("topology: address reuse, invalid address and full table") {
     Topology t{ShortAddr{k_root_addr}, RootTerm{1}};
     admit_n(t, 3);
     LM_CHECK_OK(attach(t, 0, k_root_addr, 1, 0, true));
@@ -515,16 +499,15 @@ LM_TEST("topology: address reuse, older generation and full table") {
     RouteGrant g;
     LM_CHECK_OK(t.path_from_root(ShortAddr{addr_of(1)}, 0, g));
     LM_CHECK_EQ(g.len, 3);
-    // Same address, higher membership generation: children lose their approved link.
-    LM_CHECK_OK(t.admit(dev(0), ShortAddr{addr_of(0)}, AssignmentGen{1}, MembershipGen{2}));
+    // The ledger says the address now means another membership generation (reset): the approved
+    // link of the node and of its children is void, the slot stays admitted.
+    LM_CHECK_OK(t.reset(ShortAddr{addr_of(0)}));
     LM_CHECK(t.path_from_root(ShortAddr{addr_of(1)}, 0, g) == Status::NoRoute);
     LM_CHECK(t.path_from_root(ShortAddr{addr_of(0)}, 0, g) == Status::NoRoute);
-    LM_CHECK(t.admit(dev(0), ShortAddr{addr_of(0)}, AssignmentGen{1}, MembershipGen{1}) == Status::Conflict);
-    // Another device on the address, and one device on two addresses.
-    LM_CHECK_OK(t.admit(dev(50), ShortAddr{addr_of(0)}, AssignmentGen{1}, MembershipGen{1}));
-    LM_CHECK(t.admit(dev(50), ShortAddr{addr_of(30)}, AssignmentGen{1}, MembershipGen{1}) == Status::Conflict);
-    LM_CHECK(t.admit(dev(51), ShortAddr{k_root_addr}, AssignmentGen{1}, MembershipGen{1}) ==
-             Status::InvalidArgument);
+    LM_CHECK(t.is_admitted(ShortAddr{addr_of(0)}));
+    LM_CHECK(t.reset(ShortAddr{addr_of(30)}) == Status::NotFound);
+    LM_CHECK_OK(t.admit(ShortAddr{addr_of(0)})); // idempotent
+    LM_CHECK(t.admit(ShortAddr{k_root_addr}) == Status::InvalidArgument);
     // New term drops every link, keeps membership; the term must grow.
     LM_CHECK_OK(attach(t, 2, k_root_addr, 1, 0, true));
     LM_CHECK(t.begin_term(RootTerm{1}) == Status::Conflict);
@@ -534,9 +517,9 @@ LM_TEST("topology: address reuse, older generation and full table") {
     // Table full: 64 members, the 65th is NoCapacity, and removal frees a slot.
     Topology full{ShortAddr{k_root_addr}, RootTerm{1}};
     admit_n(full, root::k_max_members);
-    LM_CHECK(full.admit(dev(500), ShortAddr{900}, AssignmentGen{1}, MembershipGen{1}) == Status::NoCapacity);
+    LM_CHECK(full.admit(ShortAddr{900}) == Status::NoCapacity);
     LM_CHECK_OK(full.remove(ShortAddr{addr_of(7)}));
-    LM_CHECK_OK(full.admit(dev(500), ShortAddr{900}, AssignmentGen{1}, MembershipGen{1}));
+    LM_CHECK_OK(full.admit(ShortAddr{900}));
 }
 
 // ---- R03 seeded model ----------------------------------------------------------------------
@@ -583,7 +566,7 @@ class Model {
             rng_.next();
         }
         for (unsigned i = 0; i < n_; ++i) {
-            (void)topo_.admit(dev(i), ShortAddr{addr_of(i)}, AssignmentGen{1}, MembershipGen{1});
+            (void)topo_.admit(ShortAddr{addr_of(i)});
         }
         deep_bias_ = rng_.chance(50) ? 90 : 10;
         calm_ = rng_.chance(50); // calm seeds churn little, so deep trees can form
@@ -733,11 +716,14 @@ class Model {
             log("lost message");
             return;
         }
+        if (m.kind == Msg::Register && m.membership != gen_[m.node]) {
+            ++stats_.malformed; // the ledger (the caller) refuses a request of an older generation
+            log("REGISTER node=" + std::to_string(m.node) + " -> stale membership generation");
+            return;
+        }
         if (m.kind == Msg::Register) {
             RouteRequest rq;
-            rq.device = dev(m.node);
-            rq.assignment = AssignmentGen{1};
-            rq.membership = MembershipGen{m.membership};
+            rq.node = ShortAddr{addr_of(m.node)};
             rq.term = RootTerm{m.term};
             rq.parent = ShortAddr{m.parent};
             rq.candidate_path = m.path.data();
@@ -772,7 +758,7 @@ class Model {
                 }
             }
         } else {
-            const Status st = topo_.confirm_ready(dev(m.node), RootTerm{m.term},
+            const Status st = topo_.confirm_ready(ShortAddr{addr_of(m.node)}, RootTerm{m.term},
                                                   PathRevision{m.revision}, now_);
             log("READY node=" + std::to_string(m.node) + " rev=" + std::to_string(m.revision) +
                 " -> " + std::string(status_name(st)));
@@ -804,7 +790,7 @@ class Model {
         } else if (r < 86) {
             const unsigned node = rng_.below(n_);
             RouteGrant g;
-            const Status st = topo_.renew(dev(node), now_, g);
+            const Status st = topo_.renew(ShortAddr{addr_of(node)}, now_, g);
             log("RENEW node=" + std::to_string(node) + " -> " + std::string(status_name(st)));
         } else if (r < 91) {
             topo_.expire(now_);
@@ -812,8 +798,7 @@ class Model {
         } else if (r < 96) {
             const unsigned node = rng_.below(n_); // address reuse: a newer membership generation
             ++gen_[node];
-            const Status st = topo_.admit(dev(node), ShortAddr{addr_of(node)}, AssignmentGen{1},
-                                          MembershipGen{gen_[node]});
+            const Status st = topo_.reset(ShortAddr{addr_of(node)});
             log("REUSE addr=" + std::to_string(addr_of(node)) + " -> " + std::string(status_name(st)));
             seen_[node].clear();
         } else if (r < 98) {
@@ -821,8 +806,7 @@ class Model {
             const Status st = topo_.remove(ShortAddr{addr_of(node)});
             log("REMOVE addr=" + std::to_string(addr_of(node)) + " -> " + std::string(status_name(st)));
             if (st == Status::Ok) { // the ledger re-admits it later as a fresh member
-                (void)topo_.admit(dev(node), ShortAddr{addr_of(node)}, AssignmentGen{1},
-                                  MembershipGen{gen_[node]});
+                (void)topo_.admit(ShortAddr{addr_of(node)});
                 seen_[node].clear();
             }
         } else if (rng_.chance(40)) {

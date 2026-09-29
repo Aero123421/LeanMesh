@@ -505,9 +505,12 @@ LM_TEST("J02 policy: closed root offers nothing; preapproved refuses an unexpect
     LM_CHECK_EQ(n.ledger().stats().requests, 0ull);
     // Preapproved without an expected entry: refused NOT_EXPECTED (a hint, not a permanent verdict).
     n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
-    op = n.join(1, 0x91, LM_JOIN_NEW, &st);
+    // S11: the refusal is reported (membership event) and the search holds and asks again inside its budget;
+    // when the budget ends the operation is EXPIRED (not a verdict on the device) and a new request starts fresh.
+    op = n.join(1, 0x91, LM_JOIN_NEW, &st, 5000);
     LM_CHECK_EQ(st, LM_STATUS_OK);
-    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::NotFound));
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::Expired));
+    LM_CHECK(n.has_event(1, LM_EVENT_MEMBERSHIP, static_cast<uint32_t>(Status::NotFound)));
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_UNASSIGNED));
     // A ticket of another fleet or for another device is refused when it is installed.
     fleet::Network rogue(77, "rogue");

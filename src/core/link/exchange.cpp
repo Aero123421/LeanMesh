@@ -150,6 +150,7 @@ void Exchange::wipe() {
 
 void Exchange::finish_idle() {
     pend_.wipe();
+    stage_release();
     tx_active_ = false;
     rto_at_ = retry_at_ = deadline_ = MonoTime::never();
     rx_len_ = 0;
@@ -358,10 +359,34 @@ Status Exchange::make_context(sec::SessionContext &ctx) const {
     return Status::Ok;
 }
 
-void Exchange::stage(ObjKind kind, ByteView bytes) {
-    stage_len_ = std::min(bytes.size(), stage_.size());
-    std::memcpy(stage_.data(), bytes.data(), stage_len_);
+FrameBuf *Exchange::stage_buf() {
+    if (TxFrame *f = s_.engine.frames().get(stage_h_)) {
+        return &f->frame;
+    }
+    TxFrame *f = s_.engine.frames().borrow(stage_h_);
+    return f != nullptr ? &f->frame : nullptr;
+}
+
+void Exchange::stage_release() {
+    (void)s_.engine.frames().release(stage_h_); // false for a stale handle: nothing to give back
+    stage_h_ = Handle{};
+    stage_len_ = 0;
+}
+
+// Local shortage (no pool frame) or an object that cannot be one frame: the exchange is aborted by the
+// caller, never truncated.
+Status Exchange::stage(ObjKind kind, ByteView bytes) {
+    FrameBuf *b = stage_buf();
+    if (b == nullptr) {
+        return Status::NoCapacity;
+    }
+    if (bytes.size() > k_stage_bytes) {
+        return Status::PayloadTooLarge;
+    }
+    std::memcpy(b->bytes.data(), bytes.data(), bytes.size());
+    stage_len_ = bytes.size();
     staged_ = kind;
+    return Status::Ok;
 }
 
 void Exchange::after_hs(MonoTime now) {
@@ -374,7 +399,10 @@ void Exchange::after_hs(MonoTime now) {
     using S = sec::HsStep;
     switch (step) {
     case S::M1Compose:
-        stage(ObjKind::Msg1, hs_.output());
+        st = stage(ObjKind::Msg1, hs_.output());
+        if (st != Status::Ok) {
+            break;
+        }
         phase_ = Phase::AwaitMsg;
         expect_ = ObjKind::Msg2;
         send_object(ObjKind::Msg1, false);
@@ -384,7 +412,10 @@ void Exchange::after_hs(MonoTime now) {
         st = run_hs(S::M3Compose);
         break;
     case S::M3Compose:
-        stage(ObjKind::Msg3, hs_.output());
+        st = stage(ObjKind::Msg3, hs_.output());
+        if (st != Status::Ok) {
+            break;
+        }
         phase_ = Phase::AwaitMsg;
         expect_ = ObjKind::Msg4;
         send_object(ObjKind::Msg3, false);
@@ -407,14 +438,20 @@ void Exchange::after_hs(MonoTime now) {
         st = run_hs(S::M2Compose);
         break;
     case S::M2Compose:
-        stage(ObjKind::Msg2, hs_.output());
+        st = stage(ObjKind::Msg2, hs_.output());
+        if (st != Status::Ok) {
+            break;
+        }
         phase_ = Phase::AwaitMsg;
         expect_ = ObjKind::Msg3;
         send_object(ObjKind::Msg2, false);
         break;
     case S::M4Compose:
         // Held back until the keys exist: SESSION_BIND may follow message_4 immediately.
-        stage(ObjKind::Msg4, hs_.output());
+        st = stage(ObjKind::Msg4, hs_.output());
+        if (st != Status::Ok) {
+            break;
+        }
         phase_ = Phase::Hs;
         st = run_hs(S::Export);
         break;
@@ -440,7 +477,7 @@ Status Exchange::alloc_sid(uint32_t &sid) {
         const uint32_t v =
             (uint32_t{b[0]} << 24U) | (uint32_t{b[1]} << 16U) | (uint32_t{b[2]} << 8U) | b[3];
         const bool used = mode_ == Mode::End
-                              ? v == delivery::k_handshake_sid || end_.sessions->sid_in_use(v)
+                              ? delivery::is_reserved_sid(v) || end_.sessions->sid_in_use(v)
                               : s_.neighbors.sid_in_use(v);
         if (v != 0 && !used) {
             sid = v;
@@ -493,8 +530,7 @@ Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce)
     LM_TRY(w.finish());
     SealedFrame f;
     LM_TRY(seal_frame(k, wire::FrameKind::Edhoc, hint(), k.rx_sid, w.written(), f));
-    stage(initiator_ ? ObjKind::Bind : ObjKind::BindAck, f.view());
-    return Status::Ok;
+    return stage(initiator_ ? ObjKind::Bind : ObjKind::BindAck, f.view());
 }
 
 bool Exchange::check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &sid,
@@ -626,10 +662,8 @@ Status Exchange::install_session(MonoTime now) {
     n->assignment = peer_state_.mc.assignment;
     n->membership = peer_state_.mc.membership;
     n->role = peer_state_.mc.role;
-    n->prev.wipe();
     if (n->cur.active) {
-        n->prev = std::move(n->cur);
-        n->prev.valid_until = earliest(n->prev.valid_until, now + s_.policy.prev_grace);
+        nb.retire(n->mac, std::move(n->cur), now + s_.policy.prev_grace);
         ++s_.stats.sessions_replaced;
     }
     n->cur = std::move(pend_);

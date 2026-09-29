@@ -443,15 +443,18 @@ Status UsbLink::emit(SerialKind kind, uint32_t sid, Keys *keys, ByteView payload
     if (auth) {
         LM_TRY(keys->rec.next_counter(counter));
     }
+    // send_built(): the plaintext already stands where the body goes and is sealed in place.
+    uint8_t *const body = frame + wire::k_serial_header_bytes;
+    const bool in_place = payload.data() == body;
     write_header(frame, kind, sid, counter, static_cast<uint16_t>(payload.size()));
     if (auth) {
         std::array<uint8_t, wire::k_serial_header_bytes + 32> aad{};
         std::memcpy(aad.data(), frame, wire::k_serial_header_bytes);
         std::memcpy(aad.data() + wire::k_serial_header_bytes, keys->ctx_hash.data(), 32);
-        LM_TRY(keys->rec.seal(counter, ByteView{aad}, payload,
-                              MutByteView{frame + wire::k_serial_header_bytes, body_len}));
+        LM_TRY(in_place ? keys->rec.seal_in_place(counter, ByteView{aad}, MutByteView{body, body_len})
+                        : keys->rec.seal(counter, ByteView{aad}, payload, MutByteView{body, body_len}));
         last_tx_ = now;
-    } else if (!payload.empty()) {
+    } else if (!payload.empty() && !in_place) {
         std::memcpy(frame + wire::k_serial_header_bytes, payload.data(), payload.size());
     }
     Writer crc{MutByteView{frame + covered, wire::k_serial_crc_bytes}};
@@ -620,7 +623,7 @@ Status UsbLink::send(SerialKind kind, uint32_t gen, ByteView payload, MonoTime n
     if (kind != SerialKind::Request && kind != SerialKind::Response && kind != SerialKind::Event) {
         return Status::InvalidArgument;
     }
-    const std::size_t cap = kind == SerialKind::Request ? k_plain_bytes : 6144;
+    const std::size_t cap = kind == SerialKind::Request ? k_plain_bytes : k_send_max;
     if (payload.size() > cap) {
         return Status::PayloadTooLarge;
     }
@@ -636,6 +639,40 @@ Status UsbLink::send(SerialKind kind, uint32_t gen, ByteView payload, MonoTime n
         return Status::Busy;
     }
     LM_TRY(emit(kind, keys_[act_].sid, &keys_[act_], payload, now));
+    tx_lane_[lane].used_frames += 1;
+    tx_lane_[lane].used_bytes += decoded;
+    pump(now);
+    return Status::Ok;
+}
+
+Status UsbLink::send_built(SerialKind kind, uint32_t gen, PayloadWriter &w, MonoTime now) {
+    if (!open_ || act_ < 0 || gen != gen_) {
+        return Status::Conflict;
+    }
+    if (kind != SerialKind::Response && kind != SerialKind::Event) {
+        return Status::InvalidArgument;
+    }
+    if (tx_len_ != 0 && !flush(now)) {
+        send_blocked_ = true;
+        return Status::Busy;
+    }
+    // No credit for even one frame: do not build (the writer may consume state).
+    if (tx_available_frames(k_lane_data) == 0 && (kind == SerialKind::Event || tx_available_frames(k_lane_control) == 0)) {
+        ++stats_.tx_credit_blocked;
+        send_blocked_ = true;
+        return Status::Busy;
+    }
+    uint8_t *const body = tx_.data() + k_cobs_headroom + wire::k_serial_header_bytes;
+    std::size_t len = 0;
+    LM_TRY(w.write(MutByteView{body, k_send_max}, len));
+    const std::size_t decoded = decoded_size(len);
+    const uint8_t lane = lane_of(kind, decoded);
+    if (!tx_room(lane, decoded)) {
+        ++stats_.tx_credit_blocked;
+        send_blocked_ = true;
+        return Status::Busy; // the writer's state is unchanged or remembered: it builds again
+    }
+    LM_TRY(emit(kind, keys_[act_].sid, &keys_[act_], ByteView{body, len}, now));
     tx_lane_[lane].used_frames += 1;
     tx_lane_[lane].used_bytes += decoded;
     pump(now);
@@ -670,6 +707,11 @@ MonoTime UsbLink::deadline() const {
 void UsbLink::on_timer(MonoTime now) {
     if (!open_) {
         return;
+    }
+    if (slot_wait_ && now >= job_retry_at_) {
+        slot_wait_ = false;
+        job_retry_at_ = MonoTime::never();
+        after_verify(now); // asks for the slot again (and waits again while it is taken)
     }
     if (job_deferred_ && now >= job_retry_at_) {
         retry_job(now);

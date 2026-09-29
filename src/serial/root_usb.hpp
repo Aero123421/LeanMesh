@@ -94,6 +94,8 @@ class RootUsb final : public SerialHook, private UsbEnv, private UsbSink {
     Status submit(Handle slot, JobClass cls, port::JobFn fn, void *arg) override {
         return engine_.submit_job(JobOwner::Serial, slot, cls, fn, arg);
     }
+    sec::HandshakeSlot *slot_acquire() override { return engine_.link().exchange().lend_slot(); }
+    void slot_release() override { engine_.link().exchange().return_slot(); }
     // UsbSink
     void on_session(bool up, uint32_t gen, UsbDown why) override;
     void on_record(SerialKind kind, uint8_t lane, uint32_t frame_bytes, ByteView payload,

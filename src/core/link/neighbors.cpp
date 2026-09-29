@@ -50,11 +50,16 @@ Neighbor *Neighbors::by_rx_sid(const MacAddr &mac, uint32_t sid, SessionKeys *&w
         if (n.cur.active && n.cur.rx_sid == sid) {
             found = &n;
             which = &n.cur;
-        } else if (n.prev.active && n.prev.rx_sid == sid) {
-            found = &n;
-            which = &n.prev;
         }
     });
+    if (found == nullptr) {
+        for (Grace &g : grace_) {
+            if (g.keys.active && g.mac == mac && g.keys.rx_sid == sid) {
+                found = find_mac(mac); // a session that outlived its neighbour is not served
+                which = &g.keys;
+            }
+        }
+    }
     return found;
 }
 
@@ -71,9 +76,39 @@ Neighbor *Neighbors::by_tx_sid(const MacAddr &mac, uint32_t sid) {
 bool Neighbors::sid_in_use(uint32_t sid) const {
     bool used = false;
     const_cast<Table &>(table_).for_each([&](Handle, Neighbor &n) {
-        used = used || (n.cur.active && n.cur.rx_sid == sid) || (n.prev.active && n.prev.rx_sid == sid);
+        used = used || (n.cur.active && n.cur.rx_sid == sid);
     });
+    for (const Grace &g : grace_) {
+        used = used || (g.keys.active && g.keys.rx_sid == sid);
+    }
     return used;
+}
+
+void Neighbors::retire(const MacAddr &mac, SessionKeys &&old, MonoTime until) {
+    Grace *slot = &grace_[0];
+    for (Grace &g : grace_) {
+        if (!g.keys.active || g.mac == mac) {
+            slot = &g; // a free slot, or the same neighbour's older grace (never two per neighbour)
+            if (g.mac == mac || !g.keys.active) {
+                break;
+            }
+        } else if (slot->keys.active && g.keys.valid_until < slot->keys.valid_until) {
+            slot = &g; // both busy with others: the one that ends first goes
+        }
+    }
+    slot->keys.wipe();
+    slot->mac = mac;
+    slot->keys = std::move(old);
+    slot->keys.valid_until = earliest(slot->keys.valid_until, until);
+}
+
+bool Neighbors::has_grace(const MacAddr &mac) const {
+    for (const Grace &g : grace_) {
+        if (g.keys.active && g.mac == mac) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Neighbor *Neighbors::acquire() {
@@ -89,7 +124,11 @@ void Neighbors::remove(Neighbor &n) {
         }
     });
     n.cur.wipe();
-    n.prev.wipe();
+    for (Grace &g : grace_) {
+        if (g.keys.active && g.mac == n.mac) {
+            g.keys.wipe();
+        }
+    }
     (void)table_.release(target);
 }
 
@@ -98,16 +137,18 @@ std::size_t Neighbors::sweep(MonoTime now, PeerHandle *released, std::size_t cap
     Neighbor *dead[k_max_neighbors];
     std::size_t n_dead = 0;
     table_.for_each([&](Handle, Neighbor &n) {
-        if (n.prev.active && !live(n.prev, now)) {
-            n.prev.wipe();
-        }
         if (n.cur.active && !live(n.cur, now)) {
             n.cur.wipe();
         }
-        if (!n.cur.active && !n.prev.active) {
+        if (!n.cur.active) {
             dead[n_dead++] = &n;
         }
     });
+    for (Grace &g : grace_) {
+        if (g.keys.active && !live(g.keys, now)) {
+            g.keys.wipe();
+        }
+    }
     for (std::size_t i = 0; i < n_dead; ++i) {
         if (n_released < cap) {
             released[n_released++] = dead[i]->peer;
@@ -123,10 +164,12 @@ MonoTime Neighbors::next_expiry() const {
         if (n.cur.active) {
             next = earliest(next, n.cur.valid_until);
         }
-        if (n.prev.active) {
-            next = earliest(next, n.prev.valid_until);
-        }
     });
+    for (const Grace &g : grace_) {
+        if (g.keys.active) {
+            next = earliest(next, g.keys.valid_until);
+        }
+    }
     return next;
 }
 

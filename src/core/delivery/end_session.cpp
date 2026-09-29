@@ -13,6 +13,15 @@ EndSession *EndSessions::find_peer(const DeviceId &d) {
     return nullptr;
 }
 
+EndSession *EndSessions::find_addr(ShortAddr a) {
+    for (EndSession &s : slots_) {
+        if (s.used && s.rec.active() && s.peer_addr == a) {
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
 EndSession *EndSessions::find_rx_sid(uint32_t sid) {
     for (EndSession &s : slots_) {
         if (s.used && s.rx_sid == sid) {

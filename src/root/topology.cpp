@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "core/route/stitch.hpp"
 #include "core/wire/frame.hpp"
 #include "gen/defaults.hpp"
 
@@ -31,15 +32,6 @@ uint8_t Topology::find_addr(uint16_t addr) const {
     }
     for (std::size_t i = 0; i < nodes_.size(); ++i) {
         if (nodes_[i].used && nodes_[i].addr == addr) {
-            return static_cast<uint8_t>(i);
-        }
-    }
-    return k_none;
-}
-
-uint8_t Topology::find_id(const DeviceId &id) const {
-    for (std::size_t i = 0; i < nodes_.size(); ++i) {
-        if (nodes_[i].used && nodes_[i].id == id) {
             return static_cast<uint8_t>(i);
         }
     }
@@ -147,39 +139,50 @@ void Topology::unattach_children(uint8_t idx) {
     }
 }
 
-Status Topology::admit(const DeviceId &id, ShortAddr addr, AssignmentGen ag, MembershipGen mg) {
-    if (!is_valid_short_addr(addr) || addr == root_addr_ || id.is_zero()) {
+Status Topology::admit(ShortAddr addr, uint32_t gen) {
+    if (!is_valid_short_addr(addr) || addr == root_addr_) {
         return Status::InvalidArgument;
     }
     const uint8_t at = find_addr(addr.value());
-    const uint8_t same = find_id(id);
-    if (same != k_none && same != at) {
-        return Status::Conflict;
-    }
-    uint8_t slot = at;
     if (at != k_none) {
-        const Node &old = nodes_[at];
-        if (old.id == id && old.assignment == ag && old.membership == mg) {
+        if (nodes_[at].gen != gen) {
+            LM_TRY(reset(addr)); // the address means another membership generation: old links are void
+            nodes_[at].gen = gen;
+        }
+        return Status::Ok;
+    }
+    for (Node &n : nodes_) {
+        if (!n.used) {
+            n = Node{};
+            n.used = true;
+            n.addr = addr.value();
+            n.gen = gen;
             return Status::Ok;
         }
-        if (old.id == id && (ag < old.assignment || mg < old.membership)) {
-            return Status::Conflict;
-        }
-        unattach_children(at); // the address now means another generation: old links are void
-    } else {
-        for (std::size_t i = 0; i < nodes_.size() && slot == k_none; ++i) {
-            slot = nodes_[i].used ? k_none : static_cast<uint8_t>(i);
-        }
-        if (slot == k_none) {
-            return Status::NoCapacity;
-        }
     }
-    nodes_[slot] = Node{};
-    nodes_[slot].used = true;
-    nodes_[slot].addr = addr.value();
-    nodes_[slot].id = id;
-    nodes_[slot].assignment = ag;
-    nodes_[slot].membership = mg;
+    return Status::NoCapacity;
+}
+
+void Topology::init(ShortAddr root_addr, RootTerm term) {
+    root_addr_ = root_addr;
+    term_ = term;
+    revision_ = 0;
+    for (Node &n : nodes_) {
+        n = Node{};
+    }
+}
+
+Status Topology::reset(ShortAddr addr) {
+    const uint8_t at = find_addr(addr.value());
+    if (at == k_none || at == k_root) {
+        return Status::NotFound;
+    }
+    unattach_children(at); // the address means another generation now: old links are void
+    const uint32_t gen = nodes_[at].gen;
+    nodes_[at] = Node{};
+    nodes_[at].used = true;
+    nodes_[at].addr = addr.value();
+    nodes_[at].gen = gen;
     return Status::Ok;
 }
 
@@ -204,9 +207,7 @@ Status Topology::begin_term(RootTerm term) {
         n = Node{};
         n.used = kept.used;
         n.addr = kept.addr;
-        n.id = kept.id;
-        n.assignment = kept.assignment;
-        n.membership = kept.membership;
+        n.gen = kept.gen;
     }
     return Status::Ok;
 }
@@ -215,14 +216,11 @@ Status Topology::register_route(const RouteRequest &req, uint64_t now, RouteGran
     if (req.term != term_) {
         return Status::NetworkMismatch;
     }
-    const uint8_t idx = find_id(req.device);
-    if (idx == k_none) {
+    const uint8_t idx = find_addr(req.node.value());
+    if (idx == k_none || idx == k_root) {
         return Status::NotFound;
     }
     Node &node = nodes_[idx];
-    if (req.assignment != node.assignment || req.membership != node.membership) {
-        return Status::TargetGenerationChanged;
-    }
     const std::size_t n = req.candidate_len;
     const uint16_t *cand = req.candidate_path;
     if (cand == nullptr || n < 2 || n > k_max_depth + 1 || cand[0] != root_addr_.value() ||
@@ -273,13 +271,12 @@ Status Topology::register_route(const RouteRequest &req, uint64_t now, RouteGran
     return Status::Ok;
 }
 
-Status Topology::confirm_ready(const DeviceId &id, RootTerm term, PathRevision revision,
-                               uint64_t now) {
+Status Topology::confirm_ready(ShortAddr addr, RootTerm term, PathRevision revision, uint64_t now) {
     if (term != term_) {
         return Status::NetworkMismatch;
     }
-    const uint8_t idx = find_id(id);
-    if (idx == k_none) {
+    const uint8_t idx = find_addr(addr.value());
+    if (idx == k_none || idx == k_root) {
         return Status::NotFound;
     }
     Node &node = nodes_[idx];
@@ -311,9 +308,9 @@ Status Topology::confirm_ready(const DeviceId &id, RootTerm term, PathRevision r
     return bump_subtree(idx);
 }
 
-Status Topology::renew(const DeviceId &id, uint64_t now, RouteGrant &out) {
-    const uint8_t idx = find_id(id);
-    if (idx == k_none) {
+Status Topology::renew(ShortAddr addr, uint64_t now, RouteGrant &out) {
+    const uint8_t idx = find_addr(addr.value());
+    if (idx == k_none || idx == k_root) {
         return Status::NotFound;
     }
     Chain path{};
@@ -334,6 +331,28 @@ void Topology::expire(uint64_t now) {
             n.parent = k_none;
         }
     }
+}
+
+uint64_t Topology::next_expiry_ms() const {
+    uint64_t next = UINT64_MAX;
+    for (const Node &n : nodes_) {
+        if (n.pending) {
+            next = std::min(next, n.pending_expires_ms);
+        }
+        if (n.active) {
+            next = std::min(next, n.lease_expires_ms);
+        }
+    }
+    return next;
+}
+
+Status Topology::path_revision(ShortAddr node, PathRevision &out) const {
+    const uint8_t idx = find_addr(node.value());
+    if (idx == k_none || idx == k_root) {
+        return Status::NotFound;
+    }
+    out = PathRevision{nodes_[idx].revision};
+    return Status::Ok;
 }
 
 Status Topology::path_from_root(ShortAddr node, uint64_t now, RouteGrant &out) const {
@@ -364,17 +383,10 @@ Status Topology::route_between(ShortAddr src, ShortAddr dst, uint64_t now, Sourc
     std::size_t nb = 0;
     LM_TRY(chain(si, &now, a, na));
     LM_TRY(chain(di, &now, b, nb));
-    std::size_t lca = 0; // index of the lowest common ancestor in both chains
-    while (lca + 1 < na && lca + 1 < nb && a[lca + 1] == b[lca + 1]) {
-        ++lca;
-    }
     out = SourceRoute{};
-    for (std::size_t i = na - 1; i-- > lca;) { // src's parent up to the LCA
-        out.path[out.len++] = a[i];
-    }
-    for (std::size_t i = lca + 1; i < nb; ++i) { // down to dst
-        out.path[out.len++] = b[i];
-    }
+    std::size_t n = 0;
+    LM_TRY(route::stitch_route(a.data(), na, b.data(), nb, out.path.data(), out.path.size(), n));
+    out.len = static_cast<uint8_t>(n);
     out.revision = PathRevision{std::max(revision_of(si), revision_of(di))};
     return Status::Ok;
 }

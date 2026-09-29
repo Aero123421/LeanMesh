@@ -32,20 +32,18 @@ bool Delivery::left_node(Handle h, const Op &op) const {
 }
 
 // ---- acceptance ----
-Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now) {
+Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTime now) {
     if (!identity_.is_member()) {
         return reply(Status::AuthPending);
     }
     if (!ready_) {
         return reply(durable_.failed() ? Status::RecoveryRequired : Status::Busy);
     }
+    const bool control = send_mode_ == SendMode::Control; // [S12] only the internal control path
     if (rq.reserved != 0 || rq.reserved2 != 0 || rq.delivery > LM_APPLIED || rq.storage > LM_DURABLE ||
-        rq.priority >= LM_PRIORITY_CONTROL || rq.strict_single_frame > 1 || rq.app_port == 0 ||
-        rq.app_port > 65534) {
+        (rq.priority >= LM_PRIORITY_CONTROL && !control) || rq.strict_single_frame > 1 ||
+        (rq.app_port == 0 && !control) || rq.app_port > 65534) {
         return reply(Status::InvalidArgument); // CONTROL is not selectable through the public API
-    }
-    if (rq.queue_mode != LM_FIFO) {
-        return reply(Status::Unsupported); // LATEST coalescing belongs to the scheduler slice
     }
     DeviceId dest;
     switch (rq.destination.kind) {
@@ -71,18 +69,36 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
             return known->hash == host_tag_->hash ? reply(Status::Ok, known->id) : reply(Status::Conflict);
         }
     }
-    if (payload.size() > k_msg_bytes) {
+    // [S12] Up to 512 B (4096 through lm_send_object when the object lane is built and enabled, one
+    // control page for control objects). Above one frame the message goes out as fragments unless
+    // strict_single_frame was asked for; a durable record must fit one journal entry.
+    std::size_t max_bytes = k_msg_bytes;
+    if (control) {
+        max_bytes = k_control_bytes;
+    } else if (send_mode_ == SendMode::Object) {
+        if (!object_enabled()) {
+            return reply(Status::Unsupported);
+        }
+        max_bytes = gen::limits::object_bytes;
+    }
+    if (payload.size() > max_bytes || (control && payload.empty()) ||
+        (rq.storage == LM_DURABLE && payload.size() > k_durable_payload_max)) {
         return reply(Status::PayloadTooLarge);
     }
-    // One frame only until the fragment slice exists (S9-D3): the payload must fit the longest
-    // single-frame path any node may have, or the known route of this destination.
-    std::size_t cap = wire::data_capacity(1);
-    PathSpec known;
-    if (route_for(dest, known, now)) {
-        cap = wire::data_capacity(known.len);
+    const bool strict = rq.strict_single_frame == 1;
+    if (strict) { // the payload must fit the known route of this destination, or the shortest frame budget
+        std::size_t cap = wire::data_capacity(1);
+        PathSpec known;
+        if (route_for(dest, known, now)) {
+            cap = wire::data_capacity(known.len);
+        }
+        if (payload.size() > cap) {
+            return reply(Status::PayloadTooLarge);
+        }
     }
-    if (payload.size() > cap) {
-        return reply(Status::PayloadTooLarge);
+    const Lane lane = control ? Lane::Control : (payload.size() > k_msg_bytes ? Lane::Object : Lane::Pool);
+    if (!lane_free(lane)) {
+        return reply(Status::NoCapacity); // the control/object buffer is busy: the work never existed
     }
     const bool finite = rq.expires_root_ms != 0;
     if (!finite) {
@@ -111,13 +127,25 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
         return reply(Status::NoCapacity);
     }
 
+    // [S14] class share of the operation slots and LATEST: the unsent send of the same key ends
+    // SUPERSEDED first, so its slots are free for this one (nothing can fail after this point).
+    Handle victim;
+    if (const Reply ar = admit_send(rq, dest, victim); ar.status != Status::Ok) {
+        return ar;
+    }
+    if (!victim.is_none()) {
+        supersede(victim, next_op_id_, now);
+    }
     Op *op = alloc_op();
     if (op == nullptr) {
         return reply(Status::NoCapacity);
     }
-    const Handle mb = msgs_.acquire();
-    if (mb.is_none()) {
-        return reply(Status::NoCapacity);
+    Handle mb; // message-pool lane only
+    if (lane == Lane::Pool) {
+        mb = msgs_.acquire();
+        if (mb.is_none()) {
+            return reply(Status::NoCapacity);
+        }
     }
     const Handle ah = actives_.acquire();
     if (ah.is_none()) {
@@ -136,7 +164,14 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
     f.expires_root_ms = rq.expires_root_ms;
     f.payload = payload;
     Sha256Digest hash{};
-    const Status hs = intent_hash(f, hash);
+    Status hs = Status::Ok;
+    if (control) {
+        hs = object_hash(f.origin, dest, f.domain, wire::RecordKind::Control,
+                         wire::make_end_flags(wire::Delivery::BestEffort, wire::Priority::Control, false), rq.root_term,
+                         rq.expires_root_ms, payload, hash);
+    } else {
+        hs = intent_hash(f, hash);
+    }
     if (hs != Status::Ok || (host_tag_ != nullptr && host_tag_->hash != hash)) {
         (void)msgs_.release(mb);
         (void)actives_.release(ah);
@@ -144,15 +179,20 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
     }
     Active *a = actives_.get(ah);
     a->durable = rq.storage == LM_DURABLE;
+    a->latest = rq.queue_mode == LM_LATEST;
+    a->key = a->latest ? rq.coalesce_key : 0;
     if (a->durable && !alloc_jslot(out_j_, a->jslot)) {
         (void)msgs_.release(mb);
         (void)actives_.release(ah);
         return reply(Status::NoCapacity);
     }
-    MsgBuf *buf = msgs_.get(mb);
     if (!payload.empty()) {
-        std::memcpy(buf->data.data(), payload.data(), payload.size());
+        uint8_t *dst = lane == Lane::Pool ? msgs_.get(mb)->data.data()
+                                          : (lane == Lane::Control ? frag_.ctl_buf.data() : frag_.obj_buf.data());
+        std::memcpy(dst, payload.data(), payload.size());
     }
+    frag_.ctl_tx = frag_.ctl_tx || lane == Lane::Control;
+    frag_.obj_tx = frag_.obj_tx || lane == Lane::Object;
     *op = Op{};
     op->used = true;
     op->id = next_op_id_++;
@@ -172,6 +212,10 @@ Reply Delivery::send(const lm_send_request_t &rq, ByteView payload, MonoTime now
     op->active = ah;
     a->op = op_index(*op);
     a->msg = mb;
+    a->lane = lane;
+    a->xfer = lane != Lane::Pool; // objects and control objects always travel as fragments
+    a->strict = strict;
+    a->control = control;
     a->len = static_cast<uint16_t>(payload.size());
     ++stats_.accepted;
     if (a->durable) {
@@ -204,6 +248,7 @@ void Delivery::retire_active(Handle h, bool persist_retire, MonoTime now) {
     }
     (void)hop_.withdraw(OwnerKind::Out, h); // frames that already left stop being retransmitted
     (void)msgs_.release(a->msg);
+    free_lane(*a);
     ops_[a->op].active = Handle{};
     const bool durable = a->durable;
     const uint16_t jslot = a->jslot;
@@ -302,9 +347,12 @@ void Delivery::drive(Handle h, MonoTime now) {
         }
         return;
     }
-    if (a->len > wire::data_capacity(ps.len)) {
-        finalize_active(h, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::PayloadTooLarge), now);
-        return;
+    if (!a->xfer && a->len > wire::data_capacity(ps.len)) {
+        if (a->strict) {
+            finalize_active(h, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::PayloadTooLarge), now);
+            return;
+        }
+        a->xfer = true; // too big for a frame on this path: FRAGMENT records (docs/09 §6)
     }
     // 4. End session.
     EndSession *s = sessions_.find_peer(op.dest);
@@ -313,8 +361,21 @@ void Delivery::drive(Handle h, MonoTime now) {
         request_exchange(*a, op, ps, now);
         return;
     }
-    // 5. End record: sealed once per (session, root term); a retry sends the same ciphertext.
-    if (a->record_len == 0 || a->record_term != ps.term.value() || a->record_epoch != s->epoch) {
+    // 5. End record: sealed once per (session, root term); a retry sends the same ciphertext. A
+    // fragmented message seals its next fragment instead (never the same counter twice).
+    ByteView record{a->record.data(), a->record_len};
+    if (a->xfer) {
+        bool parked = false;
+        if (seal_fragment(*a, op, *s, ps, record, parked, now) != Status::Ok) {
+            s->suspect = true; // refresh needed (2^24 records) or a local fault: a new session
+            a->st = Active::St::WaitSession;
+            request_exchange(*a, op, ps, now);
+            return;
+        }
+        if (parked) {
+            return; // window full or everything sent: wait for a bitmap or the round timer
+        }
+    } else if (a->record_len == 0 || a->record_term != ps.term.value() || a->record_epoch != s->epoch) {
         wire::EndHeader eh;
         eh.message_id = to_bytes(op.mid);
         eh.app_port = op.port;
@@ -336,9 +397,17 @@ void Delivery::drive(Handle h, MonoTime now) {
         a->record_len = static_cast<uint16_t>(len);
         a->record_term = ps.term.value();
         a->record_epoch = s->epoch;
+        record = ByteView{a->record.data(), a->record_len};
     }
     sessions_.touch(*s);
-    // 6. Frame. The state is set first: the hop layer may report back from inside submit().
+    transmit(h, record, ps, now);
+}
+
+// 6. Frame. The state is set first: the hop layer may report back from inside submit().
+void Delivery::transmit(Handle h, ByteView record, const PathSpec &ps, MonoTime now) {
+    Active *a = actives_.get(h);
+    Op &op = ops_[a->op];
+    const MonoTime dl = local_deadline(op.expires, op.term, now);
     Status why = Status::Ok;
     const bool opens_round = a->new_round;
     a->hops = ps.len;
@@ -350,7 +419,7 @@ void Delivery::drive(Handle h, MonoTime now) {
         ++a->round;
         ++stats_.rounds;
     }
-    if (!build_and_send(ps, ByteView{a->record.data(), a->record_len}, OwnerKind::Out, h, now, why)) {
+    if (!build_and_send(ps, record, OwnerKind::Out, h, now, why)) {
         a = actives_.get(h);
         if (a == nullptr) {
             return;
@@ -384,8 +453,9 @@ void Delivery::round_ended(Handle h, Active &a, Op &op, MonoTime now, bool link_
     a.st = Active::St::WaitRoute;
     if ((op.evidence & ev::end_received) != 0 && op.delivery == LM_APPLIED) {
         // Stored at the destination; only the application's result is missing. Ask again slowly:
-        // a duplicate makes the destination repeat its newest receipt (which may have been lost).
-        a.new_round = false;
+        // a duplicate makes the destination repeat its newest receipt (which may have been lost). A
+        // fragmented message asks with its first fragment (a duplicate the destination answers alike).
+        a.new_round = a.xfer;
         if (link_failed) {
             a.next_at = now + k_result_poll;
         }
@@ -484,6 +554,9 @@ RootTimeBound Delivery::exchange_root_time(void *ctx, MonoTime now) {
 }
 
 void Delivery::on_exchange_done(const DeviceId &peer, Status st, MonoTime now) {
+    if (mesh_.session != nullptr) {
+        mesh_.session(mesh_.ctx, peer, st, now); // [S11]
+    }
     if (st == Status::Ok) {
         kick_dest(peer, now);
         kick_all_waiting(now);
@@ -517,7 +590,7 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
     refresh_bound(now);
     switch (f.kind) {
     case OwnerKind::Out: {
-        const Active *a = actives_.get(f.owner);
+        const Active *a = actives_.get(f.owner());
         if (a == nullptr || a->cancelled) {
             return Status::Conflict;
         }
@@ -528,7 +601,7 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
         return Status::Ok;
     }
     case OwnerKind::Exchange:
-        return link_.exchange().end_alive(f.owner) ? Status::Ok : Status::Conflict;
+        return link_.exchange().end_alive(f.owner()) ? Status::Ok : Status::Conflict;
     default:
         return Status::Ok;
     }
@@ -536,6 +609,9 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
 
 void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
     refresh_bound(now);
+    if (mesh_.frame_done != nullptr) {
+        mesh_.frame_done(mesh_.ctx, f, end, now); // [S11] link quality, repair, tunnel progress
+    }
     if (f.kind == OwnerKind::Exchange) {
         link_.exchange().on_end_frame_done(f.owner, end == HopEnd::Accepted, now);
         return;
@@ -559,6 +635,11 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
         note_evidence(op, ev::hop_accepted, now);
         a->backoff = 0;
         a->refusals = 0;
+        if (a->xfer) { // fragments: the next one, or wait for the bitmaps that confirm them
+            a->st = Active::St::WaitRoute;
+            a->next_at = now; // due at once, driven by on_timer() of this same step from a shallow stack
+            return;
+        }
         if (op.delivery == LM_BEST_EFFORT) {
             finalize_active(f.owner, LM_OUTCOME_SUBMITTED, 0, now); // sent evidence only
             return;
@@ -572,7 +653,7 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
         return;
     case HopEnd::Failed:
         // Three link attempts without HOP_ACK: RF loss samples. The frame may still have arrived.
-        if (op.delivery == LM_BEST_EFFORT) {
+        if (op.delivery == LM_BEST_EFFORT && !a->xfer) {
             finalize_active(f.owner, LM_OUTCOME_INDETERMINATE, static_cast<uint32_t>(Status::NoRoute), now);
             return;
         }
@@ -608,9 +689,9 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
 }
 
 // ---- receipts (origin) ----
-void Delivery::on_receipt(const EndSession &s, const OpenedEnd &o, MonoTime now) {
+void Delivery::on_receipt(const EndSession &s, const std::array<uint8_t, 16> &mid, ByteView payload, MonoTime now) {
     Receipt r;
-    if (decode_receipt(o.view(), r) != Status::Ok || o.header.message_id != r.message_id) {
+    if (decode_receipt(payload, r) != Status::Ok || mid != r.message_id) {
         return;
     }
     Op *op = find_op_by_message(s.peer, r.message_id);

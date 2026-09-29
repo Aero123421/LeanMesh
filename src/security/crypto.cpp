@@ -39,6 +39,26 @@ Status sha256(ByteView data, Sha256Digest &out) {
     return len == out.size() ? Status::Ok : Status::RecoveryRequired;
 }
 
+Status sha256_parts(ByteView a, ByteView b, Sha256Digest &out) {
+    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
+    psa_status_t st = psa_hash_setup(&op, PSA_ALG_SHA_256);
+    if (st == PSA_SUCCESS) {
+        st = psa_hash_update(&op, a.data(), a.size());
+    }
+    if (st == PSA_SUCCESS) {
+        st = psa_hash_update(&op, b.data(), b.size());
+    }
+    std::size_t len = 0;
+    if (st == PSA_SUCCESS) {
+        st = psa_hash_finish(&op, out.data(), out.size(), &len);
+    }
+    if (st != PSA_SUCCESS) {
+        (void)psa_hash_abort(&op);
+        return from_psa(st);
+    }
+    return len == out.size() ? Status::Ok : Status::RecoveryRequired;
+}
+
 void secure_zero(MutByteView buf) {
     if (!buf.empty()) {
         mbedtls_platform_zeroize(buf.data(), buf.size());

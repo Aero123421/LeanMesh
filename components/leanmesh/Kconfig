@@ -16,6 +16,15 @@ menu "LeanMesh"
             bool "root"
     endchoice
 
+    config LEANMESH_OBJECT_TRANSFER
+        bool "Optional 4096 B object transfer (lm_send_object)"
+        default n
+        help
+            Compiles the 4 KiB object buffer (about 4.2 KB of RAM) and its reassembly slot
+            (docs/09 section 6). Off: lm_send_object returns UNSUPPORTED and lm_config_t
+            object_transfer_enabled=1 is refused. On: the application still has to enable it
+            at lm_init.
+
     menu "RF profile (docs/03 section 3)"
         config LEANMESH_RF_DEPLOYMENT_APPROVED
             bool "RF profile has a recorded deployment approval"

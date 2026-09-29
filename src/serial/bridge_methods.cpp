@@ -42,10 +42,11 @@ Reply Bridge::run(CommandKind kind, const void *request, std::size_t request_siz
 }
 
 void Bridge::snapshot_of(Pending &p, uint64_t op) {
-    p.snap = lm_operation_t{};
-    p.snap.struct_size = sizeof(p.snap);
-    p.snap.abi_version = LM_ABI_VERSION;
-    if (run(CommandKind::GetOperation, &op, sizeof(op), ByteView{}, &p.snap, sizeof(p.snap)).status == Status::Ok) {
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    if (run(CommandKind::GetOperation, &op, sizeof(op), ByteView{}, &o, sizeof(o)).status == Status::Ok) {
+        p.snap = OpSnap::of(o);
         p.has_op = true;
         p.op = op;
         p.result = Result::Snapshot;
@@ -141,12 +142,13 @@ void Bridge::m_get_message(Pending &p, ByteView params) {
     std::memcpy(ref.origin.bytes, origin.data(), 32);
     std::memcpy(ref.id.bytes, id.data(), 16);
     std::memcpy(ref.intent_hash, hash.data(), 32);
-    p.snap = lm_operation_t{};
-    p.snap.struct_size = sizeof(p.snap);
-    p.snap.abi_version = LM_ABI_VERSION;
-    const Reply rep = run(CommandKind::GetMessage, &ref, sizeof(ref), ByteView{}, &p.snap, sizeof(p.snap));
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    const Reply rep = run(CommandKind::GetMessage, &ref, sizeof(ref), ByteView{}, &o, sizeof(o));
     p.status = rep.status;
     if (rep.status == Status::Ok) {
+        p.snap = OpSnap::of(o);
         p.has_op = rep.operation_id != 0; // the operation id lets the Host cancel after its own restart
         p.op = rep.operation_id;
         p.result = Result::Snapshot;
@@ -250,7 +252,7 @@ void Bridge::m_host_store_ack(Pending &p, ByteView params) {
     ++stats_.host_store_acks;
     if (p.status == Status::Ok || p.status == Status::NotFound) {
         for (Slot &s : ring_) { // the Host has it (or the root no longer knows it): stop sending it
-            if (s.used && s.needs_store && s.mid == a.mid && std::equal(s.origin.begin(), s.origin.end(), a.origin.bytes.begin())) {
+            if (s.used && s.ev.kind == LM_EVENT_MESSAGE && s.ev.message_id == a.mid && s.ev.peer == a.origin.bytes) {
                 s.stored = true;
                 settle(s);
             }
@@ -299,7 +301,7 @@ void Bridge::m_get_request(Pending &p, ByteView params) {
     }
     const root::LedgerType &led = engine_.ledger();
     root::PendingJoin pj;
-    p.snap = lm_operation_t{};
+    p.snap = OpSnap{};
     p.status = Status::NotFound;
     for (std::size_t i = 0; i < root::k_join_txns; ++i) {
         if (led.pending_join(i, pj) && pj.request == id) {

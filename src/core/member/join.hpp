@@ -20,6 +20,7 @@
 #include "core/bytes.hpp"
 #include "core/ids.hpp"
 #include "core/member/join_wire.hpp"
+#include "core/pool.hpp"
 #include "core/radio/tx_manager.hpp"
 #include "core/time.hpp"
 
@@ -51,10 +52,11 @@ class JoinPipe {
     [[nodiscard]] const MacAddr &mac() const { return mac_; }
 
     // ---- TX ----
-    // Staging area for small objects (<= k_small bytes); send_staged() makes it the current object.
-    static constexpr std::size_t k_small = 192;
-    [[nodiscard]] MutByteView stage() { return MutByteView{small_}; }
-    void send_staged(std::size_t len, MonoTime now) { send(ByteView{small_.data(), len}, now); }
+    // Staging area for small objects (<= one pool frame); send_staged() makes it the current object.
+    // It is a frame borrowed from the node's pool (P9) from the first stage() until reset(); empty
+    // when the pool has no room (a local shortage the caller treats as a failed attempt).
+    [[nodiscard]] MutByteView stage();
+    void send_staged(std::size_t len, MonoTime now);
     // `object` must stay valid until acked() or reset(). Replaces an object still in flight.
     void send(ByteView object, MonoTime now);
     // The peer answered: stop retransmitting.
@@ -101,7 +103,7 @@ class JoinPipe {
     MonoTime rto_at_ = MonoTime::never();
     MonoTime retry_at_ = MonoTime::never();
     uint64_t frames_sent_ = 0;
-    std::array<uint8_t, k_small> small_{};
+    Handle stage_h_; // the borrowed staging frame
 
     uint8_t rx_id_ = 0;    // id of the object being assembled or last completed
     bool rx_done_ = false; // rx_id_ completed

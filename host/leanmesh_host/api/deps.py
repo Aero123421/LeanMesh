@@ -23,6 +23,7 @@ def require(*any_of: str) -> Any:
         found = authenticate(request.app.state.principals, token)
         if found is None:
             raise ApiError(401, "UNAUTHENTICATED", "unknown token")
+        request.app.state.limiter.admit(found.id)  # 429 before any work; unauthenticated requests never spend it
         if not found.permissions.intersection(any_of):
             raise ApiError(403, "FORBIDDEN", "permission required",
                            required=any_of[0] if len(any_of) == 1 else list(any_of))

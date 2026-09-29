@@ -41,6 +41,11 @@ class Settings:
     max_consumers_per_principal: int = 8
     consumer_lease_ms: int = 7 * 24 * 3600 * 1000  # every ACK renews it; an expired consumer pins nothing
     max_subscribers: int = 64  # long-poll waiters + SSE streams
+    # Request-rate admission (docs/08 §8, config/defaults.json scheduler.*; a rate of 0 disables a bucket).
+    principal_rps: float = 20.0
+    principal_burst: int = 40
+    global_rps: float = 100.0
+    global_burst: int = 100
 
     @staticmethod
     def from_env() -> Settings:
@@ -50,7 +55,14 @@ class Settings:
                 raise SettingsError(f"{name} is required")
             return value
 
+        def number(name: str, default: float) -> float:
+            return float(os.environ.get(name, default))
+
         return Settings(
+            principal_rps=number("LEANMESH_PRINCIPAL_RPS", Settings.principal_rps),
+            principal_burst=int(number("LEANMESH_PRINCIPAL_BURST", Settings.principal_burst)),
+            global_rps=number("LEANMESH_GLOBAL_RPS", Settings.global_rps),
+            global_burst=int(number("LEANMESH_GLOBAL_BURST", Settings.global_burst)),
             db_path=Path(required("LEANMESH_DB")),
             tokens_path=Path(required("LEANMESH_TOKENS")),
             # db/schema.sql is the normative schema; packaging copies it next to the package.

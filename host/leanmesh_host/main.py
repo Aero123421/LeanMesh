@@ -28,7 +28,7 @@ from . import SPEC_VERSION
 from .api import routes
 from .api.deps import require
 from .api.errors import ApiError
-from .api.limits import BodyLimit
+from .api.limits import BodyLimit, RateLimiter
 from .auth import Principal, load_principals, sync_principals
 from .bridge import Bridge
 from .db import startup
@@ -109,6 +109,8 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
             app.state.storage = storage
             app.state.hub = hub
             app.state.principals = principals
+            app.state.limiter = RateLimiter(settings.principal_rps, settings.principal_burst,
+                                            settings.global_rps, settings.global_burst)
             app.state.serial, app.state.bridge = _start_serial(settings, hub)  # [SLICE:S10/S13]
             yield
         finally:

@@ -25,8 +25,8 @@ lm::Reply call(lm_context_t *ctx, lm::CommandKind kind, const void *request, std
     return ctx->owner.call(cmd);
 }
 
-lm_status_t send_common(lm_context_t *ctx, const lm_send_request_t *rq, const uint8_t *payload, size_t len,
-                        lm_operation_id_t *op) {
+lm_status_t send_common(lm_context_t *ctx, lm::CommandKind kind, const lm_send_request_t *rq,
+                        const uint8_t *payload, size_t len, lm_operation_id_t *op) {
     if (!valid_ctx(ctx) || rq == nullptr || op == nullptr || (payload == nullptr && len != 0)) {
         return to_abi(Status::InvalidArgument);
     }
@@ -34,7 +34,7 @@ lm_status_t send_common(lm_context_t *ctx, const lm_send_request_t *rq, const ui
     if (a != Status::Ok) {
         return to_abi(a);
     }
-    const lm::Reply r = call(ctx, lm::CommandKind::Send, rq, sizeof(*rq), lm::ByteView{payload, len});
+    const lm::Reply r = call(ctx, kind, rq, sizeof(*rq), lm::ByteView{payload, len});
     if (r.status == Status::Ok) {
         *op = r.operation_id;
     }
@@ -47,13 +47,14 @@ extern "C" {
 
 lm_status_t lm_send(lm_context_t *ctx, const lm_send_request_t *rq, const uint8_t *payload, size_t len,
                     lm_operation_id_t *op) {
-    return send_common(ctx, rq, payload, len, op);
+    return send_common(ctx, lm::CommandKind::Send, rq, payload, len, op);
 }
 
-// Objects (4096 B) need the fragment engine of the transfer slice: the operation does not exist yet.
-lm_status_t lm_send_object(lm_context_t *ctx, const lm_send_request_t *, const uint8_t *, size_t,
-                           lm_operation_id_t *) {
-    return to_abi(valid_ctx(ctx) ? Status::Unsupported : Status::InvalidArgument);
+// Objects up to 4096 B: only in builds with the object lane and when the application enabled it
+// (lm_config_t.object_transfer_enabled); otherwise UNSUPPORTED and no work exists.
+lm_status_t lm_send_object(lm_context_t *ctx, const lm_send_request_t *rq, const uint8_t *payload, size_t len,
+                           lm_operation_id_t *op) {
+    return send_common(ctx, lm::CommandKind::SendObject, rq, payload, len, op);
 }
 
 lm_status_t lm_get_operation(lm_context_t *ctx, lm_operation_id_t id, lm_operation_t *out) {
