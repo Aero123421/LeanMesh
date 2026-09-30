@@ -14,6 +14,8 @@ constexpr Duration k_leave_poll = Duration::from_ms(250);   // only while an exp
 constexpr Duration k_leave_tx_wait = Duration::from_s(2);   // the notice is best effort, never blocks a leave
 constexpr Duration k_busy_retry = Duration::from_ms(50);
 constexpr uint8_t k_leave_notice_attempts = 3;
+constexpr uint8_t k_leave_checks = 3;                        // FIX8-D6: read-backs / re-commits of a tombstone
+constexpr Duration k_leave_check_gap = Duration::from_ms(1000);
 
 } // namespace
 
@@ -244,7 +246,12 @@ Status Membership::get_request(const RequestId &id, lm_operation_t &out, MonoTim
     out.struct_size = sizeof(out);
     out.abi_version = LM_ABI_VERSION;
     out.operation_id = req_.operation;
-    out.phase = static_cast<uint32_t>(phase_);
+    // FIX8-D8 (second review #13): the public phase (LM_PHASE_*), never the private join step: FINAL once the request
+    // has its outcome; WAITING_RECEIPT while the root holds it (JoinRequest sent, until the final acknowledgement);
+    // PENDING before (search, handshake, ticket).
+    out.phase = req_.outcome != LM_OUTCOME_PENDING ? LM_PHASE_FINAL
+                : phase_ >= JoinPhase::RequestOut      ? LM_PHASE_WAITING_RECEIPT
+                                                       : LM_PHASE_PENDING;
     out.outcome = req_.outcome;
     out.reason = static_cast<uint32_t>(req_.reason);
     out.evidence_bits = req_.evidence;
@@ -275,6 +282,14 @@ Status Membership::leave(uint8_t mode, uint32_t deadline_ms, MonoTime now, uint6
     leave_attempts_ = 0;
     leave_tx_inflight_ = false;
     leave_prepared_only_ = !id.is_member();
+    leave_checks_ = 0;
+    if (!leave_prepared_only_) {
+        // SEC-D8: the tombstone records what this device consumed (the generations below its floor); [S18] a
+        // revocation's floors when they are higher (a revocation notice starts its own leave; one that arrives while
+        // a leave runs is dropped - the root refuses the device all the same).
+        leave_assignment_ = std::max(id.member().assignment.value() + 1, revoked_ ? revoke_af_ : 0) - 1;
+        leave_membership_ = std::max(id.member().membership.value() + 1, revoked_ ? revoke_mf_ : 0) - 1;
+    }
     if (hooks_.refuse_sends != nullptr) {
         hooks_.refuse_sends(hooks_.ctx, true); // DRAIN and IMMEDIATE both stop new sends
     }
@@ -300,7 +315,7 @@ void Membership::leave_timer(MonoTime now) {
     case LeavePhase::Idle:
         return;
     case LeavePhase::Draining:
-        if (hooks_.drained == nullptr || hooks_.drained(hooks_.ctx)) {
+        if (revoked_ || hooks_.drained == nullptr || hooks_.drained(hooks_.ctx)) {
             leave_ = LeavePhase::Notifying;
             leave_tx_wait_ = MonoTime::never();
             leave_notify(now);
@@ -323,6 +338,11 @@ void Membership::leave_timer(MonoTime now) {
     case LeavePhase::Committing:
         if (rec_ == nullptr && !job_in_flight_ && now >= leave_tx_wait_) {
             leave_commit(now); // the record memory was busy: try again
+        }
+        return;
+    case LeavePhase::Reconciling:
+        if (!job_in_flight_ && now >= leave_tx_wait_) {
+            leave_check(now);
         }
         return;
     }
@@ -400,14 +420,10 @@ void Membership::leave_commit(MonoTime now) {
     if (hooks_.settle_pending != nullptr) {
         hooks_.settle_pending(hooks_.ctx);
     }
-    const LocalIdentity &id = engine_.identity();
     std::size_t len = 0;
     if (!leave_prepared_only_) {
         // SEC-D8: one atomic commit ends the membership AND records what it consumed (the generations below the
-        // floor). No room in the revocation-floor table is needed, so nothing can be dropped for lack of it.
-        // [S18] A revocation's erasure keeps the floors the RevokeObject named (never lower than the own one).
-        leave_assignment_ = std::max(id.member().assignment.value() + 1, revoked_ ? revoke_af_ : 0) - 1;
-        leave_membership_ = std::max(id.member().membership.value() + 1, revoked_ ? revoke_mf_ : 0) - 1;
+        // floor, fixed when the leave began). No room in the revocation-floor table is needed.
         Writer w{MutByteView{rec_->payload}};
         w.u64be(leave_assignment_ + 1);
         w.u64be(leave_membership_ + 1);
@@ -418,25 +434,89 @@ void Membership::leave_commit(MonoTime now) {
                                         store::rec::membership_prepared, k_prepared_consumed, 0, now)
                           : start_flash(Step::LeaveCommit, store::RecordJob::Op::Commit, store::rec::membership,
                                         revoked_ ? k_membership_revoked : k_membership_left, len, now);
-    if (st != Status::Ok) {
-        leave_finish(st, LM_OUTCOME_INDETERMINATE, now);
+    if (st == Status::Ok) {
+        leave_tx_wait_ = MonoTime::never(); // its completion goes on (a deadline in the past would spin the owner)
+        return;
     }
+    if (!leave_prepared_only_ && (revoked_ || !engine_.identity().is_member())) {
+        // FIX8-D6: a verified revocation (or a leave that already ended the membership in RAM) never turns back: the
+        // membership ends in RAM now and the tombstone is written again later (bounded).
+        if (engine_.identity().is_member()) {
+            apply_left();
+        }
+        engine_.identity().return_record(rec_);
+        leave_ = LeavePhase::Reconciling;
+        leave_tx_wait_ = now + k_leave_check_gap;
+        return;
+    }
+    leave_finish(st, LM_OUTCOME_INDETERMINATE, now);
 }
 
-void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
+void Membership::leave_flash_done(Step step, Status s, MonoTime now) {
+    if (step == Step::LeaveCheck) {
+        leave_checked(s, now);
+        return;
+    }
+    if (leave_prepared_only_) { // (a PREPARED join abandoned: no membership to end)
+        if (s == Status::Ok) {
+            have_prepared_ = false;
+        }
+        leave_finish(s, s == Status::Ok ? LM_OUTCOME_APPLIED : LM_OUTCOME_INDETERMINATE, now);
+        return;
+    }
+    if (engine_.identity().is_member()) {
+        apply_left(); // FIX8-D6: whatever the commit said (the tombstone may be on the Flash, its read-back failed)
+    }
+    if (s != Status::Ok) {
+        // Second review #3: 8668c69 reported the failure and kept the member live (storage LEFT, RAM ACTIVE, sends OK).
+        // The leave stays done in RAM; the stored record is read back and the operation ends by what it holds.
+        engine_.identity().return_record(rec_);
+        leave_ = LeavePhase::Reconciling;
+        leave_tx_wait_ = now + k_leave_check_gap;
+        return;
+    }
+    leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
+}
+
+// FIX8-D6: the stored membership record after a failed tombstone commit (Reconciling): a tombstone = the leave is
+// durable (APPLIED); the old credential = it is not: written again; unreadable = read again. Bounded (k_leave_checks);
+// then INDETERMINATE - RAM stays left in this boot and the stored record decides at the next start.
+void Membership::leave_check(MonoTime now) {
+    if (++leave_checks_ > k_leave_checks) {
+        leave_finish(Status::StorageFailure, LM_OUTCOME_INDETERMINATE, now);
+        return;
+    }
+    if (rec_ == nullptr && (rec_ = engine_.identity().lend_record()) == nullptr) {
+        --leave_checks_; // the record memory is another module's for a moment: not an attempt
+        leave_tx_wait_ = now + k_busy_retry;
+        return;
+    }
+    if (start_flash(Step::LeaveCheck, store::RecordJob::Op::Load, store::rec::membership, 0, 0, now) != Status::Ok) {
+        engine_.identity().return_record(rec_);
+        leave_tx_wait_ = now + k_leave_check_gap;
+        return;
+    }
+    leave_tx_wait_ = MonoTime::never(); // the job's completion goes on (a deadline in the past would spin the owner)
+}
+
+void Membership::leave_checked(Status s, MonoTime now) {
+    if (s == Status::Ok && (rec_->state == k_membership_left || rec_->state == k_membership_revoked)) {
+        leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now); // the tombstone is durable
+        return;
+    }
+    if (s == Status::Ok) {
+        leave_commit(now); // the credential is still stored: the tombstone again (same floors)
+        return;
+    }
+    engine_.identity().return_record(rec_); // unreadable now: read again later
+    leave_tx_wait_ = now + k_leave_check_gap;
+}
+
+// The credential is gone (durably, or the store could not say): erase it from RAM too and end every session of the
+// domain, link and end sessions alike (an end session is bound to this membership generation: a peer that still holds
+// one must find it gone and make a fresh one, which shows it the generation of a later join, docs/04 §7).
+void Membership::apply_left() {
     LocalIdentity &id = engine_.identity();
-    if (s != Status::Ok) { // durable state unknown: the next boot decides (ACTIVE or LEFT)
-        leave_finish(s, LM_OUTCOME_INDETERMINATE, now);
-        return;
-    }
-    if (leave_prepared_only_) {
-        have_prepared_ = false;
-        leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
-        return;
-    }
-    // The credential is gone durably, its floor with it: erase it from RAM too and end every session of the domain,
-    // link and end sessions alike (an end session is bound to this membership generation: a peer that still holds
-    // one must find it gone and make a fresh one, which shows it the generation of a later join, docs/04 §7).
     DeviceId peers[link::k_max_neighbors];
     std::size_t n = 0;
     engine_.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
@@ -452,15 +532,16 @@ void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
     // Fleet identity stays; the floor records what this device consumed (SEC-D8).
     id.drop_member(Floors::Entry{id.self(), leave_assignment_ + 1, leave_membership_ + 1}, revoked_);
     have_prepared_ = false;
-    leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
 }
 
 void Membership::leave_finish(Status why, uint32_t outcome, MonoTime now) {
     (void)now;
+    (void)outcome; // (the event carries `why`: a storage failure or RECOVERY_REQUIRED reads as INDETERMINATE)
     engine_.identity().return_record(rec_);
-    const bool left = outcome == LM_OUTCOME_APPLIED;
-    if (!left && hooks_.refuse_sends != nullptr) {
-        hooks_.refuse_sends(hooks_.ctx, false); // a failed leave: the device keeps working
+    if (hooks_.refuse_sends != nullptr) {
+        // A drain that failed: the member sends again. A device that left (or whose tombstone is in doubt: RAM left) is
+        // refused as a non-member from here on, whatever this flag says (FIX8-D6: never restored by a failure).
+        hooks_.refuse_sends(hooks_.ctx, false);
     }
     leave_ = LeavePhase::Idle;
     leave_tx_wait_ = leave_deadline_ = MonoTime::never();

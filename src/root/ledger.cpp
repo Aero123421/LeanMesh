@@ -91,6 +91,30 @@ Status decode_window_record(ByteView payload, WindowRecord &out) {
     return Status::Ok;
 }
 
+// store::rec::policy (FIX8-D12): version u8 (1) | join mode u8 (0 closed, 1 external, 2 preapproved) | changes u64.
+Status encode_policy(JoinMode mode, uint64_t changes, MutByteView out, std::size_t &len) {
+    Writer w{out};
+    w.u8(k_policy_version);
+    w.u8(static_cast<uint8_t>(mode));
+    w.u64be(changes);
+    len = w.size();
+    return w.finish();
+}
+
+Status decode_policy(ByteView payload, JoinMode &mode, uint64_t &changes) {
+    Reader r{payload};
+    const uint8_t v = r.u8();
+    const uint8_t m = r.u8();
+    const uint64_t c = r.u64be();
+    if (r.finish() != Status::Ok || v != k_policy_version || m > static_cast<uint8_t>(JoinMode::Preapproved) ||
+        c > k_u63_max) {
+        return Status::BadFrame;
+    }
+    mode = static_cast<JoinMode>(m);
+    changes = c;
+    return Status::Ok;
+}
+
 } // namespace detail
 
 Status encode_manifest(const Manifest &m, MutByteView out, std::size_t &len) {
@@ -233,6 +257,14 @@ void Ledger::on_job_done(Handle slot, Status s, MonoTime now) {
     const Step step = step_;
     step_ = Step::None;
     step_done(step, s, now);
+    // FIX8-D3: queued maintenance (the other leaves of a batch, a registry or policy commit, renewals) goes on as soon
+    // as the shared memory is free again, not at an unrelated later wake. (The repairs of dirty entries and floors keep
+    // their own doubling gap: recon_retry, mark_dirty.)
+    if (holder_ == -1 && !job_in_flight_ &&
+        (leave_mask_ != 0 || abort_pending_ || confirm_pending_ || groups_pending_ || policy_pending_ || man_dirty_ ||
+         renew_mask_ != 0)) {
+        maint_retry_ = earliest(maint_retry_, now);
+    }
 }
 
 // SEC-D5: the manifest must exist and name this root's domain; a slot it lists as used must still hold its
@@ -290,6 +322,19 @@ Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
         // it is unknown, and an old reservation is never extended.
         l.entries_[i].recovered = l.entries_[i].state == EntryState::Prepared;
     }
+    // [FIX8-D12] The join mode the policy set. Unreadable is never "the default": the root stays CLOSED (policy in
+    // doubt) while it still admits its members (a policy is no authorisation of a member).
+    rec.id = store::rec::policy;
+    st = store::record_load(env.store, rec);
+    l.load_policy_ = st;
+    if (st == Status::Ok &&
+        detail::decode_policy(ByteView{rec.payload.data(), rec.payload_len}, l.load_mode_, l.load_count_) !=
+            Status::Ok) {
+        l.load_policy_ = Status::RecoveryRequired;
+    }
+    // [FIX8-D10] The group registry last: its payload stays in the record memory for the owner to restore.
+    rec.id = store::rec::root_groups;
+    l.groups_load_ = store::record_load(env.store, rec);
     return Status::Ok;
 }
 
@@ -381,6 +426,11 @@ void Ledger::return_memory() {
 }
 
 void Ledger::stop() {
+    // A join-mode change the stop cuts ends now: its record may or may not be durable (INDETERMINATE); the next start
+    // reads it (lm_policy_get), never a silent operation that no event ends.
+    if (policy_pending_ || (job_in_flight_ && step_ == Step::CommitPolicy)) {
+        engine_.emit_event(LM_EVENT_OPERATION, static_cast<uint32_t>(Status::RecoveryRequired), policy_op_, nullptr);
+    }
     for (Txn &t : txns_) {
         if (t.pipe.bound()) {
             (void)engine_.link().close_join(t.pipe.peer());
@@ -400,11 +450,13 @@ void Ledger::stop() {
     renew_mask_ = 0;
     lc_.active = false;
     lc_.retry_at = MonoTime::never();
-    recon_block_ = recon_left_ = 0; // (found again at the next load: the floors and the entries are durable)
+    dirty_ = doubt_ = 0; // (a stricter state that never became durable is decided again by the records at the next load)
     floors_dirty_ = false;
+    groups_pending_ = policy_pending_ = false; // (their operations ended above / in Groups::stop)
     window_set_ = false;
     notice_until_ = MonoTime::never();
-    leave_pending_ = abort_pending_ = load_pending_ = confirm_pending_ = false;
+    leave_mask_ = 0;
+    abort_pending_ = load_pending_ = confirm_pending_ = false;
     maint_retry_ = MonoTime::never();
 }
 
@@ -520,15 +572,21 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
     }
     switch (step) {
     case Step::LoadAll:
+        if (s == Status::Ok) { // (the registry's payload is still in the record memory: restored before it goes back)
+            engine_.groups().restore(groups_load_, ByteView{rec_->payload.data(), rec_->payload_len});
+            policy_doubt_ = load_policy_ != Status::Ok && load_policy_ != Status::NotFound;
+            mode_ = policy_doubt_ ? JoinMode::Closed : (load_policy_ == Status::Ok ? load_mode_ : mode_);
+            policy_count_ = load_policy_ == Status::Ok ? load_count_ : 0;
+        }
         release(-2);
         if (s == Status::Ok) {
             loaded_ = true;
-            // FIX5-D2: an ACTIVE entry below its durable floors (a cut between the floors and the entry commit of a
-            // revocation or reconciliation) is refused already (authorizes()); maintenance makes it Blocked durably.
-            recon_block_ = below_floors();
-            recon_left_ = 0;
+            dirty_ = doubt_ = 0; // RAM is what the records say
+            // FIX5-D2: an ACTIVE entry below a durable floor of the table (provisioned, or written before FIX8) is
+            // refused at once and made Blocked durably by maintenance.
             recon_fails_ = 0;
-            if (man_dirty_ || recon_block_ != 0) {
+            block_below_floors(now);
+            if (man_dirty_ || dirty_ != 0) {
                 maintenance(now); // make the repaired used bits durable
             }
         } else {
@@ -571,12 +629,14 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             entries_[job_slot_index_].reserved_until = MonoTime::never();
             ++stats_.aborted;
         }
+        entry_written(job_slot_index_, s == Status::Ok);
         release(-2);
         return;
     case Step::ConfirmLoad:
         confirm_loaded(s, now);
         return;
     case Step::ConfirmCommit:
+        entry_written(job_slot_index_, s == Status::Ok);
         if (s == Status::Ok) {
             confirm_done(now);
         } else {
@@ -594,7 +654,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             recon_retry(now);
         } else {
             recon_fails_ = 0;
-            if (recon_block_ != 0 || recon_left_ != 0) {
+            if (dirty_ != 0) {
                 maintenance(now);
             }
         }
@@ -628,8 +688,16 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             window_reserved(*t, s, now);
         }
         return;
-    case Step::CommitFloored: // [FIX5-D2]
-        floored_done(s, now);
+    case Step::CommitDirty: // [FIX5-D2, FIX8-D1]
+        dirty_done(s, now);
+        return;
+    case Step::CommitGroups: // [FIX8-D10]
+        release(-2);
+        groups_done(s);
+        return;
+    case Step::CommitPolicy: // [FIX8-D12]
+        release(-2);
+        policy_done(s);
         return;
     case Step::None:
         return;
@@ -758,13 +826,18 @@ void Ledger::maintenance(MonoTime now) {
         maint_retry_ = now + k_busy_retry;
         return;
     }
-    if (leave_pending_) {
-        leave_pending_ = false;
-        Entry &e = entries_[leave_slot_];
-        job_entry_ = e;
+    while (leave_mask_ != 0) { // FIX8-D3: every member that asked to leave, one commit each
+        const auto slot = static_cast<std::size_t>(__builtin_ctzll(leave_mask_));
+        leave_mask_ &= leave_mask_ - 1U;
+        if (entries_[slot].state != EntryState::Active) {
+            continue; // revoked, moved or left meanwhile
+        }
+        job_entry_ = entries_[slot];
         job_entry_.reserved_until = MonoTime::never();
-        if (commit_entry(Step::CommitLeft, leave_slot_, EntryState::Left, false, ByteView{}, -2) != Status::Ok) {
+        if (commit_entry(Step::CommitLeft, slot, EntryState::Left, false, ByteView{}, -2) != Status::Ok) {
+            leave_mask_ |= 1ULL << slot;
             release(-2);
+            maint_retry_ = now + k_busy_retry;
         }
         return;
     }
@@ -795,7 +868,33 @@ void Ledger::maintenance(MonoTime now) {
         }
         return;
     }
-    if (recon_fails_ < detail::k_recon_tries && (recon_block_ | recon_left_) != 0 && start_floored(now)) {
+    if (recon_fails_ < detail::k_recon_tries && dirty_ != 0 && start_dirty(now)) {
+        return;
+    }
+    if (groups_pending_) { // [FIX8-D10] one registry image, committed before the set's operation ends
+        std::size_t len = 0;
+        if (engine_.groups().encode(MutByteView{rec_->payload}, len) == Status::Ok) {
+            rec_->arm(store::RecordJob::Op::Commit, store::rec::root_groups, 0, len);
+            if (submit(Step::CommitGroups, JobClass::Flash, &store::record_job, rec_, -2) == Status::Ok) {
+                groups_pending_ = false;
+                return;
+            }
+        }
+        release(-2);
+        maint_retry_ = now + k_busy_retry;
+        return;
+    }
+    if (policy_pending_) { // [FIX8-D12]
+        std::size_t len = 0;
+        if (detail::encode_policy(policy_stage_, policy_count_ + 1, MutByteView{rec_->payload}, len) == Status::Ok) {
+            rec_->arm(store::RecordJob::Op::Commit, store::rec::policy, 0, len);
+            if (submit(Step::CommitPolicy, JobClass::Flash, &store::record_job, rec_, -2) == Status::Ok) {
+                policy_pending_ = false;
+                return;
+            }
+        }
+        release(-2);
+        maint_retry_ = now + k_busy_retry;
         return;
     }
     if (man_dirty_) {
@@ -810,6 +909,16 @@ void Ledger::maintenance(MonoTime now) {
         return;
     }
     release(-2);
+}
+
+void Ledger::entry_written(std::size_t slot, bool ok) {
+    const uint64_t bit = 1ULL << slot;
+    if (ok) {
+        doubt_ &= ~bit;
+        dirty_ &= ~bit;
+    } else {
+        doubt_ |= bit;
+    }
 }
 
 void Ledger::set_entry(std::size_t slot, const Entry &e) {

@@ -2,7 +2,7 @@
 """Public C API completeness (api/leanmesh.h).
 
 1. Every `lm_*` function declared in the header has a definition in the native build (nm of the built static
-   libraries: lm_sdk + lm_sim), and a definition in first-party source (src/**, which is what the IDF port compiles).
+   libraries: lm_sdk + lm_sim), and a definition in the sources the device build compiles (src/** except src/port/sim and src/hostnative).
 2. The evidence bits / phases of the header equal what the Host maps (host/leanmesh_host/bridge/mapping.py) and the
    openapi Operation states.
 
@@ -38,13 +38,16 @@ def source_defined():
     found = set()
     pat = re.compile(r"^(?:extern \"C\" )?lm_status_t\s+(lm_[a-z0-9_]+)\s*\(", re.M)
     for p in (ROOT / "src").rglob("*.cpp"):
+        rel = p.relative_to(ROOT / "src").parts
+        if rel[:2] == ("port", "sim") or rel[0] == "hostnative":
+            continue  # a definition in the simulator or the Host helper does not make the function part of the device SDK
         found.update(pat.findall(p.read_text()))
     return found
 
 
 def header_defines(prefix):
     text = (ROOT / "api/leanmesh.h").read_text()
-    return {m.group(1): int(m.group(2)) for m in re.finditer(r"#define\s+(%s\w*)\s+\(UINT32_C\(1\)\s*<<\s*(\d+)u\)" % prefix, text)}
+    return {m.group(1): int(m.group(2)) for m in re.finditer(rf"#define\s+({prefix}\w*)\s+\(UINT32_C\(1\)\s*<<\s*(\d+)u\)", text)}
 
 
 def check_evidence(errors):

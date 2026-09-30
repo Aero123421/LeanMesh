@@ -298,7 +298,9 @@ void Delivery::run_post(MonoTime now) {
     case Post::K::NewVolatile: {
         InEntry *e = in_.get(post_.in);
         if (e != nullptr) {
-            if (e->delivery != LM_BEST_EFFORT) {
+            if (gate_receipt(*e)) {
+                e->gated = true; // [S13] the Host's DB commit is the terminal store: HOST_STORE_ACK sends it
+            } else if (e->delivery != LM_BEST_EFFORT) {
                 send_receipt(*e, ReceiptEv::EndReceived, 0, now);
             }
             queue_message_event(post_.in, *e, now);
@@ -717,8 +719,7 @@ Reply Delivery::report_result(const ReportRequest &rq, ByteView result, MonoTime
     op->evidence = ev::accepted;
     op->accepted_ms = op->last_evidence_ms = now.to_ms();
     if (rq.outcome == LM_OUTCOME_PENDING) {
-        l->app_pending = true;
-        op->phase = Phase::Pending;
+        l->app_pending = true; // the report itself is complete (Final): it holds no operation slot until the result
         send_receipt(*e, ReceiptEv::AppPending, 0, now);
         return reply(Status::Ok, op->id);
     }

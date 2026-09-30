@@ -34,13 +34,18 @@ bool Delivery::left_node(Handle h, const Op &op) const {
     return (op.evidence & ev::sent) != 0 || hop_.has_left(OwnerKind::Out, h) || (a != nullptr && a->recovered);
 }
 
+// A local give-up is a definite "not delivered" only while no frame of the send left this node.
+uint8_t Delivery::refused_outcome(Handle h, const Op &op) const {
+    return left_node(h, op) ? LM_OUTCOME_INDETERMINATE : LM_OUTCOME_REJECTED;
+}
+
 // ---- acceptance ----
 Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTime now) {
     if (!identity_.is_member()) {
         return reply(Status::AuthPending);
     }
-    if (!ready_) {
-        return reply(durable_.failed() ? Status::RecoveryRequired : Status::Busy);
+    if (!ready_ || draining_) {
+        return reply(!ready_ && durable_.failed() ? Status::RecoveryRequired : Status::Busy);
     }
     const bool control = send_mode_ == SendMode::Control; // [S12] only the internal control path
     if (rq.reserved != 0 || rq.reserved2 != 0 || rq.delivery > LM_APPLIED || rq.storage > LM_DURABLE ||
@@ -296,7 +301,7 @@ void Delivery::drive(Handle h, MonoTime now) {
     // restart, so its outcome is unknown. (While the identity is not loaded, nothing can be sent anyway: it waits.)
     if (identity_.is_member() && identity_.member().assignment.value() != op.assignment) {
         ++stats_.old_assignment;
-        finalize_active(h, left_node(h, op) ? LM_OUTCOME_INDETERMINATE : LM_OUTCOME_REJECTED,
+        finalize_active(h, refused_outcome(h, op),
                         static_cast<uint32_t>(Status::NetworkMismatch), now);
         return;
     }
@@ -374,7 +379,7 @@ void Delivery::drive(Handle h, MonoTime now) {
     }
     if (!a->xfer && a->len > wire::data_capacity(ps.len)) {
         if (a->strict) {
-            finalize_active(h, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::PayloadTooLarge), now);
+            finalize_active(h, refused_outcome(h, op), static_cast<uint32_t>(Status::PayloadTooLarge), now);
             return;
         }
         a->xfer = true; // too big for a frame on this path: FRAGMENT records (docs/09 §6)
@@ -388,7 +393,7 @@ void Delivery::drive(Handle h, MonoTime now) {
     }
     if (op.group && group_.gate != nullptr &&
         !group_.gate(group_.ctx, op, s->peer_assignment.value(), s->peer_membership.value())) {
-        finalize_active(h, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::TargetGenerationChanged), now);
+        finalize_active(h, refused_outcome(h, op), static_cast<uint32_t>(Status::TargetGenerationChanged), now);
         return; // the device behind this DeviceId is not the one the snapshot named (docs/22 §2)
     }
     // 5. End record: sealed once per (session, root term); a retry sends the same ciphertext. A
@@ -461,7 +466,7 @@ void Delivery::transmit(Handle h, ByteView record, const PathSpec &ps, MonoTime 
         }
         op.phase = Phase::Pending;
         if (why == Status::PayloadTooLarge) {
-            finalize_active(h, LM_OUTCOME_REJECTED, static_cast<uint32_t>(why), now);
+            finalize_active(h, refused_outcome(h, op), static_cast<uint32_t>(why), now);
         } else if (why == Status::NoCapacity) {
             a->st = Active::St::WaitRoute; // local shortage (TX pool): retried shortly, not a failure
             a->next_at = earliest(now + k_shortage_retry, dl);
@@ -712,7 +717,7 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
         // [S16] a refusal on the way to a target that sleeps by schedule (a restarted parent has no session with it
         // until its next wake) is a wait, not a verdict: the retry backoff paces it until the deadline.
         if (++a->refusals > k_max_refusals && !engine_.power().sleepy_target(op.dest, now)) {
-            finalize_active(f.owner, LM_OUTCOME_REJECTED, static_cast<uint32_t>(Status::NoRoute), now);
+            finalize_active(f.owner, refused_outcome(f.owner, op), static_cast<uint32_t>(Status::NoRoute), now);
             return;
         }
         a->st = Active::St::WaitRoute;
@@ -832,8 +837,14 @@ Reply Delivery::cancel(uint64_t op_id, MonoTime now) {
     }
     if (!left_node(h, *op)) {
         // Nothing left this node (waiting for a route/session/persistence, or queued): a cancel is
-        // exact. A durable commit that already happened is retired by finalize_active().
-        finalize_active(h, LM_OUTCOME_CANCELLED_NOT_SENT, 0, now);
+        // exact. A durable send stays pending until its journal retire is durable: a power cut before that brings
+        // the record back and it is sent (FIX9-D3), so "cancelled, not sent" is claimed only once nothing can revive it.
+        if (a->durable) {
+            out_cancel_op_[a->jslot] = op->id;
+            retire_active(h, true, now);
+        } else {
+            finalize_active(h, LM_OUTCOME_CANCELLED_NOT_SENT, 0, now);
+        }
         return reply(Status::Ok, op_id);
     }
     // The frame may have arrived. No more retransmissions and no new rounds, but late evidence is

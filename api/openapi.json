@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
-    "title": "LeanMesh Host API — design contract, not running server",
+    "title": "LeanMesh Host API (contract; implemented by host/leanmesh_host, software and simulation verified, not hardware qualified)",
     "version": "0.2.0",
     "description": "Local UDS API. All u63 fields are decimal strings; strict input and additive responses. See docs/11-host.md and api/SEMANTICS.md."
   },

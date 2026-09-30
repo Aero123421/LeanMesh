@@ -365,8 +365,8 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
     }
     const uint16_t seq = ++air_seq_;
     const Status st = engine_.transmit(pick->mac, pick->frame.view(), k_tag_frame | seq, now, pick->cls, true);
-    if (st == Status::Busy || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
-        ++stats_.local_busy; // not an attempt, not a loss (Busy, NO_MEM, isolated radio)
+    if (st == Status::Busy || st == Status::Conflict || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
+        ++stats_.local_busy; // not an attempt, not a loss (Busy, NO_MEM, isolated radio, radio not started: FIX9-D7)
         retry_at_ = now + k_pump_retry;
         sent = true;
         return;

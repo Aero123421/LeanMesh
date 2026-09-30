@@ -244,7 +244,7 @@ void Mesh::begin(MonoTime now) {
     }
     state_ = State::Listen;
     engine_.chan().on_lost(now); // [S17] no parent yet: arms the recovery search
-    disc_.begin(now, jitter(400), true, member::Discovery::k_budget, true);
+    disc_.begin(now, jitter(400), !engine_.power().skips_listen(), member::Discovery::k_budget, true);
 }
 
 void Mesh::stop() {

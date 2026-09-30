@@ -330,10 +330,17 @@ LM_TEST("S09-sim 8230 B frame accepted, 8193 B payload refused, corruption and n
     r.to_root(ByteView{noise.data(), noise.size()});
     const Bytes q2 = request(7, 1, 100);
     LM_CHECK_OK(r.host->send(gen::SerialKind::Request, gen, ByteView{q2.data(), q2.size()}, r.hnow()));
-    LM_CHECK(r.until([&] { return r.responses == 2; }, 2000));
+    // FIX11-D5 (docs/19 §5): the record after the dropped one carries a counter gap. It is NOT applied and the session is
+    // cut (its credits and any acknowledgement built on the lost record cannot be trusted); a fresh EDHOC follows.
+    LM_CHECK(r.until([&] { return r.root->link().stats().rx_counter_gap == 1; }, 2000));
     LM_CHECK(r.root->link().stats().rx_overflow >= 1);
-    LM_CHECK(r.both_active());
+    LM_CHECK_EQ(r.responses, 1u);
+    LM_CHECK(r.until([&] { return r.both_active() && r.host->link().session_gen() > gen; }, 8000));
     LM_CHECK_EQ(r.root->link().stats().rx_auth_fail, 0u);
+    const uint32_t gen2 = r.host->link().session_gen();
+    const Bytes q3 = request(8, 1, 100);
+    LM_CHECK_OK(r.host->send(gen::SerialKind::Request, gen2, ByteView{q3.data(), q3.size()}, r.hnow()));
+    LM_CHECK(r.until([&] { return r.responses == 2; }, 2000));
 }
 
 LM_TEST("H03-sim reset and replug: old session results are never applied") {

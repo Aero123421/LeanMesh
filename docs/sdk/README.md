@@ -7,9 +7,9 @@ ESP32-S3 / C3 / C5 / C6 向けの汎用長距離Mesh（ESP-NOW + Wi-Fi LR）SDK�
 - C11 の公開API（[api/leanmesh.h](../../api/leanmesh.h)、ABI 2）と、その下の単一ownerのcore、ESP-IDF port、root用USB bridge。
 - Python/FastAPIのHost 1サービス（[OpenAPI](../../api/openapi.json)、SQLite）。KGuardなど業務の語彙はcoreに入れません。
 - 配送は「受理・永続化・送信・終端受領・アプリ適用・結果不明」を**別の証拠**として返します。exactly-onceの副作用は保証しません。
-- **状態**: ソフトウェアとシミュレーションで実装・検証済み（native ctest、ASan/UBSan、Host pytest、meshsim上の21 node / 20 hop E2E、4 SoCのIDF build）。
+- **状態**: ソフトウェアとシミュレーションで実装し、ローカルで検証した（native ctest、ASan/UBSan、Host pytest、meshsim上の21 node / 20 hop E2E、4 SoCのIDF build）。**CI**: `8668c69` までの直近pushはCIが赤（ASan E2E の待ち条件の競合ほか）でした。FIX11で修正しましたが、**修正後のtreeでgreenだったCI runはまだありません**（push前）。green runのIDを [testing.md](testing.md) §2 に記録するまで、CIでの検証済みを主張しません。
 - **実機で認定されたものは何もありません**。RF、HIL、消費電力、実電源断、鍵のcustodyは未検証です（一覧は [testing.md](testing.md) §5）。
-- **ROOT を ESP32-C3 に載せる構成は、実機のheap測定が済むまで未対応**です（[ADR-002](../../decisions/ADR-002-budget-status.md)）。RAM・SLOCは目標を超過しており、その数値と理由もADRにあります。
+- **ROOT を ESP32-C3 に載せる構成は、実機のheap測定が済むまで未対応**です（[ADR-002](../../decisions/ADR-002-budget-status.md)）。**RAM・flash・SLOCはすべて目標を超過しています**（flash差分は測定時点で全12 buildが256 KiB目標を超え、ROOTは4 SoCとも320 KiBのreview lineも超える。現在の数値は [build-records/budget-report.md](../../build-records/budget-report.md) の冒頭にまとめ、理由はADRにあります）。
 - 量産用のprovisioning（鍵・資格情報の書込み）ツールは含みません。sim用の `tools/lmfleet` はTEST-ONLYです。RF承認（`LEANMESH_RF_DEPLOYMENT_APPROVED`）は既定でoffです。
 - `api/leanmesh.h` の全関数は定義済みです（`scripts/check_api_defined.py`）。`lm_policy_set` が適用するのはchannel freezeだけで、他の変更は署名policy objectが必要なため `UNSUPPORTED` です（[device-api §9](device-api.md)）。
 

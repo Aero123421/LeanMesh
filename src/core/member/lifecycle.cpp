@@ -35,7 +35,8 @@ void Membership::on_lifecycle_object(const DeviceId &origin, ByteView cose, Mono
     ByteView data;
     MemberCredential mc;
     if (!id.is_member() || origin != id.delegation().root || phase_ != JoinPhase::Idle || leave_ != LeavePhase::Idle ||
-        job_in_flight_ || rec_ != nullptr || cose.size() > store::k_max_payload) {
+        job_in_flight_ || rec_ != nullptr || cose.size() > store::k_max_payload ||
+        engine_.link().exchange().writes_join_out(&peer_)) { // FIX8-D13: a zombie verify job still writes peer_
         ++stats_.renew_dropped; // (busy: the root offers it again)
         return;
     }

@@ -154,18 +154,17 @@ typedef struct {
 } lm_membership_t;
 /* lm_connectivity_t.validity_bits: a field whose bit is clear is unknown (zero), not "zero". This build sets STATE,
    and STATE_SINCE / ROOT_DEPTH where it knows them; it does not track the last authenticated RX or root roundtrip. */
-#define LM_CONNECTIVITY_VALID_STATE (UINT64_C(1) << 0u)
-#define LM_CONNECTIVITY_VALID_STATE_SINCE (UINT64_C(1) << 1u)
-#define LM_CONNECTIVITY_VALID_ROOT_DEPTH (UINT64_C(1) << 2u)
-#define LM_CONNECTIVITY_VALID_LAST_AUTH_RX (UINT64_C(1) << 3u)
-#define LM_CONNECTIVITY_VALID_LAST_ROOT_ROUNDTRIP (UINT64_C(1) << 4u)
+#define LM_CONNECTIVITY_VALID_STATE (1u << 0u)
+#define LM_CONNECTIVITY_VALID_STATE_SINCE (1u << 1u)
+#define LM_CONNECTIVITY_VALID_ROOT_DEPTH (1u << 2u)
+#define LM_CONNECTIVITY_VALID_LAST_AUTH_RX (1u << 3u)
+#define LM_CONNECTIVITY_VALID_LAST_ROOT_ROUNDTRIP (1u << 4u)
 typedef struct {
  uint32_t struct_size, abi_version;
  uint32_t state, reason;
  uint64_t state_since_mono_ms, last_authenticated_rx_mono_ms;
  uint64_t last_root_roundtrip_mono_ms;
- uint64_t validity_bits;
- uint32_t root_depth, reserved;
+ uint32_t validity_bits, root_depth; /* layout of the 0.2 spec: unchanged (48 bytes) */
 } lm_connectivity_t;
 typedef struct {
  uint32_t struct_size, abi_version;
@@ -173,11 +172,12 @@ typedef struct {
  lm_domain_id_t target_domain;
  uint32_t mode, search_budget_ms, constrain_target, reserved;
 } lm_join_request_t;
-/* The network policy the root holds (lm_policy_get: root only; other roles: UNSUPPORTED). `revision` is output only.
-   lm_policy_set takes expected_revision and applies the channel_freeze change (as lm_channel_request does) but
-   refuses (UNSUPPORTED) any other change: join_mode, relay_allowed and auto transfer are changed only by a signed
-   policy object (lm_install_control). This build fixes auto_transfer_on_isolation to 0 and isolation_before_transfer_ms
-   to 0 (no automatic transfer). No field lowers a docs/06 cryptographic condition. */
+/* The network policy the root holds (lm_policy_get: root only; other roles: UNSUPPORTED). `revision` is output only:
+   the committed channel and join-mode changes. lm_policy_set takes expected_revision and changes one field per call
+   (INVALID_ARGUMENT for two): channel_freeze as lm_channel_request does, join_mode committed durably before its
+   operation ends. relay_allowed and auto transfer have no mechanism in this build (UNSUPPORTED); it fixes
+   auto_transfer_on_isolation to 0 and isolation_before_transfer_ms to 0. No field lowers a docs/06 cryptographic
+   condition. */
 typedef struct {
  uint32_t struct_size, abi_version;
  uint64_t revision;

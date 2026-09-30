@@ -1,3 +1,8 @@
-# Spec checker only; these are not the product runtime dependency lock.
-cryptography>=42
-jsonschema>=4.20
+# Spec checker only; these are not the product runtime dependency lock. Exact versions (FIX11-D16): the transitive
+# set was resolved on 2026-09-30 with Python 3.12 and check_spec.py passed with it.
+cryptography==50.0.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+attrs==26.1.0

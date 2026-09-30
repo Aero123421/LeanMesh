@@ -45,7 +45,7 @@ python scripts/check_spec.py
 
 ### 実装
 `feat/sdk-impl` には、仕様に沿った実装があります。使い方は **[docs/sdk/](docs/sdk/README.md)**（[はじめに](docs/sdk/getting-started.md)、[Device API](docs/sdk/device-api.md)、[Host](docs/sdk/host.md)、[構造](docs/sdk/architecture.md)、[試験](docs/sdk/testing.md)）。
-- 実装済み・検証済みなのは**ソフトウェアとシミュレーションの範囲**です: native ctest（ASan/UBSan含む）、Host pytest、meshsim上のE2E（21 node / 20 hop）、4 SoC（S3/C3/C5/C6）のESP-IDF build。
+- 実装し、ローカルで検証したのは**ソフトウェアとシミュレーションの範囲**です: native ctest（ASan/UBSan含む）、Host pytest、meshsim上のE2E（21 node / 20 hop）、4 SoC（S3/C3/C5/C6）のESP-IDF build。**CIは `8668c69` まで直近pushで赤**でした（FIX11で修正。修正後のtreeでgreenだったrunはまだ無い）。RAM・flash・SLOCは目標超過です（[budget](build-records/budget-report.md)）。
 - **未検証**: RF、実機（HIL）、消費電力、実電源断、鍵のcustody。ROOTのESP32-C3搭載は実機のheap測定まで未対応（[ADR-002](decisions/ADR-002-budget-status.md)）。量産用provisioningツールはありません。
 - 実装の判断は[実装ガイド](docs/IMPLEMENTATION.md)、未検証の一覧は[試験](docs/sdk/testing.md)の§5。仕様検査（下）は引き続き仕様側のG0のみです。
 

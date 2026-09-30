@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +61,8 @@ POLL_MAX_S = 30.0          # ... doubling while nothing new happens; events and 
 CAPS_MAX_AGE_S = 5.0       # root clock estimate used for UTC deadlines is refreshed when older
 EVENT_QUEUE = 256          # bounded hand-over from the serial thread; overflow is re-sent by the root
 POLL_BATCH = 16
+MAX_OP_MAP = 4096          # per-boot operation maps (FIX11-D4): as many as open operations; the oldest entry is dropped, and the
+                           # fallback is a GET_MESSAGE by MessageId (numbers) or a repeated, idempotent CANCEL
 DIAG_MIN_INTERVAL_S = 1.0  # one DIAGNOSTICS exchange per second at most, however many clients ask (S19)
 RECONCILE_RETRY_S = 2.0    # pause before an unfinished reconciliation is tried again
 JOIN_WAIT_S = 180.0        # a JOIN_DECIDE the root accepted must show durable ledger state within this time
@@ -133,10 +136,10 @@ class Bridge:
         self._open_events: set[tuple[int, int]] = set()   # (root boot, seq)
         self._ack_top: dict[int, int] = {}                # boot -> highest finished seq
         self._ack_sent: dict[int, int] = {}               # boot -> highest EVENT_ACK the root accepted
-        self._ctl_ops: dict[int, bytes] = {}   # root control-operation number -> Host operation (this boot)
-        self._opnum: dict[bytes, int] = {}     # Host operation -> root operation number (this boot)
+        self._ctl_ops: OrderedDict[int, bytes] = OrderedDict()   # root control-operation number -> Host operation (this boot)
+        self._opnum: OrderedDict[bytes, int] = OrderedDict()     # Host operation -> root operation number (this boot)
         self.groups = groups.Groups()          # group operations of this boot and their per-target mirror
-        self._cancel_taken: set[bytes] = set()  # operations whose CANCEL the root accepted (idempotent: not repeated)
+        self._cancel_taken: OrderedDict[bytes, None] = OrderedDict()  # operations whose CANCEL the root accepted (idempotent: not repeated)
         self._diag: tuple[float, dict[str, Any], int] | None = None  # (at, body, serial generation) of the last DIAGNOSTICS
         self._diag_lock = asyncio.Lock()
 
@@ -254,15 +257,7 @@ class Bridge:
         self._ack_sent = {b: v for b, v in self._ack_sent.items() if b == info.boot}
         self.info = info
 
-        def register(conn: sqlite3.Connection) -> bool:
-            row = conn.execute("SELECT root_device FROM domains WHERE id=?", (info.domain,)).fetchone()
-            if row is not None and row[0] is not None and bytes(row[0]) not in (b"\0" * 32, info.root):
-                startup.set_fault(conn, "ROOT_MISMATCH", {"domain": info.domain.hex()})
-                return False
-            mirror.register_domain(conn, info.domain, info.root)
-            return True
-
-        if not await self.hub.write(register):
+        if not await self.hub.write(lambda conn: self._register_root(conn, info)):
             log.error("another root claims domain %s: the bridge stays down", info.domain.hex())
             return
         self.hub.set_root(True, info.enabled, info.lists)
@@ -271,6 +266,35 @@ class Bridge:
         self.ready = True
         self._ready_evt.set()
         self.hub.outbox_ready.set()
+
+    def _register_root(self, conn: sqlite3.Connection, info: RootInfo) -> bool:
+        """Binds the domain to the root that answered. A different root DeviceId is accepted only as the
+        completion of a ROOT_HANDOVER this Host saw the old root apply (`handover:<domain>` = [old, new],
+        FIX11-D15); the transition is consumed. Any other root for a known domain is ROOT_MISMATCH."""
+        row = conn.execute("SELECT root_device FROM domains WHERE id=?", (info.domain,)).fetchone()
+        bound = bytes(row[0]) if row is not None and row[0] is not None else b"\0" * 32
+        if bound not in (b"\0" * 32, info.root):
+            key = f"handover:{info.domain.hex()}"
+            mark = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            if mark is None or cbor_decode(bytes(mark[0])) != [bound, info.root]:
+                startup.set_fault(conn, "ROOT_MISMATCH", {"domain": info.domain.hex()})
+                return False
+            conn.execute("DELETE FROM meta WHERE key=?", (key,))
+            log.warning("domain %s: the root changed by a completed ROOT_HANDOVER", info.domain.hex())
+        mirror.register_domain(conn, info.domain, info.root)
+        return True
+
+    def _note_handover(self, conn: sqlite3.Connection, op: bytes) -> None:
+        """A ROOT_HANDOVER the old root reported APPLIED: remember old -> new for the next session's binding."""
+        row = conn.execute("SELECT domain,payload FROM operations WHERE id=? AND type='ROOT_HANDOVER'", (op,)).fetchone()
+        if row is None or row[1] is None:
+            return
+        try:
+            data = cbor_decode(decode_control_body(decode_cose_sign1(bytes(row[1])).payload, "signed").data)
+        except WireError:
+            return
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                     (f"handover:{bytes(row[0]).hex()}", cbor_encode([data[1], data[2]])))
 
     def _forget_boot(self) -> None:
         """Operations known only by a root boot's numbers end as INDETERMINATE (docs/19 §3)."""
@@ -291,15 +315,18 @@ class Bridge:
 
     # ---- outbox ------------------------------------------------------------------------------
     async def _drain_outbox(self) -> bool:
+        link, info = self.link, self.info
+        assert link is not None and info is not None
+        domain = info.domain  # the connected root serves one domain; other domains' requests wait (FIX11-D14)
+
         def count(conn: sqlite3.Connection) -> int:
             return int(conn.execute(
-                "SELECT COUNT(*) FROM outbox WHERE state='QUEUED' AND (next_attempt_utc_ms IS NULL "
-                "OR next_attempt_utc_ms<=?)", (now_ms(),)).fetchone()[0])
+                "SELECT COUNT(*) FROM outbox b JOIN operations o ON o.id=b.operation WHERE b.state='QUEUED' AND "
+                "o.domain=? AND (b.next_attempt_utc_ms IS NULL OR b.next_attempt_utc_ms<=?)",
+                (domain, now_ms())).fetchone()[0])
 
         if await self.hub.read(count) == 0:
             return False
-        link = self.link
-        assert link is not None and self.info is not None
         if time.monotonic() - self.info.fetched > CAPS_MAX_AGE_S:
             fresh = await self._caps(link)
             if fresh is not None and fresh.boot == self.info.boot:
@@ -308,7 +335,7 @@ class Bridge:
                                      + self._gen.to_bytes(4, "big")).digest()[:16]
 
         def claim_batch(conn: sqlite3.Connection) -> list[Plan]:
-            plans = [self._plan(conn, item) for item in outbox.claim(conn, self.cfg, incarnation, 8)]
+            plans = [self._plan(conn, item) for item in outbox.claim(conn, self.cfg, incarnation, 8, domain)]
             return [p for p in plans if p is not None]
 
         plans = await self.hub.write(claim_batch)  # committed: external_write_possible=1, ids fixed
@@ -320,6 +347,8 @@ class Bridge:
         """Runs inside the claim transaction. A request the root can never take is finished here; a
         request that must wait is put back (nothing was written, so that is safe)."""
         try:
+            if self.info is None or item.domain != self.info.domain:  # never plan for another domain's root (FIX11-D14)
+                raise _Later("ROOT_DOMAIN_MISMATCH")
             if item.op_type == "MESSAGE":
                 return self._plan_message(conn, item)
             return self._plan_control(conn, item)
@@ -461,11 +490,11 @@ class Bridge:
         snap = cbor_decode(result) if status == mapping.OK and result else None
         if status == mapping.OK and op_number is not None:
             if plan.typ == "MESSAGE":
-                self._opnum[plan.op] = op_number
+                _remember(self._opnum, plan.op, op_number)
                 if plan.group:
                     self.groups.track(plan.op, op_number)
             else:
-                self._ctl_ops[op_number] = plan.op  # INSTALL_CONTROL: its end arrives as an OPERATION event
+                _remember(self._ctl_ops, op_number, plan.op) # INSTALL_CONTROL: its end arrives as an OPERATION event
 
         def apply_send(conn: sqlite3.Connection) -> None:
             if status == mapping.OK:
@@ -527,7 +556,7 @@ class Bridge:
         assert link is not None and info is not None
         self._need_reconcile = False
         try:
-            pending = await self.hub.read(outbox.pending_reconcile)
+            pending = await self.hub.read(lambda conn: outbox.pending_reconcile(conn, info.domain))
             for op, mid in pending:
                 join = await self.hub.read(lambda conn, o=op: _stored_join(conn, o))
                 plan = await self.hub.read(lambda conn, o=op: _stored_plan(conn, o))
@@ -541,7 +570,7 @@ class Bridge:
         except BaseException:
             self._need_reconcile = True
             raise
-        if await self.hub.read(outbox.pending_reconcile):
+        if await self.hub.read(lambda conn: outbox.pending_reconcile(conn, info.domain)):
             self._need_reconcile = True
             self._next_reconcile = time.monotonic() + RECONCILE_RETRY_S
 
@@ -580,7 +609,7 @@ class Bridge:
         if res.status == mapping.OK and res.result is not None:
             snap = cbor_decode(res.result)
             if res.operation_id is not None:
-                self._opnum[op] = res.operation_id
+                _remember(self._opnum, op, res.operation_id)
                 if await self.hub.read(lambda conn: _is_group(conn, op)):  # found again after a restart
                     self.groups.track(op, res.operation_id)
 
@@ -612,15 +641,16 @@ class Bridge:
             rows = conn.execute(
                 "SELECT o.id,o.message_id,m.value FROM operations o JOIN outbox b ON b.operation=o.id "
                 "JOIN meta m ON m.key='send:'||lower(hex(o.id)) WHERE o.type='MESSAGE' AND o.state!='FINAL' "
-                "AND b.state='SENDING' AND o.message_id IS NOT NULL ORDER BY o.created_utc_ms LIMIT ?",
-                (POLL_BATCH,)).fetchall()
+                "AND o.domain=? AND b.state='SENDING' AND o.message_id IS NOT NULL ORDER BY o.created_utc_ms LIMIT ?",
+                (info.domain, POLL_BATCH)).fetchall()
             return [(bytes(r[0]), bytes(r[1]), _load_plan(bytes(r[2]))[3]) for r in rows]
 
         def open_joins(conn: sqlite3.Connection) -> list[tuple[bytes, tuple[bytes, bytes, bool, int]]]:
             rows = conn.execute(
                 "SELECT o.id,m.value FROM operations o JOIN outbox b ON b.operation=o.id "
-                "JOIN meta m ON m.key='join:'||lower(hex(o.id)) WHERE o.state!='FINAL' "
-                "AND b.state IN ('SENDING','RECONCILE') ORDER BY o.created_utc_ms LIMIT ?", (POLL_BATCH,)).fetchall()
+                "JOIN meta m ON m.key='join:'||lower(hex(o.id)) WHERE o.state!='FINAL' AND o.domain=? "
+                "AND b.state IN ('SENDING','RECONCILE') ORDER BY o.created_utc_ms LIMIT ?",
+                (info.domain, POLL_BATCH)).fetchall()
             return [(bytes(r[0]), _load_join(bytes(r[1]))) for r in rows]
 
         rows = await self.hub.read(open_ops)
@@ -635,7 +665,7 @@ class Bridge:
     async def _cancels(self) -> None:
         link, info = self.link, self.info
         assert link is not None and info is not None
-        for op in await self.hub.read(outbox.cancel_requests):
+        for op in await self.hub.read(lambda conn: outbox.cancel_requests(conn, info.domain)):
             plan = await self.hub.read(lambda conn, o=op: _stored_plan(conn, o))
             done = await self.hub.read(lambda conn, o=op: any(
                 e["kind"] == "ROOT_CANCEL_TOO_LATE" for e in ops.view_any(conn, o)["evidence"]))
@@ -647,7 +677,7 @@ class Bridge:
             res = await link.request(4, [info.boot, number])
             snap = cbor_decode(res.result) if res.result else None
             if res.status == mapping.OK:
-                self._cancel_taken.add(op)  # a group finishes after its cancel: asking again changes nothing
+                _remember(self._cancel_taken, op, None) # a group finishes after its cancel: asking again changes nothing
 
             def apply_cancel(conn: sqlite3.Connection, o: bytes = op, st: int = res.status,
                              s: dict[str, Any] | None = snap, m: bytes = plan[0]) -> None:
@@ -796,14 +826,31 @@ class Bridge:
         try:
             commit = await self.hub.write(commit_inbox)  # returns after COMMIT
         except journal.InboxConflict:
+            # FIX11-D3: a MessageId reused with another intent is one message's fault, not the link's. It is settled
+            # with evidence (one journal event, no inbox row, no HOST_STORE_ACK: the root keeps the message until it
+            # expires and the origin is never told "stored"), and EVENT_ACK moves on so later events are not held back.
             log.error("inbox conflict: message id %s reused with another intent hash", mid.hex())
-            return False
+            await self.hub.write(lambda conn: self._record_conflict(conn, info.domain, origin, mid, digest, info.root))
+            self.stats["conflicts"] = self.stats.get("conflicts", 0) + 1
+            return True
         self.stats["duplicates" if commit.duplicate else "inbox"] += 1
         committed = int(commit.cursor.rpartition(":")[2])
         res = await link.request(M_HOST_STORE_ACK, [origin, ag, mid, digest, self.hub.storage.journal_id, committed])
         if res.status not in (mapping.OK, mapping.NOT_FOUND):
             log.warning("HOST_STORE_ACK answered %s", status_name(res.status))
         return True
+
+    def _record_conflict(self, conn: sqlite3.Connection, domain: bytes, origin: bytes, mid: bytes, digest: bytes,
+                         root: bytes) -> None:
+        seen = conn.execute("SELECT 1 FROM events WHERE domain=? AND kind='MESSAGE_CONFLICT' AND origin=? AND "
+                            "message_id=? AND payload_json LIKE ?", (domain, origin, mid, f'%"{digest.hex()}"%')).fetchone()
+        if seen is not None:  # the root sends the same event again in every session: one record is enough
+            return
+        journal.append(conn, self.cfg, domain, "MESSAGE_CONFLICT", True, {
+            "intent_hash": digest.hex(),
+            "evidence": {"kind": "HOST_INBOX_CONFLICT", "assurance": "SELF_REPORTED", "observer": root.hex(),
+                         "details": {"reason": "message id reused with another intent; not stored, not acknowledged"}}},
+                       origin=origin, message_id=mid)
 
     async def _on_operation_event(self, m: dict[str, Any]) -> None:
         info = self.info
@@ -813,7 +860,9 @@ class Bridge:
             mid = m.get("message_id")
             row = conn.execute("SELECT id,state FROM operations WHERE message_id=? AND type='MESSAGE'",
                                (mid,)).fetchone() if mid else None
-            if row is not None and row[1] != "FINAL" and {"phase", "outcome", "evidence_bits", "reason"} <= m.keys():
+            if row is not None and {"phase", "outcome", "evidence_bits", "reason"} <= m.keys():
+                # FIX11-D2: also for an operation the Host already closed (INDETERMINATE after a timeout, ...): late
+                # evidence is added and the outcome advances by rank (outbox.record); a definite negative stays.
                 self._apply_snapshot(conn, bytes(row[0]), m, mid)
                 return
             host_op = self._ctl_ops.pop(int(m["operation"]), None) if "operation" in m else None
@@ -821,8 +870,18 @@ class Bridge:
                 outcome, kind = mapping.control_outcome(int(m["outcome"]), int(m["reason"]))
                 self._finish(conn, host_op, outcome, "SELF_REPORTED" if outcome != "INDETERMINATE" else "UNKNOWN",
                              kind, status_name(int(m["reason"])), observer=info.root)
+                if outcome == "APPLIED":
+                    self._note_handover(conn, host_op)
 
         await self.hub.write(apply_event)
+
+
+def _remember(table: OrderedDict[Any, Any], key: Any, value: Any) -> None:
+    """A bounded per-boot table: the oldest entry makes room (MAX_OP_MAP)."""
+    table[key] = value
+    table.move_to_end(key)
+    while len(table) > MAX_OP_MAP:
+        table.popitem(last=False)
 
 
 class _Refused(Exception):

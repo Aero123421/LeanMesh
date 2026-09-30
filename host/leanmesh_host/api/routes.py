@@ -19,10 +19,12 @@ from ..auth import Principal
 from ..db import mirror, ops
 from ..events import journal
 from ..events.hub import Hub
+from ..wire import WireError, cbor_decode
+from ..wire.control import decode_control_body, decode_cose_sign1
 from . import codec
 from .deps import WRITE_PERMISSIONS, need_all, require
 from .errors import ApiError, invalid
-from .models import (CONTROL_RULES, MAX_MESSAGE_BYTES, MAX_OBJECT_BYTES, ConsumerAck, ControlRequest,
+from .models import (CONTROL_RULES, SIGNED_OBJECT_PERMISSIONS, SIGNED_OBJECT_SUBJECT, SIGNED_OBJECT_TYPE_OF, MAX_MESSAGE_BYTES, MAX_OBJECT_BYTES, ConsumerAck, ControlRequest,
                      DeadlineUtc, DestGroup, DestNode, EpochRequest, MessageRequest)
 
 router = APIRouter(prefix="/v1")
@@ -118,6 +120,29 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
 
 
 # ---- control ------------------------------------------------------------------------------------
+def _check_signed_object(p: Principal, body: ControlRequest, signed: bytes, domain: bytes) -> None:
+    """FIX11-D13: the permission, the domain and the subject are those of the decoded object, checked before the commit.
+    The signature and the authority stay the root's to verify."""
+    try:
+        cose = decode_cose_sign1(signed)
+        ctl = decode_control_body(cose.payload, "signed")
+    except WireError as exc:
+        raise invalid(f"signed object is malformed ({exc.status})") from exc
+    needed = SIGNED_OBJECT_PERMISSIONS.get(ctl.type)
+    if needed is None:
+        raise invalid(f"control type {ctl.type} cannot be installed through the API")
+    expected = SIGNED_OBJECT_TYPE_OF.get(body.type)
+    if expected is not None and ctl.type != expected:
+        raise invalid(f"{body.type} takes a control object of type {expected}, not {ctl.type}")
+    need_all(p, needed)
+    # A fleet-issued RevokeObject (type 11) is domain-agnostic (zero domain, docs/06 §revocation); every other object
+    # names the domain it is for.
+    if ctl.domain != domain and not (ctl.type == 11 and ctl.domain == bytes(16)):
+        raise invalid("the signed object names another domain than the request")
+    if body.device_id is not None and ctl.type in SIGNED_OBJECT_SUBJECT and bytes.fromhex(body.device_id) != cbor_decode(ctl.data)[0]:
+        raise invalid("the signed object is about another device than device_id")
+
+
 @router.post("/control", status_code=202)
 async def submit_control(body: ControlRequest, request: Request, idempotency_key: IdemKey,
                          p: Principal = require(*WRITE_PERMISSIONS)) -> dict[str, Any]:
@@ -127,6 +152,8 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
     domain = codec.hex_bytes(body.domain_id, 16)
     request_doc, digest = _dump(body, "signed_cbor_b64")
     signed = codec.decode_b64(body.signed_cbor_b64) if body.signed_cbor_b64 else None
+    if signed is not None:
+        _check_signed_object(p, body, signed, domain)
     expected = codec.parse_u63(body.expected_revision)
     target = bytes.fromhex(body.device_id) if body.device_id else None
     # The Host checks base64/size/permission/revision it can know. Signatures, delegation and
@@ -277,8 +304,8 @@ async def stream_events(request: Request, domain_id: Domain,
                         yield b": keepalive\n\n"
                 seen = hub.version  # taken before the read: a commit in between wakes the next wait
                 try:
-                    page = await hub.read(lambda conn: journal.read_page(
-                        conn, domain, cursor, _SSE_STAGE_EVENTS, _SSE_STAGE_BYTES))
+                    page = await hub.read(lambda conn, at=cursor: journal.read_page(
+                        conn, domain, at, _SSE_STAGE_EVENTS, _SSE_STAGE_BYTES))
                 except ApiError as err:  # retention overtook this reader: tell it, then close
                     body = {"code": err.code, "message": err.message, "details": err.details}
                     yield f"event: gap\ndata: {json.dumps(body)}\n\n".encode()

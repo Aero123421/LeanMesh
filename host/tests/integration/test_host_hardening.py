@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from host_util import DOMAIN, NODE, check, make_settings, message, rows, running
+from host_util import POLICY_OBJECT, TRANSFER_TICKET, DOMAIN, NODE, check, make_settings, message, rows, running, signed_object
 from leanmesh_host.api.errors import ApiError
 from leanmesh_host.db import ops, outbox
 from leanmesh_host.events import journal
@@ -101,7 +101,7 @@ def test_8_exact_retry_returns_the_stored_operation_despite_later_state(tmp_path
         first = h.post("/v1/messages", obj, "obj")
         assert first.status_code == 202
         signed = {"domain_id": DOMAIN, "client_epoch": e, "expected_revision": "0", "request_id": "ab" * 16,
-                  "type": "TRANSFER", "device_id": NODE, "signed_cbor_b64": "AAEC"}
+                  "type": "TRANSFER", "device_id": NODE, "signed_cbor_b64": signed_object(3, TRANSFER_TICKET)}
         ctl = h.post("/v1/control", signed, "ctl")
         assert ctl.status_code == 202
         soon = "2999-01-01T00:00:00Z"
@@ -400,3 +400,205 @@ def test_24_journal_event_carries_the_exact_evidence(tmp_path: Path) -> None:
         assert wrapper["assurance"] == "SELF_REPORTED" and wrapper["kind"] == "HOST_RECORDED"
         assert wrapper["details"]["recorded_evidence"] == real  # exact, incl. END_VERIFIED + observer
         assert wrapper["details"]["operation_id"] == op
+
+
+# ---- FIX11 M5 ----------------------------------------------------------------------------------
+def test_fix11_m5_a_late_app_applied_updates_a_final_indeterminate_operation(tmp_path: Path) -> None:
+    """docs/08 §4: late evidence is added to the history and the outcome advances by rank; only a definite
+    negative (REJECTED/EXPIRED) is never overwritten. The Host used to skip operations that were already FINAL."""
+    import asyncio  # noqa: PLC0415
+
+    from leanmesh_host.bridge.bridge import Bridge, RootInfo  # noqa: PLC0415
+
+    with running(make_settings(tmp_path)) as h:
+        op, raw = sent(h)
+        mid = b"\x44" * 16
+        h.db(lambda c: outbox.record(c, h.hub.cfg, raw, state="WAITING_RECEIPT", message_id=mid))
+        b = Bridge(h.hub, h.hub.cfg)
+        b.info = RootInfo(b"d" * 16, b"r" * 32, 1, 7, frozenset(), 1, None)
+        h.db(lambda c: b._finish(c, raw, "INDETERMINATE", "UNKNOWN", "HOST_SEND_OUTCOME_UNKNOWN", "timeout"))
+        assert view(h, op)["state"] == "FINAL" and view(h, op)["outcome"] == "INDETERMINATE"
+        snap = {"phase": 3, "reason": 0, "outcome": 2, "operation": 1, "message_id": mid, "intent_hash": b"\x00" * 32,
+                "evidence_bits": (1 << 3) | (1 << 4) | (1 << 6)}
+        asyncio.run(b._on_operation_event(snap))
+        v = view(h, op)
+        assert v["state"] == "FINAL" and v["outcome"] == "APPLIED", v
+        assert "APP_APPLIED" in {e["kind"] for e in v["evidence"]}
+
+
+# ---- FIX11 M7 ----------------------------------------------------------------------------------
+def test_fix11_m7_an_inbox_conflict_is_settled_with_evidence_and_does_not_stop_event_ack(tmp_path: Path) -> None:
+    import asyncio  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from leanmesh_host.bridge.bridge import EV_MESSAGE, M_EVENT_ACK, M_HOST_STORE_ACK, Bridge, RootInfo  # noqa: PLC0415
+    from leanmesh_host.wire import cbor_encode  # noqa: PLC0415
+
+    calls: list[tuple[int, Any]] = []
+
+    class Link:
+        gen, connected = 1, True
+
+        async def request(self, method: int, params: Any) -> Any:
+            calls.append((method, params))
+            return SimpleNamespace(status=0, result=None, operation_id=None)
+
+    def event(seq: int, mid: bytes, digest: bytes, payload: bytes) -> bytes:
+        body = cbor_encode({"origin": bytes.fromhex(NODE), "payload": payload, "app_port": 9, "recovered": False,
+                            "message_id": mid, "intent_hash": digest, "assignment_generation": 1})
+        return cbor_encode([7, seq, EV_MESSAGE, body])
+
+    with running(make_settings(tmp_path)) as h:
+        b = Bridge(h.hub, h.hub.cfg)
+        b.link = Link()  # type: ignore[assignment]
+        b.info = RootInfo(bytes.fromhex(DOMAIN), b"r" * 32, 1, 7, frozenset(), 1, None)
+        mid = b"\x55" * 16
+
+        async def run() -> None:
+            for seq, digest, payload in ((1, b"\x01" * 32, b"one"), (2, b"\x02" * 32, b"two"), (3, b"\x02" * 32, b"two"),
+                                         (4, b"\x03" * 32, b"three")):
+                b._open_events.add((7, seq))
+                await b._handle_event(event(seq, mid if seq < 4 else b"\x66" * 16, digest, payload))
+
+        asyncio.run(run())
+        acks = [p[1] for m, p in calls if m == M_EVENT_ACK]
+        assert acks and acks[-1] == 4, acks  # the conflicting events (2, 3) did not stop the cumulative ACK
+        stores = [p for m, p in calls if m == M_HOST_STORE_ACK]
+        assert len(stores) == 2 and all(p[3] != b"\x02" * 32 for p in stores)  # never "stored" for the conflict
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM inbox").fetchone()[0]) == 2
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM events WHERE kind='MESSAGE_CONFLICT'").fetchone()[0]) == 1
+
+
+# ---- FIX11 L2 ----------------------------------------------------------------------------------
+def test_fix11_usb_kit_readable_by_group_or_others_is_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    import asyncio  # noqa: PLC0415
+
+    from leanmesh_host import main  # noqa: PLC0415
+
+    kit = tmp_path / "kit.cbor"
+    kit.write_bytes(b"\x00")
+    settings = make_settings(tmp_path, serial_device="/dev/null", usb_kit_path=kit)
+    hub = object()
+
+    async def start() -> tuple[Any, Any]:
+        return main._start_serial(settings, hub)  # type: ignore[arg-type]
+
+    for mode in (0o644, 0o640, 0o604):
+        os.chmod(kit, mode)
+        caplog.clear()
+        assert asyncio.run(start()) == (None, None), oct(mode)
+        assert "must be mode 0600" in caplog.text, oct(mode)  # refused before the file is read
+    os.chmod(kit, 0o600)  # with 0600 the read goes on (and fails later on the bogus content: degraded as well)
+    caplog.clear()
+    assert asyncio.run(start()) == (None, None)
+    assert "must be mode 0600" not in caplog.text
+
+
+# ---- FIX11 L3 ----------------------------------------------------------------------------------
+def test_fix11_finished_operations_of_a_closed_epoch_are_pruned_and_a_replay_never_sends_again(tmp_path: Path) -> None:
+    with running(make_settings(tmp_path, operation_retention_ms=0)) as h:
+        e_old = h.epoch(key="old")
+        first = h.post("/v1/messages", message(e_old), "k1")
+        assert first.status_code == 202
+        op = first.json()["id"]
+        raw = bytes.fromhex(op)
+        h.db(lambda c: outbox.record(c, h.hub.cfg, raw, state="FINAL", outcome="APPLIED", outbox_state="DONE",
+                                     evidence=ev("APP_APPLIED")))
+        e_open = h.epoch(key="open")  # an open epoch's finished operation is never pruned
+        other = h.post("/v1/messages", message(e_open), "k9").json()["id"]
+        h.db(lambda c: outbox.record(c, h.hub.cfg, bytes.fromhex(other), state="FINAL", outcome="APPLIED",
+                                     outbox_state="DONE", evidence=ev("APP_APPLIED")))
+        assert h.post(f"/v1/epochs/{e_old}/close", {}, "c").status_code in (200, 202, 204)
+        h.db(lambda c: c.execute("UPDATE client_epochs SET closed_utc_ms=1 WHERE id=?", (bytes.fromhex(e_old),)))
+        e_new = h.epoch(key="new")
+        assert h.post("/v1/messages", message(e_new), "k2").status_code == 202  # this admission prunes
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM operations WHERE id=?", (raw,)).fetchone()[0]) == 0
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM outbox WHERE operation=?", (raw,)).fetchone()[0]) == 0
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM operations WHERE id=?", (bytes.fromhex(other),)).fetchone()[0]) == 1
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM events WHERE operation IS NULL AND kind='OPERATION_UPDATE'"
+                                        ).fetchone()[0]) >= 1  # the journal keeps its events
+        replay = h.post("/v1/messages", message(e_old), "k1")
+        assert replay.status_code == 410 and replay.json()["code"] == "EPOCH_CLOSED"  # not a second send
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM outbox WHERE state='QUEUED'").fetchone()[0]) == 1
+
+
+# ---- FIX11 astra#1: the permission of a signed object is that of the decoded type ---------------------------------
+def test_fix11_signed_object_needs_the_permission_of_its_decoded_type(tmp_path: Path) -> None:
+    principals = {"cfg": ["READ", "CONFIGURE"], "rev": ["READ", "CONFIGURE", "REVOKE"], "all": ["READ", "REVOKE", "CONFIGURE", "TRANSFER", "APPROVE"]}
+    with running(make_settings(tmp_path, principals)) as h:
+        e = h.epoch("cfg", key="e1")
+        er = h.epoch("rev", key="e2")
+        ea = h.epoch("all", key="e3")
+        revoke = signed_object(11, [bytes.fromhex(NODE), 1, 1, 0, 1])
+
+        def install(who: str, epoch: str, obj: str, typ: str = "INSTALL_CONTROL", **extra: Any) -> Any:
+            return h.post("/v1/control", {"domain_id": DOMAIN, "client_epoch": epoch, "expected_revision": "0", "type": typ,
+                                          "request_id": os.urandom(16).hex(), "signed_cbor_b64": obj, **extra},
+                          os.urandom(4).hex(), who)
+
+        denied = install("cfg", e, revoke)  # CONFIGURE alone must not revoke through INSTALL_CONTROL
+        assert denied.status_code == 403 and denied.json()["details"]["required"] == ["REVOKE"], denied.text
+        assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM operations").fetchone()[0]) == 0
+        assert install("rev", er, revoke).status_code == 202
+        # The typed request must carry the type it names, for the domain of the request, about its device_id.
+        assert install("all", ea, revoke, "TRANSFER", device_id=NODE).status_code == 400  # a revoke is not a transfer
+        assert install("all", ea, revoke, "REVOKE", device_id="bb" * 32).status_code == 400  # another device
+        other = signed_object(11, [bytes.fromhex(NODE), 1, 1, 0, 1], domain="e1" * 16)
+        assert install("all", ea, other).status_code == 400  # another domain
+        fleet_wide = signed_object(11, [bytes.fromhex(NODE), 1, 1, 0, 1], domain="00" * 16)  # a fleet revocation: no domain
+        assert install("all", ea, fleet_wide).status_code == 202
+        assert install("all", ea, signed_object(12, POLICY_OBJECT, domain="00" * 16)).status_code == 400
+        assert install("all", ea, revoke, "REVOKE", device_id=NODE).status_code == 202
+        policy = signed_object(12, [1, 1, bytes(32), b"\x00"])  # a policy object: CONFIGURE is enough
+        assert install("cfg", e, policy).status_code == 202
+
+
+# ---- FIX11 astra#5: a root serves only its own domain ------------------------------------------------------------
+def test_fix11_queued_requests_of_another_domain_are_never_planned_or_claimed(tmp_path: Path) -> None:
+    import threading  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from leanmesh_host.bridge.bridge import Bridge, RootInfo  # noqa: PLC0415
+
+    with running(make_settings(tmp_path)) as h:
+        op = h.post("/v1/messages", message(h.epoch()), "x").json()["id"]
+        b = Bridge(SimpleNamespace(outbox_ready=threading.Event()), h.hub.cfg)  # type: ignore[arg-type]
+        b.info = RootInfo(b"\xbb" * 16, b"r" * 32, 1, 7, frozenset(), 1, None)
+        assert h.db(lambda c: outbox.claim(c, h.hub.cfg, b"x" * 16, 8, b"\xbb" * 16)) == []  # not claimed for domain B
+        assert h.db(lambda c: outbox.pending_reconcile(c, b"\xbb" * 16)) == []
+        item = h.db(lambda c: outbox.claim(c, h.hub.cfg, b"x" * 16, 8))[0]  # an unscoped claim still sees it
+        assert h.db(lambda c: b._plan(c, item)) is None  # planning refuses: nothing is put on the wire for domain B
+        assert view(h, op)["state"] != "FINAL"  # and it waits for the right root, it is not refused
+        assert h.db(lambda c: c.execute("SELECT state FROM outbox").fetchone()[0]) == "QUEUED"
+
+
+# ---- FIX11 astra#11: a root change is accepted only as the completion of a ROOT_HANDOVER ---------------------------
+def test_fix11_root_binding_follows_a_completed_handover_and_nothing_else(tmp_path: Path) -> None:
+    import asyncio  # noqa: PLC0415
+
+    from leanmesh_host.bridge.bridge import Bridge, RootInfo  # noqa: PLC0415
+
+    old_root, new_root, stranger = b"\x0a" * 32, b"\x0b" * 32, b"\x0c" * 32
+    with running(make_settings(tmp_path)) as h:
+        h.db(lambda c: c.execute("UPDATE domains SET root_device=?", (old_root,)))
+        h.hub.set_root(True, ["ROOT_HANDOVER"])
+        b = Bridge(h.hub, h.hub.cfg)
+        b.info = RootInfo(bytes.fromhex(DOMAIN), old_root, 1, 7, frozenset(), 1, None)
+
+        def bind(root: bytes) -> bool:
+            return bool(h.db(lambda c: b._register_root(c, RootInfo(bytes.fromhex(DOMAIN), root, 1, 8, frozenset(), 1, None))))
+
+        assert bind(new_root) is False  # no handover happened: another root for a known domain
+        handover = signed_object(31, [b"\x05" * 16, old_root, new_root, 1, 2, b"\x06" * 32, 3, 0])
+        e = h.epoch()
+        op = h.post("/v1/control", {"domain_id": DOMAIN, "client_epoch": e, "expected_revision": "0", "type": "ROOT_HANDOVER",
+                                    "request_id": os.urandom(16).hex(), "signed_cbor_b64": handover}, "ho").json()["id"]
+        raw = bytes.fromhex(op)
+        h.db(lambda c: outbox.claim(c, h.hub.cfg, b"i" * 16))
+        b._ctl_ops[9] = raw
+        asyncio.run(b._on_operation_event({"operation": 9, "phase": 3, "outcome": 2, "reason": 0, "evidence_bits": 0}))
+        assert view(h, op)["outcome"] == "APPLIED"
+        assert bind(stranger) is False  # only the named new root
+        assert bind(new_root) is True  # the completed handover: accepted once
+        assert h.db(lambda c: c.execute("SELECT root_device FROM domains").fetchone()[0]) == new_root
+        assert bind(old_root) is False  # and the transition is consumed: the old root cannot come back

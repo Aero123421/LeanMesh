@@ -210,6 +210,38 @@ Status Delivery::start(MonoTime now) {
     return durable_.begin_boot(now);
 }
 
+// lm_stop does not wait for receipts (FIX9-D4): every send still open gets its final event now. A send that may have
+// left the node, or whose journal record survives to be sent after the restart, is INDETERMINATE (a recovered message
+// gets a new operation); one that provably never left and has no record ends CANCELLED_NOT_SENT. Never a silent drop.
+void Delivery::end_open_sends(MonoTime now) {
+    for (Op &o : ops_) {
+        if (!o.used || o.report || o.phase == Phase::Final || o.active.is_none()) {
+            continue; // (a durable cancel waiting for its retire ends by itself)
+        }
+        if (left_node(o.active, o)) {
+            finalize_active(o.active, LM_OUTCOME_INDETERMINATE, static_cast<uint32_t>(Status::CancelTooLate), now);
+        } else {
+            (void)cancel(o.id, now);
+        }
+    }
+}
+
+void Delivery::end_pending_for_stop(MonoTime now) {
+    for (Op &o : ops_) {
+        if (!o.used || o.report || o.group || o.phase == Phase::Final) {
+            continue;
+        }
+        const bool may_be_out = !o.active.is_none() ? left_node(o.active, o)
+                                                     : (o.evidence & (ev::sent | ev::persisted)) != 0;
+        const bool journaled = (o.evidence & ev::persisted) != 0;
+        if (may_be_out || journaled) {
+            finalize(o, LM_OUTCOME_INDETERMINATE, static_cast<uint32_t>(Status::CancelTooLate), now);
+        } else {
+            finalize(o, LM_OUTCOME_CANCELLED_NOT_SENT, 0, now);
+        }
+    }
+}
+
 void Delivery::stop() {
     hop_.clear(); // the exchange itself stops with the link layer (Engine::stop_radio)
     durable_.stop();
@@ -223,12 +255,20 @@ void Delivery::stop() {
     for (std::size_t i = 0; i < k_build_limits.app_messages; ++i) {
         (void)msgs_.release(msgs_.handle_at(i));
     }
-    ops_ = {};
+    for (Op &o : ops_) { // finished operations stay queryable across the stop (a result, an outcome the application awaits)
+        if (!o.used || o.phase != Phase::Final) {
+            o = Op{};
+        } else {
+            o.active = Handle{};
+        }
+    }
+    draining_ = false;
     routes_.clear();
     accepted_ = {};
     frag_.reset(); // [S12] reassembly slots (their pool buffers went above); the control sink stays
     out_j_ = {};
     out_retire_ = {};
+    out_cancel_op_ = {};
     in_j_ = {};
     sessions_.clear();
     ready_ = false;

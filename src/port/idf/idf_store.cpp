@@ -6,6 +6,13 @@
 #include "esp_partition.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
+#include "security/crypto.hpp"
+
+#if !CONFIG_NVS_ENCRYPTION && !CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS
+// FIX8-D7: the device's private key never goes to a plaintext NVS partition unless a development build says so.
+#error "LeanMesh keeps the device key in NVS: enable CONFIG_NVS_ENCRYPTION (development: LEANMESH_ALLOW_PLAINTEXT_SECRETS)"
+#endif
 
 namespace lm::idf {
 namespace {
@@ -50,12 +57,31 @@ class Nvs {
     esp_err_t err_ = ESP_FAIL;
 };
 
+// One SDK partition mounted by the SDK itself: a mount made earlier by someone else (maybe without encryption) is ended
+// first, so the one in use is surely this one.
+bool mount(const char *label, nvs_sec_cfg_t *keys) {
+    (void)nvs_flash_deinit_partition(label); // (ESP_ERR_NVS_NOT_INITIALIZED: nothing was mounted)
+    return keys != nullptr ? nvs_flash_secure_init_partition(label, keys) == ESP_OK
+                           : nvs_flash_init_partition(label) == ESP_OK;
+}
+
 } // namespace
 
 Status IdfStore::init() {
     ready_ = false;
-    if (nvs_flash_init_partition(k_identity_partition) != ESP_OK ||
-        nvs_flash_init_partition(k_state_partition) != ESP_OK) {
+#if CONFIG_NVS_ENCRYPTION
+    // The XTS keys of the registered scheme; never generated here (provisioning). They leave RAM right after the mounts
+    // (NVS keeps its own copy in the partitions' cipher contexts).
+    nvs_sec_cfg_t keys{};
+    nvs_sec_scheme_t *scheme = nvs_flash_get_default_security_scheme();
+    bool ok = scheme != nullptr && nvs_flash_read_security_cfg_v2(scheme, &keys) == ESP_OK;
+    ok = ok && mount(k_identity_partition, &keys) && mount(k_state_partition, &keys);
+    sec::secure_zero(MutByteView{reinterpret_cast<uint8_t *>(&keys), sizeof(keys)});
+#else
+    // Acknowledged development build: plaintext.
+    const bool ok = mount(k_identity_partition, nullptr) && mount(k_state_partition, nullptr);
+#endif
+    if (!ok) {
         return Status::StorageFailure;
     }
     journal_ = esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY,

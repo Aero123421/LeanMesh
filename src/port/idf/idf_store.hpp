@@ -5,8 +5,17 @@
 //
 // init() never formats or erases a partition that fails to open: that would turn a read error into
 // "unprovisioned" and wipe identity (docs/12 §2). Erasing is a provisioning action, not part of
-// the SDK. NVS encryption (nvs_keys) is not enabled here: it needs the product's key-custody
-// decision (docs/12 §2), so secret payloads are protected only as far as the flash itself is.
+// the SDK.
+// FIX8-D7 (review H12): the identity record holds the device's private key and discovery_scope the DiscoveryScopeKey
+// (secret payloads, docs/12 §2); NVS partitions are not covered by flash encryption. With CONFIG_NVS_ENCRYPTION both
+// SDK partitions are mounted encrypted (XTS-AES) with the keys of the registered NVS security scheme (nvs_sec_provider:
+// the HMAC eFuse key or the flash-encrypted nvs_keys partition). The SDK only reads those keys and never creates them:
+// creating them is provisioning (an eFuse write, the nvs_keys partition: the product's key custody), so a missing key
+// is StorageFailure (fail closed), never a plaintext mount. A build without NVS encryption does not compile unless
+// CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS acknowledges it (development only). The mode is fixed for a product's life:
+// IDF erases (purges) the entries a mount cannot read, so records written in the other mode are LOST at the first mount
+// of an image of the other mode (a member then reads as unprovisioned, a root's ledger as RECOVERY_REQUIRED). This port
+// does not detect it: provisioning writes the partitions in the mode of the firmware, and no update changes the mode.
 #pragma once
 
 #include <cstdint>

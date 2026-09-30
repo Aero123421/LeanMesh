@@ -17,7 +17,7 @@ LEANMESH_SERIAL=/dev/ttyACM0 LEANMESH_USB_KIT=/etc/leanmesh/usb-kit.cbor \
 | `LEANMESH_DB` | はい | SQLiteファイル（ローカルFS。WAL、`synchronous=FULL`）。開く時に `quick_check`、単一プロセスflock |
 | `LEANMESH_TOKENS` | はい | tokenファイル（下記）。**0600でなければ起動しない** |
 | `LEANMESH_SERIAL` | いいえ | rootのUSB serial device。未設定なら root 未接続（`/v1/health` の `serial: NOT_CONFIGURED`、`ready:false`） |
-| `LEANMESH_USB_KIT` | serialに必要 | HostのUSB kit（Host用identity、fleet trust anchor、期待domain）。不正でもservice自体は上がるが degraded、**認証なしserialへは落ちない** |
+| `LEANMESH_USB_KIT` | serialに必要 | HostのUSB kit（Host用identity＝**Hostの秘密鍵**、fleet trust anchor、期待domain）。**0600でなければ読まない**（group/otherに読めるkitは拒否してdegraded）。不正でもservice自体は上がるが degraded、**認証なしserialへは落ちない** |
 | `LEANMESH_SCHEMA` | いいえ | `db/schema.sql` の場所（既定はリポジトリ内） |
 | `LEANMESH_NATIVE_BUILD` / `LEANMESH_HOSTNATIVE` | いいえ | `libleanmesh_host.so` を探すbuildディレクトリ / 直接パス |
 | `LEANMESH_PRINCIPAL_RPS` `_BURST` `LEANMESH_GLOBAL_RPS` `_BURST` | いいえ | rate limit（既定 20/40、100/100。0で無効）。超過は 429 `RATE_LIMITED` + `retry_after_ms` |
@@ -34,7 +34,7 @@ LEANMESH_SERIAL=/dev/ttyACM0 LEANMESH_USB_KIT=/etc/leanmesh/usb-kit.cbor \
                  "permissions": ["READ", "SEND", "CONFIGURE"]}]}
 ```
 
-権限は `READ SEND APPROVE REVOKE TRANSFER CONFIGURE UPDATE_FIRMWARE`。tokenは `echo -n "$TOKEN" | sha256sum`。ファイルから消したprincipalは無効化されます（行は履歴のため残る）。
+権限は `READ SEND APPROVE REVOKE TRANSFER CONFIGURE UPDATE_FIRMWARE`。署名済みobject（`signed_cbor_b64`）を運ぶ操作は、HTTPの操作type**ではなくobjectの中のtype**の権限を要求します（例: `INSTALL_CONTROL` でRevokeObjectを渡すには `REVOKE`）。型付き操作（`REVOKE`/`TRANSFER`/`POLICY_SET`/`POWER_POLICY_SET`/`COMMISSIONING_WINDOW_SET`/`ROOT_HANDOVER`）はobjectのtype・domain・対象`device_id`が要求と一致しなければ、commit前に400です。署名そのものはrootが検証します。tokenは `echo -n "$TOKEN" | sha256sum`。ファイルから消したprincipalは無効化されます（行は履歴のため残る）。
 groupへのSENDは対象全員について権限を照合します。
 
 ## 2. 主なendpoint
@@ -75,7 +75,8 @@ curl -s --unix-socket $S -H "$H" http://localhost/v1/operations/<operation>
 - **202 は「Host DBにcommitした」だけ**です。到達は `evidence[]` と `outcome` で見ます:
   `ROOT_ACCEPTED` → `ROOT_SENT` → `HOP_ACCEPTED`（`LINK_VERIFIED`）→ `END_RECEIVED`（`END_VERIFIED`）→ `APP_APPLIED`。欠けた段階を推定で埋めません。`assurance` は `END_VERIFIED / LINK_VERIFIED / SELF_REPORTED / UNKNOWN`。
 - 同じ `Idempotency-Key` + 同じ本文 = 同じoperation（再送は何も書かない）。**本文が違えば 409 `CONFLICT`**。キーは `(principal, domain, 操作型, client_epoch, key)` 単位。
-- 制約: payload 512 B（`object_transfer:true` で 4096 B、rootが `OBJECT_4K` を有効化している時のみ）、APPLIEDは有限期限、LATESTは BEST_EFFORT+VOLATILE+`coalesce_key`、groupのDURABLE/LATESTは 503 `UNSUPPORTED`。u63（`revision` 等）は**10進文字列**。
+- **保持窓（`operation_retention_ms`、既定7日）**: `FINAL` の操作は、その `client_epoch` を閉じてから7日後に削除されます（開いたepochの操作は削除しない。journal eventは別の保持でoperationへのリンクだけを失う）。窓の中の再送は保存済みの操作を返し、窓の後の再送は `410 EPOCH_CLOSED` で、**新しい送信にはなりません**。
+- 制約: payload 512 B（`object_transfer:true` で 4096 B、rootが `OBJECT_4K` を有効化している時のみ。groupへのobjectは `UNSUPPORTED`）。`strict_single_frame:true` は分割を禁止し、1 frameに入らなければ `REJECTED`（`PAYLOAD_TOO_LARGE`）、APPLIEDは有限期限、LATESTは BEST_EFFORT+VOLATILE+`coalesce_key`、groupのDURABLE/LATESTは 503 `UNSUPPORTED`。u63（`revision` 等）は**10進文字列**。
 - 主なエラー: 400 検証、401/403 認証/権限、404、409 `CONFLICT`（古いrevision含む。`details.current_revision`）、410 `CURSOR_GAP`/期限外、413、429、503 `UNSUPPORTED`（`details.required_capability`）/`BUSY`、507 `NO_CAPACITY`。本文は `{code, message, request_id, retry_after_ms?, details?}`。
 
 ## 4. event・SSE・cursor
@@ -93,7 +94,10 @@ curl -s --unix-socket $S -H "$H" http://localhost/v1/operations/<operation>
 | 202の前に落ちた | 操作は存在しない。同じキーで再送してよい |
 | 202の後、送信claimの前に落ちた | outboxに `QUEUED` で残り、rootに繋がれば送られる（HTTP切断でcommit済み操作は取消されない。この境界を狙った試験は無い） |
 | claim（`external_write_possible=1`）のcommit後、rootへ送る前に落ちた | 送ったか不明として**再送しない**。再起動後にrootへMessageIdで照会し、rootが知らなければ `INDETERMINATE`（"届かなかった"と"届いて忘れた"を区別できない） |
-| rootへ送った後、Hostが応答を記録する前に落ちた | 再起動後にMessageIdで照会して**同じ操作を続ける**（rootの受理は1回、端末への配送も1回） |
+| rootへ送った後、Hostが応答を記録する前に落ちた | 再起動後にMessageIdで照会して**同じ操作を続ける**（rootの受理は1回。端末への配送はMessageIdで重複排除されるが、副作用のexactly-onceは保証しない） |
+| 操作が `FINAL`（例: `INDETERMINATE`）になった後にrootのAPP_APPLIED等が届いた | evidenceが履歴に追加され、outcomeはrank順にだけ進む（`INDETERMINATE`→`APPLIED`）。`REJECTED`/`EXPIRED`は上書きされない |
+| 同じMessageIdが別のintentで届いた（inbox conflict） | 保存せず、`MESSAGE_CONFLICT` eventを1件記録し、HOST_STORE_ACKは返さず、EVENT_ACKは進める。rootはその原本を期限まで保持し、後続のeventは止まらない |
+| rootのDeviceIdが既知domainの記録と違う | `ROOT_MISMATCH` でbridgeは上がらない。例外は、このHostが旧rootのAPPLIED報告を見た `ROOT_HANDOVER`（旧→新）だけで、1回限りで消費される（APPLIEDを見損ねた場合は運用者が明示復旧） |
 | root再起動・セッション断 | rootの起動番号だけで知っている操作は `INDETERMINATE`。USB port名が同じでも同じ端末とは認証しない |
 | DB破損・disk満杯 | 永続health fault。空DBを自動再作成して正常を装わない。原本を隔離して明示復旧 |
 

@@ -65,6 +65,11 @@ bool Power::member_power(ShortAddr addr, MemberPower &out) const {
     return true;
 }
 
+bool Power::sleepy_member(ShortAddr addr, MonoTime now) const {
+    MemberPower m;
+    return member_power(addr, m) && m.mode != k_always_rx && now.to_ms() / 1000U <= m.reported_s + uint64_t{k_max_age_s};
+}
+
 uint32_t Power::lease_ms_for(ShortAddr addr, MonoTime now) const {
     MemberPower m;
     if (!member_power(addr, m) || m.mode == k_always_rx || now.to_ms() / 1000U > m.reported_s + uint64_t{k_max_age_s}) {

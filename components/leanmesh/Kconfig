@@ -27,6 +27,19 @@ menu "LeanMesh"
             (config/partitions_4m.csv); on a layout without a second app slot the check answers
             UNSUPPORTED. Real power-cut and rollback evidence (O01, O03) needs hardware.
 
+    config LEANMESH_ALLOW_PLAINTEXT_SECRETS
+        bool "Development only: store the device key without NVS encryption"
+        depends on !NVS_ENCRYPTION
+        default n
+        help
+            The identity record holds the device's P-256 private key and the discovery_scope record the
+            DiscoveryScopeKey (docs/12 section 2: secret payloads need NVS encryption). NVS partitions are not
+            covered by flash encryption, so without CONFIG_NVS_ENCRYPTION anyone who reads the flash reads the key.
+            A build without NVS encryption does not compile unless this acknowledgement is set. Never for a product.
+            With NVS encryption the SDK mounts its `identity` and `state` partitions with the keys of the registered
+            NVS security scheme and never creates those keys (that is provisioning: an eFuse write or the nvs_keys
+            partition, the product's key custody); a missing key fails closed.
+
     config LEANMESH_OBJECT_TRANSFER
         bool "Optional 4096 B object transfer (lm_send_object)"
         default n

@@ -1,5 +1,5 @@
 {
-  "status": "implementation inputs; T01 baseline-only builds executed (empty IDF+ESP-NOW, 4 targets); no SDK/product build, no hardware test",
+  "status": "implementation inputs. The SDK builds for the 4 SoCs (LEAF/RELAY/ROOT) and native/sim tests exist on feat/sdk-impl (software and simulation only); no hardware test, no flash, no RF.",
   "esp_idf": {
     "version": "6.0.3",
     "commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",

@@ -22,6 +22,16 @@ Status Engine::radio_sleep() {
     return Status::Ok;
 }
 
+bool Engine::drain_radio(MonoTime now) {
+    port::RadioEvent ev;
+    int handled = 0;
+    while (handled < k_max_radio_events_per_step && ports_.radio.poll(ev)) {
+        on_radio_event(ev, now);
+        ++handled;
+    }
+    return handled < k_max_radio_events_per_step;
+}
+
 void Engine::radio_wake(MonoTime now) {
     if (radio_state_ != RadioState::Asleep) {
         return;

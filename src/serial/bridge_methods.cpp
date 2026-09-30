@@ -111,7 +111,7 @@ void Bridge::m_send(Pending &p, ByteView params) {
     take(r, hs.mid);
     take(r, hs.hash);
     hs.rq.app_port = static_cast<uint16_t>(r.uint_in(1, 65534));
-    const uint64_t flags = r.uint_in(0, 31);
+    const uint64_t flags = r.uint_in(0, 63); // bits 0..1 delivery, 2..3 priority, 4 durable, 5 strict_single_frame
     hs.rq.root_term = static_cast<uint32_t>(r.uint_in(0, k_u32_max));
     hs.rq.expires_root_ms = r.uint_in(0, ~uint64_t{0});
     const bool object = r.boolean();
@@ -122,16 +122,17 @@ void Bridge::m_send(Pending &p, ByteView params) {
         p.status = Status::InvalidArgument; // CONTROL priority is not selectable from outside (docs/08)
         return;
     }
-    if (object) {
-        p.status = Status::Unsupported; // lm_send_object: the object transfer module has not landed
-        return;
-    }
+    const bool strict = (flags & 32U) != 0;
     uint32_t group_id = 0;
     uint64_t group_revision = 0;
     if (group::is_group_dest(dest, group_id, group_revision)) { // a group is a marker value (group.hpp)
         hs.rq.destination.kind = LM_DEST_GROUP;
         hs.rq.destination.group_id = group_id;
         hs.rq.destination.group_revision = group_revision;
+        if (object) {
+            p.status = Status::Unsupported; // a group fan-out carries small messages only
+            return;
+        }
     } else {
         std::memcpy(hs.rq.destination.node.bytes, dest.data(), 32);
     }
@@ -139,6 +140,8 @@ void Bridge::m_send(Pending &p, ByteView params) {
     hs.rq.storage = (flags & 16U) != 0 ? LM_DURABLE : LM_VOLATILE;
     hs.rq.priority = static_cast<uint8_t>(priority);
     hs.rq.queue_mode = LM_FIFO;
+    hs.rq.strict_single_frame = strict ? 1 : 0; // FIX11-D12: the Host's option reaches the core (never silently fragmented)
+    hs.object = object;                         // FIX11-D11: 4096 B objects; the core answers UNSUPPORTED when not enabled
     const Reply rep = run(CommandKind::RootHostSend, &hs, sizeof(hs), payload);
     p.status = rep.status;
     if (rep.status == Status::Ok) {
@@ -398,7 +401,7 @@ void Bridge::m_group_set(Pending &p, ByteView params) {
     const Reply rep = run(CommandKind::GroupSet, &rq, sizeof(rq));
     p.status = rep.status;
     if (rep.status == Status::Ok) {
-        p.has_op = true; // completes at once (RAM registry); the OPERATION event says so
+        p.has_op = true; // FIX8-D10: the OPERATION event comes once the definition is durable at the root
         p.op = rep.operation_id;
         p.result = Result::Ack;
     }

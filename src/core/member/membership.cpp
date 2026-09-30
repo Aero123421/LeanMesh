@@ -125,7 +125,13 @@ void Membership::release_join() {
     }
     engine_.identity().return_record(rec_);
     have_cand_ = false;
-    peer_ = link::JoinPeerOut{};
+    // FIX8-D13 (review L5): `peer_` is the output of the exchange's JoinInit verify job; a job of a cancelled join may
+    // still run (zombie) and write it. Only `known` is the owner's: the rest is reset once no such job exists.
+    if (engine_.link().exchange().writes_join_out(&peer_)) {
+        peer_.known = false;
+    } else {
+        peer_ = link::JoinPeerOut{};
+    }
     apply_pacing(0); // the policy of a proxied join ends with it
 }
 
@@ -550,6 +556,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         return;
 
     case Step::LeaveCommit:
+    case Step::LeaveCheck: // [FIX8-D6]
         leave_flash_done(step, s, now);
         return;
 

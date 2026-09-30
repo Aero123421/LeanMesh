@@ -193,6 +193,7 @@ class Membership {
         ConsumePrepared, // refusal or leave of a PREPARED join
         InstallTicket,
         LeaveCommit,
+        LeaveCheck, // [FIX8-D6] the membership record read back after a tombstone commit reported a failure
         RenewVerify, // [S18] worker: the renewed credential under the delegation
         RenewCommit, // [S18] membership record := the renewed credential
         RenewReload, // [P4] ... read again after a handshake made it wait without the record memory
@@ -202,7 +203,8 @@ class Membership {
         SwitchCommit,  // [S18] ... becomes root_delegation
         SwitchPeek,    // [S18] the installed object says where a member's switch looks (its target domain)
     };
-    enum class LeavePhase : uint8_t { Idle, Draining, Notifying, Committing };
+    // Reconciling [FIX8-D6]: the tombstone commit reported a failure; RAM has left already, the stored record decides.
+    enum class LeavePhase : uint8_t { Idle, Draining, Notifying, Committing, Reconciling };
 
     struct Request {
         RequestId id;
@@ -282,6 +284,9 @@ class Membership {
     void leave_commit(MonoTime now);
     void leave_flash_done(Step step, Status s, MonoTime now);
     void leave_finish(Status why, uint32_t outcome, MonoTime now);
+    void apply_left(); // [FIX8-D6] the membership ends in RAM (sessions, routes, credential)
+    void leave_check(MonoTime now);
+    void leave_checked(Status s, MonoTime now);
 
     Engine &engine_;
     JoinPipe pipe_;
@@ -366,6 +371,7 @@ class Membership {
     MonoTime leave_deadline_ = MonoTime::never();
     MonoTime leave_tx_wait_ = MonoTime::never();
     uint8_t leave_attempts_ = 0;
+    uint8_t leave_checks_ = 0; // [FIX8-D6] read-backs / commits after a failed tombstone commit (bounded)
     bool leave_tx_inflight_ = false;
     bool leave_prepared_only_ = false;
 };

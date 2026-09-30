@@ -1204,7 +1204,9 @@ LM_TEST("LP20 sim: without proven RTC continuity a cold boot starts with no budg
     n.run_ms(30'500);
     n.await_boot(2, 5'000);
     LM_CHECK_EQ(n.snap(2).offline_budget_remaining_ms, 0u);
-    // Cold boot (power on: no retained memory): the same, and the boot episode can still search.
+    // Cold boot (power on: no retained memory): the same, and the boot episode can still search. (The power comes back
+    // after the parent's one-handshake-per-30-s gate for this peer has run out: this test is about the budget.)
+    n.run_ms(31'000);
     n.node(2).pm.elapsed_known = true;
     n.node(2).pm.clear_retained();
     n.node(2).power_cut();
@@ -1565,6 +1567,8 @@ LM_TEST("FIX3-9 sim: 4 sleeping and 4 awake group targets: the awake ones finish
     }
     lm_operation_id_t setop = 0;
     LM_CHECK_EQ(lm_group_set(n.ctx(0), 5, 0, ids.data(), ids.size(), &setop), LM_STATUS_OK);
+    n.node(0).notify();
+    n.run_ms(200); // FIX8-D10: the definition is durable (its operation ends) before a send can name its revision
     lm_send_request_t rq{};
     rq.struct_size = sizeof(rq);
     rq.abi_version = LM_ABI_VERSION;
@@ -1608,6 +1612,265 @@ LM_TEST("FIX3-9 sim: 4 sleeping and 4 awake group targets: the awake ones finish
     }
     // The wake: the sleepers are served too, nobody twice.
     LM_CHECK(n.until([&] { return progress().received == 8; }, 200'000, 100));
+}
+
+// FIX10-H9: the root derives the deferred set from its S16 schedule view: a REPORT_ONLY leaf asleep during a plan is
+// deferred (docs/20 §9), not a required participant that aborts every plan.
+LM_TEST("H9 sim: a REPORT_ONLY leaf asleep during a channel plan - deferred, or required (plan aborts)?") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}}, 61, 2000, true);
+    n.form();
+    LM_CHECK(n.until([&] {
+        return n.eng(0).chan().loaded() && n.eng(1).chan().stats().time_updates > 0 && n.eng(2).chan().stats().time_updates > 0;
+    }, 120'000, 20));
+    n.apply_policy(2, report_long());
+    lm_status_t sl = LM_STATUS_BUSY;
+    for (int i = 0; i < 200 && sl != LM_STATUS_OK; ++i) {
+        n.run_ms(100);
+        sl = n.sleep_now(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 1'800'000, LM_PENDING_SAVE_AND_SLEEP); // 30 min between reports
+    }
+    std::printf("  sleep_now -> %u\n", (unsigned)sl);
+    n.run_ms(5000);
+    LM_CHECK(n.asleep(2));
+    root::RouteGrant g;
+    std::printf("  leaf attached at the root while asleep: %d\n",
+                n.eng(0).routes().topology().path_from_root(ShortAddr{3}, n.root_ms(), g) == Status::Ok ? 1 : 0);
+    const Status st = n.eng(0).coordinator().plan_to(11, n.now(0));
+    n.node(0).notify();
+    auto v = n.eng(0).coordinator().view();
+    std::printf("  plan_to(11) -> %u; required %llx deferred %llx\n", (unsigned)st, (unsigned long long)v.required,
+                (unsigned long long)v.deferred);
+    LM_CHECK(n.until([&] { return n.eng(0).coordinator().state() == root::CState::Monitor; }, 400'000, 100));
+    v = n.eng(0).coordinator().view();
+    std::printf("  after: state %u why %u required %llx ready %llx deferred %llx; aborts %u commits %u; root on %u, relay on %u\n",
+                (unsigned)v.state, (unsigned)v.why, (unsigned long long)v.required, (unsigned long long)v.ready,
+                (unsigned long long)v.deferred, n.eng(0).coordinator().stats().aborts, n.eng(0).coordinator().stats().commits,
+                n.eng(0).channel(), n.eng(1).channel());
+    LM_CHECK((v.required & (1ULL << (3 - 2))) == 0); // docs/20 §9: a sleeping leaf is deferred, not required
+    LM_CHECK_EQ(n.eng(0).channel(), 11);
+}
+
+
+// FIX10-H9: a REPORT_ONLY deep sleeper misses one channel change (deferred because the root sees it sleep). Every cold
+// boot is one episode of the policy's search budget; the channel search has to fit into it and continue where it stopped.
+void h9_rejoin(const pw::Policy &pol, const char *name, bool change = true, uint8_t target = 11) {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}}, 61, 2000, true);
+    n.form();
+    LM_CHECK(n.until([&] {
+        return n.eng(0).chan().loaded() && n.eng(1).chan().stats().time_updates > 0 && n.eng(2).chan().stats().time_updates > 0;
+    }, 120'000, 20));
+    n.apply_policy(2, pol);
+    lm_status_t sl = LM_STATUS_BUSY;
+    for (int i = 0; i < 200 && sl != LM_STATUS_OK; ++i) {
+        n.run_ms(100);
+        sl = n.sleep_now(2, LM_SLEEP_DEEP, LM_WAKE_TIMER, 600'000, LM_PENDING_SAVE_AND_SLEEP);
+    }
+    LM_CHECK_EQ(sl, LM_STATUS_OK);
+    n.run_ms(5000);
+    if (change) {
+        LM_CHECK_OK(n.eng(0).coordinator().plan_to(11, n.now(0)));
+        n.node(0).notify();
+        LM_CHECK(n.until([&] { return n.eng(0).coordinator().state() == root::CState::Monitor && n.eng(0).channel() == 11; }, 500'000, 100));
+    }
+    unsigned attached_boots = 0;
+    bool counted = false;
+    // The leaf's application: deep sleep 10 min whenever its episode is over (search/episode budget, or its window).
+    bool ever_ready = false;
+    bool learned = false; // the stored channel and epoch are the network's (an authenticated word of the root, not a beacon)
+    unsigned boots = 0;
+    bool was_powered = n.node(2).powered();
+    const uint64_t end = n.world.now_us() + 3ULL * 3600 * 1000000;
+    while (n.world.now_us() < end) {
+        n.run_ms(50);
+        const bool p = n.node(2).powered();
+        boots += (p && !was_powered) ? 1U : 0U;
+        was_powered = p;
+        if (!p) {
+            counted = false;
+            continue;
+        }
+        const bool r = n.ready(2) && n.eng(2).channel() == target;
+        if (r && !counted) {
+            ++attached_boots;
+            counted = true;
+        }
+        ever_ready = ever_ready || r;
+        learned = learned || (r && n.eng(2).chan().current() == target && n.eng(2).chan().epoch().value() == (change ? 1U : 0U));
+        const auto st = n.eng(2).power().state();
+        if (st != power::Power::State::Running && st != power::Power::State::BudgetBlocked) {
+            continue;
+        }
+        const unsigned closed = n.power_events(2, pw::kWindowClosed);
+        const unsigned ended = n.power_events(2, pw::kSearchBudgetEnd) + n.power_events(2, pw::kEpisodeBudgetEnd) +
+                               n.power_events(2, pw::kWakeDenied) + n.power_events(2, pw::kOfflineBudget);
+        if ((closed > n.cycles_seen_ && n.ready(2) && n.eng(2).power().poll_done()) || ended > n.search_seen_) {
+            if (boots <= 4) {
+                const auto sn = n.snap(2);
+                std::printf("    boot %u sleeps: closed %u ended %u (search %u episode %u denied %u offline %u) mesh %u radio %u chan loaded %d cur %u scans %u offline_left %u wake_reason %u\n",
+                            boots, closed, ended, n.power_events(2, pw::kSearchBudgetEnd), n.power_events(2, pw::kEpisodeBudgetEnd),
+                            n.power_events(2, pw::kWakeDenied), n.power_events(2, pw::kOfflineBudget),
+                            (unsigned)n.eng(2).mesh().state(), n.eng(2).channel(), n.eng(2).chan().loaded() ? 1 : 0,
+                            n.eng(2).chan().current(), n.eng(2).chan().stats().scans, sn.offline_budget_remaining_ms, sn.wake_reason);
+            }
+            n.cycles_seen_ = closed;
+            n.search_seen_ = ended;
+            (void)n.sleep_now(2, LM_SLEEP_DEEP, LM_WAKE_TIMER, 600'000, LM_PENDING_SAVE_AND_SLEEP);
+        }
+    }
+    std::printf("  [%s] attached in %u boots;", name, attached_boots);
+    std::printf("  [%s] 3 h after the change: leaf boots %u, ever attached on 11: %d; channel stats (last boot): scans %u dwells %u; stored cur %u epoch %u\n",
+                name, boots, ever_ready ? 1 : 0, n.node(2).powered() ? n.eng(2).chan().stats().scans : 0,
+                n.node(2).powered() ? n.eng(2).chan().stats().scan_dwells : 0,
+                n.node(2).powered() ? n.eng(2).chan().current() : 0, n.node(2).powered() ? n.eng(2).chan().epoch().value() : 0);
+    LM_CHECK(ever_ready);
+    LM_CHECK(learned);
+    LM_CHECK(attached_boots + 4 >= boots); // not only once: (nearly) every boot after the first rejoins
+}
+
+LM_TEST("H9a sim: REPORT_ONLY deep sleeper, reference policy (1 s search), misses a channel change") { h9_rejoin(k_report, "reference"); }
+LM_TEST("H9c sim: control - no channel change, reference policy") { h9_rejoin(k_report, "control-reference", false, 6); }
+LM_TEST("H9d sim: control - no channel change, report_long") { h9_rejoin(report_long(), "control-report_long", false, 6); }
+LM_TEST("H9b sim: REPORT_ONLY deep sleeper, 12 s search policy (report_long), misses a channel change") { h9_rejoin(report_long(), "report_long"); }
+
+
+// FIX10-A6 (astra on 8668c69)
+LM_TEST("FIX10-A6 sim: authenticated DATA queued in the radio after the ticket makes lm_sleep_enter STALE; the frame is delivered, not dropped") {
+    PNet n({Spec{},Spec{Role::Relay},Spec{Role::Leaf}}); n.form();
+    auto s=n.send(1,2,LM_RECEIVED,payload_of(3),30000);
+    LM_CHECK_EQ(s.st,LM_STATUS_OK);
+    LM_CHECK(n.until([&]{return n.op(1,s.op).phase==3;},10000));
+    Bytes received; LM_CHECK(n.pop_message(2,received));
+    n.run_ms(100); n.apply_policy(2,k_report);
+    LM_CHECK(n.until([&]{return n.eng(2).power().stats().grants>=1;},2000));
+    auto p=n.prepare(2,LM_SLEEP_LIGHT,LM_WAKE_TIMER,60000,LM_PENDING_SAVE_AND_SLEEP);
+    lm_sleep_ticket_t t{}; LM_CHECK_EQ(n.get_ticket(2,p,t),LM_STATUS_OK);
+    auto* session=n.eng(1).delivery().sessions().find_peer(n.id(2)); LM_CHECK(session!=nullptr);
+    if(!session)return;
+    wire::EndHeader h;h.message_id.fill(0xD1);h.app_port=100;h.record_kind=wire::RecordKind::Data;
+    h.flags=wire::make_end_flags(wire::Delivery::Received,wire::Priority::Normal,false);
+    h.expires_root_ms=n.node(0).clock.now().to_ms()+30000;
+    std::array<uint8_t,250> rec{};std::size_t rlen=0;uint8_t value=7;
+    LM_CHECK_OK(delivery::seal_end_record(*session,session->tx_sid,RootTerm{1},h,ByteView{&value,1},MutByteView{rec},rlen));
+    delivery::PathSpec ps;ps.origin=ShortAddr{2};ps.dest=ShortAddr{3};ps.len=1;ps.path[0]=3;ps.term=RootTerm{1};ps.revision=PathRevision{1};
+    std::array<uint8_t,250> plain{};std::size_t plen=0;
+    LM_CHECK_OK(wire::encode_route(ps.header(),MutByteView{plain},plen));
+    std::memcpy(plain.data()+plen,rec.data(),rlen);
+    link::SealedFrame f;LM_CHECK_OK(n.eng(1).link().seal(n.id(2),wire::FrameKind::Data,ByteView{plain.data(),plen+rlen},f,n.node(1).clock.now()));
+    port::RadioEvent ev{};ev.rx.src=n.node(1).radio.mac();ev.rx.at=n.node(2).clock.now();ev.rx.len=static_cast<uint8_t>(f.view().size());
+    std::memcpy(ev.rx.bytes.data(),f.view().data(),f.view().size());n.node(2).radio.deliver(ev);
+    LM_CHECK_EQ(n.node(2).radio.rx_depth(),1u);
+    const auto status=lm_sleep_enter(n.ctx(2),&t);
+    LM_CHECK_EQ(status,LM_STATUS_SLEEP_TICKET_STALE);LM_CHECK(!n.asleep(2));
+    LM_CHECK_EQ(n.node(2).radio.rx_depth(),0u); // handled by the ordinary receive path before the ticket was judged
+    Bytes late; LM_CHECK(n.until([&]{return n.pop_message(2,late);},2000)); // the frame reached the application
+}
+
+// ---- FIX10-M12: tests that must fail when the property they name is broken (mutation-checked) --------------------
+
+// ME05 in the SHIPPED configuration: mesh and channel modules on (the firmware runs both), every node idle in a formed
+// network. An absolute bound, not a comparison with a run that has the same fault: a periodic wake of any period up to
+// a second fails it, and so does a run of consecutive busy 10 ms windows.
+LM_TEST("FIX10-M12 ME05 sim: a formed idle network in the shipped configuration (mesh + channel + power port) has no periodic owner wake") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Relay}, Spec{Role::Leaf}}, 61, 2000, true);
+    n.form();
+    LM_CHECK(n.until([&] {
+        return n.eng(0).chan().loaded() && n.eng(1).chan().stats().time_updates > 0 && n.eng(2).chan().stats().time_updates > 0 &&
+               n.eng(3).chan().stats().time_updates > 0;
+    }, 120'000, 20));
+    n.run_ms(120'000); // the attach traffic and the first refreshes are over
+    for (unsigned i = 0; i < n.n; ++i) {
+        LM_CHECK(n.eng(i).mesh().state() == (i == 0 ? route::Mesh::State::Root : route::Mesh::State::Ready));
+    }
+    std::array<uint64_t, 4> before{};
+    std::array<unsigned, 4> run{}, longest{};
+    std::array<uint64_t, 4> last{};
+    for (unsigned i = 0; i < n.n; ++i) {
+        before[i] = last[i] = n.eng(i).stats().steps;
+    }
+    constexpr uint64_t k_window_ms = 10;
+    constexpr uint64_t k_idle_ms = 900'000; // 15 minutes
+    for (uint64_t t = 0; t < k_idle_ms; t += k_window_ms) {
+        n.run_ms(k_window_ms);
+        for (unsigned i = 0; i < n.n; ++i) {
+            const uint64_t s = n.eng(i).stats().steps;
+            run[i] = s != last[i] ? run[i] + 1 : 0;
+            longest[i] = std::max(longest[i], run[i]);
+            last[i] = s;
+        }
+    }
+    for (unsigned i = 0; i < n.n; ++i) {
+        const uint64_t steps = n.eng(i).stats().steps - before[i];
+        std::printf("  [measure] node %u: %llu owner steps in 15 idle minutes, longest run of busy 10 ms windows %u (sim)\n", i,
+                    static_cast<unsigned long long>(steps), longest[i]);
+        // What is scheduled: the mesh's Trickle beacons (about one per second at their floor), the lease refresh every
+        // 60 s, the clock refresh every 300 s and the neighbours' relayed pairs (measured: 300..880 on the sim). A 2 ms
+        // poll would be 450 000, a 10 ms one 90 000, a 100 ms one 9 000.
+        LM_CHECK(steps <= 1500);
+        LM_CHECK(longest[i] <= 12);
+    }
+}
+
+// LP04 with the generation check as the only thing that can refuse: the ticket is otherwise perfectly fresh (quiet node,
+// same membership, inside its 2 s), and the state moves by one of the three events that must void it.
+LM_TEST("FIX10-M12 LP04 sim: a state change between ticket and enter voids the ticket by its generation alone (no timing involved)") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    n.apply_policy(2, k_report);
+    LM_CHECK(n.until([&] { return n.eng(2).power().stats().grants >= 1; }, 2000));
+    auto ticket = [&](lm_sleep_ticket_t &t) {
+        const PNet::Prep p = n.prepare(2, LM_SLEEP_LIGHT, LM_WAKE_TIMER, 60'000, LM_PENDING_SAVE_AND_SLEEP);
+        LM_CHECK_EQ(p.st, LM_STATUS_OK);
+        LM_CHECK_EQ(n.get_ticket(2, p, t), LM_STATUS_OK);
+    };
+    // 1. a channel plan step (Power::note_state_change) after the ticket
+    lm_sleep_ticket_t t{};
+    ticket(t);
+    n.eng(2).power().note_state_change();
+    LM_CHECK_EQ(lm_sleep_enter(n.ctx(2), &t), LM_STATUS_SLEEP_TICKET_STALE);
+    LM_CHECK(!n.asleep(2));
+    LM_CHECK(n.eng(2).radio_state() == RadioState::Running);
+    // 2. authenticated DATA after the ticket (Power::note_rx)
+    ticket(t);
+    n.eng(2).power().note_rx(n.now(2));
+    LM_CHECK_EQ(lm_sleep_enter(n.ctx(2), &t), LM_STATUS_SLEEP_TICKET_STALE);
+    LM_CHECK(!n.asleep(2));
+    // 3. the control: nothing moved, the very same kind of ticket is accepted
+    ticket(t);
+    LM_CHECK_EQ(lm_sleep_enter(n.ctx(2), &t), LM_STATUS_OK);
+    LM_CHECK(n.asleep(2));
+}
+
+// LP18: the level of each lock follows the work it stands for, in both directions, at every step; and each of them is
+// really taken (a build that never asked for the crypto, Flash or radio lock must fail here).
+LM_TEST("FIX10-M12 LP18 sim: the crypto, Flash and radio PM locks are held exactly while their work runs, and are taken") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    n.apply_policy(2, k_report);
+    LM_CHECK(n.until([&] { return n.eng(2).power().stats().grants >= 1; }, 2000));
+    SimPm &pm = n.node(2).pm;
+    Engine &e = n.eng(2);
+    auto consistent = [&] {
+        const uint8_t m = pm.locks();
+        return ((m & port::pm_lock::crypto) != 0) == e.crypto_busy() && ((m & port::pm_lock::flash) != 0) == e.flash_busy() &&
+               ((m & port::pm_lock::radio) != 0) == e.tx().in_flight();
+    };
+    const std::array<uint64_t, 3> before = {pm.acquired(1), pm.acquired(2), pm.acquired(3)};
+    // Crypto: an end session with the relay (a fresh EDHOC). Flash: a durable send (journal). Radio: every frame.
+    LM_CHECK_EQ(n.send(2, 1, LM_RECEIVED, payload_of(1)).st, LM_STATUS_OK);
+    LM_CHECK_EQ(n.send(2, 0, LM_RECEIVED, payload_of(2), 30000, LM_DURABLE).st, LM_STATUS_OK);
+    bool crypto = false, flash = false, radio = false;
+    for (int i = 0; i < 6000; ++i) {
+        n.run_ms(1);
+        LM_CHECK(consistent());
+        crypto = crypto || e.crypto_busy();
+        flash = flash || e.flash_busy();
+        radio = radio || e.tx().in_flight();
+    }
+    LM_CHECK(crypto && flash && radio); // the work happened ...
+    LM_CHECK(pm.acquired(1) > before[0]); // ... and its lock was taken
+    LM_CHECK(pm.acquired(2) > before[1]);
+    LM_CHECK(pm.acquired(3) > before[2]);
+    LM_CHECK(locks_balanced(n, 2));
+    LM_CHECK_EQ(pm.locks() & (port::pm_lock::crypto | port::pm_lock::flash | port::pm_lock::radio), 0u); // idle again: none held
 }
 
 LM_TEST_MAIN()

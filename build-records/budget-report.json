@@ -57,7 +57,7 @@
     },
     "same_pin": true
   },
-  "command": "scripts/budget_report.py --native-build /home/admister/.cache/leanmesh/native-arch2 --idf-root /home/admister/.cache/leanmesh/build-arch2 --out-dir build-records",
+  "command": "scripts/budget_report.py --native-build /home/admister/.cache/leanmesh/native --idf-root /home/admister/.cache/leanmesh/build-final --out-dir build-records",
   "crypto": {
     "basis": "measured natively (x86-64 software model), tests/native/test_security (run now)",
     "psa_heap": 4368,
@@ -72,30 +72,30 @@
         "basis": "link map of example_node/esp32c3",
         "items": {
           "libleanmesh.a static DRAM (map)": 17896,
-          "workspace (lm_context)": 40776
+          "workspace (lm_context)": 41264
         },
         "target": 49152,
-        "total": 58672,
+        "total": 59160,
         "verdict": "OVER"
       },
       "relay": {
         "basis": "link map of example_node-RELAY/esp32c3",
         "items": {
           "libleanmesh.a static DRAM (map)": 19016,
-          "workspace (lm_context)": 45080
+          "workspace (lm_context)": 45568
         },
         "target": 57344,
-        "total": 64096,
+        "total": 64584,
         "verdict": "OVER"
       },
       "root": {
         "basis": "link map of example_node-ROOT/esp32c3",
         "items": {
-          "libleanmesh.a static DRAM (map)": 50804,
-          "workspace (lm_context)": 125520
+          "libleanmesh.a static DRAM (map)": 50812,
+          "workspace (lm_context)": 126416
         },
         "target": 163840,
-        "total": 176324,
+        "total": 177228,
         "verdict": "OVER"
       }
     },
@@ -104,30 +104,30 @@
         "basis": "link map of example_node/esp32c5",
         "items": {
           "libleanmesh.a static DRAM (map)": 17896,
-          "workspace (lm_context)": 40776
+          "workspace (lm_context)": 41264
         },
         "target": 49152,
-        "total": 58672,
+        "total": 59160,
         "verdict": "OVER"
       },
       "relay": {
         "basis": "link map of example_node-RELAY/esp32c5",
         "items": {
           "libleanmesh.a static DRAM (map)": 19016,
-          "workspace (lm_context)": 45080
+          "workspace (lm_context)": 45568
         },
         "target": 57344,
-        "total": 64096,
+        "total": 64584,
         "verdict": "OVER"
       },
       "root": {
         "basis": "link map of example_node-ROOT/esp32c5",
         "items": {
-          "libleanmesh.a static DRAM (map)": 50804,
-          "workspace (lm_context)": 125520
+          "libleanmesh.a static DRAM (map)": 50812,
+          "workspace (lm_context)": 126416
         },
         "target": 163840,
-        "total": 176324,
+        "total": 177228,
         "verdict": "OVER"
       }
     },
@@ -136,30 +136,30 @@
         "basis": "link map of example_node/esp32c6",
         "items": {
           "libleanmesh.a static DRAM (map)": 17896,
-          "workspace (lm_context)": 40776
+          "workspace (lm_context)": 41264
         },
         "target": 49152,
-        "total": 58672,
+        "total": 59160,
         "verdict": "OVER"
       },
       "relay": {
         "basis": "link map of example_node-RELAY/esp32c6",
         "items": {
           "libleanmesh.a static DRAM (map)": 19016,
-          "workspace (lm_context)": 45080
+          "workspace (lm_context)": 45568
         },
         "target": 57344,
-        "total": 64096,
+        "total": 64584,
         "verdict": "OVER"
       },
       "root": {
         "basis": "link map of example_node-ROOT/esp32c6",
         "items": {
-          "libleanmesh.a static DRAM (map)": 50804,
-          "workspace (lm_context)": 125520
+          "libleanmesh.a static DRAM (map)": 50812,
+          "workspace (lm_context)": 126416
         },
         "target": 163840,
-        "total": 176324,
+        "total": 177228,
         "verdict": "OVER"
       }
     },
@@ -168,30 +168,30 @@
         "basis": "link map of example_node/esp32s3",
         "items": {
           "libleanmesh.a static DRAM (map)": 17904,
-          "workspace (lm_context)": 40776
+          "workspace (lm_context)": 41264
         },
         "target": 49152,
-        "total": 58680,
+        "total": 59168,
         "verdict": "OVER"
       },
       "relay": {
         "basis": "link map of example_node-RELAY/esp32s3",
         "items": {
           "libleanmesh.a static DRAM (map)": 19024,
-          "workspace (lm_context)": 45080
+          "workspace (lm_context)": 45568
         },
         "target": 57344,
-        "total": 64104,
+        "total": 64592,
         "verdict": "OVER"
       },
       "root": {
         "basis": "link map of example_node-ROOT/esp32s3",
         "items": {
-          "libleanmesh.a static DRAM (map)": 50820,
-          "workspace (lm_context)": 125520
+          "libleanmesh.a static DRAM (map)": 50828,
+          "workspace (lm_context)": 126416
         },
         "target": 163840,
-        "total": 176340,
+        "total": 177244,
         "verdict": "OVER"
       }
     },
@@ -202,10 +202,10 @@
           "owner task stack": 4096,
           "radio (rx/done rings)": 2928,
           "worker task stack": 10240,
-          "workspace (lm_context)": 41360
+          "workspace (lm_context)": 41848
         },
         "target": 49152,
-        "total": 58624,
+        "total": 59112,
         "verdict": "OVER"
       },
       "relay": {
@@ -214,208 +214,208 @@
           "owner task stack": 4096,
           "radio (rx/done rings)": 4048,
           "worker task stack": 10240,
-          "workspace (lm_context)": 45664
+          "workspace (lm_context)": 46152
         },
         "target": 57344,
-        "total": 64048,
+        "total": 64536,
         "verdict": "OVER"
       },
       "root": {
         "basis": "estimate (sizeof + stack/ring constants)",
         "items": {
-          "USB serial adapter (RootUsb)": 20736,
+          "USB serial adapter (RootUsb)": 20744,
           "USB task stack + byte ring": 4608,
           "owner task stack": 4096,
           "radio (rx/done rings)": 7408,
           "worker task stack": 10240,
-          "workspace (lm_context)": 126272
+          "workspace (lm_context)": 127160
         },
         "target": 163840,
-        "total": 173360,
+        "total": 174256,
         "verdict": "OVER"
       }
     }
   },
-  "head": "25849ed",
+  "head": "8668c69",
   "idf": {
     "builds": [
       {
         "baseline_image_bytes": 707608,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node/esp32c3",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32c3",
         "flash_verdict": "OVER",
-        "image_bytes": 991930,
-        "image_diff": 284322,
+        "image_bytes": 1008550,
+        "image_diff": 300942,
         "profile": "leaf",
         "static": {
           "dram_bss": 17896,
           "dram_data": 0,
-          "flash_code": 242230,
+          "flash_code": 249070,
           "flash_data": 5206
         },
         "target": "esp32c3"
       },
       {
         "baseline_image_bytes": 707608,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-RELAY/esp32c3",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32c3",
         "flash_verdict": "OVER",
-        "image_bytes": 997492,
-        "image_diff": 289884,
+        "image_bytes": 1013992,
+        "image_diff": 306384,
         "profile": "relay",
         "static": {
           "dram_bss": 19016,
           "dram_data": 0,
-          "flash_code": 247760,
+          "flash_code": 254480,
           "flash_data": 5238
         },
         "target": "esp32c3"
       },
       {
         "baseline_image_bytes": 707608,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-ROOT/esp32c3",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32c3",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1095740,
-        "image_diff": 388132,
+        "image_bytes": 1121340,
+        "image_diff": 413732,
         "profile": "root",
         "static": {
-          "dram_bss": 50804,
+          "dram_bss": 50812,
           "dram_data": 0,
-          "flash_code": 333662,
+          "flash_code": 349482,
           "flash_data": 5878
         },
         "target": "esp32c3"
       },
       {
         "baseline_image_bytes": 803417,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node/esp32c5",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32c5",
         "flash_verdict": "OVER",
-        "image_bytes": 1093883,
-        "image_diff": 290466,
+        "image_bytes": 1110649,
+        "image_diff": 307232,
         "profile": "leaf",
         "static": {
           "dram_bss": 17896,
           "dram_data": 0,
-          "flash_code": 242186,
+          "flash_code": 249026,
           "flash_data": 5230
         },
         "target": "esp32c5"
       },
       {
         "baseline_image_bytes": 803417,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-RELAY/esp32c5",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32c5",
         "flash_verdict": "OVER",
-        "image_bytes": 1099445,
-        "image_diff": 296028,
+        "image_bytes": 1116091,
+        "image_diff": 312674,
         "profile": "relay",
         "static": {
           "dram_bss": 19016,
           "dram_data": 0,
-          "flash_code": 247716,
+          "flash_code": 254436,
           "flash_data": 5262
         },
         "target": "esp32c5"
       },
       {
         "baseline_image_bytes": 803417,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-ROOT/esp32c5",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32c5",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1197671,
-        "image_diff": 394254,
+        "image_bytes": 1223407,
+        "image_diff": 419990,
         "profile": "root",
         "static": {
-          "dram_bss": 50804,
+          "dram_bss": 50812,
           "dram_data": 0,
-          "flash_code": 333618,
+          "flash_code": 349438,
           "flash_data": 5902
         },
         "target": "esp32c5"
       },
       {
         "baseline_image_bytes": 801401,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node/esp32c6",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32c6",
         "flash_verdict": "OVER",
-        "image_bytes": 1091061,
-        "image_diff": 289660,
+        "image_bytes": 1108261,
+        "image_diff": 306860,
         "profile": "leaf",
         "static": {
           "dram_bss": 17896,
           "dram_data": 0,
-          "flash_code": 245054,
+          "flash_code": 251904,
           "flash_data": 5068
         },
         "target": "esp32c6"
       },
       {
         "baseline_image_bytes": 801401,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-RELAY/esp32c6",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32c6",
         "flash_verdict": "OVER",
-        "image_bytes": 1096665,
-        "image_diff": 295264,
+        "image_bytes": 1113783,
+        "image_diff": 312382,
         "profile": "relay",
         "static": {
           "dram_bss": 19016,
           "dram_data": 0,
-          "flash_code": 250626,
+          "flash_code": 257394,
           "flash_data": 5100
         },
         "target": "esp32c6"
       },
       {
         "baseline_image_bytes": 801401,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-ROOT/esp32c6",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32c6",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1196013,
-        "image_diff": 394612,
+        "image_bytes": 1222181,
+        "image_diff": 420780,
         "profile": "root",
         "static": {
-          "dram_bss": 50804,
+          "dram_bss": 50812,
           "dram_data": 0,
-          "flash_code": 337650,
+          "flash_code": 353468,
           "flash_data": 5740
         },
         "target": "esp32c6"
       },
       {
         "baseline_image_bytes": 675460,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node/esp32s3",
-        "flash_verdict": "OK",
-        "image_bytes": 930713,
-        "image_diff": 255253,
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32s3",
+        "flash_verdict": "OVER",
+        "image_bytes": 946397,
+        "image_diff": 270937,
         "profile": "leaf",
         "static": {
           "dram_bss": 17904,
           "dram_data": 0,
-          "flash_code": 212667,
-          "flash_data": 5068
+          "flash_code": 218666,
+          "flash_data": 5070
         },
         "target": "esp32s3"
       },
       {
         "baseline_image_bytes": 675460,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-RELAY/esp32s3",
-        "flash_verdict": "OK",
-        "image_bytes": 935089,
-        "image_diff": 259629,
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32s3",
+        "flash_verdict": "OVER",
+        "image_bytes": 950593,
+        "image_diff": 275133,
         "profile": "relay",
         "static": {
           "dram_bss": 19024,
           "dram_data": 0,
-          "flash_code": 217020,
-          "flash_data": 5100
+          "flash_code": 222856,
+          "flash_data": 5102
         },
         "target": "esp32s3"
       },
       {
         "baseline_image_bytes": 675460,
-        "build": "/home/admister/.cache/leanmesh/build-arch2/example_node-ROOT/esp32s3",
+        "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32s3",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1022557,
-        "image_diff": 347097,
+        "image_bytes": 1045709,
+        "image_diff": 370249,
         "profile": "root",
         "static": {
-          "dram_bss": 50820,
+          "dram_bss": 50828,
           "dram_data": 0,
-          "flash_code": 293171,
-          "flash_data": 5740
+          "flash_code": 306482,
+          "flash_data": 5742
         },
         "target": "esp32s3"
       }
@@ -423,12 +423,12 @@
     "sizes": {
       "esp32c3": {
         "leaf": {
-          "ctx": 40776,
-          "ctx__engine": 40760,
+          "ctx": 41264,
+          "ctx__engine": 41248,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -452,13 +452,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 2280,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 736,
+          "ctx__engine__power": 752,
           "ctx__engine__proxy": 200,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -475,16 +475,16 @@
           "each__tx_frame": 296,
           "platform__radio": 2920,
           "platform__radio__rx_ring": 2800,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "relay": {
-          "ctx": 45080,
-          "ctx__engine": 45064,
+          "ctx": 45568,
+          "ctx__engine": 45552,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -508,13 +508,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 1320,
+          "ctx__engine__power": 1336,
           "ctx__engine__proxy": 744,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -531,16 +531,16 @@
           "each__tx_frame": 296,
           "platform__radio": 4040,
           "platform__radio__rx_ring": 3920,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "root": {
-          "ctx": 125520,
-          "ctx__engine": 125504,
+          "ctx": 126416,
+          "ctx__engine": 126400,
           "ctx__engine__app_events": 2208,
-          "ctx__engine__chan": 368,
-          "ctx__engine__coordinator": 1496,
-          "ctx__engine__delivery": 60848,
+          "ctx__engine__chan": 448,
+          "ctx__engine__coordinator": 1528,
+          "ctx__engine__delivery": 60976,
           "ctx__engine__delivery__actives": 4480,
           "ctx__engine__delivery__durable": 2976,
           "ctx__engine__delivery__durable__journal": 424,
@@ -554,23 +554,23 @@
           "ctx__engine__frames": 7256,
           "ctx__engine__group": 16488,
           "ctx__engine__group__ops": 7200,
-          "ctx__engine__groups": 648,
+          "ctx__engine__groups": 760,
           "ctx__engine__identity": 4432,
           "ctx__engine__identity__record_job": 1432,
           "ctx__engine__job_table": 92,
-          "ctx__engine__ledger": 11896,
+          "ctx__engine__ledger": 12072,
           "ctx__engine__link": 11256,
           "ctx__engine__link__exchange": 6400,
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 2848,
+          "ctx__engine__power": 2864,
           "ctx__engine__proxy": 840,
-          "ctx__engine__roles": 11904,
+          "ctx__engine__roles": 12080,
           "ctx__engine__routes": 3168,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -587,18 +587,18 @@
           "each__tx_frame": 296,
           "platform__radio": 7400,
           "platform__radio__rx_ring": 7280,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         }
       },
       "esp32c5": {
         "leaf": {
-          "ctx": 40776,
-          "ctx__engine": 40760,
+          "ctx": 41264,
+          "ctx__engine": 41248,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -622,13 +622,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 2280,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 736,
+          "ctx__engine__power": 752,
           "ctx__engine__proxy": 200,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -645,16 +645,16 @@
           "each__tx_frame": 296,
           "platform__radio": 2920,
           "platform__radio__rx_ring": 2800,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "relay": {
-          "ctx": 45080,
-          "ctx__engine": 45064,
+          "ctx": 45568,
+          "ctx__engine": 45552,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -678,13 +678,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 1320,
+          "ctx__engine__power": 1336,
           "ctx__engine__proxy": 744,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -701,16 +701,16 @@
           "each__tx_frame": 296,
           "platform__radio": 4040,
           "platform__radio__rx_ring": 3920,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "root": {
-          "ctx": 125520,
-          "ctx__engine": 125504,
+          "ctx": 126416,
+          "ctx__engine": 126400,
           "ctx__engine__app_events": 2208,
-          "ctx__engine__chan": 368,
-          "ctx__engine__coordinator": 1496,
-          "ctx__engine__delivery": 60848,
+          "ctx__engine__chan": 448,
+          "ctx__engine__coordinator": 1528,
+          "ctx__engine__delivery": 60976,
           "ctx__engine__delivery__actives": 4480,
           "ctx__engine__delivery__durable": 2976,
           "ctx__engine__delivery__durable__journal": 424,
@@ -724,23 +724,23 @@
           "ctx__engine__frames": 7256,
           "ctx__engine__group": 16488,
           "ctx__engine__group__ops": 7200,
-          "ctx__engine__groups": 648,
+          "ctx__engine__groups": 760,
           "ctx__engine__identity": 4432,
           "ctx__engine__identity__record_job": 1432,
           "ctx__engine__job_table": 92,
-          "ctx__engine__ledger": 11896,
+          "ctx__engine__ledger": 12072,
           "ctx__engine__link": 11256,
           "ctx__engine__link__exchange": 6400,
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 2848,
+          "ctx__engine__power": 2864,
           "ctx__engine__proxy": 840,
-          "ctx__engine__roles": 11904,
+          "ctx__engine__roles": 12080,
           "ctx__engine__routes": 3168,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -757,18 +757,18 @@
           "each__tx_frame": 296,
           "platform__radio": 7400,
           "platform__radio__rx_ring": 7280,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         }
       },
       "esp32c6": {
         "leaf": {
-          "ctx": 40776,
-          "ctx__engine": 40760,
+          "ctx": 41264,
+          "ctx__engine": 41248,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -792,13 +792,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 2280,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 736,
+          "ctx__engine__power": 752,
           "ctx__engine__proxy": 200,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -815,16 +815,16 @@
           "each__tx_frame": 296,
           "platform__radio": 2920,
           "platform__radio__rx_ring": 2800,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "relay": {
-          "ctx": 45080,
-          "ctx__engine": 45064,
+          "ctx": 45568,
+          "ctx__engine": 45552,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -848,13 +848,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 1320,
+          "ctx__engine__power": 1336,
           "ctx__engine__proxy": 744,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -871,16 +871,16 @@
           "each__tx_frame": 296,
           "platform__radio": 4040,
           "platform__radio__rx_ring": 3920,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "root": {
-          "ctx": 125520,
-          "ctx__engine": 125504,
+          "ctx": 126416,
+          "ctx__engine": 126400,
           "ctx__engine__app_events": 2208,
-          "ctx__engine__chan": 368,
-          "ctx__engine__coordinator": 1496,
-          "ctx__engine__delivery": 60848,
+          "ctx__engine__chan": 448,
+          "ctx__engine__coordinator": 1528,
+          "ctx__engine__delivery": 60976,
           "ctx__engine__delivery__actives": 4480,
           "ctx__engine__delivery__durable": 2976,
           "ctx__engine__delivery__durable__journal": 424,
@@ -894,23 +894,23 @@
           "ctx__engine__frames": 7256,
           "ctx__engine__group": 16488,
           "ctx__engine__group__ops": 7200,
-          "ctx__engine__groups": 648,
+          "ctx__engine__groups": 760,
           "ctx__engine__identity": 4432,
           "ctx__engine__identity__record_job": 1432,
           "ctx__engine__job_table": 92,
-          "ctx__engine__ledger": 11896,
+          "ctx__engine__ledger": 12072,
           "ctx__engine__link": 11256,
           "ctx__engine__link__exchange": 6400,
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 2848,
+          "ctx__engine__power": 2864,
           "ctx__engine__proxy": 840,
-          "ctx__engine__roles": 11904,
+          "ctx__engine__roles": 12080,
           "ctx__engine__routes": 3168,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -927,18 +927,18 @@
           "each__tx_frame": 296,
           "platform__radio": 7400,
           "platform__radio__rx_ring": 7280,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         }
       },
       "esp32s3": {
         "leaf": {
-          "ctx": 40776,
-          "ctx__engine": 40760,
+          "ctx": 41264,
+          "ctx__engine": 41248,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -962,13 +962,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 2280,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 736,
+          "ctx__engine__power": 752,
           "ctx__engine__proxy": 200,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -985,16 +985,16 @@
           "each__tx_frame": 296,
           "platform__radio": 2920,
           "platform__radio__rx_ring": 2800,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "relay": {
-          "ctx": 45080,
-          "ctx__engine": 45064,
+          "ctx": 45568,
+          "ctx__engine": 45552,
           "ctx__engine__app_events": 576,
-          "ctx__engine__chan": 368,
+          "ctx__engine__chan": 448,
           "ctx__engine__coordinator": 1,
-          "ctx__engine__delivery": 16104,
+          "ctx__engine__delivery": 16136,
           "ctx__engine__delivery__actives": 1120,
           "ctx__engine__delivery__durable": 1248,
           "ctx__engine__delivery__durable__journal": 424,
@@ -1018,13 +1018,13 @@
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 1320,
+          "ctx__engine__power": 1336,
           "ctx__engine__proxy": 744,
-          "ctx__engine__roles": 1168,
+          "ctx__engine__roles": 1176,
           "ctx__engine__routes": 1,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -1041,16 +1041,16 @@
           "each__tx_frame": 296,
           "platform__radio": 4040,
           "platform__radio__rx_ring": 3920,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         },
         "root": {
-          "ctx": 125520,
-          "ctx__engine": 125504,
+          "ctx": 126416,
+          "ctx__engine": 126400,
           "ctx__engine__app_events": 2208,
-          "ctx__engine__chan": 368,
-          "ctx__engine__coordinator": 1496,
-          "ctx__engine__delivery": 60848,
+          "ctx__engine__chan": 448,
+          "ctx__engine__coordinator": 1528,
+          "ctx__engine__delivery": 60976,
           "ctx__engine__delivery__actives": 4480,
           "ctx__engine__delivery__durable": 2976,
           "ctx__engine__delivery__durable__journal": 424,
@@ -1064,23 +1064,23 @@
           "ctx__engine__frames": 7256,
           "ctx__engine__group": 16488,
           "ctx__engine__group__ops": 7200,
-          "ctx__engine__groups": 648,
+          "ctx__engine__groups": 760,
           "ctx__engine__identity": 4432,
           "ctx__engine__identity__record_job": 1432,
           "ctx__engine__job_table": 92,
-          "ctx__engine__ledger": 11896,
+          "ctx__engine__ledger": 12072,
           "ctx__engine__link": 11256,
           "ctx__engine__link__exchange": 6400,
           "ctx__engine__link__exchange__handshake": 3560,
           "ctx__engine__link__exchange__handshake__edhoc_session": 2872,
           "ctx__engine__link__neighbors": 4248,
-          "ctx__engine__membership": 1160,
+          "ctx__engine__membership": 1168,
           "ctx__engine__membership__join_pipe": 120,
           "ctx__engine__mesh": 984,
           "ctx__engine__peer_registry": 240,
-          "ctx__engine__power": 2848,
+          "ctx__engine__power": 2864,
           "ctx__engine__proxy": 840,
-          "ctx__engine__roles": 11904,
+          "ctx__engine__roles": 12080,
           "ctx__engine__routes": 3168,
           "ctx__engine__sched": 152,
           "ctx__engine__tx_manager": 120,
@@ -1097,8 +1097,8 @@
           "each__tx_frame": 296,
           "platform__radio": 7400,
           "platform__radio__rx_ring": 7280,
-          "root__usb": 20648,
-          "root__usb__link": 20184
+          "root__usb": 20656,
+          "root__usb__link": 20192
         }
       }
     }
@@ -1106,12 +1106,12 @@
   "missing_socs": [],
   "native": {
     "leaf": {
-      "ctx": 41360,
-      "ctx__engine": 41344,
+      "ctx": 41848,
+      "ctx__engine": 41832,
       "ctx__engine__app_events": 584,
-      "ctx__engine__chan": 368,
+      "ctx__engine__chan": 456,
       "ctx__engine__coordinator": 1,
-      "ctx__engine__delivery": 16312,
+      "ctx__engine__delivery": 16344,
       "ctx__engine__delivery__actives": 1120,
       "ctx__engine__delivery__durable": 1320,
       "ctx__engine__delivery__durable__journal": 448,
@@ -1130,18 +1130,18 @@
       "ctx__engine__identity__record_job": 1432,
       "ctx__engine__job_table": 92,
       "ctx__engine__ledger": 1,
-      "ctx__engine__link": 9472,
-      "ctx__engine__link__exchange": 6496,
+      "ctx__engine__link": 9464,
+      "ctx__engine__link__exchange": 6488,
       "ctx__engine__link__exchange__handshake": 3592,
       "ctx__engine__link__exchange__handshake__edhoc_session": 2896,
       "ctx__engine__link__neighbors": 2280,
-      "ctx__engine__membership": 1216,
+      "ctx__engine__membership": 1224,
       "ctx__engine__membership__join_pipe": 136,
       "ctx__engine__mesh": 992,
       "ctx__engine__peer_registry": 248,
-      "ctx__engine__power": 744,
+      "ctx__engine__power": 760,
       "ctx__engine__proxy": 224,
-      "ctx__engine__roles": 1224,
+      "ctx__engine__roles": 1232,
       "ctx__engine__routes": 1,
       "ctx__engine__sched": 152,
       "ctx__engine__tx_manager": 120,
@@ -1158,16 +1158,16 @@
       "each__tx_frame": 296,
       "platform__radio": 2928,
       "platform__radio__rx_ring": 2800,
-      "root__usb": 20736,
-      "root__usb__link": 20248
+      "root__usb": 20744,
+      "root__usb__link": 20256
     },
     "relay": {
-      "ctx": 45664,
-      "ctx__engine": 45648,
+      "ctx": 46152,
+      "ctx__engine": 46136,
       "ctx__engine__app_events": 584,
-      "ctx__engine__chan": 368,
+      "ctx__engine__chan": 456,
       "ctx__engine__coordinator": 1,
-      "ctx__engine__delivery": 16312,
+      "ctx__engine__delivery": 16344,
       "ctx__engine__delivery__actives": 1120,
       "ctx__engine__delivery__durable": 1320,
       "ctx__engine__delivery__durable__journal": 448,
@@ -1186,18 +1186,18 @@
       "ctx__engine__identity__record_job": 1432,
       "ctx__engine__job_table": 92,
       "ctx__engine__ledger": 1,
-      "ctx__engine__link": 11440,
-      "ctx__engine__link__exchange": 6496,
+      "ctx__engine__link": 11432,
+      "ctx__engine__link__exchange": 6488,
       "ctx__engine__link__exchange__handshake": 3592,
       "ctx__engine__link__exchange__handshake__edhoc_session": 2896,
       "ctx__engine__link__neighbors": 4248,
-      "ctx__engine__membership": 1216,
+      "ctx__engine__membership": 1224,
       "ctx__engine__membership__join_pipe": 136,
       "ctx__engine__mesh": 992,
       "ctx__engine__peer_registry": 248,
-      "ctx__engine__power": 1328,
+      "ctx__engine__power": 1344,
       "ctx__engine__proxy": 768,
-      "ctx__engine__roles": 1224,
+      "ctx__engine__roles": 1232,
       "ctx__engine__routes": 1,
       "ctx__engine__sched": 152,
       "ctx__engine__tx_manager": 120,
@@ -1214,16 +1214,16 @@
       "each__tx_frame": 296,
       "platform__radio": 4048,
       "platform__radio__rx_ring": 3920,
-      "root__usb": 20736,
-      "root__usb__link": 20248
+      "root__usb": 20744,
+      "root__usb__link": 20256
     },
     "root": {
-      "ctx": 126272,
-      "ctx__engine": 126256,
+      "ctx": 127160,
+      "ctx__engine": 127144,
       "ctx__engine__app_events": 2216,
-      "ctx__engine__chan": 368,
-      "ctx__engine__coordinator": 1504,
-      "ctx__engine__delivery": 61056,
+      "ctx__engine__chan": 456,
+      "ctx__engine__coordinator": 1536,
+      "ctx__engine__delivery": 61184,
       "ctx__engine__delivery__actives": 4480,
       "ctx__engine__delivery__durable": 3048,
       "ctx__engine__delivery__durable__journal": 448,
@@ -1237,23 +1237,23 @@
       "ctx__engine__frames": 7256,
       "ctx__engine__group": 16504,
       "ctx__engine__group__ops": 7200,
-      "ctx__engine__groups": 648,
+      "ctx__engine__groups": 760,
       "ctx__engine__identity": 4464,
       "ctx__engine__identity__record_job": 1432,
       "ctx__engine__job_table": 92,
-      "ctx__engine__ledger": 12112,
-      "ctx__engine__link": 11440,
-      "ctx__engine__link__exchange": 6496,
+      "ctx__engine__ledger": 12280,
+      "ctx__engine__link": 11432,
+      "ctx__engine__link__exchange": 6488,
       "ctx__engine__link__exchange__handshake": 3592,
       "ctx__engine__link__exchange__handshake__edhoc_session": 2896,
       "ctx__engine__link__neighbors": 4248,
-      "ctx__engine__membership": 1216,
+      "ctx__engine__membership": 1224,
       "ctx__engine__membership__join_pipe": 136,
       "ctx__engine__mesh": 992,
       "ctx__engine__peer_registry": 248,
-      "ctx__engine__power": 2856,
+      "ctx__engine__power": 2872,
       "ctx__engine__proxy": 864,
-      "ctx__engine__roles": 12120,
+      "ctx__engine__roles": 12288,
       "ctx__engine__routes": 3168,
       "ctx__engine__sched": 152,
       "ctx__engine__tx_manager": 120,
@@ -1270,8 +1270,8 @@
       "each__tx_frame": 296,
       "platform__radio": 7408,
       "platform__radio__rx_ring": 7280,
-      "root__usb": 20736,
-      "root__usb__link": 20248
+      "root__usb": 20744,
+      "root__usb__link": 20256
     }
   },
   "sloc": {
@@ -1280,40 +1280,40 @@
       "sdk_c_cpp": 28000
     },
     "groups": {
-      "core": 26982,
-      "idf": 1189,
-      "native-only": 1672,
-      "root": 4324,
-      "sdk (core+idf+root+serial)": 35662,
-      "serial": 3167,
-      "tests": 18131,
-      "tools": 3399,
+      "core": 27787,
+      "idf": 1226,
+      "native-only": 1731,
+      "root": 5038,
+      "sdk (core+idf+root+serial)": 37232,
+      "serial": 3181,
+      "tests": 20173,
+      "tools": 3409,
       "vendor": 61493
     },
     "modules": {
       "src/capi": {
         "group": "core",
-        "sloc": 601
+        "sloc": 646
       },
       "src/core": {
         "group": "core",
-        "sloc": 1906
+        "sloc": 2093
       },
       "src/core/channel": {
         "group": "core",
-        "sloc": 1293
+        "sloc": 1502
       },
       "src/core/delivery": {
         "group": "core",
-        "sloc": 5078
+        "sloc": 5154
       },
       "src/core/diag": {
         "group": "core",
-        "sloc": 231
+        "sloc": 233
       },
       "src/core/group": {
         "group": "core",
-        "sloc": 1298
+        "sloc": 1294
       },
       "src/core/link": {
         "group": "core",
@@ -1321,7 +1321,7 @@
       },
       "src/core/member": {
         "group": "core",
-        "sloc": 4619
+        "sloc": 4817
       },
       "src/core/ota": {
         "group": "core",
@@ -1329,7 +1329,7 @@
       },
       "src/core/power": {
         "group": "core",
-        "sloc": 1898
+        "sloc": 1974
       },
       "src/core/radio": {
         "group": "core",
@@ -1337,7 +1337,7 @@
       },
       "src/core/route": {
         "group": "core",
-        "sloc": 2119
+        "sloc": 2134
       },
       "src/core/sched": {
         "group": "core",
@@ -1353,15 +1353,15 @@
       },
       "src/port/idf": {
         "group": "idf",
-        "sloc": 1189
+        "sloc": 1226
       },
       "src/port/sim": {
         "group": "native-only",
-        "sloc": 1229
+        "sloc": 1288
       },
       "src/root": {
         "group": "root",
-        "sloc": 4324
+        "sloc": 5038
       },
       "src/security": {
         "group": "core",
@@ -1369,15 +1369,15 @@
       },
       "src/serial": {
         "group": "serial",
-        "sloc": 3167
+        "sloc": 3181
       },
       "src/store": {
         "group": "core",
-        "sloc": 780
+        "sloc": 781
       },
       "tests/native": {
         "group": "tests",
-        "sloc": 18131
+        "sloc": 20173
       },
       "third_party": {
         "group": "vendor",
@@ -1385,12 +1385,12 @@
       },
       "tools": {
         "group": "tools",
-        "sloc": 3399
+        "sloc": 3409
       }
     },
     "python": {
-      "host (excl. tests)": 4224,
-      "host/tests": 4897
+      "host (excl. tests)": 4408,
+      "host/tests": 5257
     },
     "verdict": "OVER"
   },

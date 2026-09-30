@@ -28,7 +28,7 @@ lm_status_t app_init(lm_context_t **out) {
 
 lm_status_t app_shutdown(lm_context_t *ctx) {
   lm_operation_id_t drain = 0;
-  lm_status_t st = lm_stop(ctx, 2000, &drain);        /* drain==0: 待つものは無かった */
+  lm_status_t st = lm_stop(ctx, 2000, &drain);        /* drain==0: stopは呼出し内で完了（drain_msは待たない）。未完了の送信は各々最終OPERATION eventで終わる */
   if (st != LM_STATUS_OK) return st;
   return lm_destroy(ctx);                             /* stop後のみ。ctxとworkspaceはここまで有効 */
 }
@@ -43,6 +43,7 @@ lm_status_t app_shutdown(lm_context_t *ctx) {
 C API に provisioning 関数はありません。端末は `identity` / `state` パーティションの封印record（端末鍵、fleet署名のDeviceCredential、trust anchor、RootDelegation、必要ならMemberCredential）を起動時に読みます。
 - **量産用の書込みツールはこのリポジトリにありません。** あるのは sim/bench 専用の `tools/lmfleet`（TEST-ONLY発行者）と meshsim の `provision` コマンドだけで、その鍵を製品へ入れてはいけません。
 - 保存領域の読み取り失敗を「未provision」とは扱いません（`lm_init` はStore初期化の失敗をそのまま返し、fail closed）。
+- **端末秘密鍵はNVS暗号化が前提です（FIX8-D7）。** `identity` recordは端末のP-256秘密鍵、`discovery_scope` はDiscoveryScopeKeyを持ち、NVS partitionはflash暗号化の対象外です。IDF portは `CONFIG_NVS_ENCRYPTION` のとき `identity`/`state` を登録済みNVS security scheme（HMAC eFuse鍵、またはflash暗号化された`nvs_keys`）の鍵で暗号化mountし、鍵が読めなければ `STORAGE_FAILURE`（平文へは落ちない）。SDKはその鍵を**作りません**（eFuse書込み/`nvs_keys`書込みはprovisioning＝製品の鍵custody）。NVS暗号化なしのbuildは `CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS`（開発専用の明示承認）が無ければcompileエラーです。`firmware/example_node` の既定はHMAC方式（KEY2）で、既定partitionも**既にprovisionされた鍵でだけ**mountします（IDFの `nvs_flash_init()` は空のchipでHMAC鍵をeFuseへ書くので使いません。鍵が無ければmountせず、SDKも `lm_init` で失敗）。暗号化の方式は製品の寿命を通じて固定です：IDFは読めないentryをmount時に消去するため、別の方式のimageを一度起動すると記録（端末鍵、rootのledger）は**失われます**（端末は未provision、rootはRECOVERY_REQUIREDになる）。SDKはこれを検出しません（provisioningはfirmwareと同じ方式で書き、方式をまたぐ更新をしない）。
 - 端末の `DeviceId`、`assignment_generation`、`membership_generation` は別物です（`lm_membership_get`）。
 
 ## 3. Join・所属
@@ -67,7 +68,7 @@ int app_is_active(lm_context_t *ctx) {
 ```
 
 承認は root 側です（Host の `POST /v1/control` `JOIN_DECISION`、または join-mode preapproved）。`LM_APPROVAL_PENDING` は正常な待ちです。
-`lm_leave(ctx, LM_LEAVE_DRAIN|LM_LEAVE_IMMEDIATE, deadline_ms, &op)` で離脱。署名付きobject（移設ticket等）は `lm_install_control(ctx, type, cbor, len, &op)`。移設ticketは先に `lm_transfer_nonce_get()` のnonceを名指す必要があります（RAM保持、再起動で失効）。
+`lm_leave(ctx, LM_LEAVE_DRAIN|LM_LEAVE_IMMEDIATE, deadline_ms, &op)` で離脱。DRAINは未完了sendが無くなるまで待ち（その間の新規sendは `BUSY`）、期限までに終わらなければ `DEADLINE_UNREACHABLE` で失敗してACTIVEのまま（自動でIMMEDIATEにしない）。離脱のcommit時、残ったsendは最終eventを受けます（出た可能性があれば `INDETERMINATE`、出ていなければ `CANCELLED_NOT_SENT`）。relayの子の代替経路確認は行いません（子はmeshの修復規則で付け替わる）。tombstoneのcommitが失敗しても端末はRAMで離脱したままで、保存recordを読み直して結果を確定します（`APPLIED`、確定できなければ `INDETERMINATE`。FIX8-D5/D6）。署名付きobject（移設ticket等）は `lm_install_control(ctx, type, cbor, len, &op)`。移設ticketは先に `lm_transfer_nonce_get()` のnonceを名指す必要があります（RAM保持、再起動で失効）。
 
 ## 4. 送信
 
@@ -199,7 +200,7 @@ lm_status_t app_group_progress(lm_context_t *ctx, lm_operation_id_t op, lm_group
 }
 ```
 
-- group構成は `lm_group_set(ctx, gid, expected_revision, members, count, &op)`（最大8 group・64人、管理権限のあるappのみ）。0人は空集合で「全員」ではありません。
+- group構成は `lm_group_set(ctx, gid, expected_revision, members, count, &op)`（最大8 group・64人、管理権限のあるappのみ）。0人は空集合で「全員」ではありません。定義とrevisionはrootでdurable（再起動後も同じrevision）で、`op` の `LM_EVENT_OPERATION` はcommit後に上がります（それまでそのrevisionへは送れない）。commit中の次のsetは `BUSY`。groupが名指す端末のledger slotは他の端末へ再利用されません：離脱したmemberもgroupを編集するまで名指されたまま（送信はdispatch時にREJECTED）で、その間そのslotは新規Joinに使われません（FIX8-D9/D10）。
 - group の DURABLE / LATEST は未対応（`UNSUPPORTED`）。
 
 ```c
@@ -239,7 +240,7 @@ lm_status_t app_sleep(lm_context_t *ctx) {
 
 - 変更は必ず `expected_revision` 付き（古ければ `CONFLICT`）。`lm_sleep_abort(ctx, op)` でticketを失効。GPIOなどboard設定は先にappが準備します。
 - Deep Sleep復帰は通常fresh EDHOCです（鍵だけのRTC高速復帰は未実装）。`lm_power_get` の値は測定されたものだけ `validity_bits` が立ちます。
-- channel: `lm_channel_request(ctx, LM_CHANNEL_FREEZE|LM_CHANNEL_AUTO|LM_CHANNEL_RECALCULATE, expected_revision, &op)` は**root専用**（他は `UNSUPPORTED`）。radioを直接操作せず、rootのcoordinatorへの要求です。op が 0 のときは受理時点で適用済みです。
+- channel: `lm_channel_request(ctx, LM_CHANNEL_FREEZE|LM_CHANNEL_AUTO|LM_CHANNEL_RECALCULATE, expected_revision, &op)` は**root専用**（他は `UNSUPPORTED`）。radioを直接操作せず、rootのcoordinatorへの要求です。freeze/auto（policy revisionが変わる要求）は受理時点でRAMに適用され、`op` は0でなく、そのchannel recordがdurableになった時点で `LM_EVENT_OPERATION`（`operation_id==op`、reason 0）が上がります。それまでは電源断で失われうる（FIX10-D9）。op が 0 のときは何も変わっていません（すでにその状態）。
 
 ## 8. 診断・能力・エラー
 
@@ -276,7 +277,7 @@ if (lm_connectivity_get(ctx, &c) == LM_STATUS_OK) {
 
 - `lm_connectivity_get` は membership と独立です（`ACTIVE`＋`ISOLATED` は正常）。`REACHABLE`（rootは常に）/ `DEGRADED`（path修復中・lease失効）/ `ISOLATED`（親なし。`reason`=`NO_ROUTE`）/ `SLEEPING`（予定Sleep中）/ `UNKNOWN`（memberでない）。`validity_bits` が立った項目だけが既知です。このbuildは最終認証RXと最終root往復を追跡しないので、その2項目は常に未知（0でbit clear）です。
 - `lm_policy_get(ctx, &p)` はroot専用（他roleは `UNSUPPORTED`）。`revision`, `join_mode`, `channel_automatic/freeze` などを返します。
-- `lm_policy_set(ctx, &p, expected_revision, &op)` は **channel_freezeの変更だけ**を適用します（`lm_channel_request` と同じ経路。`op=0`＝受理時に適用済み）。古い `expected_revision` は `CONFLICT`。`join_mode` / `relay_allowed` / 自動移設など他の変更は、署名済みpolicy objectを `lm_install_control` で渡すまで `UNSUPPORTED` で、署名なしstructで代替しません。`channel_automatic` と `channel_freeze` は排他（同値は `INVALID_ARGUMENT`）。
+- `lm_policy_set(ctx, &p, expected_revision, &op)` は **1回に1項目**（`channel_freeze` または `join_mode`）を変更します（2項目同時は `INVALID_ARGUMENT`）。`channel_freeze` は `lm_channel_request` と同じ経路、`join_mode`（0 closed / 1 external / 2 preapproved）はrootのpolicy recordへcommitされてから適用・`LM_EVENT_OPERATION`（再起動後も保持。commit結果不明ならCLOSEDのまま、以後 `RECOVERY_REQUIRED`）。`revision` はchannelとjoin_modeの確定済み変更の合計で、古い `expected_revision` は `CONFLICT`。`relay_allowed` / 自動移設は変更手段が無く `UNSUPPORTED`。どの項目もdocs/06の暗号条件を下げません（preapprovedも署名ticketと署名済みexpected entryが必須）。`channel_automatic` と `channel_freeze` は排他（同値は `INVALID_ARGUMENT`）。
 
 ## 10. 初期化のbuild差
 

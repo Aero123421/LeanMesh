@@ -9,6 +9,7 @@
 // of Engine by their slices; see docs/IMPLEMENTATION.md §3 for the wiring rules.
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "core/channel/channel.hpp"
@@ -143,6 +144,9 @@ class Engine {
     // Queues an application event. False: the queue was full (a GAP will be reported).
     [[nodiscard]] bool push_event(const lm_event_t &ev) { return events_.push(ev); }
     void raise(uint32_t kind, uint32_t reason) { emit(kind, reason); }
+    // The one namespace of root control-operation ids (ledger installs, lifecycle installs, group sets): a Host that
+    // keys its control operations by this number never sees two different operations share it (FIX9-D5).
+    [[nodiscard]] uint64_t next_control_op() { return member::k_op_tag | ++control_op_; }
     // Root clock estimate from the time slice: feeds deadline checks and credential leases.
     void set_root_time(const RootTimeBound &t, MonoTime now) {
         delivery_.set_root_time(t, now);
@@ -186,6 +190,9 @@ class Engine {
     // registered again and the channel is kept. Owner thread only.
     [[nodiscard]] Status radio_sleep(); // Ok only when the driver is confirmed stopped
     void radio_wake(MonoTime now);
+    // FIX10-D8: hands the radio input that is queued right now to the ordinary receive path (a command runs before the
+    // step that would). False: the per-step budget was used up, more may be queued.
+    [[nodiscard]] bool drain_radio(MonoTime now);
     // The platform woke the CPU (an interrupt, or the port returned from a blocking light sleep).
     void power_wake(const port::WakeInfo &w, MonoTime now) { power_.wake(w, now); }
     [[nodiscard]] bool crypto_busy() const { return jobs_.public_key_busy(); }
@@ -211,6 +218,24 @@ class Engine {
 
     Reply start_radio(MonoTime now);
     Reply stop_radio();
+    // lm_stop with a drain (FIX9-D4/D8): new sends are refused, open ones run on until they end or the deadline, then
+    // stop_radio() ends what is left INDETERMINATE. The stop itself is a retained control operation.
+    Reply begin_stop(uint32_t drain_ms, MonoTime now);
+    void drain_step(MonoTime now);
+    // Retained status of control operations (lifecycle installs, leave, group sets, stop): lm_get_operation answers
+    // them after their event was taken (FIX9-D9). Bounded; the oldest finished record makes room.
+    struct CtlOp {
+        uint64_t id = 0;
+        bool final = false;
+        uint8_t outcome = LM_OUTCOME_PENDING;
+        uint32_t reason = 0;
+        uint64_t accepted_ms = 0;
+        uint64_t last_ms = 0;
+        uint32_t seq = 0;
+    };
+    static constexpr std::size_t k_ctl_ops = 8;
+    void note_ctl_op(uint64_t id, bool final, uint8_t outcome, uint32_t reason);
+    [[nodiscard]] Reply get_ctl_op(uint64_t id, lm_operation_t &out) const;
     void enter_fault();
     [[nodiscard]] Status bring_up_radio();
     void recover_radio(MonoTime now);
@@ -233,6 +258,12 @@ class Engine {
     EngineConfig config_;
     Ports ports_;
     EngineStats stats_;
+    uint64_t control_op_ = 0; // per boot, like every operation id
+    std::array<CtlOp, k_ctl_ops> ctl_ops_{};
+    uint32_t ctl_seq_ = 0;
+    bool draining_ = false;
+    uint64_t stop_op_ = 0;
+    MonoTime drain_until_ = MonoTime::never();
     JobTable<k_job_table_entries> jobs_;
     AppEventQueue<k_max_app_events> events_;
     PeerRegistry peers_;

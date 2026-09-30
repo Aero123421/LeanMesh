@@ -11,15 +11,38 @@
 #include "esp_log.h"
 #include "leanmesh.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "lm_example";
 
-void app_main(void) {
+/* The default "nvs" partition (Wi-Fi/PHY data). With NVS encryption it is mounted only with keys that were provisioned
+ * (the eFuse HMAC key, or the nvs_keys partition): IDF's nvs_flash_init() would instead create a key on a blank chip,
+ * an irreversible eFuse write that this sample never makes (key creation is the product's provisioning). */
+static esp_err_t init_default_nvs(void) {
+#if CONFIG_NVS_ENCRYPTION
+    nvs_sec_cfg_t keys = {0};
+    nvs_sec_scheme_t *scheme = nvs_flash_get_default_security_scheme();
+    esp_err_t err = ESP_ERR_NVS_KEYS_NOT_INITIALIZED;
+    if (scheme != NULL && nvs_flash_read_security_cfg_v2(scheme, &keys) == ESP_OK) {
+        err = nvs_flash_secure_init(&keys);
+    }
+    volatile uint8_t *p = (volatile uint8_t *)&keys; /* the keys leave RAM (NVS keeps its own copy) */
+    for (size_t i = 0; i < sizeof keys; ++i) {
+        p[i] = 0;
+    }
+    return err;
+#else
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
+    return err;
+#endif
+}
+
+void app_main(void) {
+    const esp_err_t err = init_default_nvs();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "default nvs partition unavailable: %s", esp_err_to_name(err));
     }

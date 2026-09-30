@@ -63,9 +63,9 @@ class Bench:
     # ---- the simulated network ------------------------------------------------------------------
     @staticmethod
     def build(meshsim: Callable[..., MeshSim], workdir: Path, *, seed: int, join: bool = True,
-              mode: str = "preapproved", nodes: int = 2) -> Bench:
+              mode: str = "preapproved", nodes: int = 2, flags: tuple[str, ...] = ()) -> Bench:
         sim = meshsim("--nodes", str(nodes), "--topology", "full", "--clock", "realtime", "--serial-pty",
-                      "--serial-bridge", "--seed", str(seed))
+                      "--serial-bridge", "--seed", str(seed), *flags)
         sim.ok("provision 0 1 root")
         kit = workdir / "kit.cbor"
         sim.ok(f"serial-kit {kit} 0")

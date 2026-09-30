@@ -35,6 +35,10 @@ class Settings:
     # SQLite hard page limit: 25 % above the soft max_db_bytes budget, so a transaction that slips
     # past the soft check fails with SQLITE_FULL (-> 507), never fills the disk (S7-D15).
     max_page_count: int | None = (1 << 30) * 5 // 4 // 4096
+    # Finished operations of a CLOSED epoch are dropped this long after the epoch closed (FIX11-D8, db/ops.py:
+    # prune_finished). Until then an idempotent replay returns the stored operation; after it the replay is
+    # EPOCH_CLOSED (410), never a second send. Operations of an open epoch are never pruned.
+    operation_retention_ms: int = 7 * 24 * 3600 * 1000
     max_epochs_per_principal: int = 1024  # open + closed epochs kept per principal
     epoch_retention_ms: int = 24 * 3600 * 1000  # closed epochs without operations are dropped after this
     max_consumers: int = 64

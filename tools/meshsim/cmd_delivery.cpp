@@ -177,7 +177,7 @@ std::string cmd_msg_next(Sim &sim, const Args &a) {
         lm_event_t ev{};
         ev.struct_size = sizeof(ev);
         ev.abi_version = LM_ABI_VERSION;
-        std::array<uint8_t, 600> buf{};
+        std::vector<uint8_t> buf(4200); // a 4096 B object fits (FIX11-D11)
         size_t req = 0;
         const lm_status_t st = lm_next_event(sim.world.node(i).ctx(), &ev, buf.data(), buf.size(), &req);
         if (st != LM_STATUS_OK) {

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from harness import HostProcess, MeshSim
-from leanmesh_host.serial import SerialLink, SessionChanged, SessionGone, native
+from leanmesh_host.serial import SerialLink, SessionChanged, SessionGone
 
 UNSUPPORTED = 2
 
@@ -213,4 +213,3 @@ def test_fake_root_never_becomes_active(
     assert b.link.stats()["sessions"] == 0
     with pytest.raises(SessionGone):
         b.run(b.link.request(1, None))
-    assert native.OK == 0

@@ -234,7 +234,8 @@ inline constexpr std::size_t k_signature_bytes = 64;
 
 // ---- revocation floors (docs/06 §7) ----
 // Minimum acceptable generations per device, raised only. Bounded: a full table refuses new
-// devices (NoCapacity) instead of forgetting one.
+// devices (NoCapacity) instead of forgetting one. On a root it holds the floors of devices its ledger does not list
+// (and copies that let a departed device's slot be reused); a listed device's floor is its ledger entry (FIX8-D1).
 inline constexpr std::size_t k_max_floors = 10;
 class Floors {
   public:
@@ -246,6 +247,11 @@ class Floors {
     [[nodiscard]] Status raise(const DeviceId &device, uint64_t assignment, uint64_t membership);
     // Revoked when either generation is below its floor.
     [[nodiscard]] Status check(const DeviceId &device, AssignmentGen a, MembershipGen m) const;
+    // The floor of `device` (all zero: none).
+    [[nodiscard]] Entry floor_of(const DeviceId &device) const;
+    // FIX8-D1: drops entry i. Only for a copy that another durable record holds at least as high (a root's ledger
+    // entry): the device's effective floor never goes down.
+    void remove(std::size_t i);
     [[nodiscard]] std::size_t count() const { return count_; }
     [[nodiscard]] const Entry &at(std::size_t i) const { return entries_[i]; }
     void clear() { *this = Floors{}; }

@@ -174,8 +174,18 @@ class Ledger {
     [[nodiscard]] bool link_control(const link::RxInfo &info, ByteView plain, MonoTime now);
 
     // ---- commands ----
-    void set_join_mode(JoinMode m) { mode_ = m; }
+    void set_join_mode(JoinMode m) { mode_ = m; } // bench/meshsim: RAM only (the product path is set_policy_mode)
     [[nodiscard]] JoinMode join_mode() const { return mode_; }
+    // FIX8-D12 (lm_policy_set): the join mode as part of the root's policy. The change is committed
+    // (store::rec::policy) and only then applied and reported (OPERATION `op`). Busy while one is being committed; RecoveryRequired once a
+    // commit's result was unknown (the stored record decides at the next start; until then the root is CLOSED).
+    [[nodiscard]] Status set_policy_mode(JoinMode m, uint64_t op, MonoTime now);
+    // The ledger's share of the policy revision: the join-mode changes committed so far (lm_policy_get adds the
+    // coordinator's channel changes to it; one revision, compare-and-set on the sum).
+    [[nodiscard]] uint64_t policy_changes() const { return policy_count_; }
+    [[nodiscard]] bool policy_in_doubt() const { return policy_doubt_; }
+    // FIX8-D10: the group registry (root::Groups) has a change to commit (store::rec::root_groups): maintenance.
+    void want_groups_commit(MonoTime now);
     // Signed ExpectedSet page (fleet, or the delegated root with the approve permission): verified on the
     // worker, then each entry is one commit. Completion: LM_EVENT_OPERATION with the returned id.
     [[nodiscard]] Status install_expected(ByteView signed_cose, MonoTime now, uint64_t &operation);
@@ -239,8 +249,9 @@ class Ledger {
         uint64_t revoked = 0;        // [S18] entries blocked by a RevokeObject
         uint64_t reconciled = 0;     // [S18] members that moved away (a transfer ticket installed here)
         uint64_t window_admitted = 0; // [S18] reservations made under a commissioning window
-        uint64_t floored = 0;         // [FIX5] ACTIVE entries below their floors made Blocked/Left by maintenance
+        uint64_t floored = 0;         // [FIX5] entries whose stricter RAM state was made durable by maintenance
         uint64_t floored_failed = 0;  // [FIX5] ... commits of those that failed (bounded retry)
+        uint64_t covers_evicted = 0;  // [FIX8] floor-table copies of a departed entry dropped for an unlisted device
     };
     [[nodiscard]] const Stats &stats() const { return stats_; }
 
@@ -309,7 +320,9 @@ class Ledger {
         LcRetireCheck, // [FIX5-D1] ... read again after a failed commit (it may have reached the Flash)
         LcWindow,  // [S18] a new commissioning window's budget record, committed
         WindowReserve, // [S18] a windowed join's reservation counted durably before its entry commit
-        CommitFloored, // [FIX5-D2] maintenance: an ACTIVE entry below its floors made Blocked/Left durably
+        CommitDirty,   // [FIX8-D1] maintenance: an entry whose (stricter) RAM state is ahead of its record
+        CommitGroups,  // [FIX8-D10] the group registry
+        CommitPolicy,  // [FIX8-D12] the join mode
     };
 
     struct VerifyArgs { // copied at submit: the worker never reads owner-mutable state
@@ -382,6 +395,13 @@ class Ledger {
     void stage_commit_data(Txn &t, const member::JoinCommitData &c, MonoTime now);
     void end_txn(Txn &t, bool close_session = true); // false: the device's new session is up, only this txn ends
     void retry_txn(Txn &t, MonoTime now);
+    // [FIX8-D2] May this transaction still get what it asks for? At every approval (decide, retry, preapproved) and
+    // before the JoinCommit signature leaves the root: a revocation, a block or the join mode may have changed.
+    [[nodiscard]] Status still_allowed(const Txn &t) const;
+    // [FIX8-D4] The first membership generation `device` may get: above its entry's last one and its floor.
+    [[nodiscard]] uint64_t next_membership(const DeviceId &device, const Entry *e) const;
+    // A slot another device may take: departed, its floor kept in the table, named by no group (FIX8-D9).
+    [[nodiscard]] bool reusable(std::size_t slot) const;
     [[nodiscard]] Status pick_slot(const DeviceId &device, std::size_t &slot) const;
     void abort_expired(MonoTime now);
     void maintenance(MonoTime now);
@@ -412,16 +432,25 @@ class Ledger {
     static Status lc_verify_job(port::JobEnv &env, void *arg);
     void lc_step(Step step, Status s, MonoTime now);
     void lc_verified(MonoTime now);
-    void lc_retire_entry(MonoTime now);
+    void lc_listed(std::size_t slot, uint64_t af, uint64_t mf, MonoTime now); // [FIX8-D1]
+    void lc_unlisted(const DeviceId &device, uint64_t af, uint64_t mf, MonoTime now);
+    [[nodiscard]] bool evict_cover();
     void lc_finish(Status s, MonoTime now);
     void stop_admitting(MonoTime now);
     void retire(MonoTime now);                              // [FIX5-D1]
     void retire_step(Step step, Status s, MonoTime now);
     void retire_check(MonoTime now);
-    void lc_fail_closed(bool floors_durable, MonoTime now); // [FIX5-D2]
-    [[nodiscard]] uint64_t below_floors() const;
-    [[nodiscard]] bool start_floored(MonoTime now);
-    void floored_done(Status s, MonoTime now);
+    void lc_entry_failed(MonoTime now);                     // [FIX5-D2, FIX8-D1]
+    void mark_dirty(std::size_t slot, MonoTime now);
+    // [FIX8-D1] Every entry commit ends here: a failed one leaves the slot's record in doubt (never evicted from nor
+    // reused while so), a successful one clears it (RAM and the record agree again: every path writes RAM's entry).
+    void entry_written(std::size_t slot, bool ok);
+    void cover(std::size_t slot, MonoTime now); // [FIX8-D1] best-effort copy of a departed entry's floor in the table
+    void block_below_floors(MonoTime now);
+    [[nodiscard]] bool start_dirty(MonoTime now);
+    void dirty_done(Status s, MonoTime now);
+    void groups_done(Status s);                              // [FIX8-D10]
+    void policy_done(Status s);                              // [FIX8-D12]
     void recon_retry(MonoTime now);
     void send_echo(MonoTime now);
     static Status verify_expected_job(port::JobEnv &env, void *arg);
@@ -449,7 +478,10 @@ class Ledger {
     Entry job_entry_;        // what RAM becomes when the entry commit in flight is durable
     int orphan_release_ = -1;
     bool load_pending_ = false;
-    std::size_t leave_slot_ = 0;
+    Status groups_load_ = Status::NotFound; // [FIX8-D10] the registry record as the load job found it (payload in rec_)
+    Status load_policy_ = Status::NotFound; // [FIX8-D12] ... and the policy record (applied by the owner at completion)
+    JoinMode load_mode_ = JoinMode::External;
+    uint64_t load_count_ = 0;
     Handle job_slot_;
     uint32_t job_gen_ = 0;
     bool job_in_flight_ = false;
@@ -465,8 +497,8 @@ class Ledger {
     std::array<uint8_t, 8> exp_digest_{}; // of the page being installed (verify job)
     Manifest exp_man_;                    // the manifest the install commits next
     bool exp_active_ = false;
-    // maintenance: a leave/abort waiting for the record memory
-    bool leave_pending_ = false;
+    // maintenance: leaves waiting for the record memory, one bit per ledger slot (FIX8-D3: several at once)
+    uint64_t leave_mask_ = 0;
     // A device's JoinActive over an ordinary link (durable retry of the final acknowledgement)
     struct Confirm {
         DeviceId device;
@@ -495,6 +527,7 @@ class Ledger {
         LcObject obj;
         std::size_t slot = 0;
         EntryState to = EntryState::Free; // the entry state the install commits (Blocked / Left)
+        bool was_active = false;          // [FIX8-D1] the install took an ACTIVE member's authorisation
         uint8_t checks = 0;                        // [FIX5-D1] reads of the retirement record after a failed commit
         MonoTime retry_at = MonoTime::never();     // ... the next one (the record memory is given back meanwhile)
     };
@@ -503,12 +536,14 @@ class Ledger {
     bool window_set_ = false;
     WindowRecord window_rec_;   // [FIX5-D6] rec::commissioning_window as committed (loaded at boot)
     WindowRecord window_stage_; // ... what the window commit in flight writes (window_rec_ once it is durable)
-    // [FIX5-D2] ACTIVE entries below their floors whose durable state is to catch up (bit = slot): made Blocked, or Left
-    // for a member that moved away (a transfer ticket's install whose entry commit failed). Bounded: after
-    // k_recon_tries failures in a row this boot stops trying (the floors refuse the device meanwhile, the next boot or
-    // lifecycle install tries again).
-    uint64_t recon_block_ = 0;
-    uint64_t recon_left_ = 0;
+    // [FIX5-D2, FIX8-D1] Entries whose RAM state is ahead of their record (bit = slot): a revocation or reconciliation
+    // changed RAM first (the entry refuses at once) and its commit failed, or the boot found an ACTIVE entry below a
+    // table floor. Written as they are in RAM; bounded: after k_recon_tries failures in a row this boot stops trying
+    // (RAM refuses meanwhile; the next boot or install decides again).
+    uint64_t dirty_ = 0;
+    // Slots whose record may differ from RAM (a failed entry commit of any path; dirty_ slots too). What RAM says of such
+    // a slot is not known to be durable: its floor is not counted as kept (evict_cover) and it is not reused (reusable).
+    uint64_t doubt_ = 0;
     bool floors_dirty_ = false; // the RAM floors may be ahead of the revocation_floors record (a failed floors commit)
     uint8_t recon_fails_ = 0;
     bool retired_ = false;
@@ -519,7 +554,13 @@ class Ledger {
     bool abort_pending_ = false;
     MonoTime maint_retry_ = MonoTime::never();
     MonoTime last_offer_ = MonoTime{0};
-    uint64_t op_counter_ = 0;
+    bool groups_pending_ = false; // [FIX8-D10] the registry waits for its commit
+    // [FIX8-D12] store::rec::policy: the join mode and the number of committed changes (the policy revision's share)
+    uint64_t policy_count_ = 0;
+    JoinMode policy_stage_ = JoinMode::External;
+    uint64_t policy_op_ = 0;
+    bool policy_pending_ = false;
+    bool policy_doubt_ = false;
 };
 
 // Leaf/relay builds carry no root code (docs/02 §4): the Engine holds this empty stand-in instead, so
@@ -542,6 +583,9 @@ struct NoLedger {
     [[nodiscard]] bool link_control(const link::RxInfo &, ByteView, MonoTime) { return false; }
     void set_join_mode(JoinMode) {}
     [[nodiscard]] JoinMode join_mode() const { return JoinMode::Closed; }
+    [[nodiscard]] Status set_policy_mode(JoinMode, uint64_t, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] uint64_t policy_changes() const { return 0; }
+    [[nodiscard]] bool policy_in_doubt() const { return false; }
     [[nodiscard]] Status install_expected(ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
     [[nodiscard]] Status install_lifecycle(uint8_t, ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
     void renew_due(const DeviceId &, uint32_t, uint64_t, MonoTime) {}

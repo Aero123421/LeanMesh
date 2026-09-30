@@ -427,25 +427,58 @@ LM_TEST("J05 resume: an ACTIVE member restarts, links again without approval; th
     LM_CHECK_EQ(st, LM_STATUS_CONFLICT);
 }
 
+namespace {
+// A send that cannot finish by itself: to a device nobody knows (no route), RECEIVED + DURABLE without a deadline.
+lm_operation_id_t open_send(JNet &n, unsigned i, lm_status_t want = LM_STATUS_OK) {
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_NODE;
+    std::memset(rq.destination.node.bytes, 0x5A, 32);
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_DURABLE;
+    rq.priority = LM_PRIORITY_NORMAL;
+    rq.queue_mode = LM_FIFO;
+    const std::array<uint8_t, 8> payload{1, 2, 3, 4, 5, 6, 7, 8};
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(i), &rq, payload.data(), payload.size(), &op), want);
+    n.run_ms(100);
+    return op;
+}
+lm_operation_t send_status(JNet &n, unsigned i, lm_operation_id_t op) {
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(i), op, &o), LM_STATUS_OK);
+    return o;
+}
+} // namespace
+
+// FIX8 (H10): the membership hooks are the production wiring (Engine), not a test's: DRAIN waits for the open sends,
+// refuses new ones meanwhile, and a leave that commits ends every open send (never PENDING forever).
 LM_TEST("M06 leave: IMMEDIATE erases membership durably; DRAIN never turns into IMMEDIATE by itself; re-join uses a new generation") {
     JNet n(2);
     LM_CHECK_EQ(n.join_device(1, 0x30, 1, 1), 0u);
     n.run_ms(6000);
     LM_CHECK(n.linked(0, 1));
-    // DRAIN with pending work that never settles: explicit failure at the deadline, still ACTIVE.
-    static bool drained = false;
-    drained = false;
-    member::MembershipHooks hooks;
-    hooks.drained = [](void *) { return drained; };
-    n.mem(1).set_hooks(hooks);
+    // DRAIN with an open send that never settles: explicit failure at the deadline, still ACTIVE, the send untouched.
+    const lm_operation_id_t s1 = open_send(n, 1);
     lm_operation_id_t op = 0;
     LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_DRAIN, 1500, &op), LM_STATUS_OK);
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_LEAVING));
+    (void)open_send(n, 1, LM_STATUS_BUSY); // no new send while the device drains
     LM_CHECK_EQ(n.wait_operation(1, op, 5000), static_cast<uint32_t>(Status::DeadlineUnreachable));
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
     LM_CHECK(n.ledger().find(n.id(1))->state == root::EntryState::Active);
-    // Once nothing is pending the same DRAIN succeeds.
-    drained = true;
+    LM_CHECK_EQ(send_status(n, 1, s1).outcome, static_cast<uint32_t>(LM_OUTCOME_PENDING));
+    const lm_operation_id_t s2 = open_send(n, 1); // the failed drain gave sending back
+    // Once nothing is open (both cancelled before they left) the same DRAIN succeeds.
+    LM_CHECK_EQ(lm_cancel(n.ctx(1), s1), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_cancel(n.ctx(1), s2), LM_STATUS_OK);
+    LM_CHECK(n.run_until([&] {
+        return send_status(n, 1, s1).phase == LM_PHASE_FINAL && send_status(n, 1, s2).phase == LM_PHASE_FINAL;
+    }, 2000));
     LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_DRAIN, 5000, &op), LM_STATUS_OK);
     LM_CHECK_EQ(n.wait_operation(1, op, 5000), 0u);
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_UNASSIGNED));
@@ -466,13 +499,74 @@ LM_TEST("M06 leave: IMMEDIATE erases membership durably; DRAIN never turns into 
     LM_CHECK_EQ(m.membership_generation, 2ull);
     LM_CHECK_EQ(m.assignment_generation, 2ull);
     LM_CHECK_EQ(n.ledger().find(n.id(1))->address.value(), 2u);
-    // IMMEDIATE leave right away.
+    // IMMEDIATE leave right away: the open send ends with the leave (it never left: CANCELLED_NOT_SENT).
     n.run_ms(6000);
+    const lm_operation_id_t s3 = open_send(n, 1);
     LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &op), LM_STATUS_OK);
     LM_CHECK_EQ(n.wait_operation(1, op, 5000), 0u);
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_UNASSIGNED));
+    const lm_operation_t o3 = send_status(n, 1, s3);
+    LM_CHECK_EQ(o3.phase, static_cast<uint32_t>(LM_PHASE_FINAL)); // PENDING forever on 8668c69
+    LM_CHECK(o3.outcome == LM_OUTCOME_CANCELLED_NOT_SENT || o3.outcome == LM_OUTCOME_INDETERMINATE);
+    { // FIX9-D9: the operation lm_leave returned is queryable after its event (lifecycle ops are retained, not NOT_FOUND)
+        lm_operation_t lo{};
+        lo.struct_size = sizeof(lo);
+        lo.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_get_operation(n.ctx(1), op, &lo), LM_STATUS_OK);
+        LM_CHECK_EQ(lo.phase, 3u);
+        LM_CHECK_EQ(lo.outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+    }
     // Leave of a non-member is NOT_FOUND (nothing to leave).
     LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &op), LM_STATUS_NOT_FOUND);
+}
+
+// FIX8 (M10): the join mode is part of the root's policy: lm_policy_set changes it (compare-and-set on the one policy
+// revision), the change is durable before its operation ends, a restart keeps it, and a CLOSED root admits nobody.
+LM_TEST("J04 FIX8 sim: lm_policy_set sets the join mode durably; CLOSED answers no joiner; a restart keeps it") {
+    JNet n(2);
+    auto get = [&](lm_policy_t &p) {
+        p = lm_policy_t{};
+        p.struct_size = sizeof(p);
+        p.abi_version = LM_ABI_VERSION;
+        return lm_policy_get(n.ctx(0), &p);
+    };
+    lm_policy_t p;
+    LM_CHECK_EQ(get(p), LM_STATUS_OK);
+    const uint64_t r0 = p.revision;
+    lm_policy_t closed = p;
+    closed.join_mode = 0;
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_policy_set(n.ctx(0), &closed, r0 + 1, &op), LM_STATUS_CONFLICT); // stale revision
+    LM_CHECK_EQ(lm_policy_set(n.ctx(0), &closed, r0, &op), LM_STATUS_OK);       // UNSUPPORTED on 8668c69
+    LM_CHECK(op != 0);
+    LM_CHECK_EQ(n.wait_operation(0, op, 2000), 0u); // durable
+    LM_CHECK_EQ(get(p), LM_STATUS_OK);
+    LM_CHECK_EQ(p.join_mode, 0u);
+    LM_CHECK_EQ(p.revision, r0 + 1);
+    // A granted device finds no root to ask: a CLOSED root answers no hello.
+    n.grant(1, 1, 1);
+    uint64_t jop = n.join(1, 0x50, LM_JOIN_NEW, nullptr, 3000);
+    LM_CHECK(jop != 0);
+    LM_CHECK(n.wait_operation(1, jop, 20000) != 0u);
+    LM_CHECK(!n.eng(1).identity().is_member());
+    // A restart keeps the mode (no bench setter this time: the policy record).
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.boot(0);
+    n.run_ms(50);
+    n.root_loaded();
+    LM_CHECK_EQ(get(p), LM_STATUS_OK);
+    LM_CHECK_EQ(p.join_mode, 0u);
+    LM_CHECK_EQ(p.revision, r0 + 1);
+    // Preapproved again: the device joins with the grant it holds.
+    lm_policy_t pre = p;
+    pre.join_mode = 2;
+    LM_CHECK_EQ(lm_policy_set(n.ctx(0), &pre, r0 + 1, &op), LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(0, op, 2000), 0u);
+    jop = n.join(1, 0x51);
+    LM_CHECK(jop != 0);
+    LM_CHECK_EQ(n.wait_operation(1, jop, 60000), 0u);
+    LM_CHECK(n.eng(1).identity().is_member());
 }
 
 // ---------------------------------------------------------------------------------------------

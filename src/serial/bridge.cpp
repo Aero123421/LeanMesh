@@ -17,7 +17,9 @@ namespace {
 constexpr std::size_t k_head = 48; // room in front of a body for the record header
 // NextEvent copies an event's payload to the caller: the tail of the transmit buffer takes the copy that
 // is never used (the message stays in the core's pool and is read from there while the body is built).
-constexpr std::size_t k_dump = gen::limits::small_message_bytes;
+// It must hold the largest payload the core can queue (a 4 KiB object): a smaller copy buffer makes the core
+// answer BUFFER_TOO_SMALL without popping, and that event would then block every later one (FIX11-D1).
+constexpr std::size_t k_dump = std::max<std::size_t>(gen::limits::small_message_bytes, gen::limits::object_bytes);
 
 // The body stands at out[k_head, k_head + n): the record head goes right in front of it.
 Status place(MutByteView out, ByteView head, std::size_t n, std::size_t &len) {
@@ -648,7 +650,7 @@ Status Bridge::write_event(Slot &s, bool take, MutByteView out, std::size_t &len
         w.uint(ev.reason);
     }
     if (w.finish() != Status::Ok) {
-        return Status::PayloadTooLarge; // cannot happen: bodies are bounded (payload <= 512 B)
+        return Status::PayloadTooLarge; // cannot happen: bodies are bounded (payload <= the object limit, see k_dump)
     }
     std::array<uint8_t, k_head> hb{};
     wire::CborWriter h{MutByteView{hb}};

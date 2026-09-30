@@ -7,7 +7,7 @@ Host: `db/schema.sql`。操作/冪等性/event/inbox/outbox/consumerを保存。
 
 ## 2. 2slot record
 record = magic4 + schema2 + state1 + reserved1 + generation8 + payload_length4 + SHA256(payload)32 + payload + CRC32。
-秘密payloadはNVS encryptionまたは固定portのauthenticated sealingで保護。CRC/hashだけで悪意ある改ざんを検出できると説明しない。
+秘密payloadはNVS encryptionまたは固定portのauthenticated sealingで保護。CRC/hashだけで悪意ある改ざんを検出できると説明しない。IDF portは`CONFIG_NVS_ENCRYPTION`のとき`identity`/`state`を登録済みNVS security schemeの鍵で暗号化mountし、鍵が無ければ失敗する（平文mountへ落ちない）。鍵の生成（eFuse/`nvs_keys`への書込み）はprovisioning側の鍵custodyでありSDKは行わない。暗号化なしのbuildは開発用の明示承認（`CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS`）なしにcompileしない（FIX8-D7）。
 非active slotへ全record write→commit→readback/hash検査→commit markerのdurable更新→RAM公開。この最後より前に成功eventを出さない。世代は単調でwrap拒否。旧slotは安全床と新recordが残る順に回収。
 片slotが破損し、高い世代が存在した証拠がある場合、古いslotへ黙って戻して失効を巻き戻さない。QUARANTINEDで復旧署名を要求。読み取りエラーを「未provision」と誤認しない。
 
@@ -46,6 +46,7 @@ Flash I/Oをworkerへ移しても、SoC/IDFのflash-cache停止や割込み制�
 
 ## lifecycle record（S18）とprovisioning
 追加record: `root_handover`（17、自rootを退役させたRootHandoverそのもの。存在すれば起動後も入会/session受理をしない。検証済みobjectが自rootを旧rootと名指した時点でRAMは退役し、commit失敗（read-back失敗を含む）でも戻さない。失敗後はrecordを読み直し、あればAPPLIED、無ければRECOVERY_REQUIRED）、`pending_delegation`（18、transfer/handover先のRootDelegation。新MemberCredentialのcommit後にroot_delegationへ移す。二つのcommitの間の電源断は、membershipを検証できるpending側で起動し書き直す）、`commissioning_window`（19、version u8(1) + policy_revision u64 + window_id16 + expected_set_revision u64 + max_new_members u8 + allowed_roles u8 + そのwindowで予約した数u8。予約entryのcommit前に数える。電源断は数え過ぎにしかならない。policy_revisionはwindowのreplay floor：低いrevisionのwindow、同じrevisionの別window（id/予算が違う）はCONFLICT、同じwindowの再投入（term変更時の再発行を含む）は数を継続。読めない/旧形式のrecordは「windowなし」とせずRECOVERY_REQUIRED）。membership recordのstate 5はrevocation通知による離脱tombstone（LEFTと同じfloor、状態はMEMBER_REVOKED）。
+ledgerに載るDeviceのfloorはそのentry自身（`consumed`以下のticket、`membership`以下のmembershipは失効）であり、失効・移設の反映はentry 1回のcommitで表の空きを要さない。`revocation_floors`表（rootでは最大10件）はledgerに無いDeviceのfloorと、離脱entryの写し（そのslotを他Deviceへ再利用できる条件。写しは冗長で、ledgerに無いDeviceのfloorに場所を譲る）を持つ（FIX8-D1）。rootの`policy`（8: version u8 | join_mode u8 | 確定変更数 u64。読めなければCLOSEDで`lm_policy_set`はRECOVERY_REQUIRED、FIX8-D12）と`root_groups`（20: version u8 | n u8 | n×(group id u32 | revision u64 | count u8 | ledger slot×count)。setはこのcommit後に適用・報告。groupが名指すslotは再利用しない。読めなければgroup操作はRECOVERY_REQUIRED、FIX8-D9/D10）。
 provisioningが書くrecord: 全Device＝boot_incarnation（最初）、identity、fleet_trust、root_delegation、必要ならmembership（ACTIVE credential）、revocation_floors、discovery_scope。新規networkのrootだけが空ledgerのmanifest（root_ledger: domain、used slot、expected進捗）を書き、既存memberの一覧はそのentryとして同じ手順で書く。交換用rootは自分のdelegation（上位generation）とcredential（上位term）だけを持ち、ledgerは検証済みbackupから復元する。backupが無いrootはRECOVERY_REQUIREDで止まり、空ledgerで再開しない。rootの自credentialのleaseは自rootが時刻基準なので遠い将来でよい（rootは自身のleaseで他者を認可しない）。
 rootのroot_termはmembership recordの自credentialが正本（ARCH2-D1）：boot毎にidentity load jobがterm+1で自署名し直してcommitし、その後にだけidentityがReadyになる（commit前の電源断は旧recordのまま次bootがその一つ上、commit後は新termが床。同じtermを二度公開しない）。保存値は最後に公開したtermで、新規networkのrootは0、交換用rootは最初に公開するtermの一つ下でprovisionする。u32上限ではRECOVERY_REQUIRED。
 

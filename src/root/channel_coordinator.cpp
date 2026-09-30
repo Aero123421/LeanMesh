@@ -13,6 +13,8 @@ constexpr unsigned k_batch = 8;              // records per pacing step: 64 memb
 constexpr Duration k_step = Duration::from_ms(500), k_round = Duration::from_s(4), k_recover_round = Duration::from_s(60);
 constexpr Duration k_abort_cooldown = Duration::from_s(600), k_retained_cooldown = Duration::from_s(300);
 constexpr Duration k_survey_max = Duration::from_s(1200);
+constexpr Duration k_recover_max = Duration::from_s(1800); // RECOVERING ends here at the latest (FIX10-D6)
+constexpr Duration k_abort_ledger_wait = Duration::from_s(30); // a restored ABORT waits this long for the ledger to name its members
 constexpr Duration k_visit_gap = Duration::from_ms(60000 / gen::defaults::channel::max_visits_per_minute); // per node and minute
 constexpr uint64_t k_lead_ms = 6000, k_min_arm_ms = 2500; // window start ahead of the request; the visitor must hear it this early
 constexpr uint16_t k_tol_ms = 100, k_tol_wide_ms = 200;   // clock tolerance of a visit; the retry after TIME_UNCERTAIN is wider
@@ -203,6 +205,10 @@ Reply Coordinator::request(uint32_t action, uint64_t expected_revision, MonoTime
     }
     const bool freeze = action == LM_CHANNEL_FREEZE;
     if (freeze != frozen_) {
+        freeze_seq_ = engine_.chan().next_save_seq(); // (read before any write of this change can start)
+        if (freeze_op_ == 0) { // a change made while the last one is not durable yet: one operation, for the latest state
+            freeze_op_ = engine_.next_control_op();
+        }
         frozen_ = freeze;
         ++policy_rev_;
         if (freeze && state_ == CState::Survey) {
@@ -212,8 +218,17 @@ Reply Coordinator::request(uint32_t action, uint64_t expected_revision, MonoTime
             abort_plan(Why::Frozen, now); // not yet committed: nothing to complete. COMMITTED and later: never cancelled
         }
         changed(now);
+        return Reply{Status::Ok, freeze_op_, 0}; // applied now; durable when LM_EVENT_OPERATION(freeze_op_) arrives (FIX10-D9)
     }
     return Reply{Status::Ok, 0, 0};
+}
+
+// A record write finished (owner thread). The freeze is durable when a write that began after it was set succeeded.
+void Coordinator::on_written(uint32_t seq, bool ok, MonoTime) {
+    if (ok && freeze_op_ != 0 && seq >= freeze_seq_) {
+        engine_.emit_event(LM_EVENT_OPERATION, 0, freeze_op_, nullptr);
+        freeze_op_ = 0;
+    }
 }
 
 // ---- plans ---------------------------------------------------------------------------------------------
@@ -239,7 +254,9 @@ Status Coordinator::begin_plan(uint8_t new_ch, MonoTime now) {
             continue;
         }
         const bool critical = (critical_ & bit(a)) != 0;
-        if (attached(a, now) && (!(sleepy_ & bit(a)) || critical)) {
+        // A member that sleeps by policy is deferred: the root's schedule view says so (S16), the bench flag only adds.
+        const bool sleepy = (sleepy_ & bit(a)) != 0 || engine_.power().sleepy_member(ShortAddr{a}, now);
+        if (attached(a, now) && (!sleepy || critical)) {
             required |= bit(a);
             std::array<uint8_t, 34> part{};
             DeviceId dev;
@@ -312,7 +329,14 @@ Status Coordinator::rollback(MonoTime now) {
 }
 
 void Coordinator::abort_plan(Why why, MonoTime now) {
+    // H8: once the root's own COMMIT is being written (or is durable) the plan can only be followed. Aborting here would
+    // send ABORT to the members while the root goes on to switch alone, and report ABORTED for a switched root.
+    if (state_ == CState::Preparing && engine_.chan().commit_started()) {
+        tick_at_ = now + ms(20); // the write answers with a receipt (or fails and the tick decides again)
+        return;
+    }
     ++stats_.aborts;
+    abort_since_ = now;
     set_state(CState::Aborted, why);
     cursor_ = 0;
     tick_at_ = now;
@@ -351,6 +375,10 @@ void Coordinator::plan_tick(MonoTime now) {
     rec.plan = plan_;
     switch (state_) {
     case CState::Preparing: {
+        if (frozen_ && !ch.commit_started()) { // (request() aborts at once; this catches a write that failed after it)
+            abort_plan(Why::Frozen, now);
+            return;
+        }
         if (now >= plan_start_ + ms(prepare_timeout_ms_)) {
             abort_plan(Why::PrepareTimeout, now); // a missing READY is never dropped from the denominator
             return;
@@ -382,6 +410,14 @@ void Coordinator::plan_tick(MonoTime now) {
     case CState::Switching:
     case CState::Settling:
     case CState::Recovering: {
+        if (state_ == CState::Recovering && now >= rec_since_ + k_recover_max) {
+            // FIX10-D6: some required member never confirmed. It is not undone and not forgotten (the view keeps
+            // required / applied); it follows through its own search and State report. The coordinator is free again.
+            set_state(CState::Monitor, Why::Partial);
+            tick_at_ = MonoTime::never();
+            changed(now);
+            return;
+        }
         const MonoTime settle_at = switched_at_ + ms(plan_.settle_ms);
         if (state_ == CState::Switching && now >= switched_at_ + ms(uint64_t{plan_.max_err_ms} + 500)) {
             set_state(CState::Settling, Why::None);
@@ -390,7 +426,7 @@ void Coordinator::plan_tick(MonoTime now) {
             finish_settle(now);
         } else if ((required_ & ~applied_) != 0) {
             send_round(channel::Phase::Commit, required_ & ~applied_, now);
-            tick_at_ = state_ == CState::Recovering ? tick_at_ : earliest(tick_at_, settle_at);
+            tick_at_ = earliest(tick_at_, state_ == CState::Recovering ? rec_since_ + k_recover_max : settle_at);
         } else if (state_ == CState::Recovering) {
             set_state(CState::Monitor, Why::Moved);
             tick_at_ = MonoTime::never();
@@ -401,20 +437,56 @@ void Coordinator::plan_tick(MonoTime now) {
         return;
     }
     case CState::Aborted:
-        if (!aborted_local_) {
-            rec.phase = channel::Phase::Abort;
-            aborted_local_ = ch.local_plan(rec, now) == Status::Ok;
-        }
-        send_round(channel::Phase::Abort, required_, now);
-        if (cursor_ == 0 && aborted_local_) { // one full round of ABORT went out
-            aborted_local_ = false;
-            set_state(CState::Monitor, why_);
-            tick_at_ = MonoTime::never();
-            changed(now);
-        }
+        abort_tick(now);
         return;
     default:
         return;
+    }
+}
+
+// ABORTED: the plan is undone where it can be. The root's own record decides first (H8): if its COMMIT is durable the
+// network follows that plan; if it is being written nothing is sent yet. Otherwise the local ABORT is made durable
+// (the channel module repeats it while its record memory is busy, H7) and every required member is told; the
+// coordinator is MONITOR again only when the root's own record no longer holds the plan.
+void Coordinator::abort_tick(MonoTime now) {
+    channel::Channel &ch = engine_.chan();
+    if (ch.commit_started()) {
+        if (ch.committed()) {
+            ++stats_.commits;
+            aborted_local_ = false;
+            cursor_ = 0;
+            set_state(CState::Committed, Why::None); // the record is the evidence, not the earlier verdict
+            tick_at_ = now;
+            changed(now);
+        } else {
+            tick_at_ = now + ms(20);
+        }
+        return;
+    }
+    if (!bound_ && required_ != 0) {
+        if (engine_.ledger().ready()) {
+            rebind();
+        } else if (now < abort_since_ + k_abort_ledger_wait) {
+            tick_at_ = now + ms(500);
+            return;
+        }
+    }
+    channel::PlanRec rec;
+    rec.plan = plan_;
+    rec.phase = channel::Phase::Abort;
+    if (!aborted_local_) {
+        aborted_local_ = ch.local_plan(rec, now) == Status::Ok;
+    }
+    send_round(channel::Phase::Abort, required_, now);
+    if (cursor_ == 0 && aborted_local_) { // one full round of ABORT went out
+        if (ch.unsettled()) {              // ... but the root's own record still holds the plan (or is being written)
+            tick_at_ = now + ms(100);
+            return;
+        }
+        aborted_local_ = false;
+        set_state(CState::Monitor, why_);
+        tick_at_ = MonoTime::never();
+        changed(now);
     }
 }
 
@@ -427,6 +499,7 @@ void Coordinator::finish_settle(MonoTime now) {
         tick_at_ = MonoTime::never();
     } else { // some never confirmed: they follow when they find the mesh again (never undone from here)
         set_state(CState::Recovering, Why::None);
+        rec_since_ = now;
         tick_at_ = now;
     }
     changed(now);
@@ -506,13 +579,16 @@ void Coordinator::on_record(const DeviceId &peer, const delivery::PathSpec &repl
     case channel::Op::State: {
         // A member that (re)attached tells where it is; one behind the last applied plan is brought up to date with
         // that plan alone (it never replays the ones in between, docs/20 §9).
+        // The plan is the channel record's last applied one, not the coordinator's memory: after a restart the
+        // coordinator holds none, and a deferred sleeper still has to learn the epoch (FIX10-D5).
+        const channel::Plan &last = engine_.chan().plan();
         channel::PlanRec rec;
         rec.phase = channel::Phase::Commit;
-        rec.plan = plan_;
+        rec.plan = last;
         std::array<uint8_t, channel::k_max_record> out{};
         std::size_t len = 0;
-        if (decode(body, st) == Status::Ok && plan_.epoch.value() != 0 && st.epoch < plan_.epoch &&
-            plan_.epoch == engine_.chan().epoch() && state_ != CState::Preparing && encode(rec, MutByteView{out}, len) == Status::Ok) {
+        if (decode(body, st) == Status::Ok && last.epoch.value() != 0 && st.epoch < last.epoch &&
+            last.epoch == engine_.chan().epoch() && state_ != CState::Preparing && encode(rec, MutByteView{out}, len) == Status::Ok) {
             (void)engine_.delivery().send_control(peer, reply, ByteView{out.data(), len}, now);
         }
         break;
@@ -789,7 +865,7 @@ void Coordinator::save(Writer &w) const {
     w.u32be(cool > 0 ? static_cast<uint32_t>(std::min<int64_t>(cool, 0xFFFFFFFFLL)) : 0U);
 }
 
-void Coordinator::restore(Reader &r, const channel::Plan *committed) {
+void Coordinator::restore(Reader &r, const channel::Plan *held, bool committed) {
     const bool frozen = r.u8() != 0;
     const uint64_t rev = r.u64be();
     const auto st = static_cast<CState>(r.u8() & 7U);
@@ -822,10 +898,23 @@ void Coordinator::restore(Reader &r, const channel::Plan *committed) {
     }
     // A plan that was COMMITTED when the power went is followed to its end, never rolled back (docs/05 §7). The channel
     // record is the evidence: the coordinator's own state may have been saved a moment earlier.
-    if (committed != nullptr || (ok && static_cast<uint8_t>(st) >= static_cast<uint8_t>(CState::Committed) && st != CState::Aborted)) {
+    if (held != nullptr && committed) {
         state_ = CState::Recovering;
-        plan_ = committed != nullptr ? *committed : p;
+        plan_ = *held;
         required_ = ok ? req : 0;
+    } else if (held != nullptr || (ok && (st == CState::Preparing || st == CState::Aborted) && channel::valid_plan(p))) {
+        // FIX10-D1: PREPARED (or PREPARING with the root's own PREPARE not durable, or an ABORT not finished) when the
+        // power went. Nobody will commit that plan: it is aborted now, as it would have been after its timeout - the
+        // members that hold it are told, the root's own record is made IDLE.
+        state_ = CState::Aborted;
+        why_ = Why::PrepareTimeout;
+        plan_ = held != nullptr ? *held : p;
+        required_ = ok ? req : 0;
+        ++stats_.aborts;
+    } else if (ok && static_cast<uint8_t>(st) >= static_cast<uint8_t>(CState::Committed) && st != CState::Aborted) {
+        state_ = CState::Recovering;
+        plan_ = p;
+        required_ = req;
     }
 }
 
@@ -838,8 +927,9 @@ void Coordinator::on_loaded(MonoTime now) {
         }
         cool_until_ = now + ms(restored_cool_ms_);
     }
-    if (state_ == CState::Recovering) {
+    if (state_ == CState::Recovering || state_ == CState::Aborted) {
         cursor_ = 0;
+        rec_since_ = abort_since_ = now;
         tick_at_ = now + Duration::from_s(5);
     }
 }
@@ -855,6 +945,8 @@ void Coordinator::stop() {
     plan_ = channel::Plan{};
     deg_ = {};
     aborted_local_ = false;
+    freeze_op_ = 0;
+    rec_since_ = abort_since_ = MonoTime::never();
 }
 
 void Coordinator::on_timer(MonoTime now) {

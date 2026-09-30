@@ -427,7 +427,7 @@ class Run {
                         t.tag, o.outcome, o.evidence_bits);
             }
             if (o.outcome == LM_OUTCOME_REJECTED && (o.evidence_bits & ev::app_rejected) == 0 && (o.evidence_bits & ev::refused) == 0) {
-                violate("no-rejected-without-destination", "message %u REJECTED with evidence %#x", t.tag, o.evidence_bits);
+                violate("no-rejected-without-destination", "message %u REJECTED with evidence %#x reason %u phase %u", t.tag, o.evidence_bits, o.reason, o.phase);
             }
             t.evidence = o.evidence_bits;
             t.outcome = o.outcome;
@@ -531,12 +531,16 @@ unsigned env_or(const char *name, unsigned dflt) {
 
 LM_TEST("D01 D02 D04 D10 MODEL sim: seeded random message / loss / link / reboot schedules keep the evidence invariants") {
     const unsigned only = env_or("LM_MODEL_SEED", 0);
-    const unsigned seeds = only != 0 ? 1 : env_or("LM_MODEL_SEEDS", 48);
+    // Seeds that once broke an invariant always run (FIX9-H3: a REJECTED whose frame had left, found at 1675 and 2398).
+    static const uint64_t k_regression_seeds[] = {1675, 1744, 2021, 2387, 2398};
+    constexpr unsigned k_regressions = sizeof(k_regression_seeds) / sizeof(k_regression_seeds[0]);
+    const unsigned base = only != 0 ? 1 : env_or("LM_MODEL_SEEDS", 48);
+    const unsigned seeds = only != 0 ? 1 : base + k_regressions;
     unsigned failures = 0;
     unsigned sends = 0;
     unsigned reboots = 0;
     for (unsigned k = 0; k < seeds; ++k) {
-        const uint64_t seed = only != 0 ? only : 1000 + k;
+        const uint64_t seed = only != 0 ? only : k < base ? 1000 + k : k_regression_seeds[k - base];
         const std::vector<Step> steps = generate(seed, 28);
         for (const Step &s : steps) {
             sends += s.kind == Kind::Send ? 1 : 0;

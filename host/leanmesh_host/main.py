@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import stat
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -62,6 +63,9 @@ def _start_serial(settings: Settings, hub: Hub) -> tuple[SerialLink | None, Brid
     if not settings.serial_device or settings.usb_kit_path is None:
         return None, None
     try:
+        # The kit holds the Host's private scalar: same rule as the token file (FIX11-D7).
+        if settings.usb_kit_path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise OSError(f"USB kit {settings.usb_kit_path} must be mode 0600 (it holds the Host private key)")
         kit = settings.usb_kit_path.read_bytes()
         bridge = Bridge(hub, settings)
         link = _run(SerialLink(settings.serial_device, kit, asyncio.get_running_loop(),

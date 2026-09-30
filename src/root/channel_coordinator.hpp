@@ -38,6 +38,7 @@ enum class CState : uint8_t { Monitor, Survey, Preparing, Committed, Switching, 
 enum class Why : uint8_t {
     None, Moved, RetainedNoData, RetainedWorse, RetainedSmall, SingleLink, GapNeeded, CriticalAsleep, Frozen, Cooldown,
     DailyLimit, NoCandidates, PrepareTimeout, Refused, TimeUncertain, SurveyFailed, NoMembers,
+    Partial, // RECOVERING ended by its time bound: some required member never confirmed (they still follow via State)
 };
 
 class Coordinator {
@@ -56,8 +57,11 @@ class Coordinator {
     void on_local_switch(MonoTime now);
     void on_loaded(MonoTime now);
     void save(Writer &w) const;
-    // `committed`: the channel record was COMMITTED when the power went: that plan is followed to its end.
-    void restore(Reader &r, const channel::Plan *committed);
+    // `held`: the plan the channel record held when the power went (nullptr: none). COMMITTED is followed to its end,
+    // PREPARED (or a coordinator saved in PREPARING/ABORTED) is aborted (FIX10-D1).
+    void restore(Reader &r, const channel::Plan *held, bool committed);
+    // A channel record write with this number finished (Channel::persisted): a freeze/unfreeze becomes durable.
+    void on_written(uint32_t seq, bool ok, MonoTime now);
 
     // ---- commands ----
     // lm_channel_request: 0 auto (unfreeze), 1 freeze, 2 recalculate. Conflict = stale policy revision.
@@ -136,6 +140,7 @@ class Coordinator {
     void plan_tick(MonoTime now);
     void send_round(channel::Phase phase, uint64_t missing, MonoTime now);
     void abort_plan(Why why, MonoTime now);
+    void abort_tick(MonoTime now);
     void finish_settle(MonoTime now);
     void apply(bool self, uint16_t addr, const DeviceId &peer, const channel::Receipt &r, MonoTime now);
     void set_state(CState s, Why why);
@@ -162,6 +167,8 @@ class Coordinator {
     uint32_t commit_lead_ms_ = static_cast<uint32_t>(gen::defaults::channel::commit_lead_ms);
     uint32_t max_err_ms_ = static_cast<uint32_t>(gen::defaults::channel::max_clock_error_ms);
     uint64_t policy_rev_ = 0;
+    uint64_t freeze_op_ = 0;  // the operation of a freeze change whose record is not durable yet (LM_EVENT_OPERATION follows)
+    uint32_t freeze_seq_ = 0; // ... it is durable when a record write with this number (or a later one) succeeds
     uint64_t sleepy_ = 0, critical_ = 0;
     Stats stats_;
 
@@ -176,6 +183,8 @@ class Coordinator {
     bool aborted_local_ = false;
     Status last_refusal_ = Status::Ok;
     MonoTime plan_start_{}, tick_at_ = MonoTime::never(), switched_at_ = MonoTime::never();
+    MonoTime rec_since_ = MonoTime::never(); // RECOVERING began (bounded, FIX10-D6)
+    MonoTime abort_since_ = MonoTime::never(); // ABORTED began (a restored plan waits for the ledger for a while)
 
     // pacing limits: kept across restarts as debt (save/restore), elapsed power-off time is never counted
     MonoTime cool_until_{};
@@ -220,7 +229,8 @@ struct NoCoordinator {
     void on_local_switch(MonoTime) {}
     void on_loaded(MonoTime) {}
     void save(Writer &) const {}
-    void restore(Reader &, const channel::Plan *) {}
+    void restore(Reader &, const channel::Plan *, bool) {}
+    void on_written(uint32_t, bool, MonoTime) {}
     [[nodiscard]] Reply request(uint32_t, uint64_t, MonoTime) { return Reply{Status::Unsupported, 0, 0}; }
     struct View {
         bool frozen = false;

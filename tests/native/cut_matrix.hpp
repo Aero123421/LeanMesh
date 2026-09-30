@@ -32,6 +32,7 @@ struct CutTarget {
 struct CutTotals {
     unsigned points = 0;
     unsigned converged = 0;
+    unsigned truncated = 0; // sweeps that stopped at max_k with the cut still firing (FIX11-D10): not a complete sweep
 };
 
 inline const char *cut_mode_name(lm::sim::CutMode m) {
@@ -49,6 +50,7 @@ CutTotals cut_matrix(const char *scenario, const std::vector<CutTarget> &targets
         for (const lm::sim::CutMode mode : modes) {
             unsigned points = 0;
             unsigned conv = 0;
+            bool complete = false;
             for (uint64_t k = first_k; k < max_k; ++k) {
                 const CutRun r = run(t.node, k, mode);
                 if (!r.ok) {
@@ -57,18 +59,22 @@ CutTotals cut_matrix(const char *scenario, const std::vector<CutTarget> &targets
                 }
                 LM_CHECK(r.ok);
                 if (!r.fired) {
-                    break; // fewer store calls than k in this scenario: complete
+                    complete = true; // fewer store calls than k in this scenario: the sweep of this node/mode is complete
+                    break;
                 }
                 ++points;
                 conv += r.converged ? 1 : 0;
             }
-            std::printf("  [matrix] %-28s node %-10s %-6s: %2u cut points, %2u converged on the target state\n", scenario,
-                        t.label, cut_mode_name(mode), points, conv);
+            std::printf("  [matrix] %-28s node %-10s %-6s: %2u cut points, %2u converged on the target state%s\n", scenario,
+                        t.label, cut_mode_name(mode), points, conv,
+                        complete ? "" : "  ** TRUNCATED: the store calls did not end before k reached the limit, the sweep is NOT complete **");
+            total.truncated += complete ? 0 : 1;
             total.points += points;
             total.converged += conv;
         }
     }
-    std::printf("  [matrix] %-28s total: %u cut points, %u converged\n", scenario, total.points, total.converged);
+    std::printf("  [matrix] %-28s total: %u cut points, %u converged, %u truncated sweeps\n", scenario, total.points,
+                total.converged, total.truncated);
     return total;
 }
 

@@ -123,6 +123,16 @@ struct GNet {
         lm_operation_id_t op = 0;
         LM_CHECK_EQ(lm_group_set(ctx(0), gid, expected, ids.data(), ids.size(), &op), want);
         node(0).notify();
+        if (want == LM_STATUS_OK) { // FIX8-D10: the definition is durable when its operation ends (read, not taken)
+            lm_operation_t o{};
+            LM_CHECK(until([&] {
+                o = lm_operation_t{};
+                o.struct_size = sizeof(o);
+                o.abi_version = LM_ABI_VERSION;
+                return lm_get_operation(ctx(0), op, &o) == LM_STATUS_OK && o.phase == LM_PHASE_FINAL;
+            }, 5000, 1));
+            LM_CHECK_EQ(o.outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+        }
         return op;
     }
     struct Sent {
@@ -337,6 +347,16 @@ LM_TEST("D11 D12 sim (small): a member that is not the root fetches the snapshot
     n.node(3).notify();
     n.run_ms(10'000);
     LM_CHECK_EQ(n.eng(0).group().stats().pages_served, served);
+}
+
+LM_TEST("FIX9-M8 sim: a group set draws its operation id from the root's one control-operation namespace") {
+    GNet n(tree(1, 3));
+    n.form();
+    const uint64_t a = n.group_set(1, 0, {1, 2});
+    const uint64_t next = n.ctx(0)->engine.next_control_op(); // what a ledger/lifecycle install gets next
+    LM_CHECK(next == a + 1);
+    const uint64_t b = n.group_set(2, 0, {1});
+    LM_CHECK(b == next + 1);
 }
 
 LM_TEST("D11 GS03 sim: registry rules and a snapshot the root does not know") {
@@ -662,6 +682,107 @@ LM_TEST("GS11 sim: targets that cannot be routed step aside (WAIT_ROUTE) and do 
             LM_CHECK_EQ(x.phase, static_cast<uint32_t>(LM_TARGET_FINAL));
         }
     }
+}
+
+// Second review #9: the registry was RAM only; after a root restart the group/revision the Host holds was NOT_FOUND. A
+// definition is durable before its operation ends, restored before any group operation runs, and one set commits at a
+// time (the next is BUSY meanwhile). A commit whose result is unknown leaves the registry refusing until the durable
+// truth is read again (the next start).
+LM_TEST("D11 GS03 FIX8 sim: group definitions and revisions survive a root restart; an unknown commit fails closed") {
+    GNet n(tree(1, 3));
+    n.form();
+    n.group_set(7, 0, {1, 2});
+    n.group_set(7, 1, {1, 2, 3});
+    n.group_set(3, 0, {});
+    {
+        std::vector<lm_device_id_t> id(1);
+        std::memcpy(id[0].bytes, n.id(1).bytes.data(), 32);
+        lm_operation_id_t a = 0;
+        lm_operation_id_t b = 0;
+        LM_CHECK_EQ(lm_group_set(n.ctx(0), 4, 0, id.data(), 1, &a), LM_STATUS_OK);
+        LM_CHECK_EQ(lm_group_set(n.ctx(0), 5, 0, id.data(), 1, &b), LM_STATUS_BUSY); // one commit at a time
+        n.node(0).notify();
+        n.run_ms(200);
+    }
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    LM_CHECK_OK(n.node(0).boot());
+    LM_CHECK_EQ(lm_start(n.ctx(0)), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000, 5));
+    group::Op snap{};
+    DeviceId ids[group::k_max_targets];
+    LM_CHECK_OK(n.eng(0).groups().snapshot(7, 2, snap, ids)); // NOT_FOUND on 8668c69
+    LM_CHECK_EQ(snap.total, 3u);
+    LM_CHECK_OK(n.eng(0).groups().snapshot(3, 1, snap, ids));
+    LM_CHECK_EQ(snap.total, 0u);
+    LM_CHECK_OK(n.eng(0).groups().snapshot(4, 1, snap, ids));
+    LM_CHECK(n.eng(0).groups().snapshot(7, 1, snap, ids) == Status::Conflict); // revisions go on, never start over
+    n.group_set(7, 1, {1}, LM_STATUS_CONFLICT);
+    n.group_set(7, 2, {1});
+    // The commit's result is unknown (its marker reached the Flash, the read-back failed): refused until a restart.
+    SimStore &st = n.node(0).store;
+    st.arm_cut(st.mutating_ops() + 1, CutMode::After);
+    std::vector<lm_device_id_t> one(1);
+    std::memcpy(one[0].bytes, n.id(2).bytes.data(), 32);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_group_set(n.ctx(0), 7, 3, one.data(), 1, &op), LM_STATUS_OK);
+    n.node(0).notify();
+    lm_operation_t o{};
+    LM_CHECK(n.until([&] {
+        o = lm_operation_t{};
+        o.struct_size = sizeof(o);
+        o.abi_version = LM_ABI_VERSION;
+        return lm_get_operation(n.ctx(0), op, &o) == LM_STATUS_OK && o.phase == LM_PHASE_FINAL;
+    }, 5000, 1));
+    LM_CHECK(o.outcome != LM_OUTCOME_APPLIED);
+    LM_CHECK_EQ(o.reason, static_cast<uint32_t>(LM_STATUS_RECOVERY_REQUIRED));
+    st.power_restore();
+    LM_CHECK(n.eng(0).groups().snapshot(7, 3, snap, ids) == Status::RecoveryRequired);
+    n.group_set(7, 3, {1}, LM_STATUS_RECOVERY_REQUIRED);
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    LM_CHECK_OK(n.node(0).boot());
+    LM_CHECK_EQ(lm_start(n.ctx(0)), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000, 5));
+    LM_CHECK_OK(n.eng(0).groups().snapshot(7, 4, snap, ids)); // the stored truth: the write had landed
+    LM_CHECK_EQ(snap.total, 1u);
+    LM_CHECK(ids[0] == n.id(2));
+}
+
+// FIX8 addendum (review HC): a group set cut by lm_stop ends (INDETERMINATE: its record may or may not be durable; the
+// next start reads the registry), and while its commit runs it is queryable (PENDING), never NOT_FOUND.
+LM_TEST("D11 FIX8 sim: a group set cut by lm_stop ends INDETERMINATE; a pending one is queryable") {
+    GNet n(tree(1, 3));
+    n.form();
+    std::vector<lm_device_id_t> id(1);
+    std::memcpy(id[0].bytes, n.id(1).bytes.data(), 32);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_group_set(n.ctx(0), 9, 0, id.data(), 1, &op), LM_STATUS_OK);
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(0), op, &o), LM_STATUS_OK); // NOT_FOUND on the first FIX8 diff
+    LM_CHECK(o.phase != LM_PHASE_FINAL);
+    lm_operation_id_t sop = 0;
+    LM_CHECK_EQ(lm_stop(n.ctx(0), 0, &sop), LM_STATUS_OK);
+    lm_status_t st = LM_STATUS_BUSY;
+    for (int k = 0; k < 2000 && (st = lm_start(n.ctx(0))) == LM_STATUS_BUSY; ++k) {
+        n.run_ms(5);
+    }
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    n.node(0).notify();
+    n.run_ms(20'000);
+    o = lm_operation_t{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(0), op, &o), LM_STATUS_OK);
+    LM_CHECK_EQ(o.phase, static_cast<uint32_t>(LM_PHASE_FINAL));
+    LM_CHECK_EQ(o.outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE));
+    // What is durable decides: either the new revision exists, or the group does not (never another state).
+    group::Op snap{};
+    DeviceId ids[group::k_max_targets];
+    const Status sn = n.eng(0).groups().snapshot(9, 1, snap, ids);
+    LM_CHECK(sn == Status::Ok || sn == Status::NotFound);
 }
 
 LM_TEST("serial SEND names a group by a marker value; only that shape is one") {

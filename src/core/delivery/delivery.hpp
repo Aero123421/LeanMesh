@@ -67,6 +67,7 @@ struct HostSendRequest {
     lm_send_request_t rq;
     std::array<uint8_t, 16> mid{};
     Sha256Digest hash{};
+    bool object = false; // FIX11-D11: the serial SEND asked for lm_send_object rules (up to 4096 B, when enabled)
 };
 // Root only: what a Host acknowledgement names (docs/19 §4 HOST_STORE_ACK).
 struct HostStoreAckRequest {
@@ -288,6 +289,20 @@ class Delivery {
     // The application took the event: MESSAGE -> Delivered (buffer freed, marker persisted).
     void on_event_taken(const lm_event_t &ev, MonoTime now);
     // Queue space appeared: re-queue MESSAGE events that did not fit.
+    // lm_stop's drain: no new send is accepted while set, and has_open_sends() says when the drain is over.
+    void set_draining(bool on) { draining_ = on; }
+    [[nodiscard]] bool has_open_sends() const {
+        for (const Op &o : ops_) {
+            if (o.used && !o.report && o.phase != Phase::Final) {
+                return true;
+            }
+        }
+        return false;
+    }
+    void end_pending_for_stop(MonoTime now); // lm_stop: a final event for every open send, before the pools go
+    // [FIX8-D5] A committed leave (docs/07 §6): every open send ends now, the pools stay. A send that may have left is
+    // INDETERMINATE; one that provably did not is cancelled exactly (durable: once its retire is durable, FIX9-D3).
+    void end_open_sends(MonoTime now);
     void flush_events(MonoTime now);
 
     // ---- [S13] root <-> Host bridge (delivery_host.cpp) ----
@@ -435,7 +450,7 @@ class Delivery {
     [[nodiscard]] Reply send_impl(const lm_send_request_t &rq, ByteView payload, MonoTime now); // [S14] send() counts refusals
     [[nodiscard]] Reply host_send(const HostSendRequest &rq, ByteView payload, MonoTime now); // delivery_host.cpp
     [[nodiscard]] bool gate_receipt(const InEntry &e) const {
-        return host_gate_ && e.durable && e.delivery == LM_RECEIVED;
+        return host_gate_ && e.delivery != LM_BEST_EFFORT; // every message with a receipt: volatile, durable, objects, APPLIED (FIX9-D6)
     }
     void finish_take(Handle h, InEntry &e, MonoTime now);
     [[nodiscard]] Reply cancel(uint64_t op_id, MonoTime now);
@@ -448,6 +463,7 @@ class Delivery {
     void finalize_active(Handle h, uint8_t outcome, uint32_t reason, MonoTime now);
     void round_ended(Handle h, Active &a, Op &op, MonoTime now, bool link_failed);
     [[nodiscard]] bool left_node(Handle h, const Op &op) const;
+    [[nodiscard]] uint8_t refused_outcome(Handle h, const Op &op) const;
     [[nodiscard]] Duration retry_delay(const Active &a) const;
     void on_frame_done(const FrameDone &f, HopEnd end, MonoTime now);
     [[nodiscard]] Status may_send(const TxFrame &f, MonoTime now);
@@ -573,6 +589,7 @@ class Delivery {
     Post post_;
     std::array<bool, k_actives> out_j_{};   // journal slots of durable sends (held until the retire is durable)
     std::array<bool, k_actives> out_retire_{}; // retire of that slot still to be written
+    std::array<uint64_t, k_actives> out_cancel_op_{}; // op id whose CANCELLED_NOT_SENT waits for that slot's retire
     std::array<bool, k_in_entries> in_j_{}; // journal slots of durable receptions
 
     FragState frag_;
@@ -582,6 +599,7 @@ class Delivery {
     const std::array<uint8_t, 16> *child_mid_ = nullptr; // [S15] set only while send_child() runs send()
     GroupHooks group_;
     bool host_gate_ = false;
+    bool draining_ = false; // lm_stop is waiting for the open sends: nothing new is accepted
     bool ready_ = false;
     bool recovering_ = false;
     std::size_t recover_pos_ = 0;

@@ -68,9 +68,10 @@ _PRIORITY = {"BULK": 0, "NORMAL": 1, "URGENT": 2}
 
 
 def send_flags(request: dict[str, Any]) -> int:
-    """docs/09 §2 flags: bits 0..1 delivery, bits 2..3 priority, bit 4 durable."""
+    """Serial SEND flags (docs/19 §3): bits 0..1 delivery, bits 2..3 priority, bit 4 durable (the docs/09 §2 layout),
+    bit 5 strict_single_frame (a local send option of the root, never put on the RF wire; FIX11-D12)."""
     return (_DELIVERY[request["delivery"]] | _PRIORITY[request["priority"]] << 2
-            | _STORAGE[request["storage"]] << 4)
+            | _STORAGE[request["storage"]] << 4 | (1 << 5 if request.get("strict_single_frame") else 0))
 
 
 def intent_hash(root: bytes, target: bytes, domain: bytes, request: dict[str, Any], term: int,

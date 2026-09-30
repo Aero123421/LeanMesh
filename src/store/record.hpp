@@ -50,7 +50,7 @@ inline constexpr uint16_t membership = 4;
 inline constexpr uint16_t membership_prepared = 5;
 inline constexpr uint16_t assignment_high_water = 6;
 inline constexpr uint16_t channel_plan = 7;
-inline constexpr uint16_t policy = 8;
+inline constexpr uint16_t policy = 8;                // FIX8-D12: the root's join mode (version | mode | change count)
 inline constexpr uint16_t root_ledger = 9;
 inline constexpr uint16_t revocation_floors = 10; // S5: member/records.cpp
 inline constexpr uint16_t root_delegation = 11;   // S5: fleet-signed RootDelegation COSE object
@@ -62,12 +62,13 @@ inline constexpr uint16_t ota_state = 16;         // S19: the OTA rollback state
 inline constexpr uint16_t root_handover = 17;     // S18: the fleet's RootHandover that retired this root (verbatim)
 inline constexpr uint16_t pending_delegation = 18; // S18: the RootDelegation of a transfer/handover target, until it is live
 inline constexpr uint16_t commissioning_window = 19; // S18: window id 16 || reservations made u8 (docs/21 §2 budget)
+inline constexpr uint16_t root_groups = 20;          // FIX8-D10: the root's group registry (api/SEMANTICS.md: durable)
 // One owner per NVS key: two records on one id overwrite and misread each other (ARCH-D7 and SEC-Da each found
 // such a collision). Every id above is listed here; the ledger's entries use 0x100 + slot.
 inline constexpr uint16_t k_all[] = {boot_incarnation, identity, fleet_trust, membership, membership_prepared,
                                      assignment_high_water, channel_plan, policy, root_ledger, revocation_floors,
                                      root_delegation, assignment_ticket, paired_host, power_policy, discovery_scope, ota_state,
-                                     root_handover, pending_delegation, commissioning_window};
+                                     root_handover, pending_delegation, commissioning_window, root_groups};
 constexpr bool all_distinct() {
     for (std::size_t i = 0; i < std::size(k_all); ++i) {
         if (k_all[i] == 0 || k_all[i] >= 0x100) {

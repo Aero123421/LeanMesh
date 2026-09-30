@@ -3,7 +3,7 @@
   "version": "0.2",
   "date": "2026-09-28",
   "language": "ja",
-  "artifact_type": "specification bundle with a software implementation (native/sim/IDF-build verified); no hardware qualification and no production provisioning",
+  "artifact_type": "specification bundle with a software implementation (native/sim tests and IDF builds run locally; CI green not yet recorded for the fixed tree); no hardware qualification and no production provisioning",
   "full_bundle": true,
   "original_paths_retained": 54,
   "file_count": 79,

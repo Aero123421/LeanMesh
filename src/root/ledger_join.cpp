@@ -120,6 +120,13 @@ void Ledger::stage_ack(Txn &t, uint8_t type, const member::JoinAckData &a, MonoT
 // JoinCommit (SEC-D1): the signature that completes the credential JoinPrepare announced. Sent only once the
 // ACTIVE entry is durable; it is the last 64 bytes of the credential the entry holds (at the scratch tail).
 void Ledger::stage_commit(Txn &t, MonoTime now) {
+    // FIX8-D2: the signature completes a credential. It leaves only for the ACTIVE entry of exactly this request that
+    // the ledger still authorises (a revocation, the floors or a block may have come since the approval).
+    const Entry &e = entries_[t.slot];
+    if (e.device != t.device || e.request != t.request || !authorizes(e)) {
+        refuse(t, e.state == EntryState::Blocked || e.device == t.device ? Status::Revoked : Status::Conflict, now);
+        return;
+    }
     member::JoinCommitData c;
     c.prepare_hash = t.prepare_hash;
     c.membership = t.membership;
@@ -292,7 +299,7 @@ void Ledger::decide_policy(Txn &t, MonoTime now) {
             v = Status::Conflict;
         }
     }
-    const uint64_t next = e != nullptr ? e->membership + 1 : 1;
+    const uint64_t next = next_membership(t.device, e); // FIX8-D4: above the device's own floor too
     if (v == Status::Ok && (next > k_u63_max || engine_.identity().floors().check(t.device,
                                                                                   AssignmentGen{t.ticket.new_generation},
                                                                                   MembershipGen{next}) != Status::Ok)) {
@@ -356,13 +363,8 @@ Status Ledger::pick_slot(const DeviceId &device, std::size_t &slot) const {
             return Status::Ok;
         }
     }
-    // Full: a departed or aborted device gives up its address, but only when its old credential is
-    // already below the revocation floor (R09: no old session or credential can match the new owner).
-    const member::Floors &f = engine_.identity().floors();
     for (std::size_t i = 0; i < entries_.size(); ++i) {
-        const Entry &e = entries_[i];
-        if ((e.state == EntryState::Left || e.state == EntryState::Aborted || e.state == EntryState::Blocked) &&
-            f.check(e.device, AssignmentGen{e.assignment}, MembershipGen{e.membership}) == Status::Revoked) {
+        if (reusable(i)) {
             slot = i;
             return Status::Ok;
         }
@@ -370,10 +372,51 @@ Status Ledger::pick_slot(const DeviceId &device, std::size_t &slot) const {
     return Status::NoCapacity;
 }
 
+// Full: a departed or aborted device gives up its address, but only when its floor outlives its entry in the table
+// (R09: no old session, credential or grant can match the new owner; FIX8-D1: the entry is the floor of a listed
+// device), and FIX8-D9: never while a group definition names the slot (a group names a device, not an address).
+bool Ledger::reusable(std::size_t slot) const {
+    const Entry &e = entries_[slot];
+    const member::Floors::Entry f = engine_.identity().floors().floor_of(e.device);
+    return (e.state == EntryState::Left || e.state == EntryState::Aborted || e.state == EntryState::Blocked) &&
+           f.assignment > std::max(e.assignment, e.consumed) && f.membership > e.membership && !floors_dirty_ &&
+           (doubt_ >> slot & 1U) == 0 && !engine_.groups().names_slot(slot);
+}
+
+uint64_t Ledger::next_membership(const DeviceId &device, const Entry *e) const {
+    const uint64_t own = e != nullptr ? e->membership + 1 : 1;
+    return std::max(own, engine_.identity().floors().floor_of(device).membership);
+}
+
+Status Ledger::still_allowed(const Txn &t) const {
+    if (!loaded_ || failed_ || retired_) {
+        return Status::RecoveryRequired;
+    }
+    const Entry *e = find(t.device);
+    if (e != nullptr && e->state == EntryState::Blocked) {
+        return Status::Revoked;
+    }
+    if (t.ticket.kind != 2 && e != nullptr && t.ticket.new_generation <= e->consumed) {
+        return Status::Conflict; // consumed meanwhile (SEC-D4), or raised by a revocation (FIX8-D1)
+    }
+    if (engine_.identity().floors().check(t.device, AssignmentGen{t.ticket.new_generation},
+                                          MembershipGen{next_membership(t.device, e)}) != Status::Ok) {
+        return Status::Revoked;
+    }
+    if (mode_ == JoinMode::Closed && !t.windowed && t.ticket.kind != 2) {
+        return Status::AuthRejected; // FIX8-D12: the root was closed after the request (a window admits on its own)
+    }
+    return Status::Ok;
+}
+
 void Ledger::start_prepare(Txn &t, MonoTime now) {
     const int idx = txn_index(&t);
     if (t.windowed && !window_open(now)) {
         refuse(t, Status::Expired, now); // [S18] authenticated before the window closed, approved after: refused
+        return;
+    }
+    if (const Status a = still_allowed(t); a != Status::Ok) {
+        refuse(t, a, now); // FIX8-D2: judged again at the approval (an operator's decision may be minutes old)
         return;
     }
     std::size_t slot = 0;
@@ -389,12 +432,15 @@ void Ledger::start_prepare(Txn &t, MonoTime now) {
         return;
     }
     const Entry &old = entries_[slot];
+    const bool own = old.state != EntryState::Free && old.device == t.device;
     t.slot = static_cast<uint16_t>(slot);
-    t.membership = old.state != EntryState::Free && old.device == t.device ? old.membership + 1 : 1;
+    t.membership = next_membership(t.device, own ? &old : nullptr);
     // What the entry becomes when PREPARED commits (RAM changes only after the commit is durable). What this
-    // device consumed stays (SEC-D4); a slot taken over from another device starts from nothing.
+    // device consumed stays (SEC-D4); a slot taken over from another device starts from the joiner's own floor
+    // (FIX8-D4: the entry holds it from now on).
+    const member::Floors::Entry floor = engine_.identity().floors().floor_of(t.device);
     job_entry_ = Entry{};
-    job_entry_.consumed = old.state != EntryState::Free && old.device == t.device ? old.consumed : 0;
+    job_entry_.consumed = own ? old.consumed : (floor.assignment > 0 ? floor.assignment - 1 : 0);
     job_entry_.device = t.device;
     job_entry_.hash = t.content;
     job_entry_.request = t.request;
@@ -500,7 +546,8 @@ Status Ledger::commit_window(Step step, const WindowRecord &r, int holder) {
 }
 
 void Ledger::prepare_committed(Txn &t, Status s, MonoTime now) {
-    if (s != Status::Ok) { // the record may or may not be durable: RAM stays as it was
+    entry_written(t.slot, s == Status::Ok);
+    if (s != Status::Ok) { // the record may or may not be durable: RAM stays as it was (the slot is in doubt)
         refuse(t, s, now);
         return;
     }
@@ -580,6 +627,7 @@ void Ledger::commit_active(Txn &t, MonoTime now) {
 }
 
 void Ledger::active_committed(Txn &t, Status s, MonoTime now) {
+    entry_written(t.slot, s == Status::Ok);
     if (s != Status::Ok) {
         // ACTIVE may or may not be durable; RAM keeps Prepared and the flash record is the truth on the
         // next query (the repeated request reads it back). No answer: the device queries again.
@@ -627,6 +675,7 @@ void Ledger::commit_confirmed(Txn &t, MonoTime now) {
 }
 
 void Ledger::confirmed_committed(Txn &t, Status s, MonoTime now) {
+    entry_written(t.slot, s == Status::Ok);
     if (s != Status::Ok) {
         end_txn(t); // unconfirmed stays unconfirmed: the device's next query completes it
         return;

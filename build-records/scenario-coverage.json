@@ -1,6 +1,7 @@
 {
- "head": "25849ed (dirty)",
+ "head": "8668c69 (dirty)",
  "mode": "static reference map (not an execution result)",
+ "limitation": "COVERED_SOFTWARE_ONLY means at least one test NAME (C++ LM_TEST prefix, pytest scenario mark) refers to the scenario id. It does not mean the test exercises every step of the scenario: a tag can be broader than the test body (FIX11-D9, review L11), and the '-style' suffix is stripped from names. Read the referenced test before relying on a row.",
  "counts": {
   "BUILD_REPORT": 1,
   "COVERED_SOFTWARE_ONLY": 41,
@@ -30,7 +31,7 @@
    "COVERED_SOFTWARE_ONLY": 17
   }
  },
- "references": 306,
+ "references": 331,
  "errors": [],
  "scenarios": [
   {
@@ -52,17 +53,17 @@
     {
      "class": "SIM",
      "test": "C01 sim: a clearly better channel measured at every pair is adopted through the full plan",
-     "at": "tests/native/test_channel.cpp:504"
+     "at": "tests/native/test_channel.cpp:660"
     },
     {
      "class": "SIM",
      "test": "C01 sim (automatic): two independent nodes losing frames on the home channel start the survey and the move on their own",
-     "at": "tests/native/test_channel.cpp:668"
+     "at": "tests/native/test_channel.cpp:824"
     },
     {
      "class": "SIM",
      "test": "R01/C01-scale sim: a 21-node, 20-hop chain runs a full plan; every relay is required, READY / STORED / APPLIED come back over 20 hops",
-     "at": "tests/native/test_channel.cpp:778"
+     "at": "tests/native/test_channel.cpp:936"
     }
    ],
    "sim_only_label": "sim"
@@ -77,7 +78,7 @@
     {
      "class": "SIM",
      "test": "C02 sim: one bad link (and BUSY at its child) does not start a channel change: the route module repairs, the channel stays",
-     "at": "tests/native/test_channel.cpp:644"
+     "at": "tests/native/test_channel.cpp:800"
     }
    ],
    "sim_only_label": null
@@ -112,7 +113,7 @@
     {
      "class": "SIM",
      "test": "C04 sim: a relay never gets COMMIT; the rest moves, the result says STORED / APPLIED / RECOVERING, the stragglers find the mesh",
-     "at": "tests/native/test_channel.cpp:422"
+     "at": "tests/native/test_channel.cpp:532"
     }
    ],
    "sim_only_label": "sim"
@@ -127,7 +128,7 @@
     {
      "class": "SIM",
      "test": "C05 sim: the root loses power right after COMMIT is durable; it comes back on the target channel, never on the old one",
-     "at": "tests/native/test_channel.cpp:452"
+     "at": "tests/native/test_channel.cpp:562"
     }
    ],
    "sim_only_label": "sim"
@@ -167,7 +168,7 @@
     {
      "class": "SIM",
      "test": "C07 unit/sim: freeze stops a plan in PREPARING and never cancels a COMMITTED one; the revision is a compare-and-set",
-     "at": "tests/native/test_channel.cpp:343"
+     "at": "tests/native/test_channel.cpp:453"
     }
    ],
    "sim_only_label": null
@@ -182,12 +183,12 @@
     {
      "class": "NATIVE_UNIT",
      "test": "C08 unit: the decision needs data everywhere, the worst pair must not get worse, the total must gain 25 %",
-     "at": "tests/native/test_channel.cpp:813"
+     "at": "tests/native/test_channel.cpp:971"
     },
     {
      "class": "SIM",
      "test": "C08 sim: a candidate that is better on average but jammed at one relay is not adopted; the worst link decides",
-     "at": "tests/native/test_channel.cpp:482"
+     "at": "tests/native/test_channel.cpp:638"
     }
    ],
    "sim_only_label": "sim"
@@ -202,7 +203,7 @@
     {
      "class": "SIM",
      "test": "C09/LP15 sim: a sleepy leaf misses two channel changes over 24 h; on wake it searches a bounded set and follows only the last plan",
-     "at": "tests/native/test_channel.cpp:544"
+     "at": "tests/native/test_channel.cpp:700"
     }
    ],
    "sim_only_label": "sim"
@@ -217,7 +218,7 @@
     {
      "class": "SIM",
      "test": "C10 sim: every channel jammed after a partial commit: the straggler says it is searching, the search stays inside its budget, nothing is undone",
-     "at": "tests/native/test_channel.cpp:602"
+     "at": "tests/native/test_channel.cpp:758"
     }
    ],
    "sim_only_label": "sim"
@@ -232,7 +233,7 @@
     {
      "class": "SIM",
      "test": "C11 sim: without a maintenance gap a chain is not surveyed: nobody leaves its channel, the reason is stated",
-     "at": "tests/native/test_channel.cpp:520"
+     "at": "tests/native/test_channel.cpp:676"
     }
    ],
    "sim_only_label": "sim"
@@ -252,7 +253,7 @@
     {
      "class": "SIM",
      "test": "C12 sim: the root rolls back with a higher epoch to the old channel; an old plan is never given life again",
-     "at": "tests/native/test_channel.cpp:373"
+     "at": "tests/native/test_channel.cpp:483"
     }
    ],
    "sim_only_label": null
@@ -317,7 +318,7 @@
     {
      "class": "SIM",
      "test": "D02 sim: destination cut after the application took a DURABLE APPLIED message: recovered flag, no exactly-once claim",
-     "at": "tests/native/test_delivery.cpp:1350"
+     "at": "tests/native/test_delivery.cpp:1385"
     },
     {
      "class": "SIM",
@@ -362,7 +363,7 @@
     {
      "class": "SIM",
      "test": "D04 sim: a cancelled durable message is retired from the journal and does not come back after a restart",
-     "at": "tests/native/test_delivery.cpp:1497"
+     "at": "tests/native/test_delivery.cpp:1532"
     },
     {
      "class": "SIM",
@@ -422,7 +423,7 @@
     {
      "class": "SIM",
      "test": "D06 sim: a recovered message with a deadline waits for a clock bound and never outlives its deadline",
-     "at": "tests/native/test_delivery.cpp:1315"
+     "at": "tests/native/test_delivery.cpp:1347"
     },
     {
      "class": "SIM",
@@ -531,23 +532,33 @@
    "software_evidence": [
     {
      "class": "SIM",
+     "test": "test_a_4k_object_to_the_root_reaches_the_host_and_later_events_still_flow",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:124"
+    },
+    {
+     "class": "SIM",
+     "test": "test_fix11_object_send_from_the_host_reaches_the_node_and_strict_single_frame_is_honoured",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:158"
+    },
+    {
+     "class": "SIM",
      "test": "test_object_needs_opt_in_and_stops_at_4096_through_meshsim",
      "at": "host/tests/e2e/test_fragment_meshsim.py:69"
     },
     {
      "class": "SIM",
      "test": "D08 sim: DURABLE RECEIVED without a deadline: persisted, sent after the commit, retired when done",
-     "at": "tests/native/test_delivery.cpp:1061"
+     "at": "tests/native/test_delivery.cpp:1068"
     },
     {
      "class": "SIM",
      "test": "D08 sim: END_RECEIVED of a DURABLE message only after the destination's journal commit",
-     "at": "tests/native/test_delivery.cpp:1082"
+     "at": "tests/native/test_delivery.cpp:1089"
     },
     {
      "class": "SIM",
      "test": "D08 sim: an empty payload is a valid message",
-     "at": "tests/native/test_delivery.cpp:1514"
+     "at": "tests/native/test_delivery.cpp:1567"
     },
     {
      "class": "SIM",
@@ -662,22 +673,27 @@
     {
      "class": "SIM",
      "test": "D11 D12 sim (small): a member that is not the root fetches the snapshot from the root and fans out",
-     "at": "tests/native/test_group.cpp:270"
+     "at": "tests/native/test_group.cpp:280"
     },
     {
      "class": "SIM",
      "test": "D11 GS03 sim: registry rules and a snapshot the root does not know",
-     "at": "tests/native/test_group.cpp:342"
+     "at": "tests/native/test_group.cpp:362"
     },
     {
      "class": "SIM",
      "test": "D11 sim: 64 targets from a member that is not the root; four pages, four in flight, one target leaves mid-way",
-     "at": "tests/native/test_group.cpp:419"
+     "at": "tests/native/test_group.cpp:439"
     },
     {
      "class": "SIM",
      "test": "GS02 GS03 D11 sim: the set is fixed at the start; a member that leaves is rejected, not replaced; an edit is a new revision",
-     "at": "tests/native/test_group.cpp:584"
+     "at": "tests/native/test_group.cpp:604"
+    },
+    {
+     "class": "SIM",
+     "test": "D11 GS03 FIX8 sim: group definitions and revisions survive a root restart; an unknown commit fails closed",
+     "at": "tests/native/test_group.cpp:691"
     }
    ],
    "sim_only_label": null
@@ -692,7 +708,7 @@
     {
      "class": "SIM",
      "test": "D11 D12 sim (small): a member that is not the root fetches the snapshot from the root and fans out",
-     "at": "tests/native/test_group.cpp:270"
+     "at": "tests/native/test_group.cpp:280"
     }
    ],
    "sim_only_label": null
@@ -722,7 +738,7 @@
     {
      "class": "SIM",
      "test": "GS02 GS03 D11 sim: the set is fixed at the start; a member that leaves is rejected, not replaced; an edit is a new revision",
-     "at": "tests/native/test_group.cpp:584"
+     "at": "tests/native/test_group.cpp:604"
     }
    ],
    "sim_only_label": "sim"
@@ -742,12 +758,17 @@
     {
      "class": "SIM",
      "test": "D11 GS03 sim: registry rules and a snapshot the root does not know",
-     "at": "tests/native/test_group.cpp:342"
+     "at": "tests/native/test_group.cpp:362"
     },
     {
      "class": "SIM",
      "test": "GS02 GS03 D11 sim: the set is fixed at the start; a member that leaves is rejected, not replaced; an edit is a new revision",
-     "at": "tests/native/test_group.cpp:584"
+     "at": "tests/native/test_group.cpp:604"
+    },
+    {
+     "class": "SIM",
+     "test": "D11 GS03 FIX8 sim: group definitions and revisions survive a root restart; an unknown commit fails closed",
+     "at": "tests/native/test_group.cpp:691"
     }
    ],
    "sim_only_label": "sim"
@@ -762,7 +783,7 @@
     {
      "class": "SIM",
      "test": "GS04 sim: awake targets are served first; a sleeping target holds a bounded mailbox, not the pool",
-     "at": "tests/native/test_power.cpp:799"
+     "at": "tests/native/test_power.cpp:805"
     }
    ],
    "sim_only_label": "sim"
@@ -812,7 +833,7 @@
     {
      "class": "SIM",
      "test": "GS07 GS10 sim: the root fans out 64 APPLIED targets, cancel mid-way keeps the sent ones open, a late APPLIED improves an unknown result",
-     "at": "tests/native/test_group.cpp:528"
+     "at": "tests/native/test_group.cpp:548"
     }
    ],
    "sim_only_label": "sim"
@@ -856,7 +877,7 @@
     {
      "class": "SIM",
      "test": "GS07 GS10 sim: the root fans out 64 APPLIED targets, cancel mid-way keeps the sent ones open, a late APPLIED improves an unknown result",
-     "at": "tests/native/test_group.cpp:528"
+     "at": "tests/native/test_group.cpp:548"
     }
    ],
    "sim_only_label": "sim"
@@ -871,7 +892,7 @@
     {
      "class": "SIM",
      "test": "GS11 sim: targets that cannot be routed step aside (WAIT_ROUTE) and do not starve the others; the partial result is kept",
-     "at": "tests/native/test_group.cpp:633"
+     "at": "tests/native/test_group.cpp:653"
     }
    ],
    "sim_only_label": "sim"
@@ -886,7 +907,7 @@
     {
      "class": "SIM",
      "test": "LP03 GS12 sim: a DURABLE report is journalled before the sleep, survives a deep sleep, converges once, no false success",
-     "at": "tests/native/test_power.cpp:1053"
+     "at": "tests/native/test_power.cpp:1059"
     }
    ],
    "sim_only_label": "sim"
@@ -931,7 +952,7 @@
     {
      "class": "SIM",
      "test": "test_root_reset_mid_operation_ends_indeterminate",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:186"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:247"
     },
     {
      "class": "SIM",
@@ -941,7 +962,7 @@
     {
      "class": "SIM",
      "test": "H03-sim reset and replug: old session results are never applied",
-     "at": "tests/native/test_serial.cpp:339"
+     "at": "tests/native/test_serial.cpp:346"
     }
    ],
    "sim_only_label": "sim"
@@ -955,38 +976,43 @@
    "software_evidence": [
     {
      "class": "SIM",
+     "test": "test_a_4k_object_to_the_root_reaches_the_host_and_later_events_still_flow",
+     "at": "host/tests/e2e/test_bridge_meshsim.py:125"
+    },
+    {
+     "class": "SIM",
      "test": "test_volatile_message_taken_by_the_bridge_is_sent_again_after_a_host_crash",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:121"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:182"
     },
     {
      "class": "SIM",
      "test": "test_host_crash_between_claim_and_send_is_never_resent",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:144"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:205"
     },
     {
      "class": "SIM",
      "test": "test_host_crash_after_send_reconciles_by_message_id",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:164"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:225"
     },
     {
      "class": "SIM",
      "test": "test_host_crash_after_join_decision_is_reconciled_by_get_request",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:307"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:368"
     },
     {
      "class": "SIM",
      "test": "test_cancel_of_an_unsent_message_is_exact",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:335"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:396"
     },
     {
      "class": "SIM",
      "test": "test_host_store_ack_names_the_assignment_of_the_message_it_releases",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:379"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:440"
     },
     {
      "class": "SIM",
      "test": "test_node_to_host_message_is_committed_before_the_root_hears_the_ack",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:82"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:83"
     },
     {
      "class": "SIM",
@@ -1055,13 +1081,18 @@
    "software_evidence": [
     {
      "class": "SIM",
+     "test": "J01 FIX8 sim: lm_get_request reports public phases: a completed join is FINAL",
+     "at": "tests/native/test_lifecycle.cpp:2390"
+    },
+    {
+     "class": "SIM",
      "test": "J01 sim: an unjoined device 19 hops from the root joins through the proxy chain",
-     "at": "tests/native/test_mesh.cpp:670"
+     "at": "tests/native/test_mesh.cpp:692"
     },
     {
      "class": "SIM",
      "test": "J01 sim: a tunnel record cannot capture the address of a real neighbour of the root",
-     "at": "tests/native/test_mesh.cpp:933"
+     "at": "tests/native/test_mesh.cpp:955"
     }
    ],
    "sim_only_label": "sim"
@@ -1076,17 +1107,17 @@
     {
      "class": "SIM",
      "test": "J02 policy: closed root offers nothing; preapproved refuses an unexpected device; foreign tickets never reach the root",
-     "at": "tests/native/test_join.cpp:578"
+     "at": "tests/native/test_join.cpp:674"
     },
     {
      "class": "SIM",
      "test": "J02 sim: a device started before its expected entry exists is not banned; the update lets it in",
-     "at": "tests/native/test_mesh.cpp:701"
+     "at": "tests/native/test_mesh.cpp:723"
     },
     {
      "class": "SIM",
      "test": "J02 sim: after the search budget the device asks again at once (no fixed ban), the update is honoured",
-     "at": "tests/native/test_mesh.cpp:724"
+     "at": "tests/native/test_mesh.cpp:746"
     }
    ],
    "sim_only_label": null
@@ -1101,7 +1132,7 @@
     {
      "class": "SIM",
      "test": "J03 sim: a forged offer (hint false positive) costs one bounded handshake and authorises nothing",
-     "at": "tests/native/test_mesh.cpp:744"
+     "at": "tests/native/test_mesh.cpp:766"
     }
    ],
    "sim_only_label": null
@@ -1116,17 +1147,27 @@
     {
      "class": "SIM",
      "test": "test_external_join_is_approved_through_the_host",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:214"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:275"
     },
     {
      "class": "SIM",
      "test": "test_host_crash_after_join_decision_is_reconciled_by_get_request",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:306"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:367"
+    },
+    {
+     "class": "SIM",
+     "test": "J04 FIX8 sim: lm_policy_set sets the join mode durably; CLOSED answers no joiner; a restart keeps it",
+     "at": "tests/native/test_join.cpp:525"
     },
     {
      "class": "SIM",
      "test": "J04 external approval: pending without a decision, no automatic approve; approve completes; timeout is retryable",
-     "at": "tests/native/test_join.cpp:515"
+     "at": "tests/native/test_join.cpp:611"
+    },
+    {
+     "class": "SIM",
+     "test": "J04 FIX8 sim: an approval given after a revocation issues nothing; the request ends refused",
+     "at": "tests/native/test_lifecycle.cpp:2309"
     }
    ],
    "sim_only_label": "sim"
@@ -1146,7 +1187,7 @@
     {
      "class": "SIM",
      "test": "J05 resume: an ACTIVE member restarts, links again without approval; the ledger does not change",
-     "at": "tests/native/test_join.cpp:400"
+     "at": "tests/native/test_join.cpp:402"
     }
    ],
    "sim_only_label": "sim"
@@ -1161,7 +1202,7 @@
     {
      "class": "SIM",
      "test": "J06 same request_id with other content is CONFLICT and never reserves a second address",
-     "at": "tests/native/test_join.cpp:479"
+     "at": "tests/native/test_join.cpp:575"
     }
    ],
    "sim_only_label": null
@@ -1176,7 +1217,7 @@
     {
      "class": "SIM",
      "test": "J07/LC06 JOIN_ACTIVE lost: the device is ACTIVE, the root stays unconfirmed, the next link converges by request evidence",
-     "at": "tests/native/test_join.cpp:618"
+     "at": "tests/native/test_join.cpp:714"
     }
    ],
    "sim_only_label": null
@@ -1264,13 +1305,23 @@
    "software_evidence": [
     {
      "class": "SIM",
+     "test": "test_a_control_the_root_refused_busy_is_retried_without_other_traffic",
+     "at": "host/tests/e2e/test_lifecycle_meshsim.py:117"
+    },
+    {
+     "class": "SIM",
      "test": "test_revoke_window_and_indeterminate_through_the_host",
-     "at": "host/tests/e2e/test_lifecycle_meshsim.py:50"
+     "at": "host/tests/e2e/test_lifecycle_meshsim.py:61"
     },
     {
      "class": "SIM",
      "test": "LC01 sim: commissioning window expiry - only inside it; a late decision is refused; the admitted member stays",
-     "at": "tests/native/test_lifecycle.cpp:1105"
+     "at": "tests/native/test_lifecycle.cpp:1276"
+    },
+    {
+     "class": "SIM",
+     "test": "LC01 FIX5 sim: an older or altered commissioning window never resets the budget; the same one resumes it",
+     "at": "tests/native/test_lifecycle.cpp:1964"
     }
    ],
    "sim_only_label": "sim"
@@ -1285,12 +1336,12 @@
     {
      "class": "SIM",
      "test": "LC02 sim: batch of 10 powered on at once - per-device evidence, no double reservation, exact budget, DATA flows",
-     "at": "tests/native/test_lifecycle.cpp:1150"
+     "at": "tests/native/test_lifecycle.cpp:1330"
     },
     {
      "class": "SIM",
      "test": "LC02 POWER sim: power cut at each commit of a window and a windowed join - the budget is never exceeded",
-     "at": "tests/native/test_lifecycle.cpp:1503"
+     "at": "tests/native/test_lifecycle.cpp:1769"
     }
    ],
    "sim_only_label": "sim"
@@ -1305,7 +1356,7 @@
     {
      "class": "SIM",
      "test": "LC03 sim: power-on before the plan - NOT_EXPECTED holds, the later revision is picked up, then it joins",
-     "at": "tests/native/test_lifecycle.cpp:1454"
+     "at": "tests/native/test_lifecycle.cpp:1720"
     }
    ],
    "sim_only_label": "sim"
@@ -1320,7 +1371,7 @@
     {
      "class": "SIM",
      "test": "LC04 sim: a factory membership gives no production access; only a production grant of a higher assignment",
-     "at": "tests/native/test_lifecycle.cpp:1477"
+     "at": "tests/native/test_lifecycle.cpp:1743"
     }
    ],
    "sim_only_label": "sim"
@@ -1335,12 +1386,12 @@
     {
      "class": "SIM",
      "test": "test_pending_approval_survives_device_sleep_and_host_restart_without_a_second_reservation",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:263"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:324"
     },
     {
      "class": "SIM",
      "test": "LC05 sim: a pending external request, the device restarts (deep sleep) and asks again with the same request id: one approval, one reservation",
-     "at": "tests/native/test_join.cpp:553"
+     "at": "tests/native/test_join.cpp:649"
     }
    ],
    "sim_only_label": "sim"
@@ -1355,12 +1406,12 @@
     {
      "class": "SIM",
      "test": "J07/LC06 JOIN_ACTIVE lost: the device is ACTIVE, the root stays unconfirmed, the next link converges by request evidence",
-     "at": "tests/native/test_join.cpp:618"
+     "at": "tests/native/test_join.cpp:714"
     },
     {
      "class": "SIM",
      "test": "LC06 JOIN_COMMIT lost: root ACTIVE, device only PREPARED; a repeated request (same id, same hash) converges",
-     "at": "tests/native/test_join.cpp:653"
+     "at": "tests/native/test_join.cpp:749"
     }
    ],
    "sim_only_label": "sim"
@@ -1374,8 +1425,13 @@
    "software_evidence": [
     {
      "class": "SIM",
-     "test": "LC07 sim: unacknowledged A-bound history is never sent to B as new data; it ends at its own deadline",
-     "at": "tests/native/test_lifecycle.cpp:1412"
+     "test": "LC07 sim: unacknowledged A-bound history is never sent to B as new data; it ends as A's history",
+     "at": "tests/native/test_lifecycle.cpp:1593"
+    },
+    {
+     "class": "SIM",
+     "test": "LC07 ARCH2 sim: a durable send accepted in A is never sent under the B assignment after both ends moved",
+     "at": "tests/native/test_lifecycle.cpp:1637"
     }
    ],
    "sim_only_label": "sim"
@@ -1389,18 +1445,28 @@
    "software_evidence": [
     {
      "class": "SIM",
+     "test": "LC08 sim: planned root handover - old root retires, members re-authenticate under the new delegation",
+     "at": "tests/native/test_lifecycle.cpp:1116"
+    },
+    {
+     "class": "SIM",
      "test": "LC08 POWER sim: power cut at each record-write boundary of a handover (device, new root) leaves old or new",
-     "at": "tests/native/test_lifecycle.cpp:1369"
+     "at": "tests/native/test_lifecycle.cpp:1549"
     },
     {
      "class": "SIM",
      "test": "LC08 POWER sim: power cut at the old root's retirement commit - retired or not; the object again completes it",
-     "at": "tests/native/test_lifecycle.cpp:1380"
+     "at": "tests/native/test_lifecycle.cpp:1560"
     },
     {
      "class": "SIM",
-     "test": "LC08 sim: planned root handover - old root retires, members re-authenticate under the new delegation",
-     "at": "tests/native/test_lifecycle.cpp:950"
+     "test": "LC08 FIX5 sim: a retirement whose read-back failed leaves the old root retired at once; the reload reconciles",
+     "at": "tests/native/test_lifecycle.cpp:1884"
+    },
+    {
+     "class": "SIM",
+     "test": "LC08 FIX5 sim: a same-root, non-increasing or stale-term handover is refused by old root, device and new root",
+     "at": "tests/native/test_lifecycle.cpp:1934"
     }
    ],
    "sim_only_label": "sim"
@@ -1415,7 +1481,7 @@
     {
      "class": "SIM",
      "test": "LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term must rise, a verified backup works",
-     "at": "tests/native/test_lifecycle.cpp:1000"
+     "at": "tests/native/test_lifecycle.cpp:1166"
     }
    ],
    "sim_only_label": "sim"
@@ -1430,7 +1496,7 @@
     {
      "class": "SIM",
      "test": "LC10 sim: old root reappears - refused by moved members, the unreached one not counted, retires on the object",
-     "at": "tests/native/test_lifecycle.cpp:1036"
+     "at": "tests/native/test_lifecycle.cpp:1204"
     }
    ],
    "sim_only_label": "sim"
@@ -1445,7 +1511,7 @@
     {
      "class": "SIM",
      "test": "LC11 sim: network reset keeps identity, fleet anchor, floors and boot counter; no rejoin without a new grant",
-     "at": "tests/native/test_lifecycle.cpp:1237"
+     "at": "tests/native/test_lifecycle.cpp:1417"
     }
    ],
    "sim_only_label": "sim"
@@ -1500,7 +1566,7 @@
     {
      "class": "SIM",
      "test": "LP02 sim: WINDOWED_RX cycles by itself, receives only after an authenticated poll, and is radio-off in between",
-     "at": "tests/native/test_power.cpp:739"
+     "at": "tests/native/test_power.cpp:745"
     }
    ],
    "sim_only_label": "sim"
@@ -1515,7 +1581,7 @@
     {
      "class": "SIM",
      "test": "LP03 GS12 sim: a DURABLE report is journalled before the sleep, survives a deep sleep, converges once, no false success",
-     "at": "tests/native/test_power.cpp:1053"
+     "at": "tests/native/test_power.cpp:1059"
     }
    ],
    "sim_only_label": "sim"
@@ -1560,7 +1626,7 @@
     {
      "class": "SIM",
      "test": "LP06 sim: 24 h without any parent: the radio time spent searching stays inside the hourly budget, the backoff grows",
-     "at": "tests/native/test_power.cpp:1101"
+     "at": "tests/native/test_power.cpp:1107"
     }
    ],
    "sim_only_label": "sim"
@@ -1575,7 +1641,7 @@
     {
      "class": "SIM",
      "test": "LP07 sim: unplanned wakes beyond the daily quota get no radio, no transmission, and say what was lost",
-     "at": "tests/native/test_power.cpp:1136"
+     "at": "tests/native/test_power.cpp:1142"
     }
    ],
    "sim_only_label": "sim"
@@ -1590,7 +1656,7 @@
     {
      "class": "SIM",
      "test": "LP08 LP09 sim: every session case of tests/power_golden.json gives the same answer in the spec model and in the engine",
-     "at": "tests/native/test_power.cpp:1261"
+     "at": "tests/native/test_power.cpp:1269"
     },
     {
      "class": "SIM",
@@ -1600,7 +1666,7 @@
     {
      "class": "SIM",
      "test": "LP08 sim: 1000 light-sleep wakes reuse the sessions: no EDHOC, monotone counters, a replayed poll changes nothing",
-     "at": "tests/native/test_power.cpp:895"
+     "at": "tests/native/test_power.cpp:901"
     }
    ],
    "sim_only_label": "sim"
@@ -1615,12 +1681,12 @@
     {
      "class": "SIM",
      "test": "LP08 LP09 sim: every session case of tests/power_golden.json gives the same answer in the spec model and in the engine",
-     "at": "tests/native/test_power.cpp:1261"
+     "at": "tests/native/test_power.cpp:1269"
     },
     {
      "class": "SIM",
      "test": "LP09 sim: after a deep sleep the node runs a fresh EDHOC, needs no new approval, and old SID/ciphertext are dead",
-     "at": "tests/native/test_power.cpp:946"
+     "at": "tests/native/test_power.cpp:952"
     }
    ],
    "sim_only_label": "sim"
@@ -1635,7 +1701,7 @@
     {
      "class": "SIM",
      "test": "LP10 sim: a parent that loses its mailbox is recovered by the origin sending the same MessageId again",
-     "at": "tests/native/test_power.cpp:846"
+     "at": "tests/native/test_power.cpp:852"
     }
    ],
    "sim_only_label": "sim"
@@ -1650,7 +1716,7 @@
     {
      "class": "SIM",
      "test": "LP11 sim: a 20-hop DURABLE report whose receipt is not back when the budget ends: original kept, same id next wake, no false success",
-     "at": "tests/native/test_power.cpp:1327"
+     "at": "tests/native/test_power.cpp:1335"
     }
    ],
    "sim_only_label": "sim"
@@ -1664,13 +1730,18 @@
    "software_evidence": [
     {
      "class": "SIM",
+     "test": "LP12 FIX5 sim: a renewal of a term older than the one the member lives in is never adopted",
+     "at": "tests/native/test_lifecycle.cpp:2119"
+    },
+    {
+     "class": "SIM",
      "test": "LP12 S18 sim: a lease that ran out while powered off is renewed, not restored; the membership stays",
-     "at": "tests/native/test_lifecycle.cpp:537"
+     "at": "tests/native/test_lifecycle.cpp:566"
     },
     {
      "class": "SIM",
      "test": "LP12 sim: sleeping past a key or authorization lifetime restores nothing; membership is never erased",
-     "at": "tests/native/test_power.cpp:985"
+     "at": "tests/native/test_power.cpp:991"
     }
    ],
    "sim_only_label": "sim"
@@ -1690,7 +1761,7 @@
     {
      "class": "SIM",
      "test": "LP13 sim: only the parent restarts; the leaf makes that one session again, no Join, no other handshake",
-     "at": "tests/native/test_power.cpp:1025"
+     "at": "tests/native/test_power.cpp:1031"
     }
    ],
    "sim_only_label": "sim"
@@ -1720,7 +1791,7 @@
     {
      "class": "SIM",
      "test": "C09/LP15 sim: a sleepy leaf misses two channel changes over 24 h; on wake it searches a bounded set and follows only the last plan",
-     "at": "tests/native/test_channel.cpp:544"
+     "at": "tests/native/test_channel.cpp:700"
     }
    ],
    "sim_only_label": "sim"
@@ -1735,7 +1806,7 @@
     {
      "class": "SIM",
      "test": "LP16 sim: a critical receiver that sleeps defers the plan; only an explicit deferred permission lets it go on",
-     "at": "tests/native/test_channel.cpp:576"
+     "at": "tests/native/test_channel.cpp:732"
     }
    ],
    "sim_only_label": "sim"
@@ -1789,7 +1860,7 @@
     {
      "class": "SIM",
      "test": "LP20 sim: without proven RTC continuity a cold boot starts with no budget left; a deep sleep with continuity keeps it",
-     "at": "tests/native/test_power.cpp:1178"
+     "at": "tests/native/test_power.cpp:1184"
     }
    ],
    "sim_only_label": "sim"
@@ -1804,7 +1875,7 @@
     {
      "class": "SIM",
      "test": "M01 sim: A off, the move to B commits; A reconciles later from the same ticket",
-     "at": "tests/native/test_lifecycle.cpp:703"
+     "at": "tests/native/test_lifecycle.cpp:869"
     }
    ],
    "sim_only_label": "sim"
@@ -1819,7 +1890,7 @@
     {
      "class": "SIM",
      "test": "M02 M03 sim: A -> B while A runs, never ACTIVE twice, A refused afterwards; then B -> A, old grants refused",
-     "at": "tests/native/test_lifecycle.cpp:619"
+     "at": "tests/native/test_lifecycle.cpp:785"
     }
    ],
    "sim_only_label": "sim"
@@ -1834,7 +1905,7 @@
     {
      "class": "SIM",
      "test": "M02 M03 sim: A -> B while A runs, never ACTIVE twice, A refused afterwards; then B -> A, old grants refused",
-     "at": "tests/native/test_lifecycle.cpp:619"
+     "at": "tests/native/test_lifecycle.cpp:785"
     }
    ],
    "sim_only_label": null
@@ -1849,7 +1920,7 @@
     {
      "class": "SIM",
      "test": "M04 sim: a revoked (lost) device is refused by its root and by a root that knows the fleet floor",
-     "at": "tests/native/test_lifecycle.cpp:734"
+     "at": "tests/native/test_lifecycle.cpp:900"
     }
    ],
    "sim_only_label": null
@@ -1864,7 +1935,7 @@
     {
      "class": "SIM",
      "test": "M05 sim: power cut at each record-write boundary of a transfer (device, B's root) leaves exactly old or new",
-     "at": "tests/native/test_lifecycle.cpp:877"
+     "at": "tests/native/test_lifecycle.cpp:1043"
     }
    ],
    "sim_only_label": "sim"
@@ -1884,7 +1955,17 @@
     {
      "class": "SIM",
      "test": "M06 leave: IMMEDIATE erases membership durably; DRAIN never turns into IMMEDIATE by itself; re-join uses a new generation",
-     "at": "tests/native/test_join.cpp:428"
+     "at": "tests/native/test_join.cpp:460"
+    },
+    {
+     "class": "SIM",
+     "test": "M06 FIX8 sim: three members leaving together are all Left at the root",
+     "at": "tests/native/test_lifecycle.cpp:2289"
+    },
+    {
+     "class": "SIM",
+     "test": "M06 FIX8 sim: a leave whose commit reported a failure stays left; the stored record decides its result",
+     "at": "tests/native/test_lifecycle.cpp:2414"
     }
    ],
    "sim_only_label": "sim"
@@ -1964,17 +2045,17 @@
     {
      "class": "SIM",
      "test": "ME05-style sim: an idle network with the channel module wakes its owners about once a minute more, never on a fixed tick",
-     "at": "tests/native/test_channel.cpp:761"
+     "at": "tests/native/test_channel.cpp:919"
     },
     {
      "class": "SIM",
      "test": "ME05 sim: an idle node with delivery state schedules no wakes",
-     "at": "tests/native/test_delivery.cpp:1555"
+     "at": "tests/native/test_delivery.cpp:1608"
     },
     {
      "class": "SIM",
      "test": "ME05 sim: diagnostics never poll - no query, no wake; a query costs at most one owner step and arms no timer",
-     "at": "tests/native/test_diag.cpp:144"
+     "at": "tests/native/test_diag.cpp:147"
     },
     {
      "class": "SIM",
@@ -2297,7 +2378,7 @@
     {
      "class": "SIM",
      "test": "test_node_to_host_message_is_committed_before_the_root_hears_the_ack",
-     "at": "host/tests/e2e/test_bridge_meshsim.py:83"
+     "at": "host/tests/e2e/test_bridge_meshsim.py:84"
     },
     {
      "class": "SIM",
@@ -2317,12 +2398,12 @@
     {
      "class": "HOST",
      "test": "test_capacity_protects_critical_events_and_rejects_with_507",
-     "at": "host/tests/integration/test_host_api.py:324"
+     "at": "host/tests/integration/test_host_api.py:327"
     },
     {
      "class": "HOST",
      "test": "test_real_database_full_is_507_and_never_a_false_202",
-     "at": "host/tests/integration/test_host_api.py:367"
+     "at": "host/tests/integration/test_host_api.py:370"
     }
    ],
    "sim_only_label": null
@@ -2347,7 +2428,7 @@
     {
      "class": "SIM",
      "test": "R01/C01-scale sim: a 21-node, 20-hop chain runs a full plan; every relay is required, READY / STORED / APPLIED come back over 20 hops",
-     "at": "tests/native/test_channel.cpp:778"
+     "at": "tests/native/test_channel.cpp:936"
     },
     {
      "class": "SIM",
@@ -2357,17 +2438,17 @@
     {
      "class": "SIM",
      "test": "R01 sim: 21 nodes / 20 hops cold boot form the whole mesh by themselves",
-     "at": "tests/native/test_mesh.cpp:396"
+     "at": "tests/native/test_mesh.cpp:400"
     },
     {
      "class": "SIM",
      "test": "R01 sim: delivery across the formed mesh, both directions, no static routes",
-     "at": "tests/native/test_mesh.cpp:420"
+     "at": "tests/native/test_mesh.cpp:424"
     },
     {
      "class": "SIM",
      "test": "R01 sim (model): formation with a slow worker, 150 ms per public-key job",
-     "at": "tests/native/test_mesh.cpp:624"
+     "at": "tests/native/test_mesh.cpp:646"
     }
    ],
    "sim_only_label": "sim"
@@ -2382,12 +2463,12 @@
     {
      "class": "SIM",
      "test": "R02 sim: 40 hops carry the end-session set-up, a 56-byte message and its receipt; a receipt with a result is fragmented",
-     "at": "tests/native/test_delivery.cpp:1528"
+     "at": "tests/native/test_delivery.cpp:1581"
     },
     {
      "class": "SIM",
      "test": "R02 sim: 41 nodes, root in the middle, 40-hop node-to-node delivery (56 B and 512 B)",
-     "at": "tests/native/test_mesh.cpp:450"
+     "at": "tests/native/test_mesh.cpp:454"
     }
    ],
    "sim_only_label": "sim"
@@ -2402,12 +2483,12 @@
     {
      "class": "NATIVE_UNIT",
      "test": "R03 simultaneous parent choice on old paths never closes a cycle",
-     "at": "tests/native/test_route.cpp:439"
+     "at": "tests/native/test_route.cpp:442"
     },
     {
      "class": "NATIVE_UNIT",
      "test": "R03 seeded model: stale/reordered/duplicated registers keep the approved tree simple",
-     "at": "tests/native/test_route.cpp:965"
+     "at": "tests/native/test_route.cpp:968"
     }
    ],
    "sim_only_label": null
@@ -2431,7 +2512,7 @@
     },
     {
      "class": "NATIVE_UNIT",
-     "test": "R04 forwarding: duplicate address, wrong peer, stale term, budget are dropped",
+     "test": "R04 forwarding: duplicate address, wrong peer, budget are dropped; another term is carried",
      "at": "tests/native/test_route.cpp:78"
     },
     {
@@ -2441,8 +2522,8 @@
     },
     {
      "class": "SIM",
-     "test": "R04 sim: a relay refuses a stale term and a wrong previous hop, and forwards nothing",
-     "at": "tests/native/test_delivery.cpp:998"
+     "test": "R04 sim: a relay refuses a wrong previous hop and forwards nothing; another term is carried, never accepted",
+     "at": "tests/native/test_delivery.cpp:1001"
     }
    ],
    "sim_only_label": null
@@ -2457,7 +2538,7 @@
     {
      "class": "SIM",
      "test": "R05 sim: diamond, the relay under a pending message dies, no flood, the same id arrives on the new path",
-     "at": "tests/native/test_mesh.cpp:640"
+     "at": "tests/native/test_mesh.cpp:662"
     }
    ],
    "sim_only_label": null
@@ -2472,17 +2553,17 @@
     {
      "class": "SIM",
      "test": "R06 sim: relay failure with a spare neighbour is repaired (traffic driven), delivery resumes",
-     "at": "tests/native/test_mesh.cpp:541"
+     "at": "tests/native/test_mesh.cpp:563"
     },
     {
      "class": "SIM",
      "test": "R06 sim: idle parent loss (no traffic) is found within the hello liveness bound",
-     "at": "tests/native/test_mesh.cpp:578"
+     "at": "tests/native/test_mesh.cpp:600"
     },
     {
      "class": "SIM",
      "test": "R06 sim: without the root, established paths and sessions keep carrying; a returning root re-admits everyone",
-     "at": "tests/native/test_mesh.cpp:593"
+     "at": "tests/native/test_mesh.cpp:615"
     }
    ],
    "sim_only_label": "sim"
@@ -2497,7 +2578,7 @@
     {
      "class": "SIM",
      "test": "R07 sim: 20 cold boots of the whole network converge again, memberships kept",
-     "at": "tests/native/test_mesh.cpp:484"
+     "at": "tests/native/test_mesh.cpp:488"
     }
    ],
    "sim_only_label": "sim"
@@ -2537,12 +2618,32 @@
     {
      "class": "SIM",
      "test": "R09 short address reuse: a departed device's address goes to another device; the old credential and session are refused",
-     "at": "tests/native/test_join.cpp:723"
+     "at": "tests/native/test_join.cpp:819"
+    },
+    {
+     "class": "SIM",
+     "test": "R09 FIX8 sim: a departed device whose slot was reused rejoins with a new grant above its own floor",
+     "at": "tests/native/test_lifecycle.cpp:2247"
+    },
+    {
+     "class": "SIM",
+     "test": "R09 FIX8 sim: a group keeps naming its departed member; its slot goes to nobody else until the group is edited",
+     "at": "tests/native/test_lifecycle.cpp:2341"
     },
     {
      "class": "SIM",
      "test": "R09 REV-20 sim: a reused address leaves no stale route at the root or at a member",
-     "at": "tests/native/test_lifecycle.cpp:567"
+     "at": "tests/native/test_lifecycle.cpp:633"
+    },
+    {
+     "class": "SIM",
+     "test": "R09 ARCH2 sim: a reused address drops the routes through it and keeps the others",
+     "at": "tests/native/test_lifecycle.cpp:683"
+    },
+    {
+     "class": "SIM",
+     "test": "R09 ARCH2 sim: a new membership generation at an address drops the routes through it",
+     "at": "tests/native/test_lifecycle.cpp:735"
     }
    ],
    "sim_only_label": null
@@ -2567,7 +2668,7 @@
     {
      "class": "SIM",
      "test": "R10 sim: stop with operations, an exchange job and a journal write in flight; nothing acts on a stopped engine",
-     "at": "tests/native/test_delivery.cpp:1567"
+     "at": "tests/native/test_delivery.cpp:1620"
     },
     {
      "class": "SIM",
@@ -2766,12 +2867,12 @@
     {
      "class": "SIM",
      "test": "S02 sim: end session set-up fails while the peer is unreachable, is retried, then the message goes out",
-     "at": "tests/native/test_delivery.cpp:1423"
+     "at": "tests/native/test_delivery.cpp:1458"
     },
     {
      "class": "SIM",
      "test": "S02 sim: both ends open an end session at once: one session, both messages delivered",
-     "at": "tests/native/test_delivery.cpp:1443"
+     "at": "tests/native/test_delivery.cpp:1478"
     },
     {
      "class": "SIM",
@@ -2791,7 +2892,7 @@
     {
      "class": "SIM",
      "test": "S03 sim: end session lifetime is one hour: an expired session is replaced, not reused",
-     "at": "tests/native/test_delivery.cpp:1480"
+     "at": "tests/native/test_delivery.cpp:1515"
     }
    ],
    "sim_only_label": "sim"
@@ -2891,12 +2992,32 @@
     {
      "class": "SIM",
      "test": "test_revoke_window_and_indeterminate_through_the_host",
-     "at": "host/tests/e2e/test_lifecycle_meshsim.py:49"
+     "at": "host/tests/e2e/test_lifecycle_meshsim.py:60"
+    },
+    {
+     "class": "SIM",
+     "test": "test_a_revocation_whose_entry_commit_failed_is_never_shown_active",
+     "at": "host/tests/e2e/test_lifecycle_meshsim.py:95"
     },
     {
      "class": "SIM",
      "test": "S06 sim: revocation proceeds without the target; its erasure is separate; in range the notice erases it",
-     "at": "tests/native/test_lifecycle.cpp:890"
+     "at": "tests/native/test_lifecycle.cpp:1056"
+    },
+    {
+     "class": "SIM",
+     "test": "S06 FIX5 sim: a revocation whose entry commit failed ends sessions and routes at once; the entry is blocked",
+     "at": "tests/native/test_lifecycle.cpp:2039"
+    },
+    {
+     "class": "SIM",
+     "test": "S06 FIX8 sim: ten routine leaves never use up revocation; the 11th member is revoked for good; so is an unlisted device",
+     "at": "tests/native/test_lifecycle.cpp:2213"
+    },
+    {
+     "class": "SIM",
+     "test": "S06 FIX8 sim: a revocation notice whose tombstone commit failed leaves the device revoked all the same",
+     "at": "tests/native/test_lifecycle.cpp:2440"
     }
    ],
    "sim_only_label": "sim"
@@ -2966,7 +3087,7 @@
     {
      "class": "SIM",
      "test": "S07 sim: a peer below the revocation floor gets no end session and no application frame",
-     "at": "tests/native/test_delivery.cpp:1463"
+     "at": "tests/native/test_delivery.cpp:1498"
     },
     {
      "class": "SIM",
@@ -3071,12 +3192,17 @@
     {
      "class": "SIM",
      "test": "S09-sim fake root is refused by the Host (foreign fleet, foreign domain) and a control run connects",
-     "at": "tests/native/test_serial.cpp:489"
+     "at": "tests/native/test_serial.cpp:496"
     },
     {
      "class": "SIM",
      "test": "S09-sim fake host is refused by the root (unpaired, foreign fleet, no pairing record)",
-     "at": "tests/native/test_serial.cpp:534"
+     "at": "tests/native/test_serial.cpp:541"
+    },
+    {
+     "class": "SIM",
+     "test": "S09-sim configure keeps the kit limits with views; the Host adapter loads one kit",
+     "at": "tests/native/test_serial.cpp:604"
     }
    ],
    "sim_only_label": "sim"

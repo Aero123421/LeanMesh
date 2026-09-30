@@ -56,9 +56,10 @@ def test_post_message_reaches_node_and_evidence_returns(bench: Callable[..., Ben
     # The node's application gets exactly the bytes the Host committed.
     ev = wait_for(lambda: (e := b.sim.ok("msg-next 1")["event"]) and e["kind"] == 2 and e, 30, "MESSAGE on the node")
     assert ev["payload"] == "01020304" and ev["port"] == 100
-    o = wait_for(lambda: (x := b.operation(op_id))["state"] == "WAITING_RECEIPT" and x, 30, "waiting for the result")
+    # Wait for the evidence itself: WAITING_RECEIPT is reached earlier (at the first hop's acceptance).
+    o = wait_for(lambda: "END_RECEIVED" in b.kinds(op_id) and b.operation(op_id), 30, "END_RECEIVED from the node")
     # Stored at the far end, application result still outstanding: never APPLIED yet.
-    assert o["outcome"] == "PENDING" and {"ROOT_ACCEPTED", "END_RECEIVED"} <= b.kinds(op_id)
+    assert o["state"] == "WAITING_RECEIPT" and o["outcome"] == "PENDING" and "ROOT_ACCEPTED" in b.kinds(op_id)
     assert "APP_APPLIED" not in b.kinds(op_id)
     assert b.sim.ok("msg-report 1 applied 0a0b")["status"] == "OK"
     done = wait_for(lambda: (x := b.operation(op_id))["outcome"] == "APPLIED" and x, 30, "APPLIED")
@@ -98,16 +99,18 @@ def test_node_to_host_message_is_committed_before_the_root_hears_the_ack(bench: 
     time.sleep(3)  # ample time: nothing may claim the Host stored it
     o = _node_op(b, op)
     assert not (o["evidence_bits"] & (1 << 4)) and o["outcome"] == 0, o
-    # The network keeps working without the Host: a volatile message to the root is confirmed by the root (its
-    # declared store is RAM), and nothing the Host has not committed is reported as committed.
+    # Without the Host nothing that is addressed to it is reported as stored, volatile messages included (FIX9-D6:
+    # every message with a receipt waits for the Host's DB commit, the root's RAM is not the declared store).
     now_ms = int(b.sim.ok("status")["now_us"]) // 1000
     vol = b.sim.ok(f"send 1 root received volatile 201 1 {now_ms + 120_000} 0a0b")["operation"]
-    wait_for(lambda: _node_op(b, vol)["evidence_bits"] & (1 << 4), 30, "volatile message confirmed without the Host")
+    time.sleep(3)
+    assert not (_node_op(b, vol)["evidence_bits"] & (1 << 4))
     assert not (_node_op(b, op)["evidence_bits"] & (1 << 4))
     b.start_host()
     b.await_root()
     o = wait_for(lambda: (x := _node_op(b, op))["evidence_bits"] & (1 << 4) and x, 40, "END_RECEIVED after the ACK")
     assert o["outcome"] == 1  # RECEIVED
+    wait_for(lambda: _node_op(b, vol)["evidence_bits"] & (1 << 4), 40, "the volatile message after the Host committed it")
     page = b.events()
     got = [e for e in page["events"] if e["kind"] == "MESSAGE_RECEIVED"]
     got = [e for e in got if base64.b64decode(e["payload_b64"]) == bytes.fromhex("c0ffee")]  # (+ the volatile one)
@@ -115,6 +118,64 @@ def test_node_to_host_message_is_committed_before_the_root_hears_the_ack(bench: 
     assert got[0]["origin"] == b.node and got[0]["evidence"]["assurance"] == "END_VERIFIED"
     assert len(db_rows(b.host.db, "SELECT 1 FROM inbox WHERE payload=?", bytes.fromhex("c0ffee"))) == 1  # not twice
     wait_for(lambda: b.sim.ok("serial-status")["bridge"]["ring_used"] == 0, 20, "root ring settled")
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("D08")
+@pytest.mark.scenario("H04")
+def test_a_4k_object_to_the_root_reaches_the_host_and_later_events_still_flow(bench: Callable[..., Bench]) -> None:
+    """FIX11 H11: the bridge's copy buffer was 512 B, so a 4096 B object's MESSAGE event could never be taken and
+    stayed at the head of the root's queue: no later event reached the Host."""
+    b = bench(34, flags=("--objects",))
+    b.link_and_routes()
+    b.start_host()
+    b.await_root()
+    now_ms = int(b.sim.ok("status")["now_us"]) // 1000
+    big = b.sim.ok(f"gen-send 1 0 received 100 1 {now_ms + 200_000} 4096 3 object")
+    assert big["status"] == "OK"
+
+    def got(size: int) -> list[dict]:  # type: ignore[type-arg]
+        return [e for e in b.events()["events"] if e["kind"] == "MESSAGE_RECEIVED"
+                and len(base64.b64decode(e["payload_b64"])) == size]
+
+    wait_for(lambda: got(4096) or None, 60, "the 4 KiB object at the Host")
+    # A normal event behind it is not held back.
+    small = b.sim.ok(f"send 1 root received volatile 201 1 {now_ms + 200_000} 0a0b")
+    assert small["status"] == "OK"
+    wait_for(lambda: got(2) or None, 30, "a later event behind the object")
+    wait_for(lambda: b.sim.ok("serial-status")["bridge"]["ring_used"] == 0, 20, "root ring settled")
+
+
+def _post_message(b: Bench, size: int, **extra: object) -> str:
+    body = {"domain_id": b.domain, "client_epoch": b.open_epoch(), "destination": {"kind": "node", "device_id": b.node},
+            "app_port": 100, "payload_b64": base64.b64encode((bytes(range(256)) * (size // 256 + 1))[:size]).decode(),
+            "delivery": "RECEIVED", "storage": "VOLATILE", "queue_mode": "FIFO", "priority": "NORMAL",
+            "deadline": {"mode": "utc", "expires_at": utc_in(120)}, **extra}
+    return str(b.post("/v1/messages", body)["id"])
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("D08")
+def test_fix11_object_send_from_the_host_reaches_the_node_and_strict_single_frame_is_honoured(
+        bench: Callable[..., Bench]) -> None:
+    """FIX11 #14/#15: object_transfer and strict_single_frame reach the root's core through the serial SEND."""
+    b = bench(35, flags=("--objects",))
+    b.link_and_routes()
+    b.start_host()
+    b.await_root()
+    op = _post_message(b, 4096, object_transfer=True)
+    done = wait_for(lambda: (x := b.operation(op))["outcome"] in ("RECEIVED", "REJECTED", "INDETERMINATE") and x, 90,
+                    "the 4 KiB object outcome")
+    assert done["outcome"] == "RECEIVED", done
+    ev = wait_for(lambda: (e := b.sim.ok("msg-next 1")["event"]) and e["kind"] == 2 and e, 30, "the object at the node")
+    assert len(ev["payload"]) == 2 * 4096 and ev["payload"].startswith("000102")
+    # A 512 B message that must not be fragmented does not fit the frame budget: refused, never split.
+    strict = _post_message(b, 512, strict_single_frame=True)
+    refused = wait_for(lambda: (x := b.operation(strict))["state"] == "FINAL" and x, 40, "the strict message ends")
+    assert refused["outcome"] == "REJECTED" and "PAYLOAD_TOO_LARGE" in str(refused["evidence"]), refused
+    # Without the option the same 512 B message is fragmented and delivered.
+    plain = _post_message(b, 512)
+    assert wait_for(lambda: (x := b.operation(plain))["outcome"] == "RECEIVED" and x, 60, "the fragmented message")
 
 
 @pytest.mark.e2e
@@ -464,7 +525,13 @@ def test_serial_methods_1_to_15_answer_typed_results_or_unsupported(
         # CANCEL: an operation number is valid only in the gateway boot that issued it.
         assert raw.call(4, [caps["gateway_boot"] + 1, op])[0] == NOT_FOUND
         st, _, cancelled = raw.call(4, [caps["gateway_boot"], op])
-        assert st == 0 and cancelled is not None and cancelled["outcome"] == 5  # CANCELLED_NOT_SENT
+        assert st == 0 and cancelled is not None  # accepted; a persisted durable send is retired first (FIX9-D2)
+
+        def cancelled_now() -> dict | None:  # type: ignore[type-arg]
+            _, _, s3 = raw.call(3, [caps["root"], caps["assignment"], mid, digest])
+            return s3 if s3 is not None and s3["outcome"] == 5 else None
+
+        assert wait_for(cancelled_now, 10, "CANCELLED_NOT_SENT once the retirement is durable")  # never earlier
         # JOIN_DECIDE, INSTALL_CONTROL, HOST_STORE_ACK, EVENT_ACK, GET_REQUEST.
         req_id = os.urandom(16)
         assert raw.call(5, [req_id, os.urandom(32), os.urandom(32), 1, 5])[0] == CONFLICT  # not the ledger revision
@@ -484,7 +551,10 @@ def test_serial_methods_1_to_15_answer_typed_results_or_unsupported(
         # operation of this gateway boot (a zero token means its own snapshot).
         assert raw.call(14, [1, 0, [os.urandom(32)]])[0] == NOT_FOUND and raw.call(14, [1, 0, [b"short"]])[0] == INVALID
         assert raw.call(14, [1, 5, []])[0] == CONFLICT and raw.call(14, [1, 0, []])[0] == 0
-        assert raw.call(14, [1, 0, []])[0] == CONFLICT  # now at revision 1
+        # The first set is still being committed on the root's worker (a slower, sanitized root answers BUSY meanwhile):
+        # ask again until the answer is definite; then the revision is 1 and the same expected revision conflicts.
+        again = wait_for(lambda: (r := raw.call(14, [1, 0, []])[0]) != 3 and [r], 20, "GROUP_SET settled")[0]  # 3 = BUSY
+        assert again == CONFLICT
         assert raw.call(15, [caps["gateway_boot"], 1, os.urandom(16), 0, 16])[0] == NOT_FOUND
         assert raw.call(15, [caps["gateway_boot"], 1, os.urandom(16), 0, 17])[0] == INVALID
     finally:

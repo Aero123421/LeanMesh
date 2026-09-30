@@ -327,7 +327,7 @@ def print_sizes(title: str, sizes: dict[str, dict[str, int]]) -> None:
 def head_info() -> dict:
     def g(*a):
         return subprocess.run(["git", "-C", str(REPO), *a], capture_output=True, text=True).stdout.strip()
-    return {"head": g("rev-parse", "--short", "HEAD"), "dirty": bool(g("status", "--porcelain"))}
+    return {"head": g("rev-parse", "--short", "HEAD"), "dirty": bool(g("status", "--porcelain", "--ignore-submodules=dirty"))}
 
 
 def main() -> int:
@@ -380,6 +380,31 @@ def main() -> int:
     return 0
 
 
+def summary_lines(r: dict) -> list[str]:
+    """One block at the top that states every overrun (RAM, flash, crypto, SLOC), so no summary can leave one out."""
+    soc = [(s, p, f) for s, profs in r["fixed_ram"].items() if s != "native-estimate" for p, f in profs.items()]
+    ram = [(s, p, f) for s, p, f in soc if f["verdict"] != "OK"]
+    native = [p for p, f in r["fixed_ram"].get("native-estimate", {}).items() if f["verdict"] != "OK"]
+    builds = r.get("idf", {}).get("builds", [])
+    flash = [b for b in builds if b.get("flash_verdict") not in (None, "OK")]
+    line = [b for b in flash if b["flash_verdict"] == "OVER-REVIEW-LINE"]
+    worst_ram = max(((f["total"] - f["target"], s, p) for s, p, f in ram), default=None)
+    worst_flash = max(((b["image_diff"] - TARGETS["flash"], b["target"], b["profile"]) for b in flash), default=None)
+    L = ["## Summary of overruns (budget state at this commit)", ""]
+    if soc:
+        L.append(f"- Fixed RAM over target: {len(ram)} of {len(soc)} SoC/profile builds" +
+                 (f" (worst +{worst_ram[0]} B, {worst_ram[1]} {str(worst_ram[2]).upper()})." if worst_ram else "."))
+    if native:
+        L.append(f"- Native estimate (sizeof + constants, not SoC evidence): {len(native)} of 3 profiles over target ({', '.join(p.upper() for p in native)}).")
+    if builds:
+        L.append(f"- Flash over the 256 KiB target: {len(flash)} of {len(builds)} builds, of which {len(line)} are also over the 320 KiB review line" +
+                 (f" (worst +{worst_flash[0]} B over 256 KiB, {worst_flash[1]} {str(worst_flash[2]).upper()})." if worst_flash else "."))
+    else:
+        L.append("- Flash: no IDF build was given to this run, so no flash figure is claimed.")
+    L.append(f"- Crypto peak: {r['crypto']['verdict']}; SDK SLOC: {r['sloc']['verdict']}.")
+    return L + [""]
+
+
 def render(r: dict, a) -> str:
     """Markdown; tables only carry measured numbers or say 'unknown'."""
     T = TARGETS
@@ -390,6 +415,7 @@ def render(r: dict, a) -> str:
          "`build-records/T01-baseline-size.json`. No heap, stack, CPU or current was measured on a SoC.", ""]
     if r.get("missing_socs"):
         L += [f"**This run lacks builds for: {', '.join(r['missing_socs'])}.**", ""]
+    L += summary_lines(r)
     L += ["## Fixed RAM (workspace + static DRAM of libleanmesh.a) vs revised targets", "",
           "| SoC | profile | fixed RAM B | target B | over B | verdict | basis |", "|---|---|---:|---:|---:|---|---|"]
     for soc, profs in r["fixed_ram"].items():

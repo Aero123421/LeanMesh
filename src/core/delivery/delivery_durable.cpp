@@ -152,11 +152,21 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
     if (req.op == DurableReq::Op::Retire) {
         const uint32_t rslot = req.id & 0x00FFFFFFU;
         if ((req.id & 0xFF000000U) == k_id_out && rslot < k_actives) {
-            if (st == Status::Ok || st == Status::NotFound) { // NotFound: never written, as good as retired
+            const bool retired = st == Status::Ok || st == Status::NotFound; // NotFound: never written, as good as retired
+            if (retired) {
                 d->out_retire_[rslot] = false;
                 d->out_j_[rslot] = false;
             } else {
                 d->retry_kick_ = earliest(d->retry_kick_, now + Duration::from_s(1)); // storage trouble: try again
+            }
+            if (d->out_cancel_op_[rslot] != 0) { // a cancelled send: its answer needs the retire (FIX9-D3)
+                if (Op *op = d->find_op(d->out_cancel_op_[rslot]); op != nullptr && op->phase != Phase::Final) {
+                    // A retire that failed leaves the record alive: it may come back after a restart, so the send
+                    // is neither "not sent" nor delivered as far as this node can tell (the retire is repeated).
+                    d->finalize(*op, retired ? LM_OUTCOME_CANCELLED_NOT_SENT : LM_OUTCOME_INDETERMINATE,
+                                retired ? 0U : static_cast<uint32_t>(st), now);
+                }
+                d->out_cancel_op_[rslot] = 0;
             }
         }
         return;
@@ -339,6 +349,11 @@ void Delivery::recovered_out(uint32_t slot, ByteView rec, MonoTime now) {
         recovering_ = false;
         engine_.raise(LM_EVENT_FAULT, static_cast<uint32_t>(Status::StorageFailure));
         return;
+    }
+    for (Op &old : ops_) { // a finished operation of the same message kept across the stop: the recovered one replaces it
+        if (&old != op && old.used && !old.report && old.dest == op->dest && to_bytes(old.mid) == mid) {
+            old = Op{};
+        }
     }
     op->evidence = ev::accepted | ev::persisted; // what the journal proves; nothing about sending
     op->accepted_ms = op->last_evidence_ms = now.to_ms();

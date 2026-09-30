@@ -138,6 +138,17 @@ class Power {
     // ---- hooks other modules call ----
     [[nodiscard]] Status admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now);
     [[nodiscard]] bool search_allowed(MonoTime now);
+    // ---- channel search of a battery node (FIX10-D3, docs/20 §8/§9) ----
+    [[nodiscard]] bool sleepy() const { return sleepy_mode(); }
+    // Radio time the episode's search may still spend without a parent (offline hour, search budget, episode end);
+    // UINT32_MAX on an always-on node. Asking changes nothing and emits nothing.
+    [[nodiscard]] uint32_t search_room_ms(MonoTime now);
+    // Where the channel search stopped (1..13, 0 = none): kept through a deep sleep with the budgets.
+    [[nodiscard]] uint8_t scan_cursor() const { return scan_cursor_; }
+    void set_scan_cursor(uint8_t channel) { scan_cursor_ = channel; }
+    // A boot that is a deliberate wake of a battery node (timer, window, external) does not listen first: that is for
+    // a mass power-on of nodes that all boot together (docs/20 §8), and it would eat the reference 1 s search budget.
+    [[nodiscard]] bool skips_listen() const { return sleepy_mode() && wake_reason_ != kColdBoot; }
     [[nodiscard]] bool handshake_allowed(MonoTime now) const;
     // parent side
     [[nodiscard]] bool deliverable(const MacAddr &mac, MonoTime now, bool first_send) const;
@@ -158,6 +169,9 @@ class Power {
     enum class WakeWait : uint8_t { None, Wait, Unreachable };
     [[nodiscard]] WakeWait target_wake(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now, MonoTime &at) const;
     [[nodiscard]] bool member_power(ShortAddr addr, MemberPower &out) const;
+    // The root's schedule view says this member sleeps by policy (fresh report of a mode other than ALWAYS_RX): a
+    // channel plan defers it instead of requiring it (FIX10-D2, docs/20 §9). Unknown = not sleepy.
+    [[nodiscard]] bool sleepy_member(ShortAddr addr, MonoTime now) const;
     // The root's wake estimate for a member, on the root clock (ms). quality per k_quality_*.
     [[nodiscard]] uint8_t next_wake(ShortAddr addr, uint64_t now_ms, uint64_t &earliest_ms, uint64_t &latest_ms) const;
 
@@ -307,6 +321,8 @@ class Power {
     bool ret_proven_ = false;
     uint64_t ret_elapsed_ms_ = 0;
     uint32_t search_used_ms_ = 0;
+    uint8_t scan_cursor_ = 0;
+    bool acct_attach_ = false; // the last accounted interval was a handshake with a parent: offline, but no search
     // tables
     std::array<Child, k_children> children_{};
     std::array<MemberPower, k_members> members_{};

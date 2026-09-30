@@ -8,7 +8,7 @@ request-params = nil / send / get-message / cancel / join-decide / install /
  node-query / group-query / host-ack / event-ack / channel-action / sleep-window / get-request / group-set / group-targets
  ; 16 DIAGNOSTICS takes nil (the root's own health, on request only)
 send = [destination: id32, message: id16, intent-hash: id32,
- app-port: 1..65534, flags: 0..31, root-term: u32, expires: u64,
+ app-port: 1..65534, flags: 0..63, root-term: u32, expires: u64,
  object-transfer: bool, payload: bstr .size (0..4096)]
 get-message = [origin: id32, assignment: u64, message: id16, intent-hash: id32]
 cancel = [operation-boot: u64, operation-id: u64]

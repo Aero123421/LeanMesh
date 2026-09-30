@@ -1536,13 +1536,31 @@ LM_TEST("D04 sim: a cancelled durable message is retired from the journal and do
     LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & persisted) != 0; }, 1000));
     LM_CHECK_EQ(n.dv(0).durable().live_count(), 1u);
     LM_CHECK_EQ(lm_cancel(n.ctx(0), s.op), LM_STATUS_OK);
-    LM_CHECK_EQ(n.op(0, s.op).outcome, static_cast<uint32_t>(LM_OUTCOME_CANCELLED_NOT_SENT));
+    LM_CHECK(n.op(0, s.op).outcome != LM_OUTCOME_CANCELLED_NOT_SENT); // FIX9-D3: not before the retire is durable
+    LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_CANCELLED_NOT_SENT; }, 1000));
     n.run_ms(100);
     LM_CHECK_EQ(n.dv(0).durable().live_count(), 0u);
     n.reboot(0);
     n.run_ms(100);
     LM_CHECK_EQ(n.dv(0).durable().live_count(), 0u); // nothing to resurrect
     LM_CHECK_EQ(n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(9, 16), 0).st, LM_STATUS_OK); // slot is free again
+}
+
+
+LM_TEST("FIX9-H6 sim: lm_cancel of a persisted durable send never claims CANCELLED_NOT_SENT while the journal record can still come back") {
+    DNet n(2);
+    n.set_time();
+    const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(8, 16), 0); // no route: waits, persisted
+    LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & persisted) != 0; }, 1000));
+    n.node(0).store.arm_cut(n.node(0).store.mutating_ops(), CutMode::Before); // the retire write dies
+    LM_CHECK_EQ(lm_cancel(n.ctx(0), s.op), LM_STATUS_OK);
+    LM_CHECK(n.op(0, s.op).outcome != LM_OUTCOME_CANCELLED_NOT_SENT);
+    n.run_ms(200);
+    LM_CHECK(n.node(0).store.cut_fired());
+    LM_CHECK(n.op(0, s.op).outcome != LM_OUTCOME_CANCELLED_NOT_SENT); // told INDETERMINATE (or still pending), never "not sent"
+    n.reboot(0);
+    n.run_ms(100);
+    LM_CHECK_EQ(n.dv(0).durable().live_count(), 1u); // the record did come back: the honest answer was not "not sent"
 }
 
 
@@ -1725,6 +1743,260 @@ LM_TEST("FIX4-D3 sim: a continuous stream of HOP_ACKs to answer cannot starve a 
     LM_CHECK(done);
     LM_CHECK(n.dv(0).hop_stats().acks_sent > 0u); // the ACKs were still served, just not without bound
     LM_CHECK(n.dv(0).hop_stats().acks_sent < queued_acks);
+}
+
+
+// ---- FIX9 (independent review) regression tests: MESSAGE events queued before lm_stop/lm_start ----
+namespace {
+struct RawEv {
+    lm_status_t st = LM_STATUS_OK;
+    lm_event_t ev{};
+    size_t required = 12345;
+    Bytes buf;
+};
+RawEv raw_next(DNet &n, unsigned i) {
+    RawEv r;
+    r.ev.struct_size = sizeof(r.ev);
+    r.ev.abi_version = LM_ABI_VERSION;
+    r.buf.assign(600, 0xEE);
+    r.st = lm_next_event(n.ctx(i), &r.ev, r.buf.data(), r.buf.size(), &r.required);
+    return r;
+}
+void opus_stale_event(uint32_t storage) {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    const Bytes body = payload_of(0x40, 30);
+    const auto s = n.send(0, 1, LM_RECEIVED, storage, body);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & end_received) != 0; }, 20000));
+    // The destination application has not taken the MESSAGE event yet; the application restarts the SDK.
+    lm_operation_id_t stop_op = 0;
+    LM_CHECK_EQ(lm_stop(n.ctx(1), 0, &stop_op), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_start(n.ctx(1)), LM_STATUS_OK);
+    n.node(1).notify();
+    n.run_ms(3000);
+    int messages = 0;
+    int gaps = 0;
+    for (int k = 0; k < 16; ++k) {
+        RawEv r = raw_next(n, 1);
+        if (r.st != LM_STATUS_OK) {
+            std::printf("  [opus] next_event -> status %d (end)\n", static_cast<int>(r.st));
+            break;
+        }
+        if (r.ev.kind != LM_EVENT_MESSAGE) {
+            gaps += r.ev.kind == LM_EVENT_GAP ? 1 : 0;
+            std::printf("  [opus] event kind %u reason %u\n", r.ev.kind, r.ev.reason);
+            continue;
+        }
+        ++messages;
+        const bool payload_ok = r.required == body.size() && std::memcmp(r.buf.data(), body.data(), body.size()) == 0;
+        std::printf("  [opus] MESSAGE #%d: payload_bytes=%u required=%zu reason=%u buf[0]=0x%02X payload_ok=%d\n",
+                    messages, r.ev.payload_bytes, r.required, r.ev.reason, r.buf[0], payload_ok ? 1 : 0);
+        // What the API promises: a MESSAGE event carries its payload (payload_bytes bytes were written).
+        LM_CHECK(r.required == r.ev.payload_bytes);
+        LM_CHECK(payload_ok);
+    }
+    // A volatile message does not survive the stop (docs/08): the queued event is withdrawn and one GAP tells so.
+    // A durable one comes back once, flagged recovered.
+    LM_CHECK_EQ(messages, storage == LM_DURABLE ? 1 : 0);
+    LM_CHECK_EQ(gaps, 1);
+}
+} // namespace
+
+LM_TEST("FIX9-H4a volatile MESSAGE event queued before lm_stop/lm_start keeps its payload or is withdrawn") {
+    opus_stale_event(LM_VOLATILE);
+}
+LM_TEST("FIX9-H4b durable MESSAGE event queued before lm_stop/lm_start is announced once with its payload") {
+    opus_stale_event(LM_DURABLE);
+}
+
+namespace {
+// An APPLIED send that reached the destination (END_RECEIVED) and waits for the application's result.
+struct StopFixture {
+    DNet n{2};
+    DNet::Sent s;
+    Received m;
+    StopFixture() {
+        n.set_time();
+        n.routes(0, 1);
+        s = n.send(0, 1, LM_APPLIED, LM_VOLATILE, payload_of(0x10, 30), 600000);
+        LM_CHECK_EQ(s.st, LM_STATUS_OK);
+        LM_CHECK(n.until([&] { return n.pop(1, m, LM_EVENT_MESSAGE); }, 20000));
+        LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & end_received) != 0; }, 20000));
+    }
+};
+int operation_events(DNet &n, unsigned i, lm_operation_id_t id, uint32_t &reason) {
+    int count = 0;
+    for (int k = 0; k < 32; ++k) {
+        RawEv r = raw_next(n, i);
+        if (r.st != LM_STATUS_OK) {
+            break;
+        }
+        if (r.ev.kind == LM_EVENT_OPERATION && r.ev.operation_id == id) {
+            ++count;
+            reason = r.ev.reason;
+        }
+    }
+    return count;
+}
+} // namespace
+
+LM_TEST("FIX9-M1a lm_stop without a drain: the open send gets its final event, and its outcome stays queryable") {
+    StopFixture f;
+    lm_operation_id_t drain = 777;
+    LM_CHECK_EQ(lm_stop(f.n.ctx(0), 0, &drain), LM_STATUS_OK);
+    LM_CHECK_EQ(drain, 0u); // stop completed inside the call
+    LM_CHECK_EQ(lm_start(f.n.ctx(0)), LM_STATUS_OK);
+    f.n.node(0).notify();
+    f.n.run_ms(2000);
+    const lm_operation_t o = f.n.op(0, f.s.op); // retained across the stop
+    LM_CHECK_EQ(o.phase, 3u);
+    LM_CHECK_EQ(o.outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE)); // the frame left: never "not delivered"
+    uint32_t reason = 0;
+    LM_CHECK_EQ(operation_events(f.n, 0, f.s.op, reason), 1);
+}
+
+LM_TEST("FIX9-M1b lm_stop with a drain: new sends wait out, the application answers in time, the send ends APPLIED, then it stops") {
+    StopFixture f;
+    lm_operation_id_t drain = 0;
+    LM_CHECK_EQ(lm_stop(f.n.ctx(0), 5000, &drain), LM_STATUS_OK);
+    LM_CHECK(drain != 0);
+    LM_CHECK_EQ(f.n.op(0, drain).phase, 1u); // draining
+    LM_CHECK_EQ(f.n.send(0, 1, LM_RECEIVED, LM_VOLATILE, payload_of(0x11, 8)).st, LM_STATUS_BUSY); // stopping
+    LM_CHECK_EQ(f.n.report(1, f.m.ev, LM_OUTCOME_APPLIED, Bytes{1}), LM_STATUS_OK);
+    LM_CHECK(f.n.until([&] { return f.n.op(0, drain).phase == 3u; }, 4000));
+    LM_CHECK_EQ(f.n.op(0, drain).outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED)); // nothing was left open
+    LM_CHECK_EQ(f.n.op(0, f.s.op).outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+    LM_CHECK_EQ(lm_stop(f.n.ctx(0), 0, &drain), LM_STATUS_OK); // already stopped
+}
+
+LM_TEST("FIX9-M1c lm_stop with a drain: at the deadline the unresolved send and the stop are INDETERMINATE") {
+    StopFixture f;
+    lm_operation_id_t drain = 0;
+    LM_CHECK_EQ(lm_stop(f.n.ctx(0), 2000, &drain), LM_STATUS_OK);
+    LM_CHECK(drain != 0);
+    f.n.run_ms(1500);
+    LM_CHECK_EQ(f.n.op(0, drain).phase, 1u); // still inside the deadline
+    LM_CHECK(f.n.until([&] { return f.n.op(0, drain).phase == 3u; }, 1500));
+    LM_CHECK_EQ(f.n.op(0, drain).outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE));
+    LM_CHECK_EQ(f.n.op(0, f.s.op).outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE)); // kept after the stop
+    uint32_t reason = 0;
+    LM_CHECK_EQ(operation_events(f.n, 0, f.s.op, reason), 1);
+    LM_CHECK_EQ(lm_destroy(f.n.ctx(0)), LM_STATUS_OK);
+}
+
+LM_TEST("FIX9-M2 lm_destroy while the identity load job still runs, then init again in the same workspace") {
+    DNet n(2, 31, false);
+    SimNode &nd = n.node(1);
+    lm_operation_id_t drain = 0;
+    LM_CHECK_EQ(lm_stop(nd.ctx(), 0, &drain), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_start(nd.ctx()), LM_STATUS_OK); // submits the identity load job (worker latency 2 ms)
+    LM_CHECK_EQ(lm_stop(nd.ctx(), 0, &drain), LM_STATUS_OK); // the load job is now a zombie
+    const bool ident_busy = nd.ctx()->engine.identity().busy();
+    const bool table_busy = nd.ctx()->engine.jobs_busy();
+    const lm_status_t d = lm_destroy(nd.ctx());
+    std::printf("  [opus] identity job in flight=%d job table busy=%d -> lm_destroy=%d\n", ident_busy ? 1 : 0,
+                table_busy ? 1 : 0, static_cast<int>(d));
+    // A job that still owns memory inside the context must keep lm_destroy BUSY (docs/IMPLEMENTATION §3 zombie rule).
+    LM_CHECK(!(ident_busy && d == LM_STATUS_OK));
+    LM_CHECK_EQ(d, LM_STATUS_BUSY);
+    n.run_ms(50); // the zombie job completes and is dropped: only then can the context go
+    LM_CHECK_EQ(lm_destroy(nd.ctx()), LM_STATUS_OK);
+    LM_CHECK_OK(nd.boot()); // the same workspace: the new LocalIdentity sits where the zombie job's arg points
+    LM_CHECK_EQ(lm_start(nd.ctx()), LM_STATUS_OK);
+    n.run_ms(200);
+    Engine &e = nd.ctx()->engine;
+    std::printf("  [opus] after re-init: stale job completions=%llu identity state=%d\n",
+                static_cast<unsigned long long>(e.stats().stale_job_completions), static_cast<int>(e.identity().state()));
+    LM_CHECK_EQ(e.stats().stale_job_completions, 0u);
+}
+
+LM_TEST("FIX9-H4c OPERATION event with an application result queued before lm_stop/lm_start") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    const auto s = n.send(0, 1, LM_APPLIED, LM_VOLATILE, payload_of(0x30, 12));
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    Received m;
+    LM_CHECK(n.until([&] { return n.pop(1, m, LM_EVENT_MESSAGE); }, 20000));
+    LM_CHECK_EQ(n.report(1, m.ev, LM_OUTCOME_APPLIED, Bytes{0xAA, 0xBB, 0xCC}), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_APPLIED; }, 10000));
+    // The origin application has not taken the OPERATION event (it carries the 3-byte result) and restarts the SDK.
+    lm_operation_id_t drain = 0;
+    LM_CHECK_EQ(lm_stop(n.ctx(0), 0, &drain), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_start(n.ctx(0)), LM_STATUS_OK);
+    n.node(0).notify();
+    n.run_ms(1000);
+    for (int k = 0; k < 16; ++k) {
+        RawEv r = raw_next(n, 0);
+        if (r.st != LM_STATUS_OK) {
+            break;
+        }
+        if (r.ev.kind == LM_EVENT_OPERATION && r.ev.operation_id == s.op) {
+            std::printf("  [opus] OPERATION op=%llu outcome/reason=%u payload_bytes=%u required=%zu buf[0]=0x%02X\n",
+                        static_cast<unsigned long long>(r.ev.operation_id), r.ev.reason, r.ev.payload_bytes, r.required,
+                        r.buf[0]);
+            LM_CHECK(r.required == r.ev.payload_bytes);
+        }
+    }
+}
+
+LM_TEST("FIX9-H5 PENDING application reports: operation slots at the destination") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    const std::size_t slots = delivery::k_ops;
+    unsigned pending_ok = 0;
+    for (std::size_t i = 0; i < slots + 2; ++i) {
+        const auto s = n.send(0, 1, LM_APPLIED, LM_VOLATILE, payload_of(static_cast<uint8_t>(i), 8), 600000);
+        LM_CHECK_EQ(s.st, LM_STATUS_OK);
+        Received m;
+        LM_CHECK(n.until([&] { return n.pop(1, m, LM_EVENT_MESSAGE); }, 20000));
+        const lm_status_t p = n.report(1, m.ev, LM_OUTCOME_PENDING, Bytes{});
+        const lm_status_t a = n.report(1, m.ev, LM_OUTCOME_APPLIED, Bytes{1});
+        pending_ok += p == LM_STATUS_OK ? 1U : 0U;
+        if (p != LM_STATUS_OK || a != LM_STATUS_OK) {
+            std::printf("  [opus] message %zu: PENDING report %d, APPLIED report %d\n", i, static_cast<int>(p),
+                        static_cast<int>(a));
+        }
+        n.run_ms(300);
+    }
+    const auto back = n.send(1, 0, LM_RECEIVED, LM_VOLATILE, payload_of(0x77, 8), 600000);
+    std::printf("  [opus] k_ops=%zu, PENDING reports accepted=%u; lm_send from the destination now -> %d\n", slots,
+                pending_ok, static_cast<int>(back.st));
+    LM_CHECK_EQ(back.st, LM_STATUS_OK);
+}
+
+namespace {
+// FIX9-M9: with the Host gate on (a root with a serial bridge), the origin hears END_RECEIVED only after the Host's
+// store acknowledgement, for every kind of message the Host is the terminal store of.
+void host_gated_end_received(uint32_t delivery, uint32_t storage) {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    n.dv(1).set_host_gate(true);
+    const auto s = n.send(0, 1, delivery, storage, payload_of(0x51, 20), 120000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    Received m;
+    LM_CHECK(n.until([&] { return n.pop(1, m, LM_EVENT_MESSAGE); }, 20000));
+    n.run_ms(5000);
+    LM_CHECK((n.op(0, s.op).evidence_bits & end_received) == 0); // stored in the root's RAM/journal only
+    delivery::HostStoreAckRequest ack;
+    std::memcpy(ack.origin.bytes.data(), m.ev.peer.bytes, 32);
+    ack.assignment = m.ev.origin_assignment_generation;
+    std::memcpy(ack.mid.data(), m.ev.message_id.bytes, 16);
+    std::memcpy(ack.hash.data(), m.ev.intent_hash, 32);
+    LM_CHECK_EQ(n.dv(1).host_store_ack(ack, n.now(1)), Status::Ok);
+    LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & end_received) != 0; }, 20000));
+}
+} // namespace
+
+LM_TEST("FIX9-M9 sim: a VOLATILE RECEIVED message to the Host is END_RECEIVED only after the Host's store ack") {
+    host_gated_end_received(LM_RECEIVED, LM_VOLATILE);
+}
+LM_TEST("FIX9-M9 sim: a DURABLE APPLIED message to the Host is END_RECEIVED only after the Host's store ack") {
+    host_gated_end_received(LM_APPLIED, LM_DURABLE);
 }
 
 LM_TEST_MAIN()

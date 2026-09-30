@@ -374,10 +374,13 @@ LM_TEST("API sim: lm_policy_get/set on the root (channel freeze, compare-and-set
     LM_CHECK_EQ(p.revision, 1u);
     LM_CHECK_EQ(p.channel_freeze, 1u);
     LM_CHECK_EQ(p.channel_automatic, 0u);
-    // A change that needs a signed policy object is refused, never applied: not a fake success.
-    lm_policy_t closed = p;
-    closed.join_mode = 0;
-    LM_CHECK_EQ(lm_policy_set(root, &closed, 1, &op), LM_STATUS_UNSUPPORTED);
+    // A change this build has no mechanism for is refused, never applied: not a fake success. (The join mode is a
+    // policy field since FIX8-D12: test_join "J04 FIX8"; two fields at once are refused.)
+    lm_policy_t both = p;
+    both.join_mode = 0;
+    both.channel_automatic = 1;
+    both.channel_freeze = 0;
+    LM_CHECK_EQ(lm_policy_set(root, &both, 1, &op), LM_STATUS_INVALID_ARGUMENT);
     lm_policy_t transfer = p;
     transfer.auto_transfer_on_isolation = 1;
     LM_CHECK_EQ(lm_policy_set(root, &transfer, 1, &op), LM_STATUS_UNSUPPORTED);
@@ -850,7 +853,7 @@ LM_TEST("C01 sim (automatic): two independent nodes losing frames on the home ch
 // without PREPARED, or the target channel; then the network finishes the plan.
 LM_TEST("POWER-* channel (sim): power cut before/torn/after every channel record write of a member leaves only allowed states") {
     const lmtest::CutTotals t = lmtest::cut_matrix(
-        "channel commit", {{1, "member"}}, [](unsigned target, uint64_t k, sim::CutMode mode) {
+        "channel commit", {{0, "root"}, {1, "member"}}, [](unsigned target, uint64_t k, sim::CutMode mode) {
             lmtest::CutRun out;
             CNet n(3, 81 + k);
             form(n);
@@ -876,11 +879,12 @@ LM_TEST("POWER-* channel (sim): power cut before/torn/after every channel record
                     LM_CHECK_EQ(n.chan(target).current(), 11);
                 }
             }
-            // Either the plan completes, or it timed out while the member was down and every node is still consistent
-            // on the old channel (ABORT): never a mixture.
+            // Either the plan completes, or it was never begun / timed out / was aborted after a restart and every node
+            // is still consistent on the old channel with no plan held anywhere (a root cut included: FIX10-H7).
             out.ok = n.until([&] {
                 return n.view().state == CState::Monitor &&
-                       (n.everyone_on(11, 1) || (n.everyone_on(6, 0) && n.view().why == Why::PrepareTimeout));
+                       (n.everyone_on(11, 1) ||
+                        (n.everyone_on(6, 0) && !n.chan(0).unsettled() && !n.chan(1).unsettled() && !n.chan(2).unsettled()));
             }, 1'500'000, 100);
             if (!out.ok) {
                 out.why = "the plan neither completed on the target channel nor aborted everyone back to the old one";
@@ -888,8 +892,9 @@ LM_TEST("POWER-* channel (sim): power cut before/torn/after every channel record
             }
             out.converged = out.ok && n.radio(0) == 11;
             return out;
-        }, 1, 9);
+        }, 0, 40);
     LM_CHECK(t.points >= 12);
+    LM_CHECK_EQ(t.truncated, 0u);
 }
 
 LM_TEST("C-switch sim: a message queued inside the guard of the switch is held, then delivered once under its own MessageId") {
@@ -1176,6 +1181,295 @@ LM_TEST("FIX3-14 sim: cooldown and the daily change count survive a root restart
     LM_CHECK_EQ(n.view().changes_24h, 1u);           // the change count is not reset by the restart
     LM_CHECK(n.view().cooldown_left_ms > 3'000'000u); // neither is the cooldown (the time the power was off is not counted)
     LM_CHECK(n.view().cooldown_left_ms <= left);
+}
+
+// ---- external review FIX10 (opus on 8668c69): every plan state has a bounded exit -------------------------------------
+
+namespace {
+// A durable send whose journal job holds the node's one record memory for `latency_us` (the channel record must wait).
+void hold_record_memory(CNet &n, unsigned node, unsigned to, uint64_t latency_us) {
+    n.node(node).jobs.latency_us = latency_us;
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_NODE;
+    std::memcpy(rq.destination.node.bytes, n.kits[to].kit.id.bytes.data(), 32);
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_DURABLE;
+    rq.priority = LM_PRIORITY_NORMAL;
+    rq.queue_mode = LM_FIFO;
+    const uint8_t payload[8] = {1};
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(node), &rq, payload, sizeof(payload), &op), LM_STATUS_OK);
+}
+} // namespace
+
+LM_TEST("FIX10-H7a sim: the root loses power in PREPARING after its own PREPARE is durable: on restart the plan is aborted and the network plans again") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.chan(0).mode() == channel::Mode::Prepared && n.chan(1).mode() == channel::Mode::Prepared; }, 200'000, 1));
+    LM_CHECK(n.view().state == CState::Preparing);
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.run_ms(3000);
+    n.boot(0);
+    LM_CHECK(n.until([&] { return n.chan(0).loaded() && n.ready(1) && n.ready(2); }, 600'000, 100));
+    // docs/05 §6: the plan is aborted (here after the restart, not after 120 s): the root, and the members it still knew
+    LM_CHECK(n.until([&] { return n.view().state == CState::Monitor && !n.chan(0).have_plan() && !n.chan(1).have_plan() && !n.chan(2).have_plan(); },
+                     300'000, 100));
+    LM_CHECK(n.chan(0).mode() == channel::Mode::Normal);
+    LM_CHECK(!n.chan(0).unsettled());
+    n.run_ms(1'900'000); // the abort cooldown (600 s) and the pacing are over
+    LM_CHECK_OK(n.coord().plan_to(1, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.radio(0) == 1 && n.radio(1) == 1 && n.radio(2) == 1 && n.view().state == CState::Monitor; }, 900'000, 100));
+}
+
+LM_TEST("FIX10-H7b sim: an ABORT that finds the root's record memory lent is kept and made durable") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.world.set_noise(2, 6, 1000); // node 2 never hears the PREPARE: the plan waits for its READY
+    n.poke();
+    LM_CHECK(n.until([&] { return n.chan(0).mode() == channel::Mode::Prepared && !n.chan(0).job_pending(); }, 200'000, 1));
+    hold_record_memory(n, 0, 1, 300'000); // the journal job holds the record memory for 300 ms
+    LM_CHECK_EQ(n.request(LM_CHANNEL_FREEZE, n.view().policy_revision), Status::Ok);
+    n.run_ms(2000);
+    n.node(0).jobs.latency_us = 2000;
+    n.world.clear_noise();
+    LM_CHECK(n.until([&] { return n.view().state == CState::Monitor; }, 120'000, 10));
+    LM_CHECK(n.chan(0).mode() == channel::Mode::Normal); // not PREPARED for good
+    LM_CHECK(!n.chan(0).unsettled());
+    LM_CHECK_EQ(n.request(LM_CHANNEL_AUTO, n.view().policy_revision), Status::Ok);
+    n.run_ms(1'900'000);
+    LM_CHECK_OK(n.coord().plan_to(1, n.now(0)));
+}
+
+LM_TEST("FIX10-H7c sim: an ABORT that arrives while a member is still writing its PREPARED record is applied once that write is durable") {
+    CNet n(3);
+    form(n);
+    n.node(1).jobs.latency_us = 9'000'000; // very slow Flash on the members: the PREPARED write takes 9 s
+    n.node(2).jobs.latency_us = 9'000'000;
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.chan(1).job_pending() && n.chan(2).job_pending(); }, 200'000, 1));
+    LM_CHECK_EQ(n.request(LM_CHANNEL_FREEZE, n.view().policy_revision), Status::Ok);
+    n.run_ms(15'000);
+    n.node(1).jobs.latency_us = 2000;
+    n.node(2).jobs.latency_us = 2000;
+    LM_CHECK(n.until([&] { return n.view().state == CState::Monitor; }, 120'000, 10));
+    LM_CHECK(n.until([&] { return !n.chan(1).unsettled() && !n.chan(2).unsettled(); }, 60'000, 100)); // a PREPARED plan vetoes every sleep ticket
+    LM_CHECK(!n.chan(1).have_plan() && !n.chan(2).have_plan());
+}
+
+LM_TEST("FIX10-H7d sim: a member whose root disappeared after its PREPARE drops the plan by itself (bounded, never a COMMITTED one)") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.chan(1).mode() == channel::Mode::Prepared && n.chan(2).mode() == channel::Mode::Prepared; }, 200'000, 1));
+    n.node(0).power_cut(); // no ABORT, no COMMIT will ever come
+    LM_CHECK(n.chan(1).unsettled());
+    LM_CHECK(n.until([&] { return !n.chan(1).unsettled() && !n.chan(2).unsettled(); }, 700'000, 1000));
+    LM_CHECK(!n.chan(1).have_plan());
+    LM_CHECK_EQ(n.radio(1), 6); // PREPARED only: never a switch
+    LM_CHECK_EQ(n.chan(1).epoch().value(), 0u);
+}
+
+LM_TEST("FIX10-H8 sim: a freeze during the root's own COMMIT write does not make the root switch alone; the view says what happened") {
+    CNet n(3);
+    form(n);
+    n.node(0).jobs.latency_us = 300'000; // the root's Flash writes take 300 ms (widens the window)
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] {
+        const auto v = n.view();
+        return v.state == CState::Preparing && v.ready == v.required && v.required != 0 && n.chan(0).mode() == channel::Mode::Prepared &&
+               n.chan(0).job_pending();
+    }, 400'000, 1));
+    LM_CHECK_EQ(n.request(LM_CHANNEL_FREEZE, n.view().policy_revision), Status::Ok);
+    n.node(0).jobs.latency_us = 2000;
+    uint64_t alone_ms = 0;
+    for (int i = 0; i < 3000; ++i) {
+        n.run_ms(100);
+        alone_ms += (n.radio(0) != n.radio(1)) ? 100U : 0U;
+    }
+    const auto v = n.view();
+    std::printf("  H8: root on %u, node 1 on %u, state %u why %u, commits %u aborts %u, skew %llu ms\n", n.radio(0), n.radio(1),
+                (unsigned)v.state, (unsigned)v.why, n.coord().stats().commits, n.coord().stats().aborts, (unsigned long long)alone_ms);
+    // Either the plan was aborted everywhere, or (the root's COMMIT was already being written) it is followed to its end.
+    // Never a root that switched while the coordinator reports an abort.
+    if (n.radio(0) == 11) {
+        LM_CHECK(n.everyone_on(11, 1));
+        LM_CHECK(v.state != CState::Aborted && !(v.state == CState::Monitor && v.why == Why::Frozen));
+        LM_CHECK(v.stored != 0 && n.coord().stats().commits == 1);
+    } else {
+        LM_CHECK(n.everyone_on(6, 0));
+        LM_CHECK(v.state == CState::Monitor && v.why == Why::Frozen);
+    }
+    LM_CHECK(alone_ms <= 3000u); // (the switch skew of a plan is inside its guard of 2 x error + drain, never a lone root)
+    LM_CHECK(v.frozen);
+}
+
+LM_TEST("FIX10-M11a sim: a deferred sleeper that wakes after a root restart learns the network's channel AND epoch") {
+    CNet n(3);
+    form(n);
+    n.coord().set_sleepy(ShortAddr{n.addrs[2]}, true);
+    n.node(2).power_cut();
+    n.node(2).store.power_restore();
+    n.run_ms(5000);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.view().state == CState::Monitor && n.view().why == Why::Moved; }, 500'000, 50));
+    n.node(0).power_cut(); // a mains outage while the sleeper still sleeps
+    n.node(0).store.power_restore();
+    n.run_ms(3000);
+    n.boot(0);
+    LM_CHECK(n.until([&] { return n.ready(1) && n.chan(0).loaded() && n.radio(0) == 11; }, 600'000, 100));
+    n.run_ms(60'000);
+    n.boot(2);
+    LM_CHECK(n.until([&] { return n.ready(2) && n.radio(2) == 11; }, 360'000, 100));
+    LM_CHECK(n.until([&] { return n.chan(2).current() == 11 && n.chan(2).epoch().value() == 1; }, 60'000, 100));
+    LM_CHECK(n.until([&] { return !n.chan(2).unsettled(); }, 30'000, 100));
+    // its next cold boot starts where the network is
+    n.node(2).power_cut();
+    n.node(2).store.power_restore();
+    n.run_ms(1000);
+    n.boot(2);
+    n.run_ms(200);
+    LM_CHECK_EQ(n.radio(2), 11);
+    LM_CHECK(n.until([&] { return n.ready(2); }, 60'000, 50));
+}
+
+LM_TEST("FIX10-M11b sim: RECOVERING ends by its time bound when a required member never confirms: MONITOR with the reason 'partial', the sets stay visible") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] {
+        const auto v = n.view();
+        return v.state == CState::Preparing && v.ready == v.required && v.required != 0;
+    }, 200'000, 1));
+    n.world.set_noise(2, 6, 1000);
+    n.world.set_noise(2, 11, 1000);
+    LM_CHECK(n.until([&] { return n.view().state == CState::Recovering; }, 600'000, 50));
+    n.node(2).power_cut(); // the relay is gone for good
+    n.world.clear_noise();
+    LM_CHECK(n.until([&] { return n.view().state == CState::Monitor; }, 3'600'000, 1000));
+    const auto v = n.view();
+    LM_CHECK(v.why == Why::Partial);
+    LM_CHECK((v.required & ~v.applied) != 0); // not called a success
+    LM_CHECK_EQ(n.radio(0), 11);
+    LM_CHECK_EQ(n.radio(1), 11);
+}
+
+LM_TEST("FIX10-L1 sim: a freeze is reported with an operation that completes when the record is durable") {
+    CNet n(3);
+    form(n);
+    n.node(0).jobs.latency_us = 300'000;
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_channel_request(n.ctx(0), LM_CHANNEL_FREEZE, n.view().policy_revision, &op), LM_STATUS_OK);
+    n.poke();
+    LM_CHECK(op != 0);
+    auto seen = [&] {
+        unsigned found = 0;
+        lm_event_t ev{};
+        std::array<uint8_t, 600> buf{};
+        for (;;) {
+            ev.struct_size = sizeof(ev);
+            ev.abi_version = LM_ABI_VERSION;
+            size_t req = 0;
+            if (lm_next_event(n.ctx(0), &ev, buf.data(), buf.size(), &req) != LM_STATUS_OK) {
+                return found;
+            }
+            found += (ev.kind == LM_EVENT_OPERATION && ev.operation_id == op && ev.reason == 0) ? 1U : 0U;
+        }
+    };
+    n.run_ms(100);
+    LM_CHECK_EQ(seen(), 0u); // the write is not done: not reported as durable
+    n.run_ms(1500);
+    LM_CHECK_EQ(seen(), 1u);
+    // a power cut after the report finds the freeze
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.node(0).jobs.latency_us = 2000;
+    n.boot(0);
+    LM_CHECK(n.until([&] { return n.chan(0).loaded(); }, 60'000, 50));
+    LM_CHECK(n.view().frozen);
+}
+
+// ---- external review FIX10 (astra on 8668c69): an uncertain write is reconciled before anything is written over it -------
+
+namespace {
+unsigned durable_phase(CNet &n, unsigned node) {
+    store::RecordJob rec;
+    rec.arm(store::RecordJob::Op::Load, store::rec::channel_plan);
+    LM_CHECK_OK(store::record_load(n.node(node).store, rec));
+    return rec.state;
+}
+} // namespace
+
+LM_TEST("FIX10-A4a sim: a COMMIT write that took effect but reported an error is not overwritten by an ABORT") {
+    CNet n(3);
+    form(n);
+    auto &c = n.chan(1);
+    channel::Plan p;
+    n.eng(1).random(MutByteView{p.id.bytes});
+    p.term = n.eng(1).identity().member().root_term;
+    p.epoch = ChannelEpoch{c.epoch().value() + 1};
+    p.old_ch = n.radio(1);
+    p.new_ch = 11;
+    p.switch_root_ms = n.at_ms() + 3'600'000;
+    p.max_err_ms = 2000;
+    p.settle_ms = 60000;
+    p.policy_rev = 4;
+    p.participants[0] = 0x77;
+    auto send = [&](channel::Phase ph) {
+        LM_CHECK(n.until([&] { return !c.job_pending(); }, 5000, 5));
+        channel::PlanRec r;
+        r.phase = ph;
+        r.plan = p;
+        LM_CHECK_OK(c.local_plan(r, n.now(1)));
+        LM_CHECK(n.until([&] { return !c.job_pending(); }, 5000, 5));
+    };
+    send(channel::Phase::Prepare);
+    LM_CHECK(c.have_plan() && !c.committed());
+    sim::SimStore &st = n.node(1).store;
+    st.arm_cut(st.mutating_ops() + 1, CutMode::After); // the write takes effect, the owner is told StorageFailure
+    send(channel::Phase::Commit);
+    LM_CHECK(st.cut_fired());
+    st.power_restore();
+    LM_CHECK(n.until([&] { return !c.job_pending() && c.committed(); }, 5000, 5));
+    LM_CHECK_EQ(durable_phase(n, 1), 2u);
+    LM_CHECK(c.committed()); // memory follows what is durable
+    send(channel::Phase::Abort);
+    LM_CHECK_EQ(durable_phase(n, 1), 2u); // a committed plan cannot be aborted
+    LM_CHECK(c.committed());
+}
+
+LM_TEST("FIX10-A4b sim: the root's own COMMIT write that reported an error is followed, not timed out into PREPARED") {
+    CNet n(3);
+    form(n);
+    auto &c = n.chan(0);
+    sim::SimStore &st = n.node(0).store;
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return c.have_plan() && !c.committed() && n.view().ready == n.view().required; }, 10'000, 1));
+    st.arm_cut(st.mutating_ops() + 1, CutMode::After);
+    LM_CHECK(n.until([&] { return st.cut_fired(); }, 10'000, 1));
+    st.power_restore();
+    LM_CHECK_EQ(durable_phase(n, 0), 2u);
+    st.arm_cut(st.mutating_ops(), CutMode::Before); // and every later write fails until the store is restored
+    n.run_ms(121'000);                              // ... through the prepare timeout
+    st.power_restore();
+    n.poke();
+    n.run_ms(2000);
+    LM_CHECK_EQ(durable_phase(n, 0), 2u); // never PREPARED again from stale memory
+    LM_CHECK(n.view().state != CState::Aborted && !(n.view().state == CState::Monitor && n.view().why == Why::PrepareTimeout));
+    LM_CHECK(n.until([&] { return n.everyone_on(11, 1); }, 600'000, 100));
 }
 
 LM_TEST_MAIN()

@@ -317,6 +317,11 @@ class Exchange {
     [[nodiscard]] bool busy() const {
         return (phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_ || slot_lent_ || usb_reserved_;
     }
+    // FIX8-D13: a JoinInit verify job (running, or the zombie of a cancelled join) may still write `out` (the joiner's
+    // JoinPeerOut): its owner must not touch it meanwhile.
+    [[nodiscard]] bool writes_join_out(const JoinPeerOut *out) const {
+        return out != nullptr && join_out_ == out && job_ == Job::Verify && mode_ == Mode::JoinInit;
+    }
     // A worker job still runs on the exchange's memory (also after stop(): lm_destroy must wait).
     [[nodiscard]] bool job_pending() const { return job_ != Job::None || slot_lent_; }
     [[nodiscard]] Phase phase() const { return phase_; }

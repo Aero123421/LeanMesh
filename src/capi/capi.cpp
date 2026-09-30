@@ -100,17 +100,20 @@ lm_status_t lm_start(lm_context_t *ctx) {
     return to_abi(lm::capi::call(ctx, lm::CommandKind::Start).status);
 }
 
-// Decision: without pending operations stop completes inside the call; *operation is then 0,
-// which is not a valid operation id (delivery slices return a real drain operation).
-lm_status_t lm_stop(lm_context_t *ctx, uint32_t /*drain_ms*/, lm_operation_id_t *operation) {
+// Decision (FIX9-D4/D8): with nothing open or drain_ms == 0, stop completes inside the call and *operation is 0 (not a
+// valid operation id). Otherwise new sends are refused (BUSY), the open ones get drain_ms to end, and *operation is the
+// stop itself: lm_get_operation / an OPERATION event report APPLIED (all ended in time) or INDETERMINATE (cut short;
+// whatever was still open ended INDETERMINATE or CANCELLED_NOT_SENT with its own final event). Finished operations stay
+// queryable after the stop; a durable message comes back after lm_start as a recovered one.
+lm_status_t lm_stop(lm_context_t *ctx, uint32_t drain_ms, lm_operation_id_t *operation) {
     if (!lm::capi::valid_ctx(ctx)) {
         return to_abi(Status::InvalidArgument);
     }
-    const Status s = lm::capi::call(ctx, lm::CommandKind::Stop).status;
-    if (s == Status::Ok && operation != nullptr) {
-        *operation = 0;
+    const lm::Reply r = lm::capi::call(ctx, lm::CommandKind::Stop, &drain_ms, sizeof(drain_ms));
+    if (r.status == Status::Ok && operation != nullptr) {
+        *operation = r.operation_id;
     }
-    return to_abi(s);
+    return to_abi(r.status);
 }
 
 // MESSAGE events carry their payload; an OPERATION event carries the application result (<= 32 B).

@@ -61,16 +61,18 @@ class OutboxItem:
 
 
 def claim(conn: sqlite3.Connection, cfg: Settings, adapter_incarnation: bytes,
-          limit: int = 16) -> list[OutboxItem]:
+          limit: int = 16, domain: bytes | None = None) -> list[OutboxItem]:
     """Takes due QUEUED entries, oldest first. Expired UTC deadlines are finalised as EXPIRED and
     never sent (the deadline is checked before the first transmission). Each returned entry is
-    marked external_write_possible so that a crash after this commit is reconciled, not re-sent."""
+    marked external_write_possible so that a crash after this commit is reconciled, not re-sent.
+    With `domain` only that domain's entries are taken: the connected root serves one domain (FIX11-D14)."""
     items: list[OutboxItem] = []
     rows = conn.execute(
         "SELECT o.id,o.domain,o.type,o.request_json,o.payload,o.target_device,o.message_id,"
         "o.expiry_utc_ms,b.attempts FROM outbox b JOIN operations o ON o.id=b.operation "
-        "WHERE b.state='QUEUED' AND (b.next_attempt_utc_ms IS NULL OR b.next_attempt_utc_ms<=?) "
-        "ORDER BY o.created_utc_ms, o.id LIMIT ?", (now_ms(), limit)).fetchall()
+        "WHERE b.state='QUEUED' AND (b.next_attempt_utc_ms IS NULL OR b.next_attempt_utc_ms<=:now) "
+        "AND (:domain IS NULL OR o.domain=:domain) ORDER BY o.created_utc_ms, o.id LIMIT :limit",
+        {"now": now_ms(), "domain": domain, "limit": limit}).fetchall()
     for op, domain, typ, req_json, payload, target, mid, expiry, attempts in rows:
         op, domain = bytes(op), bytes(domain)
         if expiry is not None and expiry <= now_ms():
@@ -108,19 +110,21 @@ def release_unwritten(conn: sqlite3.Connection, cfg: Settings, op_id: bytes) -> 
     conn.execute("UPDATE operations SET state='HOST_COMMITTED' WHERE id=?", (op_id,))
 
 
-def pending_reconcile(conn: sqlite3.Connection) -> list[tuple[bytes, bytes | None]]:
+def pending_reconcile(conn: sqlite3.Connection, domain: bytes | None = None) -> list[tuple[bytes, bytes | None]]:
     """(operation, message_id) that were possibly written before a Host restart. Do NOT re-send:
-    query the root by MessageId; with no answer record INDETERMINATE."""
+    query the root by MessageId; with no answer record INDETERMINATE. Only the connected root's domain
+    is asked (FIX11-D14): another domain's root cannot vouch for these."""
     return [(bytes(o), bytes(m) if m is not None else None) for o, m in conn.execute(
         "SELECT b.operation,o.message_id FROM outbox b JOIN operations o ON o.id=b.operation "
-        "WHERE b.state='RECONCILE'")]
+        "WHERE b.state='RECONCILE' AND (:domain IS NULL OR o.domain=:domain)", {"domain": domain})]
 
 
-def cancel_requests(conn: sqlite3.Connection) -> list[bytes]:
-    """Operations whose owner asked to cancel while they may already be on the wire."""
+def cancel_requests(conn: sqlite3.Connection, domain: bytes | None = None) -> list[bytes]:
+    """Operations whose owner asked to cancel while they may already be on the wire (of `domain` if given)."""
     return [bytes(r[0]) for r in conn.execute(
-        "SELECT o.id FROM operations o WHERE o.state!='FINAL' AND EXISTS "
-        "(SELECT 1 FROM json_each(o.evidence_json) WHERE json_extract(value,'$.kind')='HOST_CANCEL_REQUESTED')")]
+        "SELECT o.id FROM operations o WHERE o.state!='FINAL' AND (:domain IS NULL OR o.domain=:domain) AND EXISTS "
+        "(SELECT 1 FROM json_each(o.evidence_json) WHERE json_extract(value,'$.kind')='HOST_CANCEL_REQUESTED')",
+        {"domain": domain})]
 
 
 def record(conn: sqlite3.Connection, cfg: Settings, op_id: bytes, *, state: str | None = None,

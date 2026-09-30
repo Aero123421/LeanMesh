@@ -71,6 +71,25 @@ def _prune_epochs(conn: sqlite3.Connection, cfg: Settings) -> int:
     return len(old)
 
 
+def prune_finished(conn: sqlite3.Connection, cfg: Settings, limit: int = 64) -> int:
+    """Bounded retention of terminal operations (FIX11-D8): a FINAL operation of an epoch that was closed more than
+    cfg.operation_retention_ms ago is deleted with its outbox row and group targets; journal events stay (they have
+    their own retention and consumer pins) and only lose their operation link. A replay of its Idempotency-Key then
+    meets a closed epoch (410 EPOCH_CLOSED): the window in which a replay returns the stored result is that
+    retention, and a pruned operation can never be sent a second time."""
+    old = conn.execute(
+        "SELECT o.id FROM operations o JOIN client_epochs e ON e.id=o.client_epoch "
+        "WHERE o.state='FINAL' AND e.state='CLOSED' AND e.closed_utc_ms<=? LIMIT ?",
+        (now_ms() - cfg.operation_retention_ms, limit)).fetchall()
+    for (op,) in old:
+        conn.execute("UPDATE operations SET superseded_by=NULL WHERE superseded_by=?", (op,))
+        conn.execute("UPDATE events SET operation=NULL WHERE operation=?", (op,))
+        conn.execute("DELETE FROM group_targets WHERE operation=?", (op,))
+        conn.execute("DELETE FROM outbox WHERE operation=?", (op,))
+        conn.execute("DELETE FROM operations WHERE id=?", (op,))
+    return len(old)
+
+
 def close_epoch(conn: sqlite3.Connection, principal: str, epoch: bytes) -> dict[str, str]:
     """Monotonic and idempotent. Closing never cancels operations already committed."""
     row = conn.execute("SELECT state FROM client_epochs WHERE id=? AND principal=?",
@@ -154,6 +173,7 @@ def accept(conn: sqlite3.Connection, cfg: Settings, sub: Submission,
         raise ApiError(410, "EPOCH_CLOSED", "client epoch is closed; open a new epoch")
     if precheck is not None:  # request-specific state checks (destination, revision), replay excluded
         precheck(conn)
+    prune_finished(conn, cfg)
     open_ops = conn.execute(f"SELECT COUNT(*) FROM operations WHERE {_UNFINISHED}").fetchone()[0]
     if open_ops >= cfg.max_open_operations:
         raise no_capacity("open_operations", 429, retry_after_ms=1000)

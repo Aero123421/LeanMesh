@@ -6,7 +6,7 @@
 
 ## 実装を使う
 
-ビルド、Device API、Host、試験の手順は **[docs/sdk/](docs/sdk/README.md)**。実装済みなのはソフトウェアとsimulationの範囲で、RF・実機・消費電力・実電源断・鍵custodyは未検証です（[一覧](docs/sdk/testing.md)）。
+ビルド、Device API、Host、試験の手順は **[docs/sdk/](docs/sdk/README.md)**。実装し、ローカルで検証したのはソフトウェアとsimulationの範囲で、RF・実機・消費電力・実電源断・鍵custodyは未検証です（[一覧](docs/sdk/testing.md)）。CIは直近のpushで赤でした（FIX11で修正、修正後のgreen runは未取得）。RAM・flash・SLOCは目標超過、ROOTのESP32-C3搭載は未対応です。
 
 ## 読む場所
 

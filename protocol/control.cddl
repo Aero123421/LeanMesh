@@ -74,6 +74,9 @@ time-request = [nonce: id16, root-term: u32, t1-local-us: u64]
 time-response = [nonce: id16, root-term: u32, t1-local-us: u64,
  t2-root-us: u64, t3-root-us: u64]
 ; 19. phase0 prepare/phase1 commit/phase2 abort; immutable committed plan hash.
+; FIX10-D11: this version does NOT sign or send channel-plan / recovery-beacon as COSE objects. The root's plans travel in
+; the node<->root end session (AEAD, issuer = the session's root Identity) as the compact records of src/core/channel/wire.hpp;
+; the plan-hash below is the definition both sides hash. lm_install_control(19|21) is UNSUPPORTED.
 channel-plan = [plan-id: id16, phase: 0..2, root-term: u32,
  channel-epoch: u32, old: channel, new: channel, participant-hash: id32,
  switch-root-ms: u64, max-clock-error-ms: u32, settle-ms: u32,

@@ -182,3 +182,16 @@ class ControlRequest(Strict):
         if self.type == "LEAVE" and self.leave_mode == "IMMEDIATE":
             return ("REVOKE",)  # immediate removal is an explicit, stronger authority
         return CONTROL_RULES[self.type].permissions
+
+
+# ---- signed control objects: what the decoded object requires (FIX11-D13) ----------------------------------
+# The permission of a signed object is that of the type INSIDE it, not of the HTTP operation type that carries it:
+# a CONFIGURE principal must not install a RevokeObject through INSTALL_CONTROL. Types 1, 4 and 32 (credentials and
+# group snapshots) are never installed by an operator. `subject` is the index of the DeviceId the object names.
+SIGNED_OBJECT_PERMISSIONS: dict[int, tuple[str, ...]] = {
+    2: ("CONFIGURE",), 3: ("TRANSFER",), 5: ("CONFIGURE",), 11: ("REVOKE",), 12: ("CONFIGURE",), 19: ("CONFIGURE",),
+    21: ("CONFIGURE",), 26: ("UPDATE_FIRMWARE",), 29: ("CONFIGURE",), 30: ("APPROVE",), 31: ("CONFIGURE", "TRANSFER"),
+}
+SIGNED_OBJECT_TYPE_OF = {"REVOKE": 11, "TRANSFER": 3, "POLICY_SET": 12, "POWER_POLICY_SET": 29,
+                         "COMMISSIONING_WINDOW_SET": 30, "ROOT_HANDOVER": 31}
+SIGNED_OBJECT_SUBJECT = frozenset({3, 11, 29})  # the first DeviceId of the object data is the device it is about

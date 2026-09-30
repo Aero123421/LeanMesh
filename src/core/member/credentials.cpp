@@ -485,13 +485,25 @@ Status Floors::raise(const DeviceId &device, uint64_t assignment, uint64_t membe
 }
 
 Status Floors::check(const DeviceId &device, AssignmentGen a, MembershipGen m) const {
+    const Entry f = floor_of(device);
+    return a.value() < f.assignment || m.value() < f.membership ? Status::Revoked : Status::Ok;
+}
+
+Floors::Entry Floors::floor_of(const DeviceId &device) const {
     for (std::size_t i = 0; i < count_; ++i) {
         if (entries_[i].device == device) {
-            const bool low = a.value() < entries_[i].assignment || m.value() < entries_[i].membership;
-            return low ? Status::Revoked : Status::Ok;
+            return entries_[i];
         }
     }
-    return Status::Ok;
+    return Entry{device, 0, 0};
+}
+
+void Floors::remove(std::size_t i) {
+    if (i >= count_) {
+        return;
+    }
+    entries_[i] = entries_[count_ - 1];
+    entries_[--count_] = Entry{};
 }
 
 Status verify_revoke(const TrustAnchor &trust, const RootDelegation *delegation, ByteView cose, RevokeObject &out) {

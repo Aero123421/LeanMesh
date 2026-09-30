@@ -38,6 +38,16 @@ inline constexpr uint32_t k_tag_channel = 0x43480000; // "CH": survey probes
 inline constexpr uint8_t k_max_probes = 8;
 inline constexpr Duration k_time_refresh = Duration::from_s(300); // drift widens the interval 1 ms per second (2 x 500 ppm)
 inline constexpr Duration k_scan_after = Duration::from_s(12); // no parent this long: search other channels
+// A battery node's episode is shorter than that: it searches once its hello on the stored channel had its answer
+// (FIX10-D3: jitter <= 400 ms + one dwell + margin), inside the search budget of the policy.
+inline constexpr Duration k_scan_after_sleepy = Duration::from_ms(700);
+// FIX10-D1: a PREPARED plan nobody commits or aborts is dropped after this long, whatever its own switch time says
+// (the root aborts after 120 s; the cap also bounds a plan with a switch time in the far future).
+inline constexpr Duration k_prepared_max = Duration::from_s(600);
+inline constexpr Duration k_prepared_unknown = Duration::from_s(240); // (no root clock to read the plan's switch time by)
+// FIX10-D4: after finding the mesh on a channel other than the stored one the node stays up this long for the root to
+// tell it the epoch (an authenticated COMMIT of the last plan); nothing is persisted from the beacon alone.
+inline constexpr Duration k_learn_max = Duration::from_s(10);
 inline constexpr Duration k_dwell = Duration::from_ms(200);    // docs/05 §7 / docs/20 §8
 inline constexpr unsigned k_scan_laps = 2;
 inline constexpr Duration k_backoff_min = Duration::from_s(1);
@@ -96,6 +106,9 @@ class Channel {
     [[nodiscard]] Status local_plan(const PlanRec &rec, MonoTime now);
     [[nodiscard]] Status local_survey(const Survey &s, MonoTime now);
     void persist_now(MonoTime now) { dirty_ = true; kick(now); } // coordinator state changed
+    // The number the NEXT record write will carry, and the one the write that just finished carried: a state that
+    // was changed before a write began is durable when a write with a number >= the next one succeeded (FIX10-D9).
+    [[nodiscard]] uint32_t next_save_seq() const { return save_seq_ + 1; }
 
     // ---- observation ----
     [[nodiscard]] Mode mode() const;
@@ -105,7 +118,12 @@ class Channel {
     [[nodiscard]] bool committed() const { return phase_ == Ph::Committed; }
     // A plan that is prepared or committed but not yet switched, or the write of one in progress: the node has
     // promised to be on the air and must not sleep (FIX3-D5).
-    [[nodiscard]] bool unsettled() const { return phase_ != Ph::Idle || job_ != Job::None; }
+    [[nodiscard]] bool unsettled() const {
+        return phase_ != Ph::Idle || job_ != Job::None || abort_pending_ || uncertain_ || !learn_until_.is_never();
+    }
+    // The COMMIT record of this node is durable, or being written: the plan cannot be aborted any more, only followed
+    // (H8: the coordinator asks the module that owns the record, not its own memory of what it sent).
+    [[nodiscard]] bool commit_started() const { return phase_ == Ph::Committed || (job_ != Job::None && after_ == After::Stored); }
     [[nodiscard]] const Plan &plan() const { return plan_; }
     [[nodiscard]] bool loaded() const { return loaded_; }
     [[nodiscard]] const Stats &stats() const { return stats_; }
@@ -118,12 +136,15 @@ class Channel {
         sc_backoff_ = k_backoff_min;
         on_lost(now);
     }
+    // A new wake episode of a battery node (Power::begin_episode): a search that was cut by the last sleep starts over
+    // from the radio's stored channel, and a node still without a parent searches again inside the new budget.
+    void on_episode(MonoTime now);
     [[nodiscard]] uint8_t scan_tries() const { return scan_tries_; }
 
   private:
     enum class Ph : uint8_t { Idle = 0, Prepared = 1, Committed = 2 };
-    enum class Job : uint8_t { None, Load, Persist };
-    enum class After : uint8_t { None, Prepared, Stored, Applied };
+    enum class Job : uint8_t { None, Load, Persist, Reload };
+    enum class After : uint8_t { None, Prepared, Stored, Applied, Aborted };
     enum class Sw : uint8_t { None, Hold, Switch, Release };
     enum class Sv : uint8_t { None, Wait, Prep, Away };
 
@@ -134,6 +155,9 @@ class Channel {
     [[nodiscard]] MonoTime reach(uint64_t root_ms, MonoTime now); // local time the estimate reaches root_ms
     [[nodiscard]] Status to_root(ByteView rec, MonoTime now);
     void notify(uint32_t detail);
+    [[nodiscard]] Duration scan_delay() const;
+    void prepared_step(MonoTime now);
+    void arm_prepared_exit(MonoTime now);
 
     // persistence (one job at a time, the identity's lent record memory)
     void kick(MonoTime now);
@@ -143,6 +167,7 @@ class Channel {
     [[nodiscard]] bool adopt_record(Reader &rd);
     void loaded_ok(Status s, MonoTime now);
     void persisted(Status s, MonoTime now);
+    void reloaded(Status s, MonoTime now);
 
     // plan (participant)
     [[nodiscard]] static bool same_plan(const Plan &a, const Plan &b);
@@ -199,10 +224,22 @@ class Channel {
     After after_ = After::None;
     bool after_local_ = false;
     bool cancelled_ = false;
+    Sha256Digest job_hash_{}; // hash of the plan a running PREPARED write holds (an ABORT for it must not be lost, FIX10-D1)
+    uint32_t save_seq_ = 0; // number of the last Persist job started, job_seq_ that of the running one
+    uint32_t job_seq_ = 0;
     Handle job_slot_;
     uint32_t job_gen_ = 0;
     store::RecordJob *rec_ = nullptr;
     MonoTime retry_at_ = MonoTime::never(); // no record memory / job slot right now
+
+    // FIX10-D7: a write that reported an error may still have taken effect. Until the record is read back and reconciled
+    // nothing is written on top of it (a possibly COMMITTED plan is never overwritten from stale memory).
+    bool uncertain_ = false;
+    // ABORT of the held plan that found the record memory or the job slot busy: repeated until it is durable (FIX10-D1)
+    bool abort_pending_ = false;
+    PlanId abort_id_;
+    MonoTime prep_at_ = MonoTime::never(); // a PREPARED plan is dropped at this instant unless it was committed
+    MonoTime learn_until_ = MonoTime::never();
 
     // guard + switch
     Sw sw_ = Sw::None;

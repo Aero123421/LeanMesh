@@ -18,7 +18,7 @@ constexpr Duration k_lock_retry = Duration::from_ms(200); // a PM lock the port 
 constexpr uint64_t k_hour_ms = 3600000ULL;
 constexpr uint64_t k_day_ms = 86400000ULL;
 constexpr uint8_t k_retained_magic = 0xB1;
-constexpr std::size_t k_retained_bytes = 1 + 3 * 8 + 2;
+constexpr std::size_t k_retained_bytes = 1 + 3 * 8 + 2 + 1; // magic, three buckets, cursor, fail streak, channel cursor
 
 // The buckets count microseconds (radio time) and micro-events (wakes): one place converts a policy value, so a
 // millisecond quantity cannot be scaled as if it were seconds (FIX3-D1).
@@ -165,6 +165,7 @@ void Power::begin_episode(uint32_t reason, MonoTime now) {
     }
     last_reason_ = kNone;
     emit(reason);
+    engine_.chan().on_episode(now); // the channel search of the last episode was cut by the sleep: this one starts it again
     on_parent_ready(now); // a parent link kept in RAM needs no attach: poll at once
 }
 
@@ -224,6 +225,7 @@ void Power::account_radio(MonoTime now) {
     acct_at_ = now;
     if (dt_us <= 0 || engine_.radio_state() != RadioState::Running) {
         acct_offline_ = offline();
+        acct_attach_ = engine_.mesh().state() == route::Mesh::State::Attach;
         return;
     }
     const auto dt = static_cast<uint64_t>(dt_us);
@@ -231,12 +233,15 @@ void Power::account_radio(MonoTime now) {
     advance_budgets(now);
     if (acct_offline_ && sleepy_mode()) {
         bud_.offline_us += dt;
-        search_used_ms_ += static_cast<uint32_t>(dt / 1000U);
+        if (!acct_attach_) { // FIX10-D3: the search budget pays for looking, the awake budget for the handshake that follows
+            search_used_ms_ += static_cast<uint32_t>(dt / 1000U);
+        }
     }
     if (ep_extra_) {
         bud_.extra_us += dt;
     }
     acct_offline_ = offline();
+    acct_attach_ = engine_.mesh().state() == route::Mesh::State::Attach;
 }
 
 uint64_t Power::radio_on_us(MonoTime now) {
@@ -268,6 +273,7 @@ void Power::save_retained() {
     w.u64be(bud_.extra_wakes_micro);
     w.u8(bud_.cursor);
     w.u8(bud_.fail_streak);
+    w.u8(scan_cursor_);
     if (w.finish() == Status::Ok) {
         pm->retain(ByteView{b.data(), w.size()});
     }
@@ -285,9 +291,11 @@ void Power::load_retained(const port::WakeInfo &w) {
     b.extra_wakes_micro = r.u64be();
     b.cursor = r.u8();
     b.fail_streak = r.u8();
+    const uint8_t scan = r.u8();
     ret_proven_ = w.retained_len == k_retained_bytes && magic == k_retained_magic && r.finish() == Status::Ok && w.elapsed_known;
     ret_elapsed_ms_ = w.elapsed_upper_ms;
     bud_ = ret_proven_ ? b : Budgets{};
+    scan_cursor_ = ret_proven_ ? scan : 0;
     boot_grant_ = !ret_proven_;
     settled_ = false;
 }
@@ -328,8 +336,24 @@ bool Power::search_allowed(MonoTime now) {
 }
 
 // When the radio time of a search with no parent reaches the episode's search budget or the hour's offline budget.
+uint32_t Power::search_room_ms(MonoTime now) {
+    if (!sleepy_mode()) {
+        return UINT32_MAX;
+    }
+    advance_budgets(now);
+    account_radio(now);
+    const uint64_t hour_left = boot_grant_ ? UINT64_MAX : (bud_.offline_us < off_limit() ? (off_limit() - bud_.offline_us) / 1000U : 0U);
+    const uint64_t search_left = search_used_ms_ < policy_.search_budget_ms ? policy_.search_budget_ms - search_used_ms_ : 0U;
+    const int64_t ep_left = ep_end_.is_never() ? INT32_MAX : (ep_end_ - now).to_ms();
+    if (ep_over_ || now < search_next_ || ep_left <= 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>({hour_left, search_left, static_cast<uint64_t>(ep_left), UINT32_MAX}));
+}
+
 MonoTime Power::search_due() const {
-    if (!sleepy_mode() || search_ended_ || asleep() || acct_at_.is_never() || !offline()) {
+    if (!sleepy_mode() || search_ended_ || asleep() || acct_at_.is_never() || !offline() ||
+        engine_.mesh().state() == route::Mesh::State::Attach) {
         return MonoTime::never();
     }
     const uint64_t used_ms = search_used_ms_ + static_cast<uint64_t>((engine_.step_time() - acct_at_).to_ms());

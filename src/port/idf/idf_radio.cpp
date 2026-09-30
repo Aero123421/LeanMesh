@@ -52,8 +52,8 @@ Status map_send_error(esp_err_t e) {
 
 } // namespace
 
-Status IdfRadio::bring_up_wifi(const port::RfProfile &profile) {
-    if (wifi_ready_) {
+Status IdfRadio::init_wifi() {
+    if (wifi_inited_) {
         return Status::Ok;
     }
     // Both calls report INVALID_STATE when the application already did them: that is fine.
@@ -76,6 +76,16 @@ Status IdfRadio::bring_up_wifi(const port::RfProfile &profile) {
         return Status::RecoveryRequired;
     }
 #endif
+    wifi_inited_ = true;
+    return Status::Ok;
+}
+
+// Every start after a radio-off period sets the profile again: nothing is assumed to have survived esp_wifi_stop.
+Status IdfRadio::start_wifi(const port::RfProfile &profile) {
+    LM_TRY(init_wifi());
+    if (wifi_running_) {
+        return Status::Ok;
+    }
     // Allowed channel window from the deployment profile (contiguous range covering the mask).
     uint8_t lo = 14;
     uint8_t hi = 0;
@@ -100,7 +110,7 @@ Status IdfRadio::bring_up_wifi(const port::RfProfile &profile) {
         esp_wifi_start() != ESP_OK) {
         return Status::RecoveryRequired;
     }
-    wifi_ready_ = true;
+    wifi_running_ = true;
     return Status::Ok;
 }
 
@@ -133,7 +143,7 @@ Status IdfRadio::start(const port::RfProfile &profile) {
     if (now_ready_) {
         return Status::Conflict; // stop() first
     }
-    LM_TRY(bring_up_wifi(profile));
+    LM_TRY(start_wifi(profile));
     LM_TRY(apply_channel_and_power(profile.channel, profile.tx_power_qdbm));
     allowed_mask_ = profile.allowed_channels_mask;
     tx_power_qdbm_ = profile.tx_power_qdbm;
@@ -153,26 +163,37 @@ Status IdfRadio::start(const port::RfProfile &profile) {
 }
 
 Status IdfRadio::stop() {
-    if (!now_ready_) {
+    if (!now_ready_ && !wifi_running_) {
         return Status::Ok;
     }
-    const bool overdue =
-        in_flight_.load() && static_cast<uint64_t>(esp_timer_get_time()) - tx_started_us_ >=
-                                 static_cast<uint64_t>(TxManager::k_watchdog.us);
-    if (overdue) {
-        esp_restart(); // callback drain cannot be proven: controlled reboot (docs/03 §4)
+    if (now_ready_) {
+        const bool overdue =
+            in_flight_.load() && static_cast<uint64_t>(esp_timer_get_time()) - tx_started_us_ >=
+                                     static_cast<uint64_t>(TxManager::k_watchdog.us);
+        if (overdue) {
+            esp_restart(); // callback drain cannot be proven: controlled reboot (docs/03 §4)
+        }
+        // Only a successful deinit proves the callbacks are gone. On failure the port stays "ready"
+        // (callbacks possibly live) so a second stop() retries instead of reporting success, and the
+        // engine refuses lm_destroy (FIX1-D5).
+        if (esp_now_deinit() != ESP_OK) {
+            return Status::RecoveryRequired;
+        }
+        now_ready_ = false;
+        // Anything still queued is discarded by the generation check.
+        port::RadioRx rx;
+        while (rx_ring_.pop(rx)) {
+        }
     }
-    // Only a successful deinit proves the callbacks are gone. On failure the port stays "ready"
-    // (callbacks possibly live) so a second stop() retries instead of reporting success, and the
-    // engine refuses lm_destroy (FIX1-D5).
-    if (esp_now_deinit() != ESP_OK) {
-        return Status::RecoveryRequired;
+    // The radio is off only when the Wi-Fi driver is stopped as well (FIX10-D10): a failure keeps `wifi_running_`,
+    // reports the failure and lets the next stop() try again; the owner does not count the time as radio-off.
+    if (wifi_running_) {
+        if (esp_wifi_stop() != ESP_OK) {
+            return Status::RecoveryRequired;
+        }
+        wifi_running_ = false;
     }
-    now_ready_ = false;
-    // Anything still queued is discarded by the generation check.
-    port::RadioRx rx;
-    while (rx_ring_.pop(rx)) {
-    }
+    in_flight_.store(false); // (no callback can follow a stopped driver)
     return Status::Ok;
 }
 

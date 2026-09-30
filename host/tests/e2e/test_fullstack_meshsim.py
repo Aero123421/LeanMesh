@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from bridge_bench import PERMS, Bench, db_rows, wait_for
 from harness import MeshSim
-from test_group_meshsim import apps, group_send, targets
+from test_group_meshsim import apps, group_send, targets_or_empty
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "integration"))
 from host_util import CONTRACT, violations  # noqa: E402
@@ -86,8 +86,9 @@ def test_21_nodes_20_hops_through_the_real_host(mesh21: Callable[..., Bench]) ->
     ev = wait_for(lambda: (e := b.sim.ok(f"msg-next {leaf}")["event"]) and e["kind"] == 2 and e, 90, "MESSAGE at the leaf")
     report["host_to_leaf_message_s"] = round(time.monotonic() - t0, 2)
     assert ev["payload"] == bytes(range(64)).hex() and ev["port"] == 100
-    o = wait_for(lambda: (x := b.operation(op))["state"] == "WAITING_RECEIPT" and x, 60, "stored at the far end")
-    assert o["outcome"] == "PENDING" and "END_RECEIVED" in b.kinds(op) and "APP_APPLIED" not in b.kinds(op)
+    # WAITING_RECEIPT is reached at HOP_ACCEPTED (docs/08): wait for the evidence itself, not for a state that precedes it.
+    o = wait_for(lambda: "END_RECEIVED" in b.kinds(op) and b.operation(op), 60, "END_RECEIVED from the far end")
+    assert o["state"] == "WAITING_RECEIPT" and o["outcome"] == "PENDING" and "APP_APPLIED" not in b.kinds(op)
     report["host_to_leaf_end_received_s"] = round(time.monotonic() - t0, 2)
     assert b.sim.ok(f"msg-report {leaf} applied 0a0b")["status"] == "OK"
     done = wait_for(lambda: (x := b.operation(op))["outcome"] == "APPLIED" and x, 60, "APPLIED")
@@ -128,9 +129,11 @@ def test_21_nodes_20_hops_through_the_real_host(mesh21: Callable[..., Bench]) ->
     report["group_20_targets_s"] = round(time.monotonic() - t2, 2)
     fin = b.operation(gop)
     assert fin["outcome"] == "APPLIED", fin
-    ts = targets(b, gop)
-    assert len(ts) == HOPS and {t["device_id"] for t in ts} == set(ids)
-    assert all(t["outcome"] == "APPLIED" and t["phase"] == "FINAL" for t in ts)
+    # The operation is FINAL when the root says so; the per-target mirror is copied by a later exchange: wait for it.
+    ts = wait_for(lambda: (t := targets_or_empty(b, gop)) and len(t) == HOPS
+                  and all(x["outcome"] == "APPLIED" and x["phase"] == "FINAL" for x in t) and t, 60,
+                  "all 20 per-target results in the Host mirror")
+    assert {t["device_id"] for t in ts} == set(ids)
     assert b.sim.ok("serial-status")["bridge"]["send_accepted"] == 2  # the leaf message and ONE group request
 
     # ---- 4. a lifecycle operation: REVOKE of the leaf, evidence from the root, node mirror follows ---------------

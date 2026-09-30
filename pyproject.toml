@@ -3,7 +3,13 @@ target-version = "py312"
 line-length = 100
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "B", "UP"]
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependencies are declared as parameter defaults: `require(...)` returns Depends(...).
+extend-immutable-calls = ["leanmesh_host.api.deps.require", "fastapi.Depends", "fastapi.Query"]
+
 [tool.ruff.lint.per-file-ignores]
+"host/tests/**" = ["B023"]  # test closures run inside the loop that defines them
+"host/leanmesh_host/api/routes.py" = ["B008"]
 # Original spec-only tools are not the production implementation style baseline.
 "scripts/check_spec.py" = ["E701", "E702"]
 "scripts/wire_fixture.py" = ["E701", "E702"]
@@ -15,6 +21,8 @@ select = ["E4", "E7", "E9", "F", "B", "UP"]
 testpaths = ["host/tests"]
 pythonpath = ["host"]
 addopts = "--strict-markers -p no:cacheprovider"
+# A hung test dumps every thread's stack after 20 minutes (the slowest, the 21-node run, takes about 8); CI also wraps pytest in `timeout`.
+faulthandler_timeout = 1200
 markers = [
     "scenario(*ids): acceptance scenario IDs (tests/scenarios.json) this test covers in software",
     "e2e: spawns meshsim and/or a uvicorn host process",

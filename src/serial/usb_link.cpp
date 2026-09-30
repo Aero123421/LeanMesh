@@ -269,6 +269,18 @@ void UsbLink::handle_auth(const wire::SerialHeader &h, ByteView header18, ByteVi
         }
         return;
     }
+    // FIX11-D5: a USB stream is ordered and CRC-checked, so an authentic record whose counter is not exactly the next
+    // one means an earlier record was lost (CRC drop, overflow) or withheld. Its effects (an event the peer believes
+    // delivered, the credit of the lost record) are unknown: cut the session and start fresh (docs/19 §5).
+    if (h.counter != k.rec.window().highest() + 1) {
+        ++stats_.rx_counter_gap;
+        if (slot == act_) {
+            teardown(UsbDown::Aead, now);
+        } else {
+            abort_attempt(Status::AuthRejected, now);
+        }
+        return;
+    }
     const ByteView plain{sealed.data(), plen};
     if (slot == cand_) {
         // Key confirmation: the first protected record must be the PING that proves the keys.

@@ -7,7 +7,9 @@ namespace lm::delivery {
 
 Reply Delivery::host_send(const HostSendRequest &rq, ByteView payload, MonoTime now) {
     host_tag_ = &rq; // consulted by send() at exactly three places; never left set
+    send_mode_ = rq.object ? SendMode::Object : SendMode::Api; // never left set (as send_mode() does)
     const Reply r = send(rq.rq, payload, now);
+    send_mode_ = SendMode::Api;
     host_tag_ = nullptr;
     return r;
 }

@@ -174,6 +174,7 @@ struct UsbStats {
     uint64_t rx_unknown_session = 0;
     uint64_t rx_auth_fail = 0;
     uint64_t rx_replay = 0;
+    uint64_t rx_counter_gap = 0;  // authentic record after a lost one: the session is cut (docs/19 §5)
     uint64_t rx_malformed = 0;    // authentic but not the expected CBOR
     uint64_t rx_credit_violation = 0;
     uint64_t rx_hello = 0;

@@ -1847,16 +1847,6 @@ int stored_state(SimStore &st, uint16_t id) {
     return s == Status::Ok ? job->state : (s == Status::NotFound ? -1 : -2);
 }
 
-// The durable revocation floors cover (device, assignment, membership).
-bool stored_floor_covers(SimStore &st, const DeviceId &d, uint64_t assignment, uint64_t membership) {
-    auto job = std::make_unique<store::RecordJob>();
-    job->arm(store::RecordJob::Op::Load, store::rec::revocation_floors);
-    member::Floors f;
-    return store::record_load(st, *job) == Status::Ok &&
-           member::decode_floors(ByteView{job->payload.data(), job->payload_len}, f) == Status::Ok &&
-           f.check(d, AssignmentGen{assignment}, MembershipGen{membership}) == Status::Revoked;
-}
-
 // The status of the next OPERATION event for `op` at node i (0xFFFF: none within `wait_ms`).
 uint32_t op_reason(World &w, SimNode &node, lm_operation_id_t op, uint64_t wait_ms) {
     for (uint64_t t = 0; t <= wait_ms; t += 5) {
@@ -2047,9 +2037,9 @@ LM_TEST("LC01 FIX5 sim: an older or altered commissioning window never resets th
 // only new sessions are refused), the entry is made Blocked durably as soon as the store answers, and a root restarted
 // with a stale ACTIVE entry below its durable floors reconciles it at boot.
 LM_TEST("S06 FIX5 sim: a revocation whose entry commit failed ends sessions and routes at once; the entry is blocked") {
-    LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}}, 79);
+    LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}, Spec{Role::Leaf}}, 79);
     star(n);
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < 4; ++i) {
         n.boot(i);
     }
     LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
@@ -2058,8 +2048,9 @@ LM_TEST("S06 FIX5 sim: a revocation whose entry commit failed ends sessions and 
     const uint16_t rec2 = static_cast<uint16_t>(root::k_rec_ledger_base + 1);
     LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) != nullptr);
     LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(1)) != nullptr);
-    // Floors record (2 writes), then the entry record: its first write is cut, the store is dead meanwhile.
-    st.arm_cut(st.mutating_ops() + 2, CutMode::Before);
+    // FIX8-D1: the entry is the floor record of a listed device - the revocation is one entry commit. Its first write is
+    // cut; the store is dead meanwhile.
+    st.arm_cut(st.mutating_ops(), CutMode::Before);
     const Bytes rv = fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(1), 2, 2);
     lm_operation_id_t op = 0;
     LM_CHECK_EQ(lm_install_control(n.ctx(0), 11, rv.data(), rv.size(), &op), LM_STATUS_OK);
@@ -2070,30 +2061,55 @@ LM_TEST("S06 FIX5 sim: a revocation whose entry commit failed ends sessions and 
     LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr);
     LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(1)) == nullptr);
     LM_CHECK(!n.has_route(0, n.id(1)));
+    LM_CHECK(n.eng(0).ledger().authorized(n.id(1)) == nullptr);
     n.run_ms(3000);
     LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr); // and it gets no new session
     st.power_restore();
-    LM_CHECK(stored_floor_covers(st, n.id(1), 1, 1)); // precondition: the floors are durable ...
+    LM_CHECK(stored_state(st, rec1) == static_cast<int>(root::EntryState::Active)); // precondition: nothing durable yet
     // ... and the entry is made Blocked durably once the store answers (bounded retry).
     LM_CHECK(n.until([&] { return stored_state(st, rec1) == static_cast<int>(root::EntryState::Blocked); }, 10'000));
     LM_CHECK(n.eng(0).ledger().find(n.id(1))->state == root::EntryState::Blocked);
     LM_CHECK(n.ready(2)); // the other member is untouched
-    // The same failure, and the root restarts before it could repair the entry: it reconciles at boot.
-    st.arm_cut(st.mutating_ops() + 2, CutMode::Before);
+    // The same failure, and the root restarts before it could repair the entry: nothing of the revocation was durable
+    // (it answered RECOVERY_REQUIRED, never "applied"): the entry is ACTIVE again and the same object blocks it.
+    st.arm_cut(st.mutating_ops(), CutMode::Before);
     const Bytes rv2 = fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(2), 2, 2);
     LM_CHECK_EQ(lm_install_control(n.ctx(0), 11, rv2.data(), rv2.size(), &op), LM_STATUS_OK);
     n.node(0).notify();
     LM_CHECK(n.until([&] { return st.cut_fired(); }, 5000));
     n.node(0).power_cut();
     st.power_restore();
-    LM_CHECK(stored_floor_covers(st, n.id(2), 1, 1));
-    LM_CHECK(stored_state(st, rec2) == static_cast<int>(root::EntryState::Active)); // precondition: the stale entry
+    LM_CHECK(stored_state(st, rec2) == static_cast<int>(root::EntryState::Active));
     n.boot(0);
-    LM_CHECK(n.until([&] { return stored_state(st, rec2) == static_cast<int>(root::EntryState::Blocked); }, 10'000));
-    LM_CHECK(n.eng(0).ledger().find(n.id(2))->state == root::EntryState::Blocked);
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000));
+    LM_CHECK(n.eng(0).ledger().find(n.id(2))->state == root::EntryState::Active);
+    LM_CHECK_EQ(n.install_result(0, 11, rv2), 0u);
+    LM_CHECK(stored_state(st, rec2) == static_cast<int>(root::EntryState::Blocked));
+    // An ACTIVE entry below a durable floor of the table (a provisioned floor, written while the root is off) is refused
+    // at boot and made Blocked durably, the floor folded into the entry.
+    const uint16_t rec3 = static_cast<uint16_t>(root::k_rec_ledger_base + 2); // node 3 = address 4 = slot 2
+    LM_CHECK(stored_state(st, rec3) == static_cast<int>(root::EntryState::Active));
+    n.node(0).power_cut();
+    {
+        member::Floors f;
+        auto job = std::make_unique<store::RecordJob>();
+        job->arm(store::RecordJob::Op::Load, store::rec::revocation_floors);
+        if (store::record_load(st, *job) == Status::Ok) {
+            LM_CHECK_OK(member::decode_floors(ByteView{job->payload.data(), job->payload_len}, f));
+        }
+        LM_CHECK_OK(f.raise(n.id(3), 9, 9));
+        std::size_t len = 0;
+        LM_CHECK_OK(member::encode_floors(f, MutByteView{job->payload}, len));
+        job->arm(store::RecordJob::Op::Commit, store::rec::revocation_floors, 0, len);
+        LM_CHECK_OK(store::record_commit(st, *job));
+    }
+    n.boot(0);
+    LM_CHECK(n.until([&] { return stored_state(st, rec3) == static_cast<int>(root::EntryState::Blocked); }, 10'000));
+    const root::Entry *e3 = n.eng(0).ledger().find(n.id(3));
+    LM_CHECK(e3 != nullptr && e3->state == root::EntryState::Blocked && e3->membership >= 8 && e3->consumed >= 8);
     n.run_ms(40'000);
-    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(2)) == nullptr);
-    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(2)) == nullptr);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(3)) == nullptr);
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(3)) == nullptr);
 }
 
 // Finding 8: a member lives in the term the root's authenticated word gave it (a LEASE of a newer term), while its
@@ -2144,6 +2160,529 @@ LM_TEST("LP12 FIX5 sim: a renewal of a term older than the one the member lives 
     LM_CHECK(n.eng(d).identity().member().root_term == RootTerm{1});
     LM_CHECK_EQ(n.eng(d).identity().member().lease_expires_root_ms, lease0 + 1);
     LM_CHECK(n.eng(d).identity().term() == RootTerm{3});
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// FIX8 (independent reviews of 8668c69: membership, lifecycle, groups). Each test failed on 8668c69.
+namespace {
+bool root_linked(DNet &n, unsigned d) {
+    const link::Neighbor *nb = n.eng(0).link().neighbors().find_device(n.id(d));
+    return nb != nullptr && nb->cur.active && !nb->join_only;
+}
+bool connect_root(DNet &n, unsigned d, uint64_t wait_ms = 10'000) {
+    if (root_linked(n, d)) {
+        return true;
+    }
+    (void)n.eng(d).link().connect(n.mac(0), n.node(d).clock.now());
+    n.node(d).notify();
+    return n.until([&] { return root_linked(n, d); }, wait_ms, 20);
+}
+bool left_at_root(DNet &n, unsigned d) {
+    const root::Entry *e = n.eng(0).ledger().find(n.id(d));
+    return e != nullptr && e->state == root::EntryState::Left;
+}
+bool leave_at_root(DNet &n, unsigned d) {
+    lm_operation_id_t op = 0;
+    if (lm_leave(n.ctx(d), LM_LEAVE_IMMEDIATE, 0, &op) != LM_STATUS_OK) {
+        return false;
+    }
+    n.node(d).notify();
+    return n.until([&] { return left_at_root(n, d); }, 10'000, 20);
+}
+// lm_group_set at the root; waits until its operation is final (the definition is durable) and returns its outcome.
+uint32_t group_set_done(LNet &n, uint32_t gid, uint64_t expected, const std::vector<unsigned> &members) {
+    std::vector<lm_device_id_t> ids(members.size());
+    for (std::size_t k = 0; k < members.size(); ++k) {
+        std::memcpy(ids[k].bytes, n.id(members[k]).bytes.data(), 32);
+    }
+    lm_operation_id_t op = 0;
+    const lm_status_t s = lm_group_set(n.ctx(0), gid, expected, ids.data(), ids.size(), &op);
+    if (s != LM_STATUS_OK) {
+        return 0x10000U | s;
+    }
+    n.node(0).notify();
+    const uint32_t reason = op_reason(n.world, n.node(0), op, 5000); // the OPERATION event: once it is durable
+    return reason == 0 ? static_cast<uint32_t>(LM_OUTCOME_APPLIED)
+                       : (reason == 0xFFFFU ? 0xFFFFU : static_cast<uint32_t>(LM_OUTCOME_REJECTED));
+}
+} // namespace
+
+// C1: every ordinary leave took one of the root's 10 revocation-floor entries; after ten, every revocation ended
+// NO_CAPACITY and a stolen member stayed ACTIVE. A listed device's floor is its ledger entry: revocation never needs
+// table room. The table serves devices without an entry; a leave's copy there (it lets the slot be reused) gives way.
+LM_TEST("S06 FIX8 sim: ten routine leaves never use up revocation; the 11th member is revoked for good; so is an unlisted device") {
+    DNet n(11, 91);
+    for (unsigned d = 2; d < 12; ++d) {
+        LM_CHECK(connect_root(n, d));
+        LM_CHECK(leave_at_root(n, d));
+        n.run_ms(500); // the leave's floor copy is committed
+    }
+    LM_CHECK_EQ(n.eng(0).identity().floors().count(), member::k_max_floors); // precondition: the table is full
+    const unsigned victim = 12;
+    LM_CHECK(connect_root(n, victim));
+    LM_CHECK(n.eng(0).ledger().authorized(n.id(victim)) != nullptr);
+    LM_CHECK_EQ(n.install(0, 11, n.a.fleet.revoke(n.id(victim), 2, 2)), 0u); // NO_CAPACITY (4) on 8668c69
+    const root::Entry *e = n.eng(0).ledger().find(n.id(victim));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Blocked);
+    LM_CHECK(n.eng(0).ledger().authorized(n.id(victim)) == nullptr);
+    n.run_ms(11'000); // the notice had its chance: its sessions end
+    LM_CHECK(!root_linked(n, victim));
+    LM_CHECK(!connect_root(n, victim, 8000)); // and it gets no new one
+    // Durable: the entry is the floor record of a listed device.
+    n.reboot(0);
+    e = n.eng(0).ledger().find(n.id(victim));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Blocked);
+    LM_CHECK(!connect_root(n, victim, 8000));
+    // A device this root never listed (B's root): the fleet floor is recorded although the table was full.
+    LM_CHECK(n.eng(0).ledger().find(n.id(1)) == nullptr);
+    LM_CHECK_EQ(n.install(0, 11, n.a.fleet.revoke(n.id(1), 5, 5)), 0u);
+    LM_CHECK(n.eng(0).identity().floors().check(n.id(1), AssignmentGen{4}, MembershipGen{9}) == Status::Revoked);
+    n.reboot(0);
+    LM_CHECK(n.eng(0).identity().floors().check(n.id(1), AssignmentGen{4}, MembershipGen{9}) == Status::Revoked);
+    LM_CHECK(n.eng(0).identity().floors().count() <= member::k_max_floors);
+}
+
+// C1, the table's own limit: floors of devices this root never listed. Ten of them fill the table with floors nothing else
+// keeps; the next one gets a Blocked entry of its own in a free slot (the entry is its floor record). With the ledger
+// full as well nothing changes (NO_CAPACITY) - and then no new device can get a slot here either.
+LM_TEST("S06 FIX8 sim: unlisted revocations beyond the table get a Blocked entry; with the ledger full nothing is admitted") {
+    // Node 1 (address 2) and 62 listed members (addresses 3..64): one free slot left (address 65).
+    LNet n({Spec{}, Spec{Role::Leaf, 0xFFFFFFFFFFULL}, Spec{Role::Leaf, 0, true}}, 96, 62);
+    n.boot(0);
+    n.boot(1);
+    LM_CHECK(n.until([&] { return n.ready(1); }, 90'000));
+    LM_CHECK_EQ(n.eng(0).ledger().count(root::EntryState::Free), 1u);
+    auto stranger = [](uint8_t k) {
+        DeviceId d;
+        d.bytes.fill(static_cast<uint8_t>(0xA0 + k));
+        return d;
+    };
+    const std::size_t provisioned = n.eng(0).identity().floors().count();
+    for (uint8_t k = 0; k < member::k_max_floors - provisioned; ++k) {
+        LM_CHECK_EQ(n.install_result(0, 11, n.net.fleet.revoke(stranger(k), 3, 3)), 0u);
+    }
+    LM_CHECK_EQ(n.eng(0).identity().floors().count(), member::k_max_floors);
+    // The table holds only floors nothing else keeps: a Blocked entry in the free slot.
+    LM_CHECK_EQ(n.install_result(0, 11, n.net.fleet.revoke(stranger(20), 3, 3)), 0u);
+    const root::Entry *e = n.eng(0).ledger().find(stranger(20));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Blocked && e->consumed == 2 && e->membership == 2);
+    LM_CHECK_EQ(n.eng(0).ledger().count(root::EntryState::Free), 0u);
+    // No free slot and no redundant copy: NO_CAPACITY, nothing changed - and no new device can get a slot (a join needs
+    // a free or reusable one), so the revoked device cannot join this root either.
+    LM_CHECK_EQ(n.install_result(0, 11, n.net.fleet.revoke(stranger(21), 3, 3)), static_cast<uint32_t>(Status::NoCapacity));
+    LM_CHECK(n.eng(0).ledger().find(stranger(21)) == nullptr);
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.boot(0);
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000));
+    e = n.eng(0).ledger().find(stranger(20));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Blocked); // durable
+    for (uint8_t k = 0; k < member::k_max_floors - provisioned; ++k) {
+        LM_CHECK(n.eng(0).identity().floors().check(stranger(k), AssignmentGen{2}, MembershipGen{9}) == Status::Revoked);
+    }
+}
+
+// M4: a device that left, whose ledger slot was then given to another device, restarted its membership generation at 1 -
+// below its own leave floor - and was refused REVOKED forever, even with a fresh fleet grant and expected entry.
+LM_TEST("R09 FIX8 sim: a departed device whose slot was reused rejoins with a new grant above its own floor") {
+    LNet n({Spec{}, Spec{Role::Relay, 0xFFFFFFFFFFULL}, Spec{Role::Relay, 0xFFFFFFFFFFULL},
+            Spec{Role::Leaf, 0xFFFFFFFFFFULL}, Spec{Role::Leaf, 0, true}},
+           76, 61);
+    n.link(1, 2, false);
+    n.link(0, 2);
+    n.link(2, 3, false);
+    n.link(0, 3);
+    n.link(3, 4, false);
+    n.link(2, 4); // D2 (node 4) reaches the root through X (node 2)
+    for (unsigned i = 0; i < 4; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.ready(1) && n.ready(2) && n.ready(3); }, 120'000));
+    LM_CHECK_EQ(n.eng(0).ledger().count(root::EntryState::Free), 0u); // every slot is used
+    for (unsigned d : {1u, 3u}) { // D1 and D3 leave
+        lm_operation_id_t lop = 0;
+        LM_CHECK_EQ(lm_leave(n.ctx(d), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+        n.node(d).notify();
+        LM_CHECK(n.until([&] {
+            const root::Entry *x = n.eng(0).ledger().find(n.id(d));
+            return x != nullptr && x->state == root::EntryState::Left;
+        }, 10'000));
+        n.run_ms(1000);
+    }
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.boot(4);
+    n.run_ms(500);
+    n.grant(4, 1, 1); // D2's expected entry takes D1's slot (address 2): D1's entry is gone, its floor stays
+    LM_CHECK(n.eng(0).ledger().find(n.id(1)) == nullptr);
+    LM_CHECK_EQ(n.join(4, 90), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(4).identity().is_member() && n.ready(4); }, 120'000));
+    n.grant(1, 2, 2); // D1 comes back with a fresh fleet grant (generation 2 > its old 1)
+    n.run_ms(31'000); // one full handshake per peer per 30 s
+    LM_CHECK_EQ(n.join(1, 0x63), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(1).identity().is_member(); }, 120'000)); // REVOKED (8) on 8668c69
+    LM_CHECK(n.eng(1).identity().member().membership.value() >= 2); // above the floor its own leave left (1 + 1)
+    LM_CHECK_EQ(n.eng(1).identity().member().assignment.value(), 2u);
+}
+
+// M3: the root kept ONE pending leave: a LeaveRequest that arrived while an earlier one waited for the ledger's memory
+// overwrote it, and that device - erased on its side - stayed ACTIVE in the ledger.
+LM_TEST("M06 FIX8 sim: three members leaving together are all Left at the root") {
+    DNet n(3, 92);
+    for (unsigned d = 2; d < 5; ++d) {
+        LM_CHECK(connect_root(n, d));
+    }
+    n.node(0).jobs.latency_us = 300'000; // a Flash commit takes 300 ms on the root's worker
+    for (unsigned d = 2; d < 5; ++d) {
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_leave(n.ctx(d), LM_LEAVE_IMMEDIATE, 0, &op), LM_STATUS_OK);
+        n.node(d).notify();
+    }
+    n.run_ms(20'000);
+    for (unsigned d = 2; d < 5; ++d) {
+        LM_CHECK(!n.eng(d).identity().is_member());
+        LM_CHECK(left_at_root(n, d)); // one of them stayed Active on 8668c69
+    }
+}
+
+// H2: a request waiting for the operator is judged again when it is approved, and before any JoinCommit signature leaves
+// the root: a revocation that arrived meanwhile refuses it (8668c69 committed ACTIVE and sent the signature).
+LM_TEST("J04 FIX8 sim: an approval given after a revocation issues nothing; the request ends refused") {
+    DNet n(1, 93);
+    const unsigned d = 2;
+    const Bytes ab = n.transfer_ticket(d, n.a, n.b, 1, 2);
+    LM_CHECK_EQ(n.install(d, 3, ab), 0u);
+    LM_CHECK_EQ(n.start_join(d, 0x44, LM_JOIN_TRANSFER_CANDIDATE), LM_STATUS_OK); // B is in external mode
+    root::PendingJoin pj;
+    LM_CHECK(n.until([&] {
+        for (std::size_t i = 0; i < root::k_join_txns; ++i) {
+            if (n.eng(1).ledger().pending_join(i, pj)) {
+                return true;
+            }
+        }
+        return false;
+    }, 30'000, 20));
+    LM_CHECK_EQ(n.install(1, 11, n.a.fleet.revoke(n.id(d), 3, 0)), 0u); // the fleet revokes every assignment below 3
+    root::JoinDecision dec;
+    dec.request = pj.request;
+    dec.approve = true; // a stale operator view approves
+    LM_CHECK_OK(n.eng(1).ledger().decide(dec, n.node(1).clock.now()));
+    n.node(1).notify();
+    LM_CHECK(!n.until([&] { return n.in_domain(d, n.b); }, 60'000, 20)); // the revoked device never holds B's credential
+    const root::Entry *e = n.eng(1).ledger().find(n.id(d));
+    LM_CHECK(e == nullptr || (e->state != root::EntryState::Active && e->state != root::EntryState::Prepared));
+    for (std::size_t i = 0; i < root::k_join_txns; ++i) {
+        LM_CHECK(!n.eng(1).ledger().pending_join(i, pj)); // not pending any more: refused
+    }
+    LM_CHECK(n.in_domain(d, n.a)); // nothing half-moved
+}
+
+// Second review #2: a group named its members by ledger slot; a member left, another device took its slot and the
+// unchanged group revision then named the newcomer. A slot a group names is not given to another device while it does.
+LM_TEST("R09 FIX8 sim: a group keeps naming its departed member; its slot goes to nobody else until the group is edited") {
+    LNet n({Spec{}, Spec{Role::Relay, 0xFFFFFFFFFFULL}, Spec{Role::Relay, 0xFFFFFFFFFFULL}, Spec{Role::Leaf, 0, true}},
+           73, 62);
+    n.link(0, 2);
+    n.link(1, 2, false);
+    n.link(2, 3);
+    for (unsigned i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.ready(1) && n.ready(2); }, 90'000));
+    LM_CHECK_EQ(group_set_done(n, 7, 0, {1}), static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &op), LM_STATUS_OK);
+    n.node(1).notify();
+    LM_CHECK(n.until([&] {
+        const root::Entry *x = n.eng(0).ledger().find(n.id(1));
+        return x != nullptr && x->state == root::EntryState::Left;
+    }, 10'000));
+    n.node(1).power_cut();
+    n.run_ms(1000);
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.boot(3);
+    n.run_ms(500);
+    // The ledger is full: the only reusable slot is the departed member's, and group 7 names it.
+    const Bytes t = n.net.fleet.ticket(n.kits[3].kit, DomainId{}, n.net.domain, n.net.delegation_cose, 0, 1);
+    LM_CHECK_EQ(n.install(3, 3, t), LM_STATUS_OK);
+    LM_CHECK(n.install_result(0, 5, n.expected_page(3, 1, t, 1)) == static_cast<uint32_t>(Status::NoCapacity));
+    LM_CHECK_EQ(n.join(3, 90), LM_STATUS_OK);
+    n.run_ms(40'000);
+    LM_CHECK(!n.eng(3).identity().is_member());
+    group::Op snap{};
+    DeviceId ids[group::k_max_targets];
+    LM_CHECK_OK(n.eng(0).groups().snapshot(7, 1, snap, ids));
+    LM_CHECK(ids[0] == n.id(1)); // the newcomer on 8668c69
+    // The Host drops the departed member from the group: the slot is free for another device now.
+    LM_CHECK_EQ(group_set_done(n, 7, 1, {}), static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+    LM_CHECK_EQ(n.install_result(0, 5, n.expected_page(3, 1, t, 2)), 0u);
+    LM_CHECK(n.until([&] {
+        if (n.eng(3).membership().phase() == member::JoinPhase::Idle && !n.eng(3).identity().is_member()) {
+            (void)n.join(3, 91); // (the first request may have ended meanwhile: ask again)
+        }
+        return n.eng(3).identity().is_member() && n.ready(3);
+    }, 150'000, 1000));
+    LM_CHECK_OK(n.eng(0).groups().snapshot(7, 2, snap, ids));
+    LM_CHECK_EQ(snap.total, 0u);
+}
+
+// Second review #13: lm_get_request put the private join phase into the public phase field (an APPLIED join read
+// phase 0 = PENDING).
+LM_TEST("J01 FIX8 sim: lm_get_request reports public phases: a completed join is FINAL") {
+    LNet n({Spec{}, Spec{Role::Leaf, 0, true}}, 74);
+    n.boot(0);
+    n.boot(1);
+    n.run_ms(500);
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.grant(1, 1, 1);
+    LM_CHECK_EQ(n.join(1, 91), LM_STATUS_OK);
+    lm_request_id_t request = rid(91);
+    lm_operation_t out{};
+    out.struct_size = sizeof(out);
+    out.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_request(n.ctx(1), &request, &out), LM_STATUS_OK);
+    LM_CHECK(out.phase == LM_PHASE_PENDING || out.phase == LM_PHASE_SENDING || out.phase == LM_PHASE_WAITING_RECEIPT);
+    LM_CHECK(n.until([&] { return n.eng(1).identity().is_member() && n.ready(1); }, 120'000));
+    n.run_ms(1000);
+    LM_CHECK_EQ(lm_get_request(n.ctx(1), &request, &out), LM_STATUS_OK);
+    LM_CHECK_EQ(out.outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+    LM_CHECK_EQ(out.phase, static_cast<uint32_t>(LM_PHASE_FINAL)); // 0 on 8668c69
+}
+
+// Second review #3: the LEFT tombstone reached the Flash but its read-back failed; 8668c69 reported the failure, undid
+// the send prohibition and kept the member live in RAM (storage LEFT, RAM ACTIVE, lm_send OK). The leave stays fail
+// closed: RAM leaves at once, the stored record is read back and the operation ends by what it says.
+LM_TEST("M06 FIX8 sim: a leave whose commit reported a failure stays left; the stored record decides its result") {
+    for (const CutMode mode : {CutMode::After, CutMode::Before}) {
+        DNet n(1, 94);
+        const unsigned d = 2;
+        (void)n.eng(d).link().close(n.id(0)); // no root link: the commit starts at once
+        SimStore &st = n.node(d).store;
+        st.arm_cut(st.mutating_ops() + 1, mode); // the marker of the LEFT record: written (After) or not (Before)
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_leave(n.ctx(d), LM_LEAVE_IMMEDIATE, 0, &op), LM_STATUS_OK);
+        n.node(d).notify();
+        n.run_ms(100);
+        LM_CHECK(st.cut_fired());
+        LM_CHECK(!n.eng(d).identity().is_member()); // fail closed at once (live on 8668c69)
+        lm_membership_t m = n.membership(d);
+        LM_CHECK(m.state != LM_ACTIVE);
+        st.power_restore();
+        const uint32_t reason = op_reason(n.world, n.node(d), op, 10'000);
+        LM_CHECK_EQ(reason, 0u); // APPLIED: read back LEFT (After), or committed again (Before)
+        LM_CHECK_EQ(stored_state(st, store::rec::membership), static_cast<int>(member::k_membership_left));
+        LM_CHECK(!n.eng(d).identity().is_member());
+        n.reboot(d);
+        LM_CHECK_EQ(n.membership(d).state, static_cast<uint32_t>(LM_UNASSIGNED));
+    }
+}
+
+// Second review #3 (revocation): a verified revocation notice holds whatever its tombstone commit does.
+LM_TEST("S06 FIX8 sim: a revocation notice whose tombstone commit failed leaves the device revoked all the same") {
+    LNet n({Spec{}, Spec{Role::Leaf}}, 95);
+    n.boot(0);
+    n.boot(1);
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    const lm_operation_id_t o = n.send_to_root(1); // the end session the notice travels over
+    LM_CHECK(o != 0);
+    LM_CHECK(n.until([&] { return n.op(1, o).phase == LM_PHASE_FINAL; }, 30'000));
+    SimStore &st = n.node(1).store;
+    st.arm_cut(st.mutating_ops() + 1, CutMode::Before); // the tombstone's marker never reaches the Flash
+    LM_CHECK_EQ(n.install(0, 11, fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(1), 2, 2)), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return st.cut_fired(); }, 30'000));
+    n.run_ms(200);
+    LM_CHECK(!n.eng(1).identity().is_member()); // the verified revocation holds in RAM
+    LM_CHECK_EQ(n.state(1), static_cast<uint32_t>(LM_MEMBER_REVOKED));
+    st.power_restore();
+    LM_CHECK(n.until([&] { return stored_state(st, store::rec::membership) ==
+                                  static_cast<int>(member::k_membership_revoked); }, 10'000)); // then durably
+    LM_CHECK(!n.eng(1).identity().is_member());
+}
+
+// ---- FIX8 addendum: the independent review of the FIX8 diff (its experiments HA, HB, HD), asserting the fix ----
+namespace {
+std::size_t stored_len(SimStore &st, uint16_t id) {
+    auto job = std::make_unique<store::RecordJob>();
+    job->arm(store::RecordJob::Op::Load, id);
+    return store::record_load(st, *job) == Status::Ok ? job->payload_len : 0;
+}
+bool revoked_event(LNet &n, unsigned about) {
+    bool seen = false;
+    lm_event_t ev{};
+    ev.struct_size = sizeof(ev);
+    ev.abi_version = LM_ABI_VERSION;
+    std::array<uint8_t, 700> buf{};
+    std::size_t len = 0;
+    while (lm_next_event(n.ctx(0), &ev, buf.data(), buf.size(), &len) == LM_STATUS_OK) {
+        if (ev.kind == LM_EVENT_MEMBERSHIP && ev.reason == LM_MEMBER_REVOKED &&
+            std::memcmp(ev.peer.bytes, n.id(about).bytes.data(), 32) == 0) {
+            seen = true;
+        }
+    }
+    return seen;
+}
+void write_table_floor(SimStore &st, const DeviceId &d, uint64_t a, uint64_t m) {
+    member::Floors f;
+    auto job = std::make_unique<store::RecordJob>();
+    job->arm(store::RecordJob::Op::Load, store::rec::revocation_floors);
+    if (store::record_load(st, *job) == Status::Ok) {
+        LM_CHECK_OK(member::decode_floors(ByteView{job->payload.data(), job->payload_len}, f));
+    }
+    LM_CHECK_OK(f.raise(d, a, m));
+    std::size_t len = 0;
+    LM_CHECK_OK(member::encode_floors(f, MutByteView{job->payload}, len));
+    job->arm(store::RecordJob::Op::Commit, store::rec::revocation_floors, 0, len);
+    LM_CHECK_OK(store::record_commit(st, *job));
+}
+DeviceId stranger(uint8_t k) {
+    DeviceId d;
+    d.bytes.fill(static_cast<uint8_t>(0xA0 + k));
+    return d;
+}
+} // namespace
+
+// A revocation whose entry commit failed and whose repair gave up (the store stayed dead) must never later write that
+// slot's record over a newer state of it: the member was re-allowed by a signed expected page and joined again; a later
+// unrelated floor copy restarted the repairs, which rewrote the ACTIVE record without its credential (review HA).
+LM_TEST("S06 FIX8 sim: a repair that gave up never rewrites the member's later ACTIVE record") {
+    LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}}, 79);
+    star(n);
+    for (unsigned i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    SimStore &st = n.node(0).store;
+    const uint16_t rec1 = static_cast<uint16_t>(root::k_rec_ledger_base + 0);
+    st.arm_cut(st.mutating_ops(), CutMode::Before);
+    const Bytes rv = fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(1), 2, 2);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_install_control(n.ctx(0), 11, rv.data(), rv.size(), &op), LM_STATUS_OK);
+    n.node(0).notify();
+    LM_CHECK(n.until([&] { return st.cut_fired(); }, 5000));
+    n.run_ms(40'000); // the store stays dead: every repair fails until k_recon_tries
+    st.power_restore();
+    n.run_ms(3000);
+    LM_CHECK(stored_state(st, rec1) == static_cast<int>(root::EntryState::Active)); // precondition
+    LM_CHECK(n.eng(0).ledger().find(n.id(1))->state == root::EntryState::Blocked);
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    n.node(1).notify();
+    LM_CHECK(n.until([&] { return !n.eng(1).identity().is_member(); }, 10'000));
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.grant(1, 2, 1); // a new fleet grant and an expected entry for it (Blocked -> Expected)
+    n.run_ms(31'500);
+    LM_CHECK_EQ(n.join(1, 0x61), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(1).identity().is_member() && n.ready(1); }, 120'000));
+    n.run_ms(3000);
+    const std::size_t before = stored_len(st, rec1);
+    LM_CHECK(stored_state(st, rec1) == static_cast<int>(root::EntryState::Active) && before > 105); // holds its credential
+    (void)revoked_event(n, 1);
+    lm_operation_id_t lop2 = 0; // an unrelated member leaves: its floor copy restarts the ledger's repairs
+    LM_CHECK_EQ(lm_leave(n.ctx(2), LM_LEAVE_IMMEDIATE, 0, &lop2), LM_STATUS_OK);
+    n.node(2).notify();
+    n.run_ms(5000);
+    LM_CHECK_EQ(stored_len(st, rec1), before); // 105 (credential dropped) on the first FIX8 diff
+    LM_CHECK(!revoked_event(n, 1));
+    LM_CHECK(n.eng(0).ledger().authorized(n.id(1)) != nullptr);
+}
+
+// A table floor below which an ACTIVE entry lies is folded into the entry at boot (RAM Blocked); when that repair fails,
+// the table copy is the only durable floor and must never be evicted for an unlisted revocation (review HB).
+LM_TEST("S06 FIX8 sim: a table floor whose entry repair failed is never evicted; after a restart it still refuses") {
+    bool hit = false;
+    for (uint64_t k = 0; k < 24 && !hit; ++k) {
+        LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}, Spec{Role::Leaf}}, 79);
+        star(n);
+        for (unsigned i = 0; i < 4; ++i) {
+            n.boot(i);
+        }
+        LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+        const std::size_t provisioned = n.eng(0).identity().floors().count();
+        for (uint8_t s = 0; s + 1 + provisioned < member::k_max_floors; ++s) {
+            LM_CHECK_EQ(n.install_result(0, 11, n.net.fleet.revoke(stranger(s), 3, 3)), 0u);
+        }
+        SimStore &st = n.node(0).store;
+        const uint16_t rec3 = static_cast<uint16_t>(root::k_rec_ledger_base + 2);
+        n.node(0).power_cut();
+        write_table_floor(st, n.id(3), 9, 9); // a durable table floor above node 3's ACTIVE entry
+        st.arm_cut(st.mutating_ops() + k, CutMode::Before);
+        if (n.node(0).boot() != Status::Ok || lm_start(n.ctx(0)) != LM_STATUS_OK) {
+            continue;
+        }
+        n.run_ms(300);
+        const root::Entry *e3 = n.eng(0).ledger().ready() ? n.eng(0).ledger().find(n.id(3)) : nullptr;
+        if (!st.cut_fired() || e3 == nullptr || e3->state != root::EntryState::Blocked) {
+            continue;
+        }
+        n.run_ms(40'000);
+        st.power_restore();
+        n.run_ms(1000);
+        if (stored_state(st, rec3) != static_cast<int>(root::EntryState::Active)) {
+            continue; // the cut was not the repair commit
+        }
+        hit = true;
+        (void)n.install_result(0, 11, n.net.fleet.revoke(stranger(20), 3, 3)); // an unlisted revocation, table full
+        LM_CHECK(n.eng(0).identity().floors().floor_of(n.id(3)).assignment == 9); // kept (evicted on the first diff)
+        n.run_ms(1000);
+        n.node(0).power_cut();
+        n.boot(0);
+        LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000));
+        LM_CHECK(n.eng(0).ledger().authorized(n.id(3)) == nullptr);
+    }
+    LM_CHECK(hit); // some cut index hit the boot-time repair commit
+}
+
+// An expected-page entry commit into a reused slot reported a failure although the record landed (RAM keeps the departed
+// device there): that slot is in doubt, so the departed device's table copy - now its only durable floor - is never
+// evicted as "redundant" (review HD).
+LM_TEST("R09 FIX8 sim: a slot whose commit result is unknown keeps the floor of its former device") {
+    bool hit = false;
+    for (uint64_t k = 0; k < 16 && !hit; ++k) {
+        // Node 1 (address 2, slot 0) and 63 more listed members: the ledger is full. Node 2 is unjoined.
+        LNet n({Spec{}, Spec{Role::Leaf, 0xFFFFFFFFFFULL}, Spec{Role::Leaf, 0, true}}, 96, 63);
+        n.boot(0);
+        n.boot(1);
+        LM_CHECK(n.until([&] { return n.ready(1); }, 90'000));
+        LM_CHECK_EQ(n.eng(0).ledger().count(root::EntryState::Free), 0u);
+        lm_operation_id_t lop = 0;
+        LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+        n.node(1).notify();
+        LM_CHECK(n.until([&] {
+            const root::Entry *x = n.eng(0).ledger().find(n.id(1));
+            return x != nullptr && x->state == root::EntryState::Left;
+        }, 10'000));
+        n.run_ms(1000); // its floor copy is durable: slot 0 is reusable
+        const std::size_t have = n.eng(0).identity().floors().count();
+        for (uint8_t s = 0; s + have < member::k_max_floors; ++s) {
+            LM_CHECK_EQ(n.install_result(0, 11, n.net.fleet.revoke(stranger(s), 3, 3)), 0u);
+        }
+        LM_CHECK_EQ(n.eng(0).identity().floors().count(), member::k_max_floors);
+        n.boot(2);
+        n.run_ms(500);
+        const Bytes t = n.net.fleet.ticket(n.kits[2].kit, DomainId{}, n.net.domain, n.net.delegation_cose, 0, 1);
+        LM_CHECK_EQ(n.install(2, 3, t), LM_STATUS_OK);
+        SimStore &st = n.node(0).store;
+        st.arm_cut(st.mutating_ops() + k, CutMode::After);
+        const uint32_t er = n.install_result(0, 5, n.expected_page(2, 1, t, 1));
+        st.power_restore();
+        const root::Entry &ram0 = n.eng(0).ledger().entry(0);
+        auto job = std::make_unique<store::RecordJob>();
+        job->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(root::k_rec_ledger_base + 0));
+        const bool loaded = store::record_load(st, *job) == Status::Ok && job->payload_len >= 57;
+        const bool durable_is_2 = loaded && std::memcmp(job->payload.data() + 25, n.id(2).bytes.data(), 32) == 0;
+        if (er == 0 || !(ram0.device == n.id(1) && ram0.state == root::EntryState::Left) || !durable_is_2) {
+            continue;
+        }
+        hit = true;
+        (void)n.install_result(0, 11, n.net.fleet.revoke(stranger(20), 3, 3)); // an unlisted revocation, table full
+        n.run_ms(1000);
+        n.node(0).power_cut();
+        n.boot(0);
+        LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000));
+        // Node 1's floor survives: in its entry (none: the slot holds node 2 now) or in the table.
+        LM_CHECK(n.eng(0).ledger().find(n.id(1)) != nullptr ||
+                 n.eng(0).identity().floors().floor_of(n.id(1)).assignment > 0);
+    }
+    LM_CHECK(hit); // some cut index gave the unknown-result entry commit
 }
 
 int main(int argc, char **argv) { return lmtest::run_all(argc, argv); }

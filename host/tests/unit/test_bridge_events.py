@@ -68,3 +68,16 @@ def test_event_ack_never_covers_an_event_whose_handling_failed() -> None:
         return link.acks
 
     assert asyncio.run(run()) == []
+
+
+def test_fix11_m15_per_boot_operation_maps_are_bounded() -> None:
+    from collections import OrderedDict  # noqa: PLC0415
+
+    from leanmesh_host.bridge import bridge as mod  # noqa: PLC0415
+
+    table: OrderedDict[int, int] = OrderedDict()
+    for n in range(mod.MAX_OP_MAP * 3):
+        mod._remember(table, n, n)
+    assert len(table) == mod.MAX_OP_MAP and next(iter(table)) == mod.MAX_OP_MAP * 2  # the newest are kept
+    mod._remember(table, mod.MAX_OP_MAP * 2, 0)  # re-adding an old key refreshes it, does not grow the table
+    assert len(table) == mod.MAX_OP_MAP

@@ -119,7 +119,7 @@ Status Ledger::install_lifecycle(uint8_t type, ByteView cose, MonoTime /*now*/, 
     lc_.active = true;
     lc_.type = type;
     lc_.len = cose.size();
-    lc_.op = member::k_op_tag | ++op_counter_;
+    lc_.op = engine_.next_control_op(); // FIX9-D5: one namespace with the group sets
     if (submit(Step::LcVerify, JobClass::PublicKey, &lc_verify_job, this, -2) != Status::Ok) {
         lc_.active = false;
         release(-2);
@@ -176,10 +176,14 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
         return;
     }
     if (s != Status::Ok) {
-        // Before a commit nothing changed (the object was refused); after one the durable state may or may not
-        // have moved (floors raised in RAM, an entry commit unknown): RECOVERY_REQUIRED, never "rejected".
-        if (step == Step::LcFloors || step == Step::LcEntry) {
-            lc_fail_closed(step == Step::LcEntry, now); // FIX5-D2: the floors refuse the member from now on
+        // Before a commit nothing changed (the object was refused); after one the durable state may or may not have
+        // moved: RECOVERY_REQUIRED, never "rejected". RAM refuses already (FIX5-D2, FIX8-D1).
+        if (step == Step::LcEntry) {
+            lc_entry_failed(now);
+        } else if (step == Step::LcFloors) {
+            floors_dirty_ = true; // the RAM floor refuses the device; the table is written again (bounded)
+            recon_fails_ = 0;
+            maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
         } else if (step == Step::LcWindow) {
             // FIX5-D6: the new window's record may be on the Flash all the same: its replay floor holds from now on, and
             // no window is open until one is installed again (the same object then goes on with this record's count).
@@ -193,39 +197,46 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
     case Step::LcVerify:
         lc_verified(now);
         return;
-    case Step::LcFloors:
-        lc_retire_entry(now);
+    case Step::LcFloors: // an unlisted device's floor is durable
+        lc_finish(Status::Ok, now);
         return;
     case Step::LcEntry: {
-        Entry e = job_entry_;
+        const Entry &e = entries_[lc_.slot];
         const DeviceId device = e.device;
         const ShortAddr addr = e.address;
-        set_entry(lc_.slot, e);
+        mark_used(lc_.slot); // (a new entry for an unlisted device: after its record, SEC-D5)
+        entry_written(lc_.slot, true); // RAM and the record agree again (an earlier failed commit is superseded)
         if (lc_.type == member::k_type_revoke) {
             ++stats_.revoked;
-            // The signed notice goes to the device over its end session first; its sessions end when that had its
-            // chance (network refusal is already durable: the ledger admits and renews it no more).
-            const delivery::ControlSendRequest cr{device, engine_.identity().member().root_term.value(),
-                                                  now.to_ms() + 10000};
-            if (!notice_until_.is_never()) {
-                forget_member(notice_device_, notice_addr_); // an earlier notice's time is over now
+            if (lc_.was_active) {
+                // The signed notice goes to the device over its end session first; its sessions end when that had its
+                // chance (the network's refusal is already in force: the ledger admits and renews it no more).
+                const delivery::ControlSendRequest cr{device, engine_.identity().member().root_term.value(),
+                                                      now.to_ms() + 10000};
+                if (!notice_until_.is_never()) {
+                    forget_member(notice_device_, notice_addr_); // an earlier notice's time is over now
+                }
+                if (engine_.delivery().has_session(device, now) &&
+                    engine_.delivery().send_control(cr, ByteView{scratch_.data(), lc_.len}, now).status == Status::Ok) {
+                    notice_device_ = device;
+                    notice_addr_ = addr;
+                    notice_until_ = now + Duration::from_s(10);
+                } else {
+                    notice_until_ = MonoTime::never();
+                    forget_member(device, addr);
+                }
             }
-            if (engine_.delivery().has_session(device, now) &&
-                engine_.delivery().send_control(cr, ByteView{scratch_.data(), lc_.len}, now).status == Status::Ok) {
-                notice_device_ = device;
-                notice_addr_ = addr;
-                notice_until_ = now + Duration::from_s(10);
-            } else {
-                notice_until_ = MonoTime::never();
-                forget_member(device, addr);
+            if (e.state == EntryState::Blocked) {
+                engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_MEMBER_REVOKED, 0, &device);
             }
-            engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_MEMBER_REVOKED, 0, &device);
         } else {
             ++stats_.reconciled;
             forget_member(device, addr);
             engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
         }
+        const std::size_t slot = lc_.slot;
         lc_finish(Status::Ok, now);
+        cover(slot, now);
         return;
     }
     case Step::LcWindow: // a new window's record is durable: it is the one counted from now on (FIX5-D6)
@@ -241,7 +252,6 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
 
 void Ledger::lc_verified(MonoTime now) {
     const member::LocalIdentity &id = engine_.identity();
-    member::Floors &floors = engine_.identity().floors();
     uint64_t af = 0;
     uint64_t mf = 0;
     DeviceId device;
@@ -316,113 +326,181 @@ void Ledger::lc_verified(MonoTime now) {
         lc_finish(Status::Unsupported, now);
         return;
     }
-    // Revocation / reconciliation: the floors first (fail closed in RAM at once, then durable), then the entry.
-    if (floors.raise(device, af, mf) != Status::Ok) {
-        lc_finish(Status::NoCapacity, now); // the floor table is full: nothing changed
+    if (const Entry *e = find(device)) {
+        lc_listed(static_cast<std::size_t>(e - entries_.data()), af, mf, now);
+    } else {
+        lc_unlisted(device, af, mf, now);
+    }
+}
+
+// FIX8-D1: a listed device's floor is its ledger entry (C1: routine leaves filled the 10-entry table and revocation
+// then failed for room). Tickets at or below `consumed` and memberships at or below `membership` are dead for good, so the
+// revocation (or reconciliation) folds its floors into those two and makes the entry Blocked (Left: the member moved
+// away) when they cut its generations. RAM first - the entry refuses at once (authorizes()) - then one commit. No table
+// room is needed: a revocation of a listed device never fails for capacity. A reservation keeps its credential in its
+// record, which this commit does not carry: a fold that would change it blocks the reservation instead (fail closed).
+void Ledger::lc_listed(std::size_t slot, uint64_t af, uint64_t mf, MonoTime now) {
+    const Entry &e = entries_[slot];
+    Entry x = e;
+    x.consumed = std::max(x.consumed, af > 0 ? af - 1 : 0);
+    x.membership = std::max(x.membership, mf > 0 ? mf - 1 : 0);
+    const bool cut = e.assignment < af || e.membership < mf;
+    const bool folded = x.consumed != e.consumed || x.membership != e.membership;
+    const bool holds_credential = e.state == EntryState::Prepared || e.state == EntryState::Active;
+    if (e.state != EntryState::Blocked && (cut || (holds_credential && folded))) {
+        x.state = e.state == EntryState::Left && lc_.to == EntryState::Left ? EntryState::Left : lc_.to;
+    }
+    if (x.state == e.state && !folded) {
+        lc_finish(Status::Ok, now); // generations it no longer holds (or the same object again): nothing more
         return;
     }
-    if (commit_floors(Step::LcFloors) != Status::Ok) {
-        lc_fail_closed(false, now); // FIX5-D2: RAM refuses already; the commit did not happen
+    x.confirmed = x.state == EntryState::Active && e.confirmed;
+    x.reserved_until = MonoTime::never();
+    lc_.slot = slot;
+    lc_.was_active = e.state == EntryState::Active && x.state != EntryState::Active;
+    entries_[slot] = x; // fail closed at once: the entry refuses from here on, whatever the commit does
+    job_entry_ = x;
+    if (commit_entry(Step::LcEntry, slot, x.state, x.confirmed, ByteView{}, -2) != Status::Ok) {
+        lc_entry_failed(now);
         lc_finish(Status::RecoveryRequired, now);
     }
 }
 
-// The entry of a revoked device becomes Blocked, that of a device that moved away Left (with what it consumed), when
-// the ledger lists it below the new floors; a revocation of generations it no longer holds changes nothing more.
-void Ledger::lc_retire_entry(MonoTime now) {
-    const DeviceId &device = lc_.type == member::k_type_revoke ? lc_.obj.revoke.device : lc_.obj.ticket.device;
-    const Entry *e = find(device);
-    if (e == nullptr || e->state == lc_.to || // (the same object again: done already)
-        engine_.identity().floors().check(device, AssignmentGen{e->assignment}, MembershipGen{e->membership}) ==
-            Status::Ok) {
-        lc_finish(Status::Ok, now);
+// A device this ledger does not list: its floor goes to the table (RAM at once, then the record). A full table first
+// drops a copy an entry holds anyway (evict_cover); if the table holds only floors nothing else keeps, the device gets
+// a Blocked entry of its own in any slot a join could take (free, or a departed one whose floor the table keeps): that
+// entry is its floor record then. No such slot: nothing changed (NO_CAPACITY) - and while that lasts no join can
+// reserve a slot here either (the same pick_slot rule), so the device cannot become a member of this root.
+void Ledger::lc_unlisted(const DeviceId &device, uint64_t af, uint64_t mf, MonoTime now) {
+    member::Floors &f = engine_.identity().floors();
+    if (f.raise(device, af, mf) == Status::Ok || (evict_cover() && f.raise(device, af, mf) == Status::Ok)) {
+        if (commit_floors(Step::LcFloors) != Status::Ok) {
+            floors_dirty_ = true;
+            recon_fails_ = 0;
+            maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
+            lc_finish(Status::RecoveryRequired, now);
+        }
         return;
     }
-    lc_.slot = static_cast<std::size_t>(e - entries_.data());
-    job_entry_ = *e;
-    job_entry_.consumed = std::max(e->consumed, e->assignment);
-    job_entry_.reserved_until = MonoTime::never();
-    ByteView cose; // the credential stays in the record (a repeated join request is answered from it)
-    if (commit_entry(Step::LcEntry, lc_.slot, lc_.to, false, cose, -2) != Status::Ok) {
-        lc_fail_closed(true, now); // FIX5-D2
+    std::size_t i = 0;
+    if (pick_slot(device, i) != Status::Ok) {
+        lc_finish(Status::NoCapacity, now);
+        return;
+    }
+    Entry x;
+    x.device = device;
+    x.consumed = af > 0 ? af - 1 : 0;
+    x.membership = mf > 0 ? mf - 1 : 0;
+    x.state = EntryState::Blocked;
+    x.address = ShortAddr{static_cast<uint16_t>(2 + i)};
+    lc_.slot = i;
+    lc_.was_active = false;
+    set_entry(i, x); // (a reused slot's departed device keeps its floor in the table: that is what made it reusable)
+    job_entry_ = x;
+    if (commit_entry(Step::LcEntry, i, EntryState::Blocked, false, ByteView{}, -2) != Status::Ok) {
+        lc_entry_failed(now);
         lc_finish(Status::RecoveryRequired, now);
     }
 }
 
-// ---- FIX5-D2: the floors are the authorisation (a failed or unknown commit of a revocation / reconciliation) ----
-// The floors are raised in RAM and a commit after them failed: the member is refused already (authorizes()). Nothing of
-// it may keep serving: its link and end sessions end and the routes through its address go, now. Its entry is made
-// Blocked (Left for a member that moved away) by maintenance, the floors written again when their own commit failed.
-void Ledger::lc_fail_closed(bool floors_durable, MonoTime now) {
-    const DeviceId &device = lc_.type == member::k_type_revoke ? lc_.obj.revoke.device : lc_.obj.ticket.device;
-    floors_dirty_ = floors_dirty_ || !floors_durable;
-    recon_fails_ = 0;
-    const Entry *e = find(device);
-    if (e != nullptr && e->state == EntryState::Active && !authorizes(*e)) {
-        const uint64_t bit = 1ULL << static_cast<std::size_t>(e - entries_.data());
-        (lc_.to == EntryState::Left ? recon_left_ : recon_block_) |= bit;
-        forget_member(e->device, e->address);
-        // The member is effectively revoked already (the Host's node view reads effective(), never ACTIVE).
-        engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_MEMBER_REVOKED, 0, &e->device);
-    }
-    maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
-}
-
-uint64_t Ledger::below_floors() const {
-    uint64_t mask = 0;
-    for (std::size_t i = 0; i < entries_.size(); ++i) {
-        mask |= entries_[i].state == EntryState::Active && !authorizes(entries_[i]) ? 1ULL << i : 0;
-    }
-    return mask;
-}
-
-// Maintenance (holder -2): the lowest slot waiting is made Blocked/Left durably with what it consumed. False: nothing is
-// left to do (the shared memory stays with the caller, which goes on with its other items).
-bool Ledger::start_floored(MonoTime now) {
-    while ((recon_block_ | recon_left_) != 0) {
-        const auto slot = static_cast<std::size_t>(__builtin_ctzll(recon_block_ | recon_left_));
-        const uint64_t bit = 1ULL << slot;
-        const bool left = (recon_left_ & bit) != 0;
-        const Entry &e = entries_[slot];
-        if (e.state != EntryState::Active || authorizes(e)) {
-            recon_block_ &= ~bit; // resolved meanwhile (the install completed, or another entry holds the slot)
-            recon_left_ &= ~bit;
-            continue;
+// A table floor whose device's ledger entry holds it at least as high (the copy a departure left so that the slot could
+// be reused) makes room for a floor nothing else keeps. That slot is not reused from then on. False: none.
+bool Ledger::evict_cover() {
+    member::Floors &f = engine_.identity().floors();
+    for (std::size_t i = 0; i < f.count(); ++i) {
+        const member::Floors::Entry c = f.at(i);
+        const Entry *e = find(c.device);
+        // (A slot whose record is in doubt may not hold what RAM shows: its floor is not known to be kept.)
+        if (e != nullptr && e->state != EntryState::Active && e->state != EntryState::Prepared &&
+            (doubt_ >> static_cast<std::size_t>(e - entries_.data()) & 1U) == 0 && e->consumed + 1 >= c.assignment &&
+            e->membership + 1 >= c.membership) {
+            f.remove(i);
+            ++stats_.covers_evicted;
+            return true;
         }
-        job_entry_ = e;
-        job_entry_.consumed = std::max(e.consumed, e.assignment);
-        job_entry_.reserved_until = MonoTime::never();
-        if (commit_entry(Step::CommitFloored, slot, left ? EntryState::Left : EntryState::Blocked, false, ByteView{},
-                         -2) != Status::Ok) {
-            release(-2);
-            recon_retry(now);
-        }
-        return true;
     }
     return false;
 }
 
-void Ledger::floored_done(Status s, MonoTime now) {
+// FIX5-D2 / FIX8-D1: the entry commit of a revocation or reconciliation failed and its result is unknown. RAM refuses
+// the member already; nothing of it may keep serving: its link and end sessions end and its routes go now, and
+// maintenance writes the entry again (bounded).
+void Ledger::lc_entry_failed(MonoTime now) {
+    mark_dirty(lc_.slot, now);
+    if (lc_.was_active) {
+        const Entry &e = entries_[lc_.slot];
+        forget_member(e.device, e.address);
+        engine_.emit_event(LM_EVENT_MEMBERSHIP, lc_.to == EntryState::Left ? LM_UNASSIGNED : LM_MEMBER_REVOKED, 0,
+                           &e.device);
+    }
+}
+
+void Ledger::mark_dirty(std::size_t slot, MonoTime now) {
+    dirty_ |= 1ULL << slot;
+    doubt_ |= 1ULL << slot;
+    recon_fails_ = 0;
+    maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
+}
+
+// At boot: an ACTIVE entry below a durable table floor (provisioned, or a record written before FIX8) is refused at
+// once and made Blocked durably, the floor folded into it (so that the entry keeps it).
+void Ledger::block_below_floors(MonoTime now) {
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        Entry &e = entries_[i];
+        if (e.state != EntryState::Active || authorizes(e)) {
+            continue;
+        }
+        const member::Floors::Entry f = engine_.identity().floors().floor_of(e.device);
+        e.consumed = std::max({e.consumed, e.assignment, f.assignment > 0 ? f.assignment - 1 : 0});
+        e.membership = std::max(e.membership, f.membership > 0 ? f.membership - 1 : 0);
+        e.state = EntryState::Blocked;
+        e.confirmed = false;
+        mark_dirty(i, now);
+        maint_retry_ = earliest(maint_retry_, now);
+    }
+}
+
+// Maintenance (holder -2): the lowest dirty slot is written as RAM holds it. False: nothing is left to do (the shared
+// memory stays with the caller, which goes on with its other items).
+bool Ledger::start_dirty(MonoTime now) {
+    while (dirty_ != 0 && (entries_[static_cast<std::size_t>(__builtin_ctzll(dirty_))].state == EntryState::Active ||
+                           entries_[static_cast<std::size_t>(__builtin_ctzll(dirty_))].state == EntryState::Prepared)) {
+        // A repair writes no credential: an entry that holds one again (a later join) is never overwritten by it.
+        dirty_ &= dirty_ - 1U;
+    }
+    if (dirty_ == 0) {
+        return false;
+    }
+    const auto slot = static_cast<std::size_t>(__builtin_ctzll(dirty_));
+    job_entry_ = entries_[slot];
+    if (commit_entry(Step::CommitDirty, slot, job_entry_.state, job_entry_.confirmed, ByteView{}, -2) != Status::Ok) {
+        release(-2);
+        recon_retry(now);
+    }
+    return true;
+}
+
+void Ledger::dirty_done(Status s, MonoTime now) {
     const std::size_t slot = job_slot_index_;
     release(-2);
     if (s != Status::Ok) {
         ++stats_.floored_failed;
-        recon_retry(now); // unknown durable result: RAM keeps Active (refused by the floors), the next try decides
+        recon_retry(now); // unknown durable result: RAM keeps refusing, the next try decides
         return;
     }
-    const uint64_t bit = 1ULL << slot;
-    recon_block_ &= ~bit;
-    recon_left_ &= ~bit;
+    const Entry &e = entries_[slot];
+    if (e.state == job_entry_.state && e.consumed == job_entry_.consumed && e.membership == job_entry_.membership &&
+        e.device == job_entry_.device) {
+        entry_written(slot, true); // (RAM moved on meanwhile: written again)
+    }
     recon_fails_ = 0;
     ++stats_.floored;
-    const Entry e = job_entry_;
-    set_entry(slot, e);
-    forget_member(e.device, e.address); // (at boot there is nothing to end; at run time it ended already)
-    engine_.emit_event(LM_EVENT_MEMBERSHIP, e.state == EntryState::Left ? LM_UNASSIGNED : LM_MEMBER_REVOKED, 0,
-                       &e.device);
-    if ((recon_block_ | recon_left_) != 0) {
-        maintenance(now);
+    mark_used(slot);
+    if (job_entry_.state == EntryState::Left || job_entry_.state == EntryState::Blocked) {
+        engine_.emit_event(LM_EVENT_MEMBERSHIP, job_entry_.state == EntryState::Left ? LM_UNASSIGNED : LM_MEMBER_REVOKED,
+                           0, &job_entry_.device);
     }
+    cover(slot, now);
 }
 
 // Bounded retry of the repairs above: k_recon_tries failures in a row (the gap doubling) end them for this boot.

@@ -43,6 +43,9 @@ Status SimRadio::stop() {
     on_ = false;
     tx_in_flight_ = false;
     peer_count_ = 0;
+    port::RadioRx rx; // like IdfRadio::stop(): what the stopped driver had queued is gone (FIX10-D8 hands it over first)
+    while (ring_.pop(rx)) {
+    }
     return Status::Ok;
 }
 

@@ -109,13 +109,9 @@ Reply Fanout::execute(const Command &c, MonoTime now) {
         if (!request_as(c, set)) {
             return reply(Status::InvalidArgument);
         }
-        const Status s = engine_.groups().set(*set);
-        if (s != Status::Ok) {
-            return reply(s);
-        }
-        const uint64_t op = member::k_op_tag | ++counter_; // completes at once: RAM registry (root.groups)
-        engine_.emit_event(LM_EVENT_OPERATION, 0, op, nullptr);
-        return reply(Status::Ok, op);
+        uint64_t op = 0; // FIX8-D10: its LM_EVENT_OPERATION comes once the definition is durable (root.groups)
+        const Status s = engine_.groups().set(*set, op, now);
+        return s != Status::Ok ? reply(s) : reply(Status::Ok, op);
     }
     case CommandKind::GroupProgress: {
         Op *g = find(id_of(c));

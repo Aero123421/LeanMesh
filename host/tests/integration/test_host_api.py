@@ -3,6 +3,7 @@ against api/openapi.json; rejections are checked for "nothing was written"."""
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -10,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from host_util import (ALL_PERMS, DOMAIN, NODE, check, make_settings, message, rows, running)
+from host_util import (ALL_PERMS, DOMAIN, NODE, POLICY_OBJECT, TRANSFER_TICKET, check, make_settings, message, rows, running,
+                       signed_object)
 from leanmesh_host.db import mirror, outbox
 
 
@@ -185,21 +187,22 @@ def test_control_rules_permissions_capabilities_and_revision(tmp_path: Path) -> 
         assert ctl("7", who="approver", type="LEAVE", device_id=NODE, leave_mode="DRAIN").status_code == 202
         assert ctl("8", who="sender", type="JOIN_DECISION", device_id=NODE, decision="REJECT").status_code == 403
         # capability gating: unknown mandatory capability -> 503 UNSUPPORTED, then allowed
-        signed = {"type": "TRANSFER", "device_id": NODE, "signed_cbor_b64": "AAEC"}
+        signed = {"type": "TRANSFER", "device_id": NODE, "signed_cbor_b64": signed_object(3, TRANSFER_TICKET)}
         r = ctl("9", **signed)
         assert r.status_code == 503 and r.json()["details"]["required_capability"] == "SIGNED_TRANSFER"
         h.hub.set_root(True, ["SIGNED_TRANSFER"])
         assert ctl("9", **signed).status_code == 202
         # expected_revision is compared where the Host holds the current value
+        policy = signed_object(12, POLICY_OBJECT)
         h.db(lambda c: c.execute("UPDATE domains SET policy_revision=5"))
-        stale = ctl("10", type="POLICY_SET", signed_cbor_b64="AAEC")
+        stale = ctl("10", type="POLICY_SET", signed_cbor_b64=policy)
         assert stale.status_code == 409 and stale.json()["details"]["current_revision"] == "5"
-        assert ctl("11", type="POLICY_SET", signed_cbor_b64="AAEC", expected_revision="5").status_code == 202
+        assert ctl("11", type="POLICY_SET", signed_cbor_b64=policy, expected_revision="5").status_code == 202
         # request_id/content mismatch under one Idempotency-Key is a conflict, not a new command
-        assert ctl("11", type="POLICY_SET", signed_cbor_b64="AAEC", expected_revision="5",
+        assert ctl("11", type="POLICY_SET", signed_cbor_b64=policy, expected_revision="5",
                    request_id="cd" * 16).status_code == 409
         stored = rows(tmp_path / "host.db", "SELECT type,length(payload) FROM operations WHERE type='POLICY_SET'")
-        assert stored == [("POLICY_SET", 3)]
+        assert stored == [("POLICY_SET", len(base64.b64decode(policy)))]
 
 
 def test_idempotency_replay_isolation_and_epochs(tmp_path: Path) -> None:

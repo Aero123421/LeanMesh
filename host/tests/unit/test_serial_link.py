@@ -7,7 +7,6 @@ import ctypes
 import fcntl
 import os
 import threading
-from types import SimpleNamespace
 from typing import Any
 
 import pytest

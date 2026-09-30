@@ -233,3 +233,20 @@ class HostProc:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+
+
+def signed_object(ctype: int, data: list[Any], domain: str = DOMAIN) -> str:
+    """A structurally valid COSE_Sign1 control object (the signature is a placeholder: the root verifies it)."""
+    import base64  # noqa: PLC0415
+
+    from leanmesh_host.wire import cbor_encode  # noqa: PLC0415
+    from leanmesh_host.wire.control import ControlBody, encode_control_body, encode_cose_sign1  # noqa: PLC0415
+
+    body = encode_control_body(ControlBody(ctype, 1, b"\x01" * 16, bytes.fromhex(domain), 1, b"\x02" * 32,
+                                           cbor_encode(data)))
+    return base64.b64encode(encode_cose_sign1(b"\x02" * 32, body, b"\x00" * 64)).decode()
+
+
+TRANSFER_TICKET = [bytes.fromhex(NODE), b"\x03" * 16, b"\x04" * 16, b"\x05" * 16, b"\x06" * 32, 1, 2, b"\x07" * 16, 0,
+                   b"\x08" * 16, b"\x09" * 32]
+POLICY_OBJECT = [1, 1, bytes(32), b"\x00"]

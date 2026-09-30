@@ -141,8 +141,8 @@ def test_host_channel_endpoint_mirrors_the_root_and_controls_reach_the_coordinat
     # A plan run by the root: the Host shows STORED-then-APPLIED members as required/applied, per device.
     b.sim.ok("channel timing 3000 6000")
     assert b.sim.ok("channel plan 11")["status"] == "OK"
-    ch = wait_for(lambda: (x := b.get("/v1/channel", domain_id=b.domain))["current_channel"] == 11 and x, 60,
-                  "the committed channel is reported")
+    ch = wait_for(lambda: (x := b.get("/v1/channel", domain_id=b.domain))["current_channel"] == 11
+                  and x["channel_epoch"] == 1 and x["required"] == [b.node] and x, 60, "the committed channel is reported")
     assert ch["channel_epoch"] == 1 and ch["state"] in ("SWITCHING", "SETTLING", "MONITOR")
     assert ch["required"] == [b.node]
     wait_for(lambda: b.get("/v1/channel", domain_id=b.domain)["applied"] == [b.node], 60, "APPLIED reported")

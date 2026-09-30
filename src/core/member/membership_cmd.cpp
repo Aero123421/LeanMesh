@@ -146,9 +146,13 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
     }
 }
 
-// lm_policy_get/set (docs/10 §5). The policy lives on the root; other roles have none (UNSUPPORTED, as
-// lm_channel_request). Set changes the channel freeze through the coordinator and refuses every other change: those
-// need a signed policy object (lm_install_control), and an unsigned struct never stands in for it (docs/06).
+// lm_policy_get/set (docs/10 §5, docs/07 §9). The policy lives on the root; other roles have none (UNSUPPORTED, as
+// lm_channel_request). FIX8-D12 (review M10): the join mode is a policy field like the channel freeze. One policy
+// revision counts every committed change - the coordinator's channel changes plus the ledger's join-mode changes, each
+// kept in its own record - and a set is a compare-and-set on it. One field changes per call: channel_freeze through the
+// coordinator, join_mode through the ledger (durable before its operation ends, CLOSED if that commit's result is
+// unknown). relay_allowed and automatic transfer have no mechanism in this build: UNSUPPORTED, never a fake success.
+// No field lowers a docs/06 condition: every join still needs a fleet-signed ticket, and preapproved a signed entry.
 Reply Engine::execute_policy(const Command &cmd, MonoTime now) {
     if (!is_root()) {
         return Reply{Status::Unsupported, 0, 0};
@@ -157,7 +161,7 @@ Reply Engine::execute_policy(const Command &cmd, MonoTime now) {
     lm_policy_t cur{};
     cur.struct_size = sizeof(cur);
     cur.abi_version = LM_ABI_VERSION;
-    cur.revision = v.policy_revision;
+    cur.revision = v.policy_revision + ledger().policy_changes();
     cur.join_mode = static_cast<uint32_t>(ledger().join_mode());
     cur.relay_allowed = 1; // the root is the tree's origin
     cur.channel_automatic = v.frozen ? 0U : 1U;
@@ -173,18 +177,31 @@ Reply Engine::execute_policy(const Command &cmd, MonoTime now) {
         return Reply{Status::InvalidArgument, 0, 0};
     }
     const auto &rq = *static_cast<const PolicySetRequest *>(cmd.request);
+    if (ledger().policy_in_doubt()) {
+        return Reply{Status::RecoveryRequired, 0, 0}; // the revision itself is in doubt: no compare-and-set on it
+    }
     if (rq.expected_revision != cur.revision) {
         return Reply{Status::Conflict, 0, 0}; // compare-and-set on the policy revision
     }
     const lm_policy_t &want = rq.policy;
-    if (want.join_mode != cur.join_mode || want.relay_allowed != cur.relay_allowed ||
-        want.auto_transfer_on_isolation != 0 || want.isolation_before_transfer_ms != 0) {
+    if (want.relay_allowed != cur.relay_allowed || want.auto_transfer_on_isolation != 0 ||
+        want.isolation_before_transfer_ms != 0) {
         return Reply{Status::Unsupported, 0, 0};
     }
-    if (want.channel_freeze == cur.channel_freeze) {
+    const bool mode = want.join_mode != cur.join_mode;
+    const bool freeze = want.channel_freeze != cur.channel_freeze;
+    if (mode && freeze) {
+        return Reply{Status::InvalidArgument, 0, 0}; // one field per call: each change is its own operation
+    }
+    if (mode) {
+        const uint64_t op = next_control_op();
+        const Status s = ledger().set_policy_mode(static_cast<root::JoinMode>(want.join_mode), op, now);
+        return Reply{s, s == Status::Ok ? op : 0, 0};
+    }
+    if (!freeze) {
         return Reply{Status::Ok, 0, 0}; // nothing changes: applied, no operation
     }
-    return coord_.request(want.channel_freeze != 0 ? LM_CHANNEL_FREEZE : LM_CHANNEL_AUTO, rq.expected_revision, now);
+    return coord_.request(want.channel_freeze != 0 ? LM_CHANNEL_FREEZE : LM_CHANNEL_AUTO, v.policy_revision, now);
 }
 
 } // namespace lm

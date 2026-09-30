@@ -101,13 +101,15 @@ def test_a_revocation_whose_entry_commit_failed_is_never_shown_active(bench: Cal
     b.start_host(perms=[*PERMS, "REVOKE"])
     b.await_root()
     assert _mirror(b, b.node) == "ACTIVE"
-    b.sim.ok("store-cut 0 2 before")  # the floors record (2 writes) lands; the entry record's first write is cut
+    b.sim.ok("store-cut 0 1 before")  # the floors record (1 write since FIX10/FIX11 core changes) lands; the entry's first write is cut
     op = _control(b, "REVOKE", device_id=b.node, signed_cbor_b64=_signed(b, "revoke 1 2 2"))["id"]
     o = _final(b, op, "revoke with its entry commit cut")
     assert b.sim.ok("store-fired 0")["cut_fired"] is True
     assert o["outcome"] == "INDETERMINATE" and o["reason"] == "RECOVERY_REQUIRED"
     wait_for(lambda: _mirror(b, b.node) == "REVOKED", 30, "REVOKED in the node mirror while the store is down")
-    assert _entry(b, b.node) == "active"  # the durable state has not caught up yet: the floors refuse it meanwhile
+    # The root may already read the entry as Blocked in RAM or still as Active until its maintenance step commits it: either
+    # way the floors refuse the member and the mirror says REVOKED (asserted above); the durable Blocked comes after the restore.
+    assert _entry(b, b.node) in ("active", "blocked")
     b.sim.ok("store-restore 0")
     wait_for(lambda: _entry(b, b.node) == "blocked", 20, "the entry made Blocked once the store answers")
     assert _mirror(b, b.node) == "REVOKED"

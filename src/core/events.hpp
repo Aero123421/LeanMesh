@@ -53,6 +53,22 @@ template <std::size_t N> class AppEventQueue {
         return ring_.front();
     }
 
+    // Withdraws the queued events for which `gone(ev)` holds (their backing state no longer exists: a payload that
+    // was dropped by a stop). The order of the others is kept; the application sees one GAP where they were.
+    template <class Pred> void withdraw(Pred gone) {
+        for (std::size_t n = ring_.size(); n > 0; --n) {
+            lm_event_t ev{};
+            if (!ring_.pop(ev)) {
+                return;
+            }
+            if (gone(ev)) {
+                ++lost_;
+            } else {
+                (void)ring_.push(ev);
+            }
+        }
+    }
+
     [[nodiscard]] uint64_t lost() const { return lost_; }
     // [S19] Diagnostics: events waiting for the application, and every event ever lost (lost_ restarts at each GAP).
     [[nodiscard]] std::size_t depth() const { return ring_.size(); }

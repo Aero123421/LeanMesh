@@ -38,8 +38,7 @@ bool Ledger::link_control(const link::RxInfo &info, ByteView plain, MonoTime now
         if (member::decode_leave(data, d) != Status::Ok || d.device != info.peer) {
             return true; // a device can only leave itself
         }
-        leave_slot_ = slot;
-        leave_pending_ = true;
+        leave_mask_ |= 1ULL << slot; // FIX8-D3: each member's own bit (one pending leave overwrote the other)
         maintenance(now);
         return true;
     }
@@ -128,6 +127,7 @@ void Ledger::send_echo(MonoTime now) {
 // Left is durable: the entry stops admitting the device, its sessions end and the revocation floors
 // remember which generations it consumed (a left device's old credential cannot come back, R09).
 void Ledger::leave_committed(Status s, MonoTime now) {
+    entry_written(job_slot_index_, s == Status::Ok);
     if (s != Status::Ok) { // the commit's result is unknown: RAM keeps Active, flash decides at boot
         release(-2);
         return;
@@ -139,13 +139,21 @@ void Ledger::leave_committed(Status s, MonoTime now) {
     const DeviceId device = e.device;
     forget_member(device, e.address);
     engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
-    // A full floor table: the entry stays Left and its slot is not reused (pick_slot).
-    if (engine_.identity().floors().raise(device, e.assignment + 1, e.membership + 1) != Status::Ok) {
-        release(-2);
-    } else if (commit_floors(Step::CommitFloors) != Status::Ok) {
-        floors_dirty_ = true; // FIX5-D2: RAM is ahead of the record; maintenance writes it again (bounded)
-        maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
-        release(-2);
+    release(-2);
+    cover(job_slot_index_, now);
+}
+
+// FIX8-D1: a departed entry (Left, Blocked) is the floor record of its device. A copy in the table, when there is room,
+// is what lets its slot be given to another device later (reusable(): only once that copy is durable); a full table
+// costs no revocation capacity, only this slot's reuse (a redundant copy even gives way to an unlisted device's floor).
+void Ledger::cover(std::size_t slot, MonoTime now) {
+    const Entry &e = entries_[slot];
+    if ((e.state == EntryState::Left || e.state == EntryState::Blocked) &&
+        engine_.identity().floors().raise(e.device, std::max(e.assignment, e.consumed) + 1, e.membership + 1) ==
+            Status::Ok) {
+        floors_dirty_ = true;
+        recon_fails_ = 0;
+        maint_retry_ = earliest(maint_retry_, now);
     }
 }
 
@@ -167,6 +175,45 @@ void Ledger::forget_member(const DeviceId &device, ShortAddr address) {
     }
     engine_.routes().forget(address);
     engine_.delivery().invalidate_addr(address);
+}
+
+// ---- [FIX8-D10] group registry and [FIX8-D12] join-mode policy: one record each, committed by maintenance ----
+void Ledger::want_groups_commit(MonoTime now) {
+    groups_pending_ = true;
+    maintenance(now);
+}
+
+void Ledger::groups_done(Status s) { engine_.groups().committed(s); }
+
+Status Ledger::set_policy_mode(JoinMode m, uint64_t op, MonoTime now) {
+    if (failed_ || policy_doubt_) {
+        return Status::RecoveryRequired;
+    }
+    if (!loaded_ || policy_pending_ || (step_ == Step::CommitPolicy && job_in_flight_)) {
+        return Status::Busy;
+    }
+    if (policy_count_ >= k_u63_max) {
+        return Status::RecoveryRequired; // (the revision would wrap)
+    }
+    policy_stage_ = m;
+    policy_op_ = op;
+    policy_pending_ = true;
+    maintenance(now);
+    return Status::Ok;
+}
+
+// The committed mode applies from now on; a commit whose result is unknown leaves the root CLOSED (the stricter state)
+// until the stored record is read again at the next start (lm_policy_set answers RECOVERY_REQUIRED meanwhile).
+void Ledger::policy_done(Status s) {
+    if (s == Status::Ok) {
+        mode_ = policy_stage_;
+        ++policy_count_;
+    } else {
+        mode_ = JoinMode::Closed;
+        policy_doubt_ = true;
+    }
+    engine_.emit_event(LM_EVENT_OPERATION, s == Status::Ok ? 0U : static_cast<uint32_t>(Status::RecoveryRequired),
+                       policy_op_, nullptr);
 }
 
 // ---- expected entries (docs/07 §2, docs/21 §4) ----
@@ -193,7 +240,7 @@ Status Ledger::install_expected(ByteView cose, MonoTime /*now*/, uint64_t &opera
     LM_TRY(begin_install(cose, 1024, exp_active_));
     vargs_.ticket_cose = ByteView{scratch_.data(), cose.size()};
     exp_active_ = true;
-    exp_op_ = member::k_op_tag | ++op_counter_;
+    exp_op_ = engine_.next_control_op(); // FIX9-D5: one namespace with the group sets
     if (submit(Step::VerifyExpected, JobClass::PublicKey, &verify_expected_job, this, -2) != Status::Ok) {
         exp_active_ = false;
         release(-2);
@@ -279,18 +326,16 @@ bool Ledger::expected_room() const {
         need += seen ? 0 : 1;
     }
     std::size_t room = 0;
-    const member::Floors &f = engine_.identity().floors();
-    for (const Entry &e : entries_) {
-        const bool reusable = (e.state == EntryState::Left || e.state == EntryState::Aborted ||
-                               e.state == EntryState::Blocked) && // [S18] a revoked one too, once floored
-                              f.check(e.device, AssignmentGen{e.assignment}, MembershipGen{e.membership}) ==
-                                  Status::Revoked;
-        room += e.state == EntryState::Free || reusable ? 1 : 0;
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        room += entries_[i].state == EntryState::Free || reusable(i) ? 1 : 0;
     }
     return room >= need;
 }
 
 void Ledger::expected_step_done(Step step, Status s, MonoTime now) {
+    if (step == Step::CommitExpectedEntry) {
+        entry_written(job_slot_index_, s == Status::Ok); // (also after the install ended: RAM did not take it then)
+    }
     if (!exp_active_) {
         return;
     }
@@ -359,6 +404,11 @@ void Ledger::expected_next(MonoTime /*now*/) {
             continue;
         }
         job_entry_ = old != nullptr ? *old : Entry{};
+        if (old == nullptr) { // FIX8-D4: a device the ledger lists again starts from its own floor (the entry keeps it)
+            const member::Floors::Entry f = engine_.identity().floors().floor_of(x.device);
+            job_entry_.consumed = f.assignment > 0 ? f.assignment - 1 : 0;
+            job_entry_.membership = f.membership > 0 ? f.membership - 1 : 0;
+        }
         job_entry_.device = x.device;
         job_entry_.hash = x.grant_hash;
         job_entry_.assignment = x.assignment;

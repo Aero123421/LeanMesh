@@ -1,7 +1,9 @@
 // ESP-IDF Radio port: ESP-NOW over Wi-Fi STA without an AP, LR 250 kbit/s on every peer (docs/03).
 //
-// Init order (docs/03 §3): netif/event loop -> Wi-Fi init (RAM storage) -> STA, country, HT20,
+// Init order (docs/03 §3): netif/event loop -> Wi-Fi init (RAM storage, once) -> STA -> country, HT20,
 // protocol incl. LR -> Wi-Fi start -> channel + tx power with readback -> ESP-NOW init -> callbacks.
+// stop() is the reverse: ESP-NOW deinit, then esp_wifi_stop - only then is the radio off (FIX10-D10); the next start()
+// applies country, bandwidth, protocol, channel and power again and the owner re-registers the peers.
 // Peers get the LR250 rate config right after registration; a peer that cannot be switched to LR is
 // removed again and reported (no silent fall-back to 1 Mbit/s).
 //
@@ -49,11 +51,13 @@ class IdfRadio final : public port::Radio {
     void on_sent(bool success);
 
   private:
-    [[nodiscard]] Status bring_up_wifi(const port::RfProfile &profile);
+    [[nodiscard]] Status init_wifi();                                     // once: driver init, RAM storage, STA, band
+    [[nodiscard]] Status start_wifi(const port::RfProfile &profile);      // every start: country, HT20, protocol incl. LR, start
     [[nodiscard]] Status apply_channel_and_power(uint8_t channel, int16_t tx_qdbm);
 
     IdfOwner &owner_;
-    bool wifi_ready_ = false;
+    bool wifi_inited_ = false;  // esp_wifi_init done (kept across radio-off periods)
+    bool wifi_running_ = false; // esp_wifi_start done and not yet stopped: only false means the radio is really off
     bool now_ready_ = false;
     uint16_t allowed_mask_ = 0;
     int16_t tx_power_qdbm_ = 0;

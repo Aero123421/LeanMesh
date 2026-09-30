@@ -85,6 +85,24 @@ void Engine::wire_join_hooks() {
     h.join_control = &hook_join_control;
     h.link_control = &hook_link_control;
     h.link_up = &hook_link_up;
+    if (!is_root()) {
+        // FIX8-D5 (review H10): the membership's leave hooks are the production wiring. DRAIN waits until no send is
+        // open (delivery), new sends are refused meanwhile (the stop's own drain keeps its refusal), and a committed
+        // leave ends every open send honestly (INDETERMINATE if it may have left, else CANCELLED_NOT_SENT). Before,
+        // nothing installed them: DRAIN acted as IMMEDIATE and open sends stayed PENDING for ever.
+        member::MembershipHooks m;
+        m.ctx = this;
+        m.drained = [](void *c) { return !static_cast<Engine *>(c)->delivery_.has_open_sends(); };
+        m.refuse_sends = [](void *c, bool on) {
+            Engine &e = *static_cast<Engine *>(c);
+            e.delivery_.set_draining(on || e.draining_);
+        };
+        m.settle_pending = [](void *c) {
+            Engine &e = *static_cast<Engine *>(c);
+            e.delivery_.end_open_sends(e.step_now_);
+        };
+        membership().set_hooks(m);
+    }
 }
 
 Engine::Engine(const EngineConfig &config, Ports ports) : config_(config), ports_(ports) {
@@ -201,10 +219,15 @@ MonoTime Engine::step(MonoTime now) {
     power_.after_step(now); // [SLICE:S16] sleep-prepare progress, radio-time accounting, PM locks
     if (restart_pending_ && !jobs_.busy()) { // [SLICE:S18] a committed transfer/handover: boot into the new domain
         restart_pending_ = false;
-        if (stop_radio().status == Status::Ok) {
-            (void)start_radio(now);
+        // FIX8-D14 (review L4): a restart that cannot bring the node up again is reported, never silent.
+        if (stop_radio().status == Status::Ok) { // (a stop that fails is a fault already: enter_fault)
+            const Status st = start_radio(now).status;
+            if (st != Status::Ok && radio_state_ != RadioState::Faulted) {
+                emit(LM_EVENT_FAULT, static_cast<uint32_t>(st));
+            }
         }
     }
+    drain_step(now);
     return next_deadline();
 }
 
@@ -323,6 +346,9 @@ MonoTime Engine::next_deadline() const {
     if (radio_state_ == RadioState::Recovering) {
         next = earliest(next, recover_at_);
     }
+    if (draining_) {
+        next = earliest(next, drain_until_);
+    }
     // [SLICE] next = earliest(next, x_.deadline()); over module deadlines.
     next = earliest(next, link_.deadline());
     next = earliest(next, delivery_.deadline()); // [SLICE:S9]
@@ -399,7 +425,68 @@ void Engine::emit_event(uint32_t kind, uint32_t reason, uint64_t operation, cons
     if (peer != nullptr) {
         std::memcpy(ev.peer.bytes, peer->bytes.data(), 32);
     }
+    if ((operation & member::k_op_tag) != 0) { // a control operation: its status stays queryable after the event is taken
+        if (kind == LM_EVENT_OPERATION) {
+            // A control operation whose durable result is unknown (RECOVERY_REQUIRED, STORAGE_FAILURE) is
+            // INDETERMINATE, never "rejected" (S18-D11, as the Host maps it; FIX8: leave, policy, group set, installs).
+            const bool unknown = reason == static_cast<uint32_t>(Status::RecoveryRequired) ||
+                                 reason == static_cast<uint32_t>(Status::StorageFailure);
+            const uint8_t outcome = reason == 0 ? LM_OUTCOME_APPLIED
+                                    : unknown   ? LM_OUTCOME_INDETERMINATE
+                                                : LM_OUTCOME_REJECTED;
+            note_ctl_op(operation, true, outcome, reason);
+        } else if (kind == LM_EVENT_MEMBERSHIP) {
+            note_ctl_op(operation, false, LM_OUTCOME_PENDING, 0); // accepted, in progress (never downgrades a final record)
+        }
+    }
     (void)events_.push(ev);
+}
+
+void Engine::note_ctl_op(uint64_t id, bool final, uint8_t outcome, uint32_t reason) {
+    const uint64_t now_ms = step_now_.to_ms();
+    CtlOp *slot = nullptr;
+    for (CtlOp &r : ctl_ops_) {
+        if (r.id == id) {
+            slot = &r;
+            break;
+        }
+    }
+    if (slot == nullptr) { // a free slot, else the oldest finished record, else the oldest of all
+        for (CtlOp &r : ctl_ops_) {
+            const bool better = slot == nullptr || (slot->id != 0 && (r.id == 0 || (r.final && !slot->final) ||
+                                                                     (r.final == slot->final && static_cast<int32_t>(r.seq - slot->seq) < 0)));
+            slot = better ? &r : slot;
+        }
+        *slot = CtlOp{};
+        slot->id = id;
+        slot->accepted_ms = now_ms;
+    }
+    if (slot->final && !final) {
+        return;
+    }
+    slot->final = final;
+    slot->outcome = outcome;
+    slot->reason = reason;
+    slot->last_ms = now_ms;
+    slot->seq = ++ctl_seq_;
+}
+
+Reply Engine::get_ctl_op(uint64_t id, lm_operation_t &out) const {
+    for (const CtlOp &r : ctl_ops_) {
+        if (r.id != 0 && r.id == id) {
+            out = lm_operation_t{};
+            out.struct_size = sizeof(out);
+            out.abi_version = LM_ABI_VERSION;
+            out.operation_id = id;
+            out.phase = r.final ? 3U : 1U;
+            out.outcome = r.outcome;
+            out.reason = r.reason;
+            out.accepted_mono_ms = r.accepted_ms;
+            out.last_evidence_mono_ms = r.last_ms;
+            return Reply{Status::Ok, id, 0};
+        }
+    }
+    return Reply{Status::NotFound, 0, 0};
 }
 
 void Engine::emit(uint32_t kind, uint32_t reason) {
@@ -461,14 +548,39 @@ Reply Engine::start_radio(MonoTime now) {
     return Reply{Status::Ok, 0, 0};
 }
 
+// lm_stop(drain_ms): with nothing open, or drain_ms == 0, the stop happens inside the call (operation 0). Otherwise new
+// sends are refused and the open ones get drain_ms to end on their own; the returned operation is the stop itself.
+Reply Engine::begin_stop(uint32_t drain_ms, MonoTime now) {
+    if (draining_) {
+        return Reply{Status::Ok, stop_op_, 0}; // repeated: the same drain, its deadline unchanged
+    }
+    if (radio_state_ == RadioState::Stopped || drain_ms == 0 || !delivery_.has_open_sends()) {
+        return stop_radio();
+    }
+    draining_ = true;
+    stop_op_ = next_control_op();
+    drain_until_ = now + Duration::from_ms(drain_ms);
+    delivery_.set_draining(true);
+    note_ctl_op(stop_op_, false, LM_OUTCOME_PENDING, 0);
+    return Reply{Status::Ok, stop_op_, 0};
+}
+
+void Engine::drain_step(MonoTime now) {
+    if (draining_ && (!delivery_.has_open_sends() || now >= drain_until_)) {
+        (void)stop_radio(); // what is still open at the deadline is ended INDETERMINATE there
+    }
+}
+
 Reply Engine::stop_radio() {
     if (radio_state_ == RadioState::Stopped) {
         return Reply{Status::Ok, 0, 0};
     }
-    // No operation exists yet that needs a drain (delivery slices add it): stop is immediate.
+    const bool drained = draining_ && !delivery_.has_open_sends();
+    // Open sends are ended honestly below (a drain has already given them its time).
     if (serial_ != nullptr) {
         serial_->on_stop(); // [SLICE:S10] the USB session and its secrets go before the identity key
     }
+    delivery_.end_pending_for_stop(step_now_); // FIX9-D4: no open send disappears without its final event
     coord_.stop(); // [SLICE:S17]
     chan_.stop();
     group_.stop(); // [SLICE:S15] payload buffers go back before delivery drops its pools
@@ -478,6 +590,9 @@ Reply Engine::stop_radio() {
     mesh_.stop(); // [SLICE:S11] candidates, leases and the tree go before the sessions they name
     routes_.stop();
     delivery_.stop(); // [SLICE:S9] operations, end sessions and their frames go before the link
+    // The bodies these events announce went with the pools: the application must not read a payload_bytes it can no
+    // longer get. A recovered durable message is announced anew. (Finished operations keep their result bytes.)
+    events_.withdraw([](const lm_event_t &e) { return e.kind == LM_EVENT_MESSAGE; }); // finished operations stay queryable
     if (is_root()) { // [SLICE:S8] join sessions and borrowed buffers go back before link/identity
         ledger().stop();
     } else {
@@ -487,6 +602,14 @@ Reply Engine::stop_radio() {
     frames_.clear(); // [S14] every owner returned its frames above; a leak would not survive a restart
     ident_.release();
     const Status s = radio_state_ == RadioState::Asleep ? Status::Ok : ports_.radio.stop(); // [S16] already off
+    if (draining_) { // the stop operation ends with the stop: APPLIED = everything ended in time, INDETERMINATE = cut short
+        draining_ = false;
+        delivery_.set_draining(false);
+        const uint32_t why = s != Status::Ok ? static_cast<uint32_t>(s) : drained ? 0U : static_cast<uint32_t>(Status::Expired);
+        const uint8_t out = s != Status::Ok ? LM_OUTCOME_REJECTED : drained ? LM_OUTCOME_APPLIED : LM_OUTCOME_INDETERMINATE;
+        emit_event(LM_EVENT_OPERATION, why, stop_op_, nullptr);
+        note_ctl_op(stop_op_, true, out, why); // after the event: its own outcome (APPLIED/REJECTED by reason) is refined
+    }
     if (s != Status::Ok) {
         // The driver may still call back into ring buffers: Stopped (and so lm_destroy) is only
         // allowed after a successful teardown. A later lm_stop retries (FIX1-D5).
@@ -534,7 +657,11 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     ++stats_.commands;
     step_now_ = now; // hooks and completions reached from a command see the command's time
     if (group::Fanout::wants(cmd)) { // [SLICE:S15] a send to a group, a group operation id, the group API
-        return group_.execute(cmd, now);
+        const Reply r = group_.execute(cmd, now);
+        if (cmd.kind == CommandKind::GroupSet && r.status == Status::Ok && (r.operation_id & member::k_op_tag) != 0) {
+            note_ctl_op(r.operation_id, false, LM_OUTCOME_PENDING, 0); // FIX8-D10: queryable until durable
+        }
+        return r;
     }
     switch (cmd.kind) {
     case CommandKind::GetCapabilities:
@@ -555,7 +682,10 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
         const RootTimeBound b = delivery_.root_time(now);
         auto &out = *static_cast<lm_root_time_t *>(cmd.response);
         out.valid = b.valid && ident_.is_member() && b.term == ident_.term() ? 1U : 0U;
-        out.root_term = out.valid != 0 ? b.term.value() : ident_.term().value();
+        // FIX8-D13 (review L5): the identity's fields are the load job's while it runs: read only once Ready.
+        out.root_term = out.valid != 0 ? b.term.value()
+                        : ident_.state() == member::LocalIdentity::State::Ready ? ident_.term().value()
+                                                                              : 0U;
         out.earliest_root_ms = out.valid != 0 ? b.earliest_ms : 0;
         out.latest_root_ms = out.valid != 0 ? b.latest_ms : 0;
         return Reply{Status::Ok, 0, 0};
@@ -564,10 +694,14 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
         return next_event(cmd, now);
     case CommandKind::Start:
         return start_radio(now);
-    case CommandKind::Stop:
-        return stop_radio();
+    case CommandKind::Stop: {
+        const auto *drain_ms = static_cast<const uint32_t *>(cmd.request);
+        return begin_stop(drain_ms != nullptr && cmd.request_size == sizeof(uint32_t) ? *drain_ms : 0U, now);
+    }
     case CommandKind::Destroy:
-        return Reply{radio_state_ == RadioState::Stopped && !delivery_.job_pending() && !role_job_pending() &&
+        // Any job still in the table (identity load, link exchange, USB verify, ...) owns memory of this context and its
+        // completion would be credited to whatever runs next in the same workspace: destroy waits for it (FIX9-D2).
+        return Reply{radio_state_ == RadioState::Stopped && !jobs_.busy() && !delivery_.job_pending() && !role_job_pending() &&
                              !group_.job_pending() && !chan_.job_pending() && !power_.job_pending()
                          ? Status::Ok
                          : Status::Busy,
@@ -581,12 +715,24 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::InstallControl:
     case CommandKind::GetRequest:
     case CommandKind::RootJoinDecide:
-    case CommandKind::TransferNonce: // [SLICE:S18]
-        return execute_membership(cmd, now);
+    case CommandKind::TransferNonce: { // [SLICE:S18]
+        const Reply r = execute_membership(cmd, now);
+        if (r.status == Status::Ok && (r.operation_id & member::k_op_tag) != 0) {
+            note_ctl_op(r.operation_id, false, LM_OUTCOME_PENDING, 0); // visible to lm_get_operation from now on
+        }
+        return r;
+    }
+    case CommandKind::GetOperation: { // lifecycle / group-set / stop operations are answered here (FIX9-D9)
+        const auto *id = static_cast<const uint64_t *>(cmd.request);
+        if (id != nullptr && cmd.request_size == sizeof(uint64_t) && (*id & member::k_op_tag) != 0 &&
+            cmd.response != nullptr && cmd.response_size == sizeof(lm_operation_t)) {
+            return get_ctl_op(*id, *static_cast<lm_operation_t *>(cmd.response));
+        }
+        return delivery_.execute(cmd, now);
+    }
     case CommandKind::Send: // [SLICE:S9]
     case CommandKind::SendObject: // [SLICE:S12]
     case CommandKind::SendControl:
-    case CommandKind::GetOperation:
     case CommandKind::Cancel:
     case CommandKind::ReportApplicationResult:
     case CommandKind::PayloadCapacity:
@@ -599,8 +745,14 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::SleepPrepare:
     case CommandKind::SleepPrepareEx:
     case CommandKind::SleepTicketGet:
-    case CommandKind::SleepEnter:
     case CommandKind::SleepAbort:
+        return power_.execute(cmd, now);
+    case CommandKind::SleepEnter:
+        // FIX10-D8: a command is run before the step that would receive what is queued. Authenticated input that arrived
+        // after the ticket was issued is handled first (it makes the ticket stale) and is never dropped by the radio stop.
+        if (!drain_radio(now)) {
+            power_.note_state_change();
+        }
         return power_.execute(cmd, now);
     case CommandKind::ChannelRequest: { // [SLICE:S17] lm_channel_request (request: {action, expected_revision})
         const auto *rq = static_cast<const std::array<uint64_t, 2> *>(cmd.request);
@@ -680,12 +832,24 @@ Reply Engine::next_event(const Command &cmd, MonoTime now) {
     // [SLICE:S9] The payload capacity is checked BEFORE popping: BufferTooSmall must not consume
     // the event (docs/10 §2).
     const lm_event_t *front = events_.peek();
+    ByteView payload;
+    bool has_payload = false;
+    // An event that announces a body must hand it out: one whose body is gone is withdrawn (one GAP), never returned
+    // with a payload_bytes that no bytes back.
+    while (front != nullptr) {
+        has_payload = delivery_.event_payload(*front, payload);
+        const bool needs = front->kind == LM_EVENT_MESSAGE || (front->kind == LM_EVENT_OPERATION && front->payload_bytes > 0);
+        if (has_payload || !needs) {
+            break;
+        }
+        const uint64_t seq = front->event_sequence;
+        events_.withdraw([seq](const lm_event_t &e) { return e.event_sequence == seq; });
+        front = events_.peek();
+    }
     if (front == nullptr) {
         // No event pending (decision: NOT_FOUND; see docs/IMPLEMENTATION.md §10).
         return Reply{Status::NotFound, 0, 0};
     }
-    ByteView payload;
-    const bool has_payload = delivery_.event_payload(*front, payload);
     if (has_payload && cmd.response_payload.size() < payload.size()) {
         return Reply{Status::BufferTooSmall, 0, payload.size()};
     }

@@ -1,5 +1,6 @@
 {
   "status": "design_targets_not_measurements",
+  "implementation_revision": "ram_target_bytes below are the ORIGINAL docs/16 design targets (leaf 32768 / relay 49152 / root 98304). The implementation is measured against the revised targets 49152 / 57344 / 163840 (decisions/ADR-002, scripts/budget_report.py); the measured overruns are in build-records/budget-report.md.",
   "profiles": {
     "leaf": {
       "members": 0,

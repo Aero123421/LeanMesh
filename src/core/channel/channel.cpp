@@ -73,15 +73,19 @@ void Channel::on_identity_ready(MonoTime now) {
 
 Status Channel::begin_job(Job kind, Ph phase, const Plan &plan, After after, MonoTime now) {
     (void)now;
-    if (job_ != Job::None || cancelled_) {
+    if (job_ != Job::None || cancelled_ || (kind == Job::Persist && uncertain_)) {
         return Status::Busy;
     }
     rec_ = engine_.identity().lend_record();
     if (rec_ == nullptr) {
         return Status::Busy;
     }
-    rec_->arm(kind == Job::Load ? store::RecordJob::Op::Load : store::RecordJob::Op::Commit, store::rec::channel_plan);
+    rec_->arm(kind == Job::Persist ? store::RecordJob::Op::Commit : store::RecordJob::Op::Load, store::rec::channel_plan);
     if (kind == Job::Persist) {
+        job_hash_ = Sha256Digest{};
+        if (phase == Ph::Prepared) {
+            (void)plan_hash(plan, job_hash_);
+        }
         Writer w{MutByteView{rec_->payload}};
         w.u8(k_rec_version);
         w.u8(static_cast<uint8_t>(phase));
@@ -106,11 +110,31 @@ Status Channel::begin_job(Job kind, Ph phase, const Plan &plan, After after, Mon
     }
     job_ = kind;
     after_ = after;
+    job_seq_ = kind == Job::Persist ? ++save_seq_ : 0;
     return Status::Ok;
 }
 
 void Channel::kick(MonoTime now) {
-    if (!dirty_ || !loaded_ || job_ != Job::None) {
+    if (!loaded_ || job_ != Job::None) {
+        return;
+    }
+    if (uncertain_) { // read the record back before anything is written over it
+        if (begin_job(Job::Reload, phase_, plan_, After::None, now) != Status::Ok) {
+            retry_at_ = now + k_retry;
+        }
+        return;
+    }
+    if (abort_pending_) { // FIX10-D1: an ABORT that met a busy record memory or job slot is repeated until it is durable
+        if (phase_ != Ph::Prepared || plan_.id != abort_id_) {
+            abort_pending_ = false; // the plan is gone (or was never held): nothing left to abort
+        } else {
+            if (begin_job(Job::Persist, Ph::Idle, Plan{}, After::Aborted, now) != Status::Ok) {
+                retry_at_ = now + k_retry;
+            }
+            return;
+        }
+    }
+    if (!dirty_) {
         return;
     }
     if (begin_job(Job::Persist, phase_, plan_, After::None, now) == Status::Ok) {
@@ -133,6 +157,8 @@ void Channel::on_job_done(Handle slot, Status s, MonoTime now) {
     }
     if (j == Job::Load) {
         loaded_ok(s, now);
+    } else if (j == Job::Reload) {
+        reloaded(s, now);
     } else {
         persisted(s, now);
     }
@@ -160,7 +186,7 @@ void Channel::loaded_ok(Status s, MonoTime now) {
     Reader rd{ByteView{rec_->payload.data(), s == Status::Ok ? rec_->payload_len : 0}};
     if (s == Status::Ok && adopt_record(rd)) {
         if (is_root()) {
-            engine_.coordinator().restore(rd, phase_ == Ph::Committed ? &plan_ : nullptr);
+            engine_.coordinator().restore(rd, phase_ != Ph::Idle ? &plan_ : nullptr, phase_ == Ph::Committed);
         }
     } else if (s == Status::NotFound) { // never planned: the deployment channel is the current one
         cur_ = engine_.channel();
@@ -191,6 +217,7 @@ void Channel::boot_apply(MonoTime now) {
     }
     pend_apply_ = false;
     time_at_ = now; // the root anchors its own clock, a member waits for a path (the mesh arms the search)
+    arm_prepared_exit(now);
     if (is_root()) {
         engine_.coordinator().on_loaded(now);
     }
@@ -204,26 +231,109 @@ void Channel::persisted(Status s, MonoTime now) {
         engine_.identity().return_record(rec_);
         ++stats_.refused;
         // Nothing was stored, so no receipt claims it: the root asks again (and the plan times out there).
-        dirty_ = a == After::None; // a failed state write of our own is tried again
+        dirty_ = true; // a failed write is tried again with the state of the time (an ABORT stays pending, a freeze must land)
+        uncertain_ = true; // ... after the record was read back: the failed write may have taken effect (FIX10-D7)
         retry_at_ = now + Duration::from_s(1);
+        if (is_root()) {
+            engine_.coordinator().on_written(job_seq_, false, now);
+        }
+        kick(now);
         return;
     }
     Reader rd{ByteView{rec_->payload.data(), rec_->payload_len}};
     (void)adopt_record(rd); // adopt what is now durable
     engine_.identity().return_record(rec_);
     engine_.power().note_state_change();
+    if (phase_ != Ph::Prepared) {
+        prep_at_ = MonoTime::never();
+    }
     if (a == After::Prepared) {
         ++stats_.prepared;
+        arm_prepared_exit(now);
         reply(plan_, Evidence::Prepared, Status::Ok, after_local_, now);
     } else if (a == After::Stored) {
         ++stats_.committed;
+        learn_until_ = MonoTime::never(); // the root has told this node the epoch
         reply(plan_, Evidence::Stored, Status::Ok, after_local_, now);
         arm_switch(now);
     } else if (a == After::Applied) {
         reply(plan_, Evidence::Applied, Status::Ok, after_local_, now);
+    } else if (a == After::Aborted) {
+        abort_pending_ = false;
+    }
+    notify(0);
+    if (is_root()) {
+        engine_.coordinator().on_written(job_seq_, true, now);
+    }
+    kick(now);
+}
+
+// The record after a write that reported an error. What is durable is compared with memory: a phase that is AHEAD
+// (PREPARED or COMMITTED where memory has less) is the truth - a commit point cannot be un-written by an error report -
+// and is followed as if the write had been reported Ok (receipt included); anything else leaves memory as it was and
+// the state is written again.
+void Channel::reloaded(Status s, MonoTime now) {
+    if (s != Status::Ok) {
+        engine_.identity().return_record(rec_); // still unreadable: nothing is written meanwhile, ask again later
+        retry_at_ = now + Duration::from_s(1);
+        return;
+    }
+    const Ph ram_phase = phase_;
+    const uint8_t ram_cur = cur_;
+    const ChannelEpoch ram_epoch = epoch_;
+    const Plan ram_plan = plan_;
+    Reader rd{ByteView{rec_->payload.data(), rec_->payload_len}};
+    const bool ok = adopt_record(rd);
+    engine_.identity().return_record(rec_);
+    uncertain_ = false;
+    dirty_ = true;
+    if (!ok || static_cast<uint8_t>(phase_) <= static_cast<uint8_t>(ram_phase)) {
+        phase_ = ram_phase;
+        cur_ = ram_cur;
+        epoch_ = ram_epoch;
+        plan_ = ram_plan;
+    } else {
+        engine_.power().note_state_change();
+        if (phase_ == Ph::Committed) {
+            ++stats_.committed;
+            learn_until_ = MonoTime::never();
+            prep_at_ = MonoTime::never();
+            reply(plan_, Evidence::Stored, Status::Ok, after_local_, now);
+            arm_switch(now);
+        } else {
+            ++stats_.prepared;
+            arm_prepared_exit(now);
+            reply(plan_, Evidence::Prepared, Status::Ok, after_local_, now);
+        }
     }
     notify(0);
     kick(now);
+}
+
+// FIX10-D1: a PREPARED plan has a bounded life on its own: the root aborts it after 120 s, so a plan that is still
+// held after its own switch time (read on the root clock when there is one) can no longer be committed. The cap
+// bounds it also when there is no clock or the plan names a switch time in the far future. Never for COMMITTED.
+void Channel::arm_prepared_exit(MonoTime now) {
+    prep_at_ = MonoTime::never();
+    if (phase_ != Ph::Prepared) {
+        return;
+    }
+    MonoTime t = now + k_prepared_unknown;
+    const RootTimeBound b = engine_.delivery().root_time(now);
+    if (b.valid && b.term == plan_.term) {
+        t = reach(plan_.switch_root_ms + plan_.max_err_ms + 5000U, now);
+    }
+    prep_at_ = std::min(t, now + k_prepared_max);
+}
+
+void Channel::prepared_step(MonoTime now) {
+    if (phase_ == Ph::Prepared && now >= prep_at_ && !abort_pending_) {
+        abort_pending_ = true;
+        abort_id_ = plan_.id;
+        prep_at_ = MonoTime::never();
+        notify(4);
+        kick(now);
+    }
 }
 
 // ---- plan (participant) -----------------------------------------------------------------------------
@@ -252,7 +362,15 @@ void Channel::on_plan(const PlanRec &rec, bool local, MonoTime now) {
                 reply(rec.plan, Evidence::Refused, Status::Conflict, local, now);
                 break;
             }
-            (void)begin_job(Job::Persist, Ph::Idle, Plan{}, After::None, now);
+            abort_pending_ = true; // (durable through kick(); repeated while the record memory or job slot is busy)
+            abort_id_ = plan_.id;
+            kick(now);
+        } else if (job_ == Job::Persist && after_ == After::Prepared) { // the PREPARED write of that plan is running
+            Sha256Digest h{};
+            if (plan_hash(rec.plan, h) == Status::Ok && h == job_hash_) {
+                abort_pending_ = true; // ... the ABORT follows once it is durable
+                abort_id_ = rec.plan.id;
+            }
         }
         break;
     }
@@ -317,11 +435,14 @@ void Channel::commit(const Plan &p, bool local, MonoTime now) {
     const bool held = phase_ != Ph::Idle && plan_.id == p.id;
     const bool prepared = held && phase_ == Ph::Prepared && same_plan(plan_, p);
     const bool done = phase_ == Ph::Idle && epoch_ == p.epoch && cur_ == p.new_ch && (plan_.id != p.id || same_plan(plan_, p));
+    const bool catchup = !local && !held && p.epoch > epoch_ && engine_.channel() == p.new_ch;
     if (faulted_) {
         why = Status::RecoveryRequired;
-    } else if (term() < p.term || (p.term < term() && !held && !done)) {
+    } else if (term() < p.term || (p.term < term() && !held && !done && !catchup)) {
         // A plan of an earlier term (the root committed it, then restarted, docs/05 §7) is completed only where it is
-        // held or done already; nobody new is dragged into it (ARCH2-D1).
+        // held or done already; nobody new is dragged into it (ARCH2-D1). The one exception is a node that found the
+        // root on the target channel by itself: the current root's authenticated end session tells it the last plan
+        // of the network (FIX10-D5: a deferred sleeper learns the epoch after a root restart).
         why = Status::NetworkMismatch;
     } else if (held && !same_plan(plan_, p)) {
         why = Status::Conflict; // same id, other channel / epoch / time: never matched by the id alone
@@ -534,14 +655,43 @@ void Channel::on_ready(MonoTime now) {
     time_tries_ = 0;
     time_wait_ = false;
     time_at_ = now;
+    if (engine_.channel() != cur_) { // found by the search, not by the stored channel: wait for the root's word on the epoch
+        learn_until_ = now + k_learn_max;
+        engine_.power().note_state_change();
+    }
+}
+
+// A battery node that listens first (a mass power-on) has not sent its first hello before that listen is over.
+Duration Channel::scan_delay() const {
+    if (!engine_.power().sleepy()) {
+        return k_scan_after;
+    }
+    return engine_.power().skips_listen() ? k_scan_after_sleepy : k_scan_after_sleepy + Duration::from_ms(gen::defaults::join::listen_ms);
 }
 
 void Channel::on_lost(MonoTime now) {
     if (!enabled_ || !loaded_ || is_root() || sc_ != Sc::Idle) {
         return;
     }
+    learn_until_ = MonoTime::never();
     sc_ = Sc::Armed;
-    sc_at_ = now + k_scan_after;
+    sc_at_ = now + scan_delay();
+}
+
+void Channel::on_episode(MonoTime now) {
+    if (!enabled_ || !loaded_ || is_root()) {
+        return;
+    }
+    const route::Mesh::State ms = engine_.mesh().state();
+    if (ms == route::Mesh::State::Ready || ms == route::Mesh::State::Off) {
+        return;
+    }
+    if (sc_ != Sc::Idle) { // cut by the last sleep: the radio is home again and the search starts over
+        (void)set_radio(cur_);
+        sc_ = Sc::Idle;
+        dwell_open_ = false;
+    }
+    rearm_scan(now);
 }
 
 void Channel::on_link_sample(bool ok, MonoTime now) {
@@ -569,27 +719,42 @@ void Channel::on_link_sample(bool ok, MonoTime now) {
 }
 
 // ---- recovery scan --------------------------------------------------------------------------------------
-// Order: the stored channel, the pending target, then the rest of the allowed set (docs/05 §7, docs/20 §8).
+// Order: the stored channel, the pending target, then the rest of the allowed set (docs/05 §7, docs/20 §8). A battery
+// node has listened on the stored channel already (its hello went unanswered): it tries the pending target, then the
+// allowed set from the cursor it left off at (Power keeps it through a deep sleep) - a search that fits an episode
+// and continues in the next (docs/20 §8 "探索cursorを保持し次episodeで続ける").
 unsigned Channel::scan_list(std::array<uint8_t, 14> &list) const {
     unsigned n = 0;
+    const bool sleepy = engine_.power().sleepy();
     auto add = [&](uint8_t c) {
         if (valid_channel(c) && ((allowed_mask() >> c) & 1U) != 0 && std::find(list.begin(), list.begin() + n, c) == list.begin() + n) {
             list[n++] = c;
         }
     };
-    add(engine_.channel()); // where the radio is now (a parent may have answered here), then the stored channel
-    add(cur_);
-    if (phase_ != Ph::Idle) {
+    if (!sleepy) {
+        add(engine_.channel()); // where the radio is now (a parent may have answered here), then the stored channel
+        add(cur_);
+    }
+    if (phase_ != Ph::Idle && plan_.new_ch != cur_) {
         add(plan_.new_ch);
     }
-    for (uint8_t c = 1; c <= 13; ++c) {
-        add(c);
+    const uint8_t first = sleepy && engine_.power().scan_cursor() >= 1 && engine_.power().scan_cursor() <= 13 ? engine_.power().scan_cursor() : 1;
+    for (uint8_t i = 0; i < 13; ++i) {
+        const auto c = static_cast<uint8_t>((first - 1 + i) % 13 + 1);
+        if (!sleepy || c != cur_) {
+            add(c);
+        }
     }
     return n;
 }
 
 void Channel::scan_end(MonoTime now) {
     (void)set_radio(cur_); // back to the stored channel between attempts
+    if (engine_.power().sleepy()) { // the episode's search budget is the limit: the next episode goes on from the cursor
+        sc_ = Sc::Idle;
+        sc_at_ = MonoTime::never();
+        return;
+    }
     const Duration b = sc_backoff_ + ms(jitter(static_cast<uint16_t>(std::min<int64_t>(sc_backoff_.to_ms() / 5, 12000))));
     sc_ = Sc::Backoff;
     sc_at_ = now + b;
@@ -633,17 +798,25 @@ void Channel::scan_step(MonoTime now) {
         dwell_open_ = false;
         if (mesh.heard_since(dwell_start_)) { // somebody answered on this channel: stay, the mesh attaches
             sc_ = Sc::Armed; // if it does not reach a parent within k_scan_after (the neighbour moved on), search again
-            sc_at_ = now + k_scan_after;
+            sc_at_ = now + scan_delay();
             notify(3);
             return;
         }
+        const bool sleepy = engine_.power().sleepy();
+        if (sleepy) {
+            engine_.power().set_scan_cursor(list[(sc_index_ + 1U) % n]); // ... and where the next episode goes on
+        }
         if (++sc_index_ >= n) { // one lap done
             sc_index_ = 0;
-            if (++sc_lap_ >= k_scan_laps) {
+            if (++sc_lap_ >= (sleepy ? 1U : k_scan_laps)) {
                 scan_end(now);
                 return;
             }
         }
+    }
+    if (engine_.power().search_room_ms(now) < static_cast<uint32_t>(k_dwell.to_ms())) {
+        scan_end(now); // a battery node does not start a dwell its search budget cannot pay for
+        return;
     }
     (void)set_radio(list[sc_index_ % n]);
     ++stats_.scan_dwells;
@@ -846,7 +1019,8 @@ void Channel::on_record(const DeviceId &peer, const delivery::PathSpec &reply_pa
     Survey sv;
     switch (op_of(body)) {
     case Op::Plan:
-        if (decode(body, plan) == Status::Ok && job_ == Job::None) { // busy: the root asks again
+        // busy: the root asks again - except for an ABORT, which it sends once (the module repeats it itself, FIX10-D1)
+        if (decode(body, plan) == Status::Ok && (job_ == Job::None || plan.phase == Phase::Abort)) {
             on_plan(plan, false, now);
         }
         break;
@@ -881,8 +1055,13 @@ void Channel::on_timer(MonoTime now) {
     if (!loaded_) {
         return;
     }
+    if (now >= learn_until_) {
+        learn_until_ = MonoTime::never(); // the root did not tell (no plan to give): the node may sleep again
+        engine_.power().note_state_change();
+    }
     time_step(now);
     switch_step(now);
+    prepared_step(now);
     scan_step(now);
     survey_step(now);
 }
@@ -896,6 +1075,8 @@ MonoTime Channel::deadline() const {
         d = earliest(d, time_at_);
         d = earliest(d, sw_ != Sw::None ? sw_at_ : MonoTime::never());
         d = earliest(d, sc_ != Sc::Idle ? sc_at_ : MonoTime::never());
+        d = earliest(d, phase_ == Ph::Prepared ? prep_at_ : MonoTime::never());
+        d = earliest(d, learn_until_);
         d = earliest(d, sv_ != Sv::None ? sv_at_ : MonoTime::never());
     }
     return d;
@@ -919,6 +1100,8 @@ void Channel::stop() {
     loaded_ = !enabled_;
     pend_apply_ = false;
     dwell_open_ = false;
+    abort_pending_ = uncertain_ = false;
+    prep_at_ = learn_until_ = MonoTime::never();
     if (job_ != Job::None) {
         cancelled_ = true; // the worker may still write into the borrowed record memory (zombie rule)
     } else {
