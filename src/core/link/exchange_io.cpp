@@ -177,12 +177,13 @@ void Exchange::obj_complete(ObjKind kind, ByteView obj, const Origin &o, MonoTim
             // Both sides started: the lower DeviceId keeps the initiator role (docs/06 §8, one
             // handshake per pair). The peek is structural only; the winner still verifies
             // everything.
-            member::Bundle b;
+            ByteView dc_cose;
+            ByteView mc_cose;
             member::Envelope env;
             ByteView data;
             member::DeviceCredential dc;
-            const bool ok = member::bundle_parse(obj, b) == Status::Ok &&
-                            member::peek_signed(b.device_cose, member::k_type_device_credential,
+            const bool ok = member::cred_pair_parse(obj, member::k_max_member_cose, dc_cose, mc_cose) == Status::Ok &&
+                            member::peek_signed(dc_cose, member::k_type_device_credential,
                                                 env, data) == Status::Ok &&
                             member::decode_device_credential(data, dc) == Status::Ok;
             if (!ok || !(dc.device < s_.identity.self())) {

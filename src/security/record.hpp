@@ -179,6 +179,7 @@ class RecordSession {
 
   private:
     void take(RecordSession &o);
+    [[nodiscard]] Status open_precheck(uint64_t counter, std::size_t sealed_len, ReplayVerdict &verdict) const;
 
     RecordKeys keys_{};
     ReplayWindow window_;

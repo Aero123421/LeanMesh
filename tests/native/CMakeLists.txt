@@ -2,7 +2,9 @@
 # Label "scenario" marks binaries containing tests named after tests/scenarios.json IDs.
 function(lm_add_test name)
     cmake_parse_arguments(T "" "" "SOURCES;LABELS" ${ARGN})
-    add_executable(${name} ${T_SOURCES})
+    # The sim's LM_ASSERT handler in every test: SDK objects (Engine, P8 role accessors) need it whatever order the
+    # static libraries are scanned in.
+    add_executable(${name} ${T_SOURCES} ${LM_REPO_ROOT}/src/port/sim/assert_sim.cpp)
     target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(${name} PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(${name} PRIVATE lm_sim)
@@ -19,6 +21,8 @@ lm_add_test(test_runtime_meshsim SOURCES test_runtime_meshsim.cpp LABELS "integr
 target_compile_definitions(test_runtime_meshsim PRIVATE MESHSIM_EXE="$<TARGET_FILE:meshsim>")
 add_dependencies(test_runtime_meshsim meshsim)
 lm_add_test(test_wire SOURCES test_wire.cpp LABELS "unit;wire;scenario")
+# ARCH2-P2A: byte-exact golden encodings of the compact fixed-layout records (one field list per record).
+lm_add_test(test_codec SOURCES test_codec.cpp LABELS "unit;wire")
 lm_add_test(test_route SOURCES test_route.cpp LABELS "unit;integration;route;scenario")
 # CRYPTO slice: record layer, identity/COSE, EDHOC suite-3 handshake; the RFC 9529 replay is C. The
 # linker wraps the allocator so the test can measure PSA heap use (peak and leaks).
@@ -57,6 +61,7 @@ target_link_libraries(test_sched PRIVATE lm_fleet)
 # MESH slice (S11): formation, registration, leases, repair, queries and delivery over the formed mesh.
 lm_add_test(test_mesh SOURCES test_mesh.cpp LABELS "integration;sim;mesh;scenario")
 target_link_libraries(test_mesh PRIVATE lm_fleet)
+set_tests_properties(test_mesh PROPERTIES TIMEOUT 900) # 21..41 node formations: minutes under ASan/UBSan
 # GROUP slice (S15): GroupSnapshotV2 pages, fan-out from the origin, per-target results, cancel, fixed set.
 lm_add_test(test_group SOURCES test_group.cpp LABELS "integration;sim;group;scenario")
 target_link_libraries(test_group PRIVATE lm_fleet)
@@ -78,3 +83,14 @@ target_link_libraries(test_ota PRIVATE lm_fleet)
 lm_add_test(test_lifecycle SOURCES test_lifecycle.cpp LABELS "integration;sim;lifecycle;scenario")
 target_link_libraries(test_lifecycle PRIVATE lm_fleet)
 set_tests_properties(test_lifecycle PROPERTIES TIMEOUT 900)
+# MODEL (S20): seeded random schedules against the production delivery/link/journal code (seed + event log + minimal
+# counterexample on failure, docs/18 §2). LM_MODEL_SEEDS / LM_MODEL_SEED select the runs.
+lm_add_test(test_model SOURCES test_model.cpp LABELS "integration;sim;model;scenario")
+target_link_libraries(test_model PRIVATE lm_fleet)
+set_tests_properties(test_model PROPERTIES TIMEOUT 900)
+execute_process(COMMAND git -C "${LM_REPO_ROOT}" rev-parse --short HEAD OUTPUT_VARIABLE LM_MODEL_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+target_compile_definitions(test_model PRIVATE LM_MODEL_COMMIT="${LM_MODEL_COMMIT}")
+# ROOT TERM (ARCH2): one root_term per root boot, members follow it, nothing of the old clock is read on the new one.
+lm_add_test(test_term SOURCES test_term.cpp LABELS "integration;sim;mesh;lifecycle;scenario")
+target_link_libraries(test_term PRIVATE lm_fleet)
+set_tests_properties(test_term PROPERTIES TIMEOUT 900)

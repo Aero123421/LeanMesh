@@ -54,6 +54,10 @@ class LinkLayer {
     // SessionRefreshRequired: key lifetime over. The bytes are what a retransmission sends again.
     [[nodiscard]] Status seal(const DeviceId &peer, wire::FrameKind kind, ByteView plain,
                               SealedFrame &out, MonoTime now);
+    // Seals one frame for `peer` and hands it to the radio for `mac` (Engine::transmit: `tag`, charged as CONTROL).
+    // The first failure of either step is the result (AuthPending / Busy / DriverResultUnknown ...).
+    [[nodiscard]] Status send_sealed(const DeviceId &peer, const MacAddr &mac, wire::FrameKind kind, ByteView plain,
+                                     uint32_t tag, MonoTime now);
     // Closes every session with `peer` (revocation, leave). No message is sent.
     [[nodiscard]] Status close(const DeviceId &peer);
     // SEC-D3: the root-time estimate changed (`bound` is the one for `now`). Every session is judged by its peer's
@@ -92,6 +96,8 @@ class LinkLayer {
         disc_ctx_ = ctx;
     }
     void set_root_time(const RootTimeBound &t) { shared_.root_time = t; }
+    // No rotation starts before `until` (the renewals after a root restart must not rotate every link at once).
+    void hold_rotations(MonoTime until) { rotation_retry_ = rotation_retry_ < until ? until : rotation_retry_; }
     LinkPolicy &policy() { return policy_; }
     [[nodiscard]] const LinkPolicy &policy() const { return policy_; }
     [[nodiscard]] const LinkStats &stats() const { return stats_; }

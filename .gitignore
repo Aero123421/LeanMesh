@@ -8,3 +8,4 @@ sdkconfig
 sdkconfig.old
 .venv/
 .pytest_cache/
+*.log

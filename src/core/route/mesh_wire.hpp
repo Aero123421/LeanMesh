@@ -89,18 +89,12 @@ struct Answer {
     std::array<uint16_t, k_max_root_path> path{};
 };
 
-[[nodiscard]] Status encode(const Register &m, MutByteView out, std::size_t &len);
-[[nodiscard]] Status encode(const Ready &m, MutByteView out, std::size_t &len);
-[[nodiscard]] Status encode(const LeaseRec &m, MutByteView out, std::size_t &len);
-[[nodiscard]] Status encode(const Query &m, MutByteView out, std::size_t &len);
-[[nodiscard]] Status encode(const Answer &m, MutByteView out, std::size_t &len);
+// Register, Ready, LeaseRec, Query, Answer: one layout per record (mesh_wire.cpp), used both ways. decode() rejects
+// trailing bytes and out-of-range fields (BadFrame) and leaves `out` untouched then.
+template <class M> [[nodiscard]] Status encode(const M &m, MutByteView out, std::size_t &len);
+template <class M> [[nodiscard]] Status decode(ByteView body, M &out);
 // True when the first byte is a mesh opcode (anything else is somebody else's control body).
 [[nodiscard]] bool is_mesh_record(ByteView body);
-[[nodiscard]] Status decode(ByteView body, Register &out);
-[[nodiscard]] Status decode(ByteView body, Ready &out);
-[[nodiscard]] Status decode(ByteView body, LeaseRec &out);
-[[nodiscard]] Status decode(ByteView body, Query &out);
-[[nodiscard]] Status decode(ByteView body, Answer &out);
 
 // A root path must be simple (no zero/broadcast, no duplicate) and 1..21 long.
 [[nodiscard]] bool path_ok(const uint16_t *p, std::size_t n);

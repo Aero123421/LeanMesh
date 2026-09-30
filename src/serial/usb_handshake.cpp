@@ -14,6 +14,10 @@ namespace {
 
 constexpr uint8_t k_obj_max = 6;
 
+// Encoded size of a CBOR byte string of n bytes (shortest head, as CborWriter writes it). Exact up to 0xFFFF bytes;
+// anything longer is far over k_cred_bytes, which is all configure() asks.
+constexpr std::size_t bstr_size(std::size_t n) { return n + (n < 24 ? 1 : (n <= 0xFF ? 2 : 3)); }
+
 // [device] (Host) or [device, delegation] (root): what CredI / CredR carry.
 Status parse_creds(ByteView in, bool with_delegation, ByteView &device, ByteView &delegation) {
     LM_TRY(wire::cbor_validate(in));
@@ -206,6 +210,31 @@ void UsbLink::stage(Obj kind, ByteView body, bool hold) {
     stage_hold_ = hold;
 }
 
+// Encoded size of the own credential object (configure() bounds it by k_cred_bytes).
+std::size_t UsbLink::cred_size() const {
+    std::size_t n = 1 + bstr_size(own_dc_.size());
+    if (role_ == UsbRole::Root) {
+        n += bstr_size(own_deleg_.size());
+    }
+    return n;
+}
+
+// stage() of the own credential object, written from the kit's views (no copy of it is kept).
+void UsbLink::stage_cred(Obj kind) {
+    const bool root = role_ == UsbRole::Root;
+    wire::CborWriter w{MutByteView{stage_}};
+    w.array(2);
+    w.uint(static_cast<uint8_t>(kind));
+    w.bytes_head(cred_size());
+    w.array(root ? 2 : 1);
+    w.bytes(own_dc_);
+    if (root) {
+        w.bytes(own_deleg_);
+    }
+    stage_len_ = w.finish() == Status::Ok ? w.size() : 0;
+    stage_hold_ = false;
+}
+
 // Host: a root HELLO asked for a handshake and the gate/backoff allows it.
 void UsbLink::maybe_start_attempt(MonoTime now) {
     if (role_ != UsbRole::Host || !attempt_wanted_ || phase_ != Phase::Idle || !open_ ||
@@ -224,7 +253,7 @@ void UsbLink::maybe_start_attempt(MonoTime now) {
         return;
     }
     begin_attempt(sid, now);
-    stage(Obj::CredI, ByteView{own_cred_.data(), own_cred_len_}, false);
+    stage_cred(Obj::CredI);
     phase_ = Phase::AwaitCred;
     expect_ = Obj::CredR;
 }
@@ -315,10 +344,10 @@ void UsbLink::after_verify(MonoTime now) {
     }
     const sec::HsRole hr = role_ == UsbRole::Root ? sec::HsRole::Responder : sec::HsRole::Initiator;
     const ByteView peers[1] = {ByteView{peer_.ccs.data(), peer_.ccs_len}};
-    Status st = hs_->begin(hr, key_, ByteView{ccs_.data(), ccs_len_}, peers, 1);
+    Status st = hs_->begin(hr, key_, ccs_, peers, 1);
     if (st == Status::Ok) {
         if (role_ == UsbRole::Root) {
-            stage(Obj::CredR, ByteView{own_cred_.data(), own_cred_len_}, false);
+            stage_cred(Obj::CredR);
             phase_ = Phase::AwaitMsg;
             expect_ = Obj::Msg1;
         } else {

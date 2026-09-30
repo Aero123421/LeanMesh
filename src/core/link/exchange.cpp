@@ -177,15 +177,16 @@ Status Exchange::verify_body(Exchange &x) {
     if (x.mode_ == Mode::JoinInit || x.mode_ == Mode::JoinResp) {
         return verify_join_body(x);
     }
-    member::Bundle b;
-    LM_TRY(member::bundle_parse(ByteView{x.rx_.data(), x.rx_len_}, b));
+    ByteView dc;
+    ByteView mc;
+    LM_TRY(member::cred_pair_parse(ByteView{x.rx_.data(), x.rx_len_}, member::k_max_member_cose, dc, mc));
     PeerState &p = x.peer_state_;
-    LM_TRY(member::check_device_credential(x.vin_.trust, b.device_cose, p.dc));
-    LM_TRY(member::check_member_credential(x.vin_.delegation, b.member_cose, p.mc));
-    LM_TRY(member::check_binding(p.dc, b.device_cose, p.mc));
+    LM_TRY(member::check_device_credential(x.vin_.trust, dc, p.dc));
+    LM_TRY(member::check_member_credential(x.vin_.delegation, mc, p.mc));
+    LM_TRY(member::check_binding(p.dc, dc, p.mc));
     LM_TRY(sec::ccs_encode(ByteView{p.dc.serial.data(), p.dc.serial_len}, p.dc.key,
                            MutByteView{p.ccs}, p.ccs_len));
-    return sec::sha256(b.member_cose, p.mc_hash);
+    return sec::sha256(mc, p.mc_hash);
 }
 
 Status Exchange::run_verify() {
@@ -661,8 +662,9 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
         nb.remove(*other);
         ++s_.stats.sessions_replaced;
     }
-    // Review finding 20: this address now belongs to the verified peer; a neighbour of another device holding it is
-    // an owner the root replaced, and routes learned through it are stale.
+    // Review finding 20, docs/04 §7: this address now belongs to the verified peer under its membership generation. A
+    // neighbour of another device holding it is an owner the root replaced; the same device under another generation
+    // (it left and joined again) is a new owner too. Routes to or through the address it held are stale.
     Neighbor *stale = nullptr;
     nb.for_each([&](Handle, Neighbor &x) {
         stale = stale == nullptr && &x != n && !x.join_only && x.device != device && x.address == peer_state_.mc.address
@@ -672,7 +674,10 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
     if (stale != nullptr) {
         (void)s_.engine.release_peer(stale->peer);
         nb.remove(*stale);
-        s_.engine.delivery().invalidate_routes();
+        s_.engine.delivery().invalidate_addr(peer_state_.mc.address);
+    }
+    if (n != nullptr && (n->membership != peer_state_.mc.membership || n->address != peer_state_.mc.address)) {
+        s_.engine.delivery().invalidate_addr(n->address);
     }
     if (n == nullptr) {
         n = nb.acquire();

@@ -8,23 +8,8 @@
 
 using lm::Status;
 using lm::to_abi;
-
-namespace {
-
-bool valid_ctx(const lm_context_t *ctx) { return ctx != nullptr && ctx->magic == lm_context::k_magic; }
-
-lm::Reply call(lm_context_t *ctx, lm::CommandKind kind, const void *req, std::size_t req_size, void *resp,
-               std::size_t resp_size) {
-    lm::Command cmd;
-    cmd.kind = kind;
-    cmd.request = req;
-    cmd.request_size = req_size;
-    cmd.response = resp;
-    cmd.response_size = resp_size;
-    return ctx->owner.call(cmd);
-}
-
-} // namespace
+using lm::capi::call;
+using lm::capi::valid_ctx;
 
 extern "C" {
 

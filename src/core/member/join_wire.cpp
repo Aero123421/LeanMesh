@@ -23,32 +23,6 @@ template <std::size_t N> void rd(CborReader &r, std::array<uint8_t, N> &out) {
 
 } // namespace
 
-// ---- credential swap ----
-Status join_bundle_encode(ByteView device_cose, ByteView delegation_cose, MutByteView out, std::size_t &len) {
-    if (device_cose.empty() || device_cose.size() > k_max_device_cose || delegation_cose.empty() ||
-        delegation_cose.size() > k_max_delegation_cose) {
-        return Status::InvalidArgument;
-    }
-    CborWriter w{out};
-    w.array(2);
-    w.bytes(device_cose);
-    w.bytes(delegation_cose);
-    len = w.size();
-    return w.finish();
-}
-
-Status join_bundle_parse(ByteView in, JoinBundle &out) {
-    LM_TRY(wire::cbor_validate(in));
-    CborReader r{in};
-    (void)r.array(2, 2);
-    const ByteView dc = r.bstr(1, k_max_device_cose);
-    const ByteView del = r.bstr(1, k_max_delegation_cose);
-    LM_TRY(r.finish());
-    out.device_cose = dc;
-    out.delegation_cose = del;
-    return Status::Ok;
-}
-
 Status decode_offer_hint(ByteView body, OfferHint &out) {
     OfferHint h;
     if ((body.size() == 6 && body[0] == 2) || (body.size() == 14 && body[0] == 4)) {

@@ -32,7 +32,7 @@ Reply Delivery::cancel_child(const DeviceId &dest, const std::array<uint8_t, 16>
 
 Status Delivery::deadline_status(uint64_t expires, uint32_t term) {
     refresh_bound(engine_.step_time());
-    switch (deadline_state(expires, term)) {
+    switch (own_deadline(expires, term)) {
     case DeadlineCheck::After:
         return Status::Expired;
     case DeadlineCheck::Uncertain:

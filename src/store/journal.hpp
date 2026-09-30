@@ -30,8 +30,8 @@ namespace lm::store {
 inline constexpr std::size_t k_journal_max_payload = 672;
 inline constexpr std::size_t k_journal_header = 20;
 inline constexpr std::size_t k_journal_max_segments = 32; // 128 KiB / 4 KiB
-// Staging memory the owner lends (see Journal): at least one entry of the largest payload; a larger
-// scratch (e.g. k_journal_batch_bytes) lets apply() take batches of several entries.
+// Staging memory the owner lends to each call (see Journal): at least one entry of the largest payload;
+// a larger scratch (e.g. k_journal_batch_bytes) lets apply() take batches of several entries.
 inline constexpr std::size_t k_journal_min_scratch = k_journal_header + k_journal_max_payload;
 inline constexpr std::size_t k_journal_batch_bytes = 1100;
 inline constexpr uint32_t k_commit_batch_window_us = 20'000;
@@ -55,18 +55,19 @@ class Journal {
   public:
     // `index` holds the live entries: its size is the durable-entry capacity of this role
     // (profile durable_pending + results). open() fails closed if Flash holds more live entries.
-    // `scratch` (>= k_journal_min_scratch) is where every operation stages entries; it belongs to
-    // the owner's job memory (the journal is only used inside jobs) and its size bounds a batch.
-    Journal(JournalLive *index, std::size_t capacity, MutByteView scratch)
-        : index_(index), capacity_(capacity), buf_(scratch) {}
+    // Every call stages entries in `scratch` (>= k_journal_min_scratch; its size bounds a batch): memory
+    // of the caller's job that the journal uses for that call only (ADR-002 P4: the node's one RecordJob
+    // is lent per job, so the journal keeps no view of it).
+    Journal(JournalLive *index, std::size_t capacity) : index_(index), capacity_(capacity) {}
 
     // Scans all segments (two passes), rebuilds the live set, and finishes an interrupted
     // reclaim. Safe to call again after any failed operation.
-    [[nodiscard]] Status open(port::Store &store);
+    [[nodiscard]] Status open(port::Store &store, MutByteView scratch);
     // Ok = durable. NoCapacity: no room (live entries never dropped) or live table full.
     // NotFound: Retire of an id that is not live (checked before anything is written).
-    [[nodiscard]] Status apply(port::Store &store, const JournalOp *ops, std::size_t count);
-    [[nodiscard]] Status read(port::Store &store, uint32_t id, MutByteView out, std::size_t &len);
+    [[nodiscard]] Status apply(port::Store &store, MutByteView scratch, const JournalOp *ops, std::size_t count);
+    [[nodiscard]] Status read(port::Store &store, MutByteView scratch, uint32_t id, MutByteView out,
+                              std::size_t &len);
 
     [[nodiscard]] std::size_t live_count() const { return live_; }
     [[nodiscard]] const JournalLive &live_at(std::size_t i) const { return index_[i]; }
@@ -78,6 +79,17 @@ class Journal {
         uint32_t tail = 0;     // next write offset; == segment size when full or torn
         uint32_t last_seq = 0; // highest valid seq (0 = none)
         bool used = false;     // any non-erased byte
+    };
+    // The caller's staging memory, for the duration of one public call.
+    class Staged {
+      public:
+        Staged(Journal &j, MutByteView scratch) : j_(j) { j_.buf_ = scratch; }
+        ~Staged() { j_.buf_ = MutByteView{}; }
+        Staged(const Staged &) = delete;
+        Staged &operator=(const Staged &) = delete;
+
+      private:
+        Journal &j_;
     };
 
     Status scan_segment(port::Store &store, uint32_t seg, bool apply_entries);
@@ -100,7 +112,7 @@ class Journal {
     bool open_ = false;
     bool overflow_ = false;
     std::array<Segment, k_journal_max_segments> seg_{};
-    MutByteView buf_; // lent staging memory (see the constructor)
+    MutByteView buf_; // the caller's staging memory, set only while one of its calls runs (Staged)
 };
 
 // Entry size on Flash for a payload of `len` bytes.

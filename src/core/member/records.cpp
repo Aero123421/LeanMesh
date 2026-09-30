@@ -12,6 +12,13 @@ namespace {
 
 constexpr std::size_t head_size(std::size_t n) { return n < 24 ? 1 : (n < 256 ? 2 : 3); }
 
+template <class F> void io(F &f, TrustAnchor &t) { // the trust record (core/codec.hpp field list); key_id is derived
+    f.raw(t.fleet.bytes);
+    f.raw(t.key.x);
+    f.raw(t.key.y);
+    f.u64(t.min_credential_generation);
+}
+
 } // namespace
 
 Status encode_identity(ByteView scalar32, ByteView device_cose, MutByteView out, std::size_t &len) {
@@ -35,25 +42,13 @@ Status decode_identity(ByteView payload, ByteView &scalar32, ByteView &device_co
 }
 
 Status encode_trust(const TrustAnchor &t, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.bytes(t.fleet.view());
-    w.bytes(ByteView{t.key.x});
-    w.bytes(ByteView{t.key.y});
-    w.u64be(t.min_credential_generation);
-    len = w.size();
-    return w.finish();
+    return put_record(t, out, len, [](auto &f, auto &m) { io(f, m); });
 }
 
 Status decode_trust(ByteView payload, TrustAnchor &out) {
-    Reader r{payload};
-    FleetId fleet;
-    sec::PublicKey key;
-    r.copy_to(fleet.bytes);
-    r.copy_to(key.x);
-    r.copy_to(key.y);
-    const uint64_t min_gen = r.u64be();
-    LM_TRY(r.finish());
-    return make_trust_anchor(fleet, key, min_gen, out);
+    TrustAnchor t;
+    LM_TRY(get_record(payload, t, [](auto &f, auto &m) { io(f, m); }));
+    return make_trust_anchor(t.fleet, t.key, t.min_credential_generation, out);
 }
 
 Status encode_floors(const Floors &f, MutByteView out, std::size_t &len) {
@@ -92,8 +87,8 @@ Status decode_floors(ByteView payload, Floors &out) {
 
 // ---- LocalIdentity ----
 Status LocalIdentity::begin_load(Engine &engine) {
-    if (job_in_flight_) {
-        return Status::Busy; // a cancelled load still owns this memory
+    if (job_in_flight_ || rec_lent_) {
+        return Status::Busy; // a cancelled load, or a borrower's job of a stopped engine, still owns this memory
     }
     if (state_ == State::Loading) {
         return Status::Conflict;
@@ -141,8 +136,10 @@ void LocalIdentity::release() {
 
 void LocalIdentity::clear() {
     sec::destroy_key(key_);
-    sec::secure_zero(MutByteView{rec_.payload});
-    sec::secure_zero(MutByteView{rec_.scratch});
+    if (!rec_lent_) { // a lent record belongs to its borrower's job until it is returned (zombie rule)
+        sec::secure_zero(MutByteView{rec_.payload});
+        sec::secure_zero(MutByteView{rec_.scratch});
+    }
     state_ = State::Unloaded;
     unprovisioned_ = false;
     has_delegation_ = false;
@@ -153,6 +150,7 @@ void LocalIdentity::clear() {
     dc_ = DeviceCredential{};
     delegation_ = RootDelegation{};
     mc_ = MemberCredential{};
+    term_ = RootTerm{};
     floors_.clear();
     own_floor_ = Floors::Entry{};
     ccs_len_ = 0;
@@ -164,7 +162,6 @@ void LocalIdentity::clear() {
     paired_status_ = Status::NotFound;
     sec::secure_zero(MutByteView{scope_});
     has_scope_ = false;
-    rec_lent_ = false;
     delegation_behind_ = false;
 }
 
@@ -183,11 +180,14 @@ Status LocalIdentity::adopt_member(const RootDelegation &delegation, const Membe
     uint8_t *tail = bundle_.data() + k_max_bundle - dc_len;
     std::memmove(tail, bundle_.data() + dc_off_, dc_len);
     dc_off_ = k_max_bundle - dc_len;
-    LM_TRY(bundle_encode(ByteView{tail, dc_len}, mc_cose, MutByteView{bundle_}, bundle_len_));
+    LM_TRY(cred_pair_encode(ByteView{tail, dc_len}, mc_cose, k_max_member_cose, MutByteView{bundle_}, bundle_len_));
     dc_len_ = dc_len;
     mc_len_ = mc_cose.size();
     dc_off_ = 1 + head_size(dc_len_);
     mc_off_ = dc_off_ + dc_len_ + head_size(mc_len_);
+    // A renewal may carry the root's newer term (the one this node already follows); a credential of another root
+    // (a join, a handover) brings that root's term.
+    term_ = delegation.root == delegation_.root && has_member_ ? std::max(term_, mc.root_term) : mc.root_term;
     delegation_ = delegation;
     has_delegation_ = true;
     mc_ = mc;
@@ -204,6 +204,7 @@ void LocalIdentity::drop_member(const Floors::Entry &floor, bool revoked) {
     has_delegation_ = false;
     member_status_ = revoked ? Status::Revoked : Status::NotFound; // [S18] lm_membership_get: MEMBER_REVOKED
     mc_ = MemberCredential{};
+    term_ = RootTerm{};
     delegation_ = RootDelegation{};
     bundle_len_ = 0; // the DeviceCredential stays where device_cose() finds it
     mc_len_ = 0;
@@ -216,10 +217,7 @@ Status LocalIdentity::load_job(port::JobEnv &env, void *arg) {
 }
 
 Status LocalIdentity::load_record(port::JobEnv &env, uint16_t id) {
-    rec_.op = store::RecordJob::Op::Load;
-    rec_.id = id;
-    rec_.state = 0;
-    rec_.payload_len = 0;
+    rec_.arm(store::RecordJob::Op::Load, id);
     return store::record_load(env.store, rec_);
 }
 
@@ -373,13 +371,53 @@ Status LocalIdentity::load_membership(port::JobEnv &env) {
         member_status_ = Status::Revoked; // valid identity, credential below the revocation floor
         return Status::Ok;
     }
-    LM_TRY(bundle_encode(dc, mc, MutByteView{bundle_}, bundle_len_));
+    if constexpr (k_root_capable) {
+        if (delegation_.root == dc_.device) {
+            LM_TRY(advance_term(env)); // the domain's root: this boot's term, durable before anything uses it
+        }
+    }
+    const ByteView live{rec_.payload.data(), rec_.payload_len};
+    LM_TRY(cred_pair_encode(dc, live, k_max_member_cose, MutByteView{bundle_}, bundle_len_));
+    term_ = mc_.root_term;
     dc_len_ = dc.size();
-    mc_len_ = mc.size();
+    mc_len_ = live.size();
     dc_off_ = 1 + head_size(dc_len_);
     mc_off_ = dc_off_ + dc_len_ + head_size(mc_len_);
     has_member_ = true;
     member_status_ = Status::Ok;
+    return Status::Ok;
+}
+
+// docs/04 §7 "root_termはroot bootごとに永続増加 ... rebootで0に戻さない": the root's clock starts at 0 at every boot, so
+// every boot is a new term. The term is the root_term of the root's own MemberCredential (members judge the root's
+// lease in it and learn the term from it); this job re-issues that credential one higher and commits it before the
+// identity is Ready, i.e. before any module publishes anything of this boot. A cut before the commit leaves the old
+// record (the next boot goes one above it, the term was never published); after it the new one is the floor. Stored
+// = the last term published: provisioning writes 0 for a new network, a replacement root one below its first term.
+Status LocalIdentity::advance_term(port::JobEnv &env) {
+    MemberCredential next = mc_;
+    if (!next_generation(mc_.root_term, 0xFFFFFFFFU, next.root_term)) {
+        return Status::RecoveryRequired; // docs/04 §7: stop before the wrap, administrative recovery
+    }
+    std::array<uint8_t, 256> data{};
+    std::size_t dlen = 0;
+    LM_TRY(encode_member_credential(next, MutByteView{data}, dlen));
+    Envelope e;
+    e.type = k_type_member_credential;
+    e.domain = delegation_.domain;
+    e.issuer = dc_.device;
+    e.revision = next.membership.value();
+    std::array<uint8_t, 4> term_be{};
+    Writer tw{MutByteView{term_be}};
+    tw.u32be(next.root_term.value());
+    Sha256Digest rid{};
+    LM_TRY(sec::sha256_parts(dc_.device.view(), ByteView{term_be}, rid)); // one request id per (root, term)
+    std::copy_n(rid.begin(), e.request.bytes.size(), e.request.bytes.begin());
+    std::size_t len = 0;
+    LM_TRY(issue_signed(key_, e, ByteView{data.data(), dlen}, MutByteView{rec_.payload}, len));
+    rec_.arm(store::RecordJob::Op::Commit, store::rec::membership, k_membership_active, len);
+    LM_TRY(store::record_commit(env.store, rec_));
+    mc_ = next;
     return Status::Ok;
 }
 

@@ -40,6 +40,8 @@
 //                                           counters of node i; on the root also the approved tree size (cmd_mesh.cpp)
 //   diag <node> [heap <bytes>]              lm_diagnostics_get + capabilities with validity bits (cmd_diag.cpp)
 //   lc-object revoke|window ...             a fleet- or root-signed lifecycle object as hex (cmd_lifecycle.cpp)
+//   app-equipment <node> [fail] / app-battery <node> <mv> <pct>   run the example applications of examples/apps
+//                                           (cmd_apps.cpp) on a node
 //   quit
 // Stdout carries only protocol lines; diagnostics go to stderr.
 #pragma once
@@ -133,6 +135,9 @@ std::string cmd_wake(Sim &sim, const Args &a);
 std::string cmd_diag(Sim &sim, const Args &a);
 // Commands of the lifecycle slice (cmd_lifecycle.cpp): signed revoke / commissioning-window objects.
 std::string cmd_lc_object(Sim &sim, const Args &a);
+// Commands running the example applications (cmd_apps.cpp).
+std::string cmd_app_equipment(Sim &sim, const Args &a);
+std::string cmd_app_battery(Sim &sim, const Args &a);
 
 // Commands of the channel slice (cmd_channel.cpp).
 std::string cmd_channel(Sim &sim, const Args &a);

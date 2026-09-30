@@ -94,7 +94,9 @@ struct UsbTiming {
     Duration job_retry = Duration::from_ms(20); // public-key slot busy (link exchange running)
 };
 
-// Local identity for the handshake (copied by configure()).
+// Local identity for the handshake. configure() copies the key handle, trust anchor and ids; ccs and the two
+// credentials are views the caller keeps valid and unchanged until unconfigure() (root: the loaded identity, which
+// does not change while the engine runs; Host: the adapter's kit storage).
 struct UsbKit {
     sec::KeyHandle key;
     ByteView ccs;
@@ -200,7 +202,7 @@ class UsbLink {
     UsbLink &operator=(const UsbLink &) = delete;
     ~UsbLink() { close(); }
 
-    // Copies the kit. Busy while a handshake is running.
+    // Takes the kit (see UsbKit for what is copied and what is viewed). Busy while a handshake is running.
     [[nodiscard]] Status configure(const UsbKit &kit);
     [[nodiscard]] bool configured() const { return configured_; }
     // Forgets the kit (engine stop: the key handle it named is gone). Call after close().
@@ -298,6 +300,8 @@ class UsbLink {
     void begin_attempt(uint32_t sid, MonoTime now);
     void abort_attempt(Status why, MonoTime now);
     void stage(Obj kind, ByteView body, bool hold);
+    [[nodiscard]] std::size_t cred_size() const;
+    void stage_cred(Obj kind);
     [[nodiscard]] Status start_job(Job job, sec::HsStep step, ByteView input, MonoTime now);
     void after_verify(MonoTime now);
     void retry_job(MonoTime now);
@@ -307,7 +311,6 @@ class UsbLink {
     void finish_keys(MonoTime now);
     [[nodiscard]] Status make_context();
     [[nodiscard]] Status verify_body();
-    [[nodiscard]] Status build_own_cred();
     void promote(MonoTime now);
     void teardown(UsbDown why, MonoTime now);
 
@@ -324,13 +327,12 @@ class UsbLink {
     UsbTiming timing_{};
     UsbStats stats_{};
 
-    // kit copy
+    // kit
     bool configured_ = false;
     sec::KeyHandle key_;
-    std::array<uint8_t, sec::k_ccs_max_bytes> ccs_{};
-    std::size_t ccs_len_ = 0;
-    std::array<uint8_t, k_cred_bytes> own_cred_{};
-    std::size_t own_cred_len_ = 0;
+    ByteView ccs_;       // view (UsbKit)
+    ByteView own_dc_;    // view: own DeviceCredential
+    ByteView own_deleg_; // view: own RootDelegation (root only)
     Sha256Digest own_hash_{};
     member::TrustAnchor trust_;
     DeviceId self_;

@@ -32,7 +32,9 @@ def native_build_dir() -> Path:
 
 
 def meshsim_binary() -> Path:
-    path = native_build_dir() / "meshsim"
+    """meshsim of $LEANMESH_MESHSIM_BUILD (the sanitizer job runs an ASan meshsim next to the plain
+    libleanmesh_host.so the Python Host loads), else of the native build."""
+    path = Path(os.environ.get("LEANMESH_MESHSIM_BUILD", native_build_dir())) / "meshsim"
     if not path.is_file():
         raise FileNotFoundError(
             f"{path} not found: build the native tree first "
@@ -91,7 +93,10 @@ class MeshSim:
         return json.loads(line)
 
     def close(self) -> None:
-        if self.proc.poll() is None:
+        """Ends the simulator. With LEANMESH_SIM_STRICT_EXIT=1 (sanitizer builds) a simulator that died on its own or
+        exited non-zero (ASan/UBSan report) fails the test that started it instead of being swept up silently."""
+        was_running = self.proc.poll() is None
+        if was_running:
             try:
                 self.cmd("quit", timeout_s=5)
             except (MeshSimError, BrokenPipeError, OSError):
@@ -101,9 +106,14 @@ class MeshSim:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        rc = self.proc.returncode
+        strict = os.environ.get("LEANMESH_SIM_STRICT_EXIT") == "1"
+        err = self.proc.stderr.read() if strict and self.proc.stderr is not None else ""
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             if stream is not None:
                 stream.close()
+        if strict and (rc != 0 or "runtime error:" in err or "ERROR: AddressSanitizer" in err):
+            raise MeshSimError(f"meshsim ended with status {rc}: {err[-2000:]}")
 
 
 @dataclass

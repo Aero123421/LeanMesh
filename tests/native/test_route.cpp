@@ -42,7 +42,7 @@ wire::RouteHeader make_header(uint16_t origin, const std::vector<uint16_t> &path
 
 // Walks a source route hop by hop with the production decision function. Returns the number of
 // nodes that forwarded; -1 when a hop dropped, and checks that no node handles the packet twice.
-int walk(wire::RouteHeader h, uint32_t term) {
+int walk(wire::RouteHeader h) {
     std::vector<uint16_t> seen;
     uint16_t prev = h.origin;
     int forwarded = 0;
@@ -52,7 +52,7 @@ int walk(wire::RouteHeader h, uint32_t term) {
             return -2;
         }
         seen.push_back(self);
-        const Decision d = decide_forward(h, ShortAddr{self}, ShortAddr{prev}, RootTerm{term});
+        const Decision d = decide_forward(h, ShortAddr{self}, ShortAddr{prev});
         if (d.action == Action::Drop) {
             return -1;
         }
@@ -75,12 +75,12 @@ std::vector<uint16_t> seq_path(uint16_t first, std::size_t n) {
 
 } // namespace
 
-LM_TEST("R04 forwarding: duplicate address, wrong peer, stale term, budget are dropped") {
+LM_TEST("R04 forwarding: duplicate address, wrong peer, budget are dropped; another term is carried") {
     const auto ok = make_header(10, {11, 12, 13}, 7);
-    LM_CHECK_EQ(walk(ok, 7), 2); // 11 and 12 forward, 13 delivers
+    LM_CHECK_EQ(walk(ok), 2); // 11 and 12 forward, 13 delivers
 
     auto dup = make_header(10, {11, 12, 11, 13}, 7); // authenticated frame, repeated address
-    LM_CHECK_EQ(static_cast<int>(decide_forward(dup, ShortAddr{11}, ShortAddr{10}, RootTerm{7}).reason),
+    LM_CHECK_EQ(static_cast<int>(decide_forward(dup, ShortAddr{11}, ShortAddr{10}).reason),
                 static_cast<int>(DropReason::NotSimple));
     uint8_t buf[300];
     std::size_t len = 0;
@@ -91,43 +91,45 @@ LM_TEST("R04 forwarding: duplicate address, wrong peer, stale term, budget are d
     LM_CHECK(enc != Status::Ok || wire::decode_route(ByteView{buf, len}, parsed, end) != Status::Ok);
 
     auto h = ok;
-    LM_CHECK(decide_forward(h, ShortAddr{12}, ShortAddr{10}, RootTerm{7}).reason == DropReason::NotSelf);
+    LM_CHECK(decide_forward(h, ShortAddr{12}, ShortAddr{10}).reason == DropReason::NotSelf);
     h = ok;
-    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{99}, RootTerm{7}).reason ==
+    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{99}).reason ==
              DropReason::WrongPrevious);
-    h = ok;
-    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}, RootTerm{8}).reason == DropReason::StaleTerm);
+    // ARCH2-D1: the header's root_term is no forwarding condition (docs/04 §4); a frame of another term is carried
+    // (its deadline is judged separately, a term the relay does not know is TIME_UNCERTAIN, never a drop).
+    h = make_header(10, {11, 12, 13}, 8);
+    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}).action == Action::Forward);
     h = ok;
     h.budget = 0;
-    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}, RootTerm{7}).reason == DropReason::NoBudget);
+    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}).reason == DropReason::NoBudget);
     h = ok;
     h.budget = 9;
-    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}, RootTerm{7}).reason == DropReason::NoBudget);
+    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}).reason == DropReason::NoBudget);
     h = ok;
     h.final = 99;
-    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}, RootTerm{7}).reason ==
+    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}).reason ==
              DropReason::FinalMismatch);
     h = ok;
     h.next_index = 3;
-    LM_CHECK(decide_forward(h, ShortAddr{13}, ShortAddr{12}, RootTerm{7}).reason == DropReason::BadIndex);
+    LM_CHECK(decide_forward(h, ShortAddr{13}, ShortAddr{12}).reason == DropReason::BadIndex);
     h = ok;
-    LM_CHECK(decide_forward(h, ShortAddr{10}, ShortAddr{10}, RootTerm{7}).reason ==
+    LM_CHECK(decide_forward(h, ShortAddr{10}, ShortAddr{10}).reason ==
              DropReason::OriginIsSelf);
     // Zero and broadcast addresses inside the path.
     h = make_header(10, {11, 0, 13}, 7);
-    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}, RootTerm{7}).reason == DropReason::NotSimple);
+    LM_CHECK(decide_forward(h, ShortAddr{11}, ShortAddr{10}).reason == DropReason::NotSimple);
     // A forward changes exactly next_index and budget.
     h = ok;
-    const Decision d = decide_forward(h, ShortAddr{11}, ShortAddr{10}, RootTerm{7});
+    const Decision d = decide_forward(h, ShortAddr{11}, ShortAddr{10});
     LM_CHECK(d.action == Action::Forward && d.next_hop.value() == 12);
     LM_CHECK_EQ(h.next_index, 1);
     LM_CHECK_EQ(h.budget, 2);
     // 20-hop and 40-hop routes each traverse every node once.
-    LM_CHECK_EQ(walk(make_header(5, seq_path(100, 20), 1), 1), 19);
-    LM_CHECK_EQ(walk(make_header(5, seq_path(100, 40), 1), 1), 39);
+    LM_CHECK_EQ(walk(make_header(5, seq_path(100, 20), 1)), 19);
+    LM_CHECK_EQ(walk(make_header(5, seq_path(100, 40), 1)), 39);
 }
 
-LM_TEST("candidate path: self, duplicates, depth 21, other term and expiry are refused") {
+LM_TEST("candidate path: self, duplicates, depth 21, an older term and expiry are refused") {
     const auto p = seq_path(1, 19);
     LM_CHECK_OK(check_candidate_path(ShortAddr{500}, p.data(), 19, RootTerm{3}, RootTerm{3}, false));
     const auto p20 = seq_path(1, 20); // this node would sit at depth 21
@@ -142,7 +144,8 @@ LM_TEST("candidate path: self, duplicates, depth 21, other term and expiry are r
     LM_CHECK(check_candidate_path(ShortAddr{500}, dup.data(), 3, RootTerm{3}, RootTerm{3}, false) ==
              Status::InvalidArgument);
     LM_CHECK(check_candidate_path(ShortAddr{500}, p.data(), 19, RootTerm{2}, RootTerm{3}, false) ==
-             Status::NetworkMismatch);
+             Status::NetworkMismatch); // a tree of a term the root has left
+    LM_CHECK_OK(check_candidate_path(ShortAddr{500}, p.data(), 19, RootTerm{4}, RootTerm{3}, false)); // a newer term: a hint to try
     LM_CHECK(check_candidate_path(ShortAddr{500}, p.data(), 19, RootTerm{3}, RootTerm{3}, true) ==
              Status::Expired);
 }
@@ -364,7 +367,7 @@ LM_TEST("topology: depth 20 accepted, 21 refused, 40-hop LCA path forwards end t
     LM_CHECK_OK(t.route_between(ShortAddr{addr_of(19)}, ShortAddr{addr_of(39)}, 1000, r));
     LM_CHECK_EQ(r.len, 40);
     std::vector<uint16_t> path(r.path.begin(), r.path.begin() + r.len);
-    LM_CHECK_EQ(walk(make_header(addr_of(19), path, 1), 1), 39);
+    LM_CHECK_EQ(walk(make_header(addr_of(19), path, 1)), 39);
     // Ancestor/descendant and root endpoints.
     LM_CHECK_OK(t.route_between(ShortAddr{addr_of(3)}, ShortAddr{addr_of(6)}, 1000, r));
     LM_CHECK_EQ(r.len, 3);
@@ -898,7 +901,7 @@ class Model {
                 wire::validate_simple_path(sa, path.data(), path.size()) != Status::Ok) {
                 return "source route not simple/bounded " + std::to_string(sa) + "->" + std::to_string(sb);
             }
-            const int fwd = walk(make_header(sa, path, term_), term_);
+            const int fwd = walk(make_header(sa, path, term_));
             if (fwd != static_cast<int>(r.len) - 1) {
                 return "forwarder rejected the tree route " + std::to_string(sa) + "->" + std::to_string(sb) +
                        " code " + std::to_string(fwd);

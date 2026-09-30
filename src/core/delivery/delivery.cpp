@@ -52,7 +52,7 @@ Delivery::Delivery(Engine &engine, member::LocalIdentity &identity, link::LinkLa
 
 // ---- small helpers ----
 RootTerm Delivery::local_term() const {
-    return identity_.is_member() ? identity_.member().root_term : RootTerm{};
+    return identity_.is_member() ? identity_.term() : RootTerm{};
 }
 
 ShortAddr Delivery::self_addr() const {
@@ -76,6 +76,15 @@ DeadlineCheck Delivery::deadline_state(uint64_t expires, uint32_t term) const {
         return DeadlineCheck::Before; // no deadline (only RECEIVED+DURABLE records may have none)
     }
     return check_deadline(bound_, RootTime{RootTerm{term}, expires});
+}
+
+// A deadline this node puts on its own frames must be of the term those frames carry (the node's current term,
+// ARCH2-D1): a deadline of another term would be read on the wrong clock at every hop and at the destination.
+DeadlineCheck Delivery::own_deadline(uint64_t expires, uint32_t term) const {
+    if (expires != 0 && term != local_term().value()) {
+        return DeadlineCheck::Uncertain;
+    }
+    return deadline_state(expires, term);
 }
 
 MonoTime Delivery::local_deadline(uint64_t expires, uint32_t term, MonoTime now) const {
@@ -177,7 +186,7 @@ void Delivery::emit_op_event(const Op &op, MonoTime now) {
     ev.operation_id = op.id;
     ev.peer = abi_dev(op.dest);
     ev.message_id = abi_mid(to_bytes(op.mid));
-    ev.origin_assignment_generation = identity_.is_member() ? identity_.member().assignment.value() : 0;
+    ev.origin_assignment_generation = op.assignment;
     std::memcpy(ev.intent_hash, op.hash.data(), 32);
     ev.app_port = op.port;
     ev.payload_bytes = op.result_len;
@@ -196,10 +205,9 @@ void Delivery::finalize(Op &op, uint8_t outcome, uint32_t reason, MonoTime now) 
 
 // ---- lifecycle ----
 Status Delivery::start(MonoTime now) {
-    (void)now;
     ready_ = false;
     recovering_ = false;
-    return durable_.begin_boot();
+    return durable_.begin_boot(now);
 }
 
 void Delivery::stop() {
@@ -244,6 +252,7 @@ void Delivery::on_job_done(JobOwner owner, Handle slot, Status s, MonoTime now) 
 
 void Delivery::on_timer(MonoTime now) {
     refresh_bound(now);
+    durable_.pump(now); // P4: a journal job that waited for the record memory runs once it is back
     hop_.on_timer(now);
     frag_expire(now); // [S12]
     if (slot_wait_ && !link_.exchange().busy()) {
@@ -289,7 +298,7 @@ MonoTime Delivery::deadline() const {
     if (slot_wait_ && !link_.exchange().busy()) {
         return MonoTime{0}; // known pending work (the slot is free), not a poll
     }
-    MonoTime next = earliest(earliest(hop_.deadline(), retry_kick_), frag_deadline());
+    MonoTime next = earliest(earliest(hop_.deadline(), retry_kick_), earliest(frag_deadline(), durable_.deadline()));
     for (std::size_t i = 0; i < k_actives; ++i) {
         const Active *a = actives_.get(actives_.handle_at(i));
         if (a != nullptr) {

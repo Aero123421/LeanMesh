@@ -36,10 +36,7 @@ Status Membership::start_flash(Step step, store::RecordJob::Op op, uint16_t id, 
     if (rec_ == nullptr || job_in_flight_) {
         return Status::Busy;
     }
-    rec_->op = op;
-    rec_->id = id;
-    rec_->state = state;
-    rec_->payload_len = static_cast<uint32_t>(payload_len);
+    rec_->arm(op, id, state, payload_len);
     job_slot_ = Handle{0, ++job_gen_};
     LM_TRY(engine_.submit_job(JobOwner::Join, job_slot_, JobClass::Flash, &store::record_job, rec_));
     step_ = step;
@@ -114,7 +111,7 @@ void Membership::stop() {
     resume_ = false;
     confirm_pending_ = confirm_consume_ = false;
     confirm_at_ = MonoTime::never();
-    switch_ = handover_ = renew_adopt_ = false;
+    switch_ = handover_ = renew_adopt_ = boot_load_ = false;
 }
 
 void Membership::release_join() {
@@ -126,10 +123,7 @@ void Membership::release_join() {
         engine_.link().exchange().return_scratch();
         scratch_ = MutByteView{};
     }
-    if (rec_ != nullptr) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
-    }
+    engine_.identity().return_record(rec_);
     have_cand_ = false;
     peer_ = link::JoinPeerOut{};
     apply_pacing(0); // the policy of a proxied join ends with it
@@ -142,22 +136,32 @@ void Membership::on_identity_ready(MonoTime now) {
     state_since_ = now;
     confirm_pending_ = confirm_consume_ = false;
     confirm_at_ = MonoTime::never();
-    if (engine_.config().role == Role::Root) {
+    boot_load_ = engine_.config().role != Role::Root;
+    boot_load(now);
+}
+
+// A member only cares about an ACTIVATED record (root acknowledgement owed); a stale PREPARED one is ignored because
+// ACTIVE is authoritative. A non-member resumes a PREPARED request. The load needs the node's one record memory,
+// which another module's boot job (the channel record, the journal) may hold at this moment: then it waits on the
+// retry timer, it is never skipped (ADR-002 P4).
+void Membership::boot_load(MonoTime now) {
+    if (!boot_load_ || engine_.identity().state() != LocalIdentity::State::Ready) {
+        boot_load_ = false;
         return;
     }
-    // A member only cares about an ACTIVATED record (root acknowledgement owed); a stale PREPARED one is
-    // ignored because ACTIVE is authoritative. A non-member resumes a PREPARED request.
-    if (rec_ != nullptr || engine_.identity().state() != LocalIdentity::State::Ready ||
-        (rec_ = engine_.identity().lend_record()) == nullptr) {
+    if (job_in_flight_ || !lend_record_or_retry(now)) {
+        retry_at_ = now + k_busy_retry;
         return;
     }
     // [S18] A switch cut between its two commits: root_delegation is rewritten from the pending record first.
     const bool repair = engine_.identity().delegation_behind();
     if (start_flash(repair ? Step::SwitchLoad : Step::BootLoadPrepared, store::RecordJob::Op::Load,
                     repair ? store::rec::pending_delegation : store::rec::membership_prepared, 0, 0, now) != Status::Ok) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
+        retry_at_ = now + k_busy_retry; // the job table or the worker queue is full: local, tried again
+        return;
     }
+    boot_load_ = false;
 }
 
 // [S18] The delegation of a switch is written (or its write failed and the next boot repairs it). A live transfer
@@ -169,8 +173,7 @@ void Membership::switch_done(MonoTime now) {
     }
     if (start_flash(Step::BootLoadPrepared, store::RecordJob::Op::Load, store::rec::membership_prepared, 0, 0, now) !=
         Status::Ok) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
     }
 }
 
@@ -380,19 +383,20 @@ void Membership::session_up(bool initiator, const MacAddr &mac, const DeviceId &
     if (!initiator || phase_ != JoinPhase::Connect) {
         return;
     }
-    JoinBundle b;
-    if (join_bundle_parse(bundle, b) != Status::Ok || !lend_record_only()) {
+    ByteView dc_cose;
+    ByteView del_cose;
+    if (cred_pair_parse(bundle, k_max_delegation_cose, dc_cose, del_cose) != Status::Ok || !lend_record_only()) {
         finish_join(Status::Busy, LM_OUTCOME_REJECTED, now);
         return;
     }
     pipe_.bind(mac, peer, hint());
-    std::memcpy(rec_->payload.data(), b.delegation_cose.data(), b.delegation_cose.size());
+    std::memcpy(rec_->payload.data(), del_cose.data(), del_cose.size());
     phase_ = JoinPhase::PersistDelegation;
     // [S18] A member's transfer/handover must not touch root_delegation before its new credential is committed: the
     // new root's delegation waits in pending_delegation (every cut then loads the old or the new membership).
     if (start_flash(switch_ ? Step::CommitPending : Step::CommitDelegation, store::RecordJob::Op::Commit,
                     switch_ ? store::rec::pending_delegation : store::rec::root_delegation, 0,
-                    b.delegation_cose.size(), now) != Status::Ok) {
+                    del_cose.size(), now) != Status::Ok) {
         finish_join(Status::Busy, LM_OUTCOME_REJECTED, now);
     }
 }
@@ -421,8 +425,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         } else if (s != Status::Ok && s != Status::NotFound) {
             engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(s), 0, nullptr);
         }
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         if (resume_) { // docs/07 §10: ask the root again about the same request, no new approval
             begin_discovery(now);
             search_deadline_ = now + k_default_budget;
@@ -470,8 +473,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
         req_.prepared_generation = rec_->generation;
         req_.evidence |= kEvRootStored | kEvDeviceStored;
         prepared_until_ = now + Duration::from_ms(req_.reservation_ms);
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         phase_ = JoinPhase::StoredOut;
         emit_state(0);
         send_stored(now);
@@ -528,8 +530,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
 
     case Step::ConfirmConsume:
         confirm_consume_ = false;
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         if (phase_ == JoinPhase::ActiveOut) {
             have_prepared_ = false;
             finish_join(Status::Ok, LM_OUTCOME_APPLIED, now);
@@ -554,6 +555,7 @@ void Membership::flash_done(Step step, Status s, MonoTime now) {
 
     case Step::RenewVerify: // [S18]
     case Step::RenewCommit:
+    case Step::RenewReload:
         renew_step(step, s, now);
         return;
 
@@ -656,6 +658,8 @@ void Membership::retry_work(MonoTime now) {
             fail_and_consume(req_.reason, now);
         } else if (renew_adopt_) {
             renew_adopt(now); // [S18] the exchange was sending our bundle
+        } else if (boot_load_) {
+            boot_load(now); // [P4] the record memory was lent at boot
         }
         break;
     }

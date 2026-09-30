@@ -407,18 +407,36 @@ LM_TEST("S5 bundle and record payload codecs are strict") {
     Env e;
     Bytes out(member::k_max_bundle);
     std::size_t len = 0;
-    LM_CHECK_OK(bundle_encode(view(e.node.kit.device_cose), view(e.node.member_cose),
-                              MutByteView{out.data(), out.size()}, len));
-    Bundle b;
-    LM_CHECK_OK(bundle_parse(ByteView{out.data(), len}, b));
-    LM_CHECK(bytes_equal(b.device_cose, view(e.node.kit.device_cose)));
-    LM_CHECK(bytes_equal(b.member_cose, view(e.node.member_cose)));
+    LM_CHECK_OK(cred_pair_encode(view(e.node.kit.device_cose), view(e.node.member_cose), k_max_member_cose,
+                                 MutByteView{out.data(), out.size()}, len));
+    // ARCH2-P2B: one codec for the link bundle and the join CredR; the bytes are those of CBOR [bstr, bstr].
+    Bytes manual(member::k_max_bundle);
+    wire::CborWriter mw{MutByteView{manual.data(), manual.size()}};
+    mw.array(2);
+    mw.bytes(view(e.node.kit.device_cose));
+    mw.bytes(view(e.node.member_cose));
+    LM_CHECK_OK(mw.finish());
+    LM_CHECK(bytes_equal(ByteView{out.data(), len}, mw.written()));
+    ByteView pdc;
+    ByteView pmc;
+    LM_CHECK_OK(cred_pair_parse(ByteView{out.data(), len}, k_max_member_cose, pdc, pmc));
+    LM_CHECK(bytes_equal(pdc, view(e.node.kit.device_cose)));
+    LM_CHECK(bytes_equal(pmc, view(e.node.member_cose)));
     Bytes extra(out.begin(), out.begin() + len);
     extra.push_back(0);
-    LM_CHECK(bundle_parse(view(extra), b) == Status::BadFrame);
-    LM_CHECK(bundle_parse(ByteView{out.data(), len - 1}, b) == Status::BadFrame);
-    LM_CHECK(bundle_encode(ByteView{}, view(e.node.member_cose), MutByteView{out.data(), out.size()}, len) ==
-             Status::InvalidArgument);
+    LM_CHECK(cred_pair_parse(view(extra), k_max_member_cose, pdc, pmc) == Status::BadFrame);
+    LM_CHECK(cred_pair_parse(ByteView{out.data(), len - 1}, k_max_member_cose, pdc, pmc) == Status::BadFrame);
+    LM_CHECK(cred_pair_encode(ByteView{}, view(e.node.member_cose), k_max_member_cose,
+                              MutByteView{out.data(), out.size()}, len) == Status::InvalidArgument);
+    // The second element is bounded by its kind: 400 B is a RootDelegation's room, not a MemberCredential's.
+    const Bytes big(400, 0x5A);
+    LM_CHECK(cred_pair_encode(view(e.node.kit.device_cose), view(big), k_max_member_cose,
+                              MutByteView{out.data(), out.size()}, len) == Status::InvalidArgument);
+    LM_CHECK_OK(cred_pair_encode(view(e.node.kit.device_cose), view(big), k_max_delegation_cose,
+                                 MutByteView{out.data(), out.size()}, len));
+    LM_CHECK(cred_pair_parse(ByteView{out.data(), len}, k_max_member_cose, pdc, pmc) == Status::BadFrame);
+    LM_CHECK_OK(cred_pair_parse(ByteView{out.data(), len}, k_max_delegation_cose, pdc, pmc));
+    LM_CHECK(bytes_equal(pmc, view(big)));
 
     // sealed record payloads
     std::array<uint8_t, 600> buf{};

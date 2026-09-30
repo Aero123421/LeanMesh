@@ -73,6 +73,7 @@ Reply Delivery::send_mode(SendMode m, const lm_send_request_t &rq, ByteView payl
 }
 
 Reply Delivery::send_control(const ControlSendRequest &c, ByteView payload, MonoTime now) {
+    refresh_bound(now); // as execute() does before every command
     lm_send_request_t rq{};
     rq.struct_size = sizeof(rq);
     rq.abi_version = LM_ABI_VERSION;

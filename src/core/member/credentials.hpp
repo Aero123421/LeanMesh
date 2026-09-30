@@ -260,13 +260,11 @@ class Floors {
 // 500 ppm) and 1 ms. A session authorised by that lease ends then at the latest.
 [[nodiscard]] MonoTime lease_local_end(const RootTimeBound &bound, const RootTime &lease, MonoTime now);
 
-// Credential bundle sent during a link exchange: CBOR [DeviceCredential COSE, MemberCredential COSE].
-struct Bundle {
-    ByteView device_cose;
-    ByteView member_cose;
-};
-[[nodiscard]] Status bundle_encode(ByteView device_cose, ByteView member_cose, MutByteView out,
-                                   std::size_t &len);
-[[nodiscard]] Status bundle_parse(ByteView in, Bundle &out);
+// The credential pair every exchange sends first, CBOR [DeviceCredential COSE, x]: x is the MemberCredential COSE
+// (a link or end exchange; x_max = k_max_member_cose) or the RootDelegation COSE (the root's CredR of a join;
+// k_max_delegation_cose). One codec for both.
+[[nodiscard]] Status cred_pair_encode(ByteView device_cose, ByteView x, std::size_t x_max, MutByteView out,
+                                      std::size_t &len);
+[[nodiscard]] Status cred_pair_parse(ByteView in, std::size_t x_max, ByteView &device_cose, ByteView &x);
 
 } // namespace lm::member

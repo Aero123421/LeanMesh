@@ -22,6 +22,7 @@
 #include "core/member/membership.hpp"
 #include "core/member/proxy.hpp"
 #include "core/member/records.hpp"
+#include "core/one_of.hpp"
 #include "core/power/power.hpp"
 #include "core/ports.hpp"
 #include "core/profile.hpp"
@@ -141,9 +142,14 @@ class Engine {
         delivery_.set_root_time(t, now);
         link_.revalidate(delivery_.root_time(now), now); // SEC-D3: every session judged by its peer's lease again
     }
-    // [SLICE:S8] membership: joiner/resume/leave on every device, the ledger on the root only.
-    member::Membership &membership() { return membership_; }
-    root::LedgerType &ledger() { return ledger_; }
+    // [SLICE:S8] membership: joiner/resume/leave on every device, the ledger on the root only. ADR-002 P8: a node holds
+    // only the one its role (fixed at lm_init) uses, in one storage; reaching for the other is an invariant failure.
+    member::Membership &membership() { return roles_.a(); }
+    root::LedgerType &ledger() { return roles_.b(); }
+    // The role's membership object (joiner side or ledger) still owns memory a worker job may write.
+    [[nodiscard]] bool role_job_pending() const {
+        return roles_.holds_a() ? roles_.a().job_pending() : roles_.b().job_pending();
+    }
     // Membership/operation events: like raise() but with the operation id and the peer they concern.
     void emit_event(uint32_t kind, uint32_t reason, uint64_t operation, const DeviceId *peer);
     // [SLICE:S11] mesh: parent search, registration, leases, path queries; the tree exists on the root only.
@@ -186,6 +192,10 @@ class Engine {
     // [SLICE:S18] The membership moved to another root (transfer/handover committed): at the end of this step, once no
     // job runs, the engine stops and starts again (like lm_stop + lm_start) so every module starts in the new domain.
     void request_restart() { restart_pending_ = true; }
+    // ARCH2-D1: this node now follows a newer root term (the root restarted; identity().note_term() moved or a renewal
+    // brought it). Everything held in the old term is re-synchronised (docs/04 §7): registration and paths, channel
+    // plans of the old clock; the root clock of the old term stays until the new one is measured.
+    void on_new_term(MonoTime now);
 
   private:
     void on_radio_event(const port::RadioEvent &ev, MonoTime now);
@@ -226,8 +236,8 @@ class Engine {
     link::LinkLayer link_{*this, ident_};
     delivery::Delivery delivery_{*this, ident_, link_}; // [SLICE:S9]
     MonoTime step_now_;                                 // [SLICE:S9] time of the running step()
-    member::Membership membership_{*this};              // [SLICE:S8]
-    root::LedgerType ledger_{*this};                    // [SLICE:S8] empty stand-in off the root
+    // [SLICE:S8] the joiner/member side, or on the root the ledger (an empty stand-in off root images): P8, one storage
+    OneOf<member::Membership, root::LedgerType> roles_{!(k_root_capable && config_.role == Role::Root), *this};
     route::Mesh mesh_{*this};                           // [SLICE:S11]
     root::RoutesType routes_{*this};                    // [SLICE:S11] empty stand-in off the root
     member::Proxy proxy_{*this};                        // [SLICE:S11] join tunnel (relay side and root side)

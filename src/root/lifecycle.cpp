@@ -45,12 +45,12 @@ void Ledger::start_renew(MonoTime now) {
         if (entries_[slot].state != EntryState::Active) {
             continue;
         }
-        rec_->op = store::RecordJob::Op::Load;
-        rec_->id = static_cast<uint16_t>(k_rec_ledger_base + slot);
-        rec_->payload_len = 0;
-        job_txn_ = -2;
+        rec_->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(k_rec_ledger_base + slot));
         job_slot_index_ = slot;
-        if (submit(Step::RenewLoad, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+        // The renewal leaves by the one control lane: while it carries another object, loading and signing now would
+        // only be done again (ARCH2-D1: after a root restart every member is renewed, one after the other).
+        if (!engine_.delivery().control_lane_free() ||
+            submit(Step::RenewLoad, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
             renew_mask_ |= 1ULL << slot;
             ++stats_.renew_deferred;
             maint_retry_ = now + k_retry;
@@ -91,7 +91,7 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
         a.env.issuer = id.self();
         a.env.revision = mc.membership.value();
         a.out = scratch_.from(detail::k_cose_off);
-        if (submit(Step::RenewSign, JobClass::PublicKey, &sign_job, this) != Status::Ok) {
+        if (submit(Step::RenewSign, JobClass::PublicKey, &sign_job, this, -2) != Status::Ok) {
             renew_mask_ |= 1ULL << slot; // the one public-key slot is busy (a handshake): later
             ++stats_.renew_deferred;
             maint_retry_ = now + k_retry;
@@ -100,17 +100,10 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
         return;
     }
     // RenewSign: the signed credential goes to the member as one control object over its end session.
-    delivery::ControlSendRequest cr;
-    cr.dest = e.device;
-    cr.root_term = engine_.identity().member().root_term.value();
-    cr.expires_root_ms = now.to_ms() + 30000;
-    Command cmd;
-    cmd.kind = CommandKind::SendControl;
-    cmd.request = &cr;
-    cmd.request_size = sizeof(cr);
-    cmd.payload = ByteView{scratch_.data() + detail::k_cose_off, sargs_.len};
+    const delivery::ControlSendRequest cr{e.device, engine_.identity().member().root_term.value(), now.to_ms() + 30000};
+    const ByteView cose{scratch_.data() + detail::k_cose_off, sargs_.len};
     if (s == Status::Ok && e.state == EntryState::Active && sargs_.len != 0 &&
-        engine_.delivery().execute(cmd, now).status == Status::Ok) {
+        engine_.delivery().send_control(cr, cose, now).status == Status::Ok) {
         ++stats_.renewals;
         e.reserved_until = now + k_renew_gap; // a READY racing the delivery does not sign again
     } else if (s == Status::Ok && e.state == EntryState::Active) {
@@ -123,29 +116,13 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
 
 // ---- lifecycle installs ----
 Status Ledger::install_lifecycle(uint8_t type, ByteView cose, MonoTime /*now*/, uint64_t &operation) {
-    if (failed_) {
-        return Status::RecoveryRequired;
-    }
-    if (!loaded_ || lc_.active || exp_active_ || holder_ != -1 || job_in_flight_) {
-        return Status::Busy;
-    }
-    if (cose.empty() || cose.size() > detail::k_cose_off) {
-        return Status::PayloadTooLarge;
-    }
-    if (!acquire(-2)) {
-        return Status::Busy;
-    }
-    std::memcpy(scratch_.data(), cose.data(), cose.size());
-    const member::LocalIdentity &id = engine_.identity();
-    vargs_.trust = id.trust();
-    vargs_.delegation = id.delegation();
+    LM_TRY(begin_install(cose, detail::k_cose_off, lc_.active || exp_active_));
     lc_ = Lifecycle{};
     lc_.active = true;
     lc_.type = type;
     lc_.len = cose.size();
     lc_.op = member::k_op_tag | ++op_counter_;
-    job_txn_ = -2;
-    if (submit(Step::LcVerify, JobClass::PublicKey, &lc_verify_job, this) != Status::Ok) {
+    if (submit(Step::LcVerify, JobClass::PublicKey, &lc_verify_job, this, -2) != Status::Ok) {
         lc_.active = false;
         release(-2);
         return Status::Busy;
@@ -218,19 +195,13 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
             ++stats_.revoked;
             // The signed notice goes to the device over its end session first; its sessions end when that had its
             // chance (network refusal is already durable: the ledger admits and renews it no more).
-            delivery::ControlSendRequest cr;
-            cr.dest = device;
-            cr.root_term = engine_.identity().member().root_term.value();
-            cr.expires_root_ms = now.to_ms() + 10000;
-            Command cmd;
-            cmd.kind = CommandKind::SendControl;
-            cmd.request = &cr;
-            cmd.request_size = sizeof(cr);
-            cmd.payload = ByteView{scratch_.data(), lc_.len};
+            const delivery::ControlSendRequest cr{device, engine_.identity().member().root_term.value(),
+                                                  now.to_ms() + 10000};
             if (!notice_until_.is_never()) {
                 forget_member(notice_device_, notice_addr_); // an earlier notice's time is over now
             }
-            if (engine_.delivery().has_session(device, now) && engine_.delivery().execute(cmd, now).status == Status::Ok) {
+            if (engine_.delivery().has_session(device, now) &&
+                engine_.delivery().send_control(cr, ByteView{scratch_.data(), lc_.len}, now).status == Status::Ok) {
                 notice_device_ = device;
                 notice_addr_ = addr;
                 notice_until_ = now + Duration::from_s(10);
@@ -313,12 +284,9 @@ void Ledger::lc_verified(MonoTime now) {
         const member::RootHandover &h = lc_.obj.handover;
         if (h.old_root == id.self() && h.old_generation == id.delegation().generation &&
             h.new_generation > h.old_generation) {
-            rec_->op = store::RecordJob::Op::Commit; // this root is replaced: it retires, durably
-            rec_->id = store::rec::root_handover;
-            rec_->state = 0;
-            rec_->payload_len = static_cast<uint32_t>(lc_.len);
+            rec_->arm(store::RecordJob::Op::Commit, store::rec::root_handover, 0, lc_.len); // it retires, durably
             std::memcpy(rec_->payload.data(), scratch_.data(), lc_.len);
-            if (submit(Step::LcRetire, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+            if (submit(Step::LcRetire, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
                 lc_finish(Status::Busy, now);
             }
             return;
@@ -326,7 +294,7 @@ void Ledger::lc_verified(MonoTime now) {
         Sha256Digest dh{};
         const bool ours = h.new_root == id.self() && sec::sha256(id.delegation_cose(), dh) == Status::Ok &&
                           dh == h.new_delegation_hash && h.new_generation == id.delegation().generation &&
-                          h.new_term == id.member().root_term;
+                          !(id.member().root_term < h.new_term); // its first term or a later boot's (ARCH2-D1)
         lc_finish(ours ? Status::Ok : Status::NetworkMismatch, now); // the new root: it knows itself already
         return;
     }
@@ -339,17 +307,7 @@ void Ledger::lc_verified(MonoTime now) {
         lc_finish(Status::NoCapacity, now); // the floor table is full: nothing changed
         return;
     }
-    std::size_t len = 0;
-    if (member::encode_floors(floors, MutByteView{rec_->payload}, len) != Status::Ok) {
-        lc_finish(Status::RecoveryRequired, now);
-        return;
-    }
-    rec_->op = store::RecordJob::Op::Commit;
-    rec_->id = store::rec::revocation_floors;
-    rec_->state = 0;
-    rec_->payload_len = static_cast<uint32_t>(len);
-    job_txn_ = -2;
-    if (submit(Step::LcFloors, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+    if (commit_floors(Step::LcFloors) != Status::Ok) {
         lc_finish(Status::RecoveryRequired, now); // RAM refuses already; the commit did not happen
     }
 }

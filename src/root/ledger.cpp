@@ -9,58 +9,61 @@
 #include "security/crypto.hpp"
 
 namespace lm::root {
+namespace {
+
+// One field list per record (core/codec.hpp): it writes and reads the same layout.
+template <class F> void io(F &f, Entry &e) { // the entry head after its confirmed byte; the credential COSE follows
+    f.u64(e.assignment);
+    f.u64(e.membership);
+    f.u64(e.consumed);
+    f.raw(e.device.bytes);
+    f.raw(e.request.bytes);
+    f.raw(e.hash);
+}
+template <class F> void io(F &f, Manifest &m) {
+    f.is(k_manifest_version);
+    f.raw(m.domain.bytes);
+    f.u64(m.expected_revision);
+    f.u64(m.used);
+    f.raw(m.set_hash);
+    f.u8(m.pages);
+    f.u16(m.received);
+    f.u16(m.pending);
+    for (auto &d : m.digests) {
+        f.raw(d);
+    }
+}
+
+} // namespace
+
 namespace detail {
 
 Status encode_entry(const Entry &e, bool confirmed, ByteView cose, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(confirmed ? 1 : 0);
-    w.u64be(e.assignment);
-    w.u64be(e.membership);
-    w.u64be(e.consumed);
-    w.bytes(e.device.view());
-    w.bytes(e.request.view());
-    w.bytes(ByteView{e.hash});
-    w.bytes(cose);
-    len = w.size();
-    return w.finish();
+    return put_record(e, out, len, [&](auto &f, auto &m) {
+        f.flag(confirmed);
+        io(f, m);
+        f.w.bytes(cose);
+    });
 }
 
 Status decode_entry(const store::RecordJob &rec, Entry &out, ByteView &cose) {
     if (rec.payload_len < k_entry_head || rec.state > static_cast<uint8_t>(EntryState::Blocked)) {
         return Status::BadFrame;
     }
-    Reader r{ByteView{rec.payload.data(), rec.payload_len}};
     Entry e;
-    e.confirmed = r.u8() != 0;
-    e.assignment = r.u64be();
-    e.membership = r.u64be();
-    e.consumed = r.u64be();
-    r.copy_to(e.device.bytes);
-    r.copy_to(e.request.bytes);
-    r.copy_to(e.hash);
-    cose = r.bytes(r.remaining());
-    LM_TRY(r.finish());
+    LM_TRY(get_record(ByteView{rec.payload.data(), rec.payload_len}, e, [&](auto &f, auto &m) {
+        f.flag(m.confirmed);
+        io(f, m);
+        cose = f.r.bytes(f.r.remaining());
+    }));
     e.state = static_cast<EntryState>(rec.state);
     out = e;
     return Status::Ok;
 }
 
 Status decode_manifest(ByteView payload, Manifest &out) {
-    Reader r{payload};
     Manifest m;
-    const uint8_t version = r.u8();
-    r.copy_to(m.domain.bytes);
-    m.expected_revision = r.u64be();
-    m.used = r.u64be();
-    r.copy_to(m.set_hash);
-    m.pages = r.u8();
-    m.received = r.u16be();
-    m.pending = r.u16be();
-    for (auto &d : m.digests) {
-        r.copy_to(d);
-    }
-    LM_TRY(r.finish());
-    if (version != k_manifest_version || m.pages > 16) {
+    if (get_record(payload, m, [](auto &f, auto &x) { io(f, x); }) != Status::Ok || m.pages > 16) {
         return Status::BadFrame;
     }
     out = m;
@@ -70,20 +73,7 @@ Status decode_manifest(ByteView payload, Manifest &out) {
 } // namespace detail
 
 Status encode_manifest(const Manifest &m, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(k_manifest_version);
-    w.bytes(m.domain.view());
-    w.u64be(m.expected_revision);
-    w.u64be(m.used);
-    w.bytes(ByteView{m.set_hash});
-    w.u8(m.pages);
-    w.u16be(m.received);
-    w.u16be(m.pending);
-    for (const auto &d : m.digests) {
-        w.bytes(ByteView{d});
-    }
-    len = w.size();
-    return w.finish();
+    return put_record(m, out, len, [](auto &f, auto &x) { io(f, x); });
 }
 
 Status encode_provisioned_member(const member::MemberCredential &mc, ByteView member_cose, uint16_t &record_id,
@@ -134,6 +124,10 @@ std::size_t Ledger::count(EntryState s) const {
 }
 
 // ---- shared memory ----
+// The credential buffer (the exchange's lent scratch) belongs to one holder for a whole join transaction or
+// maintenance chain. The node's one record memory (ADR-002 P4) is taken with it by a maintenance chain (a few
+// back-to-back jobs), but a join transaction takes it only for its own record jobs (hold_record) and gives it
+// back while it waits for the device: the journal and the other modules' records go on meanwhile.
 bool Ledger::acquire(int txn) {
     if (holder_ == txn) {
         return true;
@@ -141,18 +135,27 @@ bool Ledger::acquire(int txn) {
     if (holder_ != -1 || job_in_flight_) {
         return false;
     }
-    rec_ = engine_.identity().lend_record();
-    if (rec_ == nullptr) {
+    if (txn < 0 && !hold_record()) {
         return false;
     }
     scratch_ = engine_.link().exchange().lend_scratch();
     if (scratch_.empty()) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        give_back_record();
         return false;
     }
     holder_ = txn;
     return true;
+}
+
+bool Ledger::hold_record() {
+    if (rec_ == nullptr) {
+        rec_ = engine_.identity().lend_record();
+    }
+    return rec_ != nullptr;
+}
+
+void Ledger::give_back_record() {
+    engine_.identity().return_record(rec_);
 }
 
 void Ledger::release(int txn) {
@@ -161,13 +164,12 @@ void Ledger::release(int txn) {
     }
     engine_.link().exchange().return_scratch();
     scratch_ = MutByteView{};
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    give_back_record();
     holder_ = -1;
 }
 
 // ---- worker plumbing ----
-Status Ledger::submit(Step step, JobClass cls, port::JobFn fn, void *arg) {
+Status Ledger::submit(Step step, JobClass cls, port::JobFn fn, void *arg, int owner) {
     if (job_in_flight_) {
         return Status::Busy;
     }
@@ -175,6 +177,7 @@ Status Ledger::submit(Step step, JobClass cls, port::JobFn fn, void *arg) {
     LM_TRY(engine_.submit_job(JobOwner::Ledger, job_slot_, cls, fn, arg));
     step_ = step;
     job_in_flight_ = true;
+    job_txn_ = owner;
     return Status::Ok;
 }
 
@@ -189,13 +192,10 @@ Status Ledger::commit_entry(Step step, std::size_t slot, EntryState state, bool 
     job_entry_.address = ShortAddr{static_cast<uint16_t>(2 + slot)}; // the address is the slot
     std::size_t len = 0;
     LM_TRY(encode_entry(job_entry_, confirmed, cose, MutByteView{rec_->payload}, len));
-    rec_->op = store::RecordJob::Op::Commit;
-    rec_->id = static_cast<uint16_t>(k_rec_ledger_base + slot);
-    rec_->state = static_cast<uint8_t>(state);
-    rec_->payload_len = static_cast<uint32_t>(len);
+    rec_->arm(store::RecordJob::Op::Commit, static_cast<uint16_t>(k_rec_ledger_base + slot), static_cast<uint8_t>(state),
+              len);
     job_slot_index_ = slot;
-    job_txn_ = txn;
-    return submit(step, JobClass::Flash, &store::record_job, rec_);
+    return submit(step, JobClass::Flash, &store::record_job, rec_, txn);
 }
 
 void Ledger::on_job_done(Handle slot, Status s, MonoTime now) {
@@ -219,8 +219,7 @@ void Ledger::on_job_done(Handle slot, Status s, MonoTime now) {
 Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
     auto &l = *static_cast<Ledger *>(arg);
     store::RecordJob &rec = *l.rec_;
-    rec.op = store::RecordJob::Op::Load;
-    rec.id = store::rec::root_ledger;
+    rec.arm(store::RecordJob::Op::Load, store::rec::root_ledger);
     Status st = store::record_load(env.store, rec);
     if (st == Status::NotFound) {
         return Status::RecoveryRequired; // a domain root without its ledger: only new-network provisioning writes one
@@ -291,8 +290,10 @@ Status Ledger::verify_ticket_job(port::JobEnv & /*env*/, void *arg) {
         LM_TRY(member::decode_handover(data, h));
         if (env.domain != v.delegation.domain || h.new_root != v.delegation.root ||
             h.new_delegation_hash != v.delegation_hash || h.new_generation != v.delegation.generation ||
-            h.new_term != v.term) {
-            return Status::NetworkMismatch; // a handover to another root, delegation or term
+            v.term < h.new_term) {
+            // A handover to another root or delegation, or to a term this root has not reached. The handover names the
+            // new root's first term; every boot of the new root is one more (ARCH2-D1), so a later term still is it.
+            return Status::NetworkMismatch;
         }
         v.out.kind = 2;
         return sec::sha256(v.ticket_cose, v.out.grant);
@@ -342,7 +343,7 @@ void Ledger::on_identity_ready(MonoTime now) {
     man_dirty_ = false;
     retired_ = false;
     load_domain_ = engine_.identity().delegation().domain; // the job reads only its own copies
-    if (submit(Step::LoadAll, JobClass::Flash, &load_all_job, this) != Status::Ok) {
+    if (submit(Step::LoadAll, JobClass::Flash, &load_all_job, this, -2) != Status::Ok) {
         release(-2);
         load_pending_ = true;
         maint_retry_ = now + k_busy_retry;
@@ -352,10 +353,9 @@ void Ledger::on_identity_ready(MonoTime now) {
 void Ledger::return_memory() {
     if (holder_ != -1) {
         engine_.link().exchange().return_scratch();
-        engine_.identity().return_record();
     }
+    give_back_record(); // (a join transaction that waits for its device holds the scratch only)
     scratch_ = MutByteView{};
-    rec_ = nullptr;
     holder_ = -1;
 }
 
@@ -431,7 +431,8 @@ void Ledger::session_up(const MacAddr &mac, const DeviceId &peer, const Sha256Di
     Txn *free_txn = nullptr;
     for (Txn &t : txns_) {
         if (t.state != TxnState::Free && t.device == peer) {
-            end_txn(t); // the same device started again: its old session is superseded
+            end_txn(t, false); // the same device started again: its old session is superseded (the link layer
+                               // replaced it already; closing by device now would end the NEW session)
         }
         if (t.state == TxnState::Free && free_txn == nullptr) {
             free_txn = &t;
@@ -455,7 +456,8 @@ void Ledger::session_up(const MacAddr &mac, const DeviceId &peer, const Sha256Di
 
 // ---- job completions ----
 // A finished job may leave its transaction ended (a refusal, an aborted request) while it still holds the
-// shared buffers: they go back here, never later than the job that used them.
+// shared buffers: they go back here, never later than the job that used them. A transaction that goes on
+// without a job of its own (it waits for its device) keeps the credential buffer and gives the record back.
 void Ledger::step_done(Step step, Status s, MonoTime now) {
     const int idx = job_txn_;
     handle_step(step, s, now);
@@ -463,6 +465,8 @@ void Ledger::step_done(Step step, Status s, MonoTime now) {
         const TxnState st = txns_[static_cast<std::size_t>(idx)].state;
         if (st == TxnState::Free || st == TxnState::Linger) {
             release(idx);
+        } else {
+            give_back_record();
         }
     }
 }
@@ -635,14 +639,22 @@ void Ledger::on_timer(MonoTime now) {
 }
 
 void Ledger::retry_txn(Txn &t, MonoTime now) {
-    if (t.retry_kind_ == 1 && t.state == TxnState::Pending) {
-        t.retry_kind_ = 0;
+    const uint8_t kind = t.retry_kind_;
+    t.retry_kind_ = 0;
+    if (kind == 1 && t.state == TxnState::Pending) {
         start_prepare(t, now);
-    } else if (t.retry_kind_ == 2 && t.state == TxnState::Session) {
-        t.retry_kind_ = 0;
+    } else if (kind == 2 && t.state == TxnState::Session) {
         if (const Entry *e = find(t.device)) {
             answer_repeat(t, *e, now);
         }
+    } else if (kind == 3 && t.state == TxnState::Preparing) { // [P4] the record memory was lent for a moment
+        commit_prepared(t, now);
+    } else if (kind == 4 && t.state == TxnState::Activating) {
+        commit_active(t, now);
+    } else if (kind == 5 && t.state == TxnState::Confirming) {
+        commit_confirmed(t, now);
+    } else {
+        t.retry_kind_ = kind;
     }
 }
 
@@ -695,12 +707,9 @@ void Ledger::maintenance(MonoTime now) {
         return;
     }
     if (confirm_pending_) {
-        rec_->op = store::RecordJob::Op::Load;
-        rec_->id = static_cast<uint16_t>(k_rec_ledger_base + confirm_.slot);
-        rec_->payload_len = 0;
-        job_txn_ = -2;
+        rec_->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(k_rec_ledger_base + confirm_.slot));
         job_slot_index_ = confirm_.slot;
-        if (submit(Step::ConfirmLoad, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+        if (submit(Step::ConfirmLoad, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
             confirm_pending_ = false;
             release(-2);
         }
@@ -731,8 +740,9 @@ void Ledger::maintenance(MonoTime now) {
 void Ledger::set_entry(std::size_t slot, const Entry &e) {
     const Entry &old = entries_[slot];
     if (old.state != EntryState::Free && old.device != e.device) {
-        forget_member(old.device, old.address);
-        engine_.delivery().invalidate_routes();
+        forget_member(old.device, old.address); // the routes through its address go with it
+    } else if (old.state != EntryState::Free && old.membership != e.membership) {
+        engine_.delivery().invalidate_addr(e.address); // the same device under a new membership generation
     }
     entries_[slot] = e;
 }
@@ -749,12 +759,8 @@ void Ledger::mark_used(std::size_t slot) {
 Status Ledger::commit_manifest(const Manifest &m, Step step) {
     std::size_t len = 0;
     LM_TRY(encode_manifest(m, MutByteView{rec_->payload}, len));
-    rec_->op = store::RecordJob::Op::Commit;
-    rec_->id = store::rec::root_ledger;
-    rec_->state = 0;
-    rec_->payload_len = static_cast<uint32_t>(len);
-    job_txn_ = -2;
-    LM_TRY(submit(step, JobClass::Flash, &store::record_job, rec_));
+    rec_->arm(store::RecordJob::Op::Commit, store::rec::root_ledger, 0, len);
+    LM_TRY(submit(step, JobClass::Flash, &store::record_job, rec_, -2));
     man_dirty_ = false;
     return Status::Ok;
 }

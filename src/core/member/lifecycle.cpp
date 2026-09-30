@@ -12,12 +12,15 @@ namespace {
 constexpr Duration k_busy_retry = Duration::from_ms(50);
 
 // A renewal repeats the live credential with a later lease: same device, address, generations, role, relay
-// permission, term and DeviceCredential. Anything else is not a renewal (a new membership comes by a join).
+// permission and DeviceCredential; the lease is later on the same term's clock, or it is a lease of a newer term (the
+// root restarted, ARCH2-D1: a lease of the old clock cannot be compared with one of the new). Anything else is not a
+// renewal (a new membership comes by a join). An older term is never taken back.
 bool renews(const MemberCredential &live, const MemberCredential &mc) {
+    const bool later = mc.root_term == live.root_term ? mc.lease_expires_root_ms > live.lease_expires_root_ms
+                                                      : live.root_term < mc.root_term;
     return mc.device == live.device && mc.address == live.address && mc.assignment == live.assignment &&
            mc.membership == live.membership && mc.role == live.role && mc.relay_allowed == live.relay_allowed &&
-           mc.root_term == live.root_term && mc.credential_hash == live.credential_hash &&
-           mc.policy_hash == live.policy_hash && mc.lease_expires_root_ms > live.lease_expires_root_ms;
+           mc.credential_hash == live.credential_hash && mc.policy_hash == live.policy_hash && later;
 }
 
 } // namespace
@@ -48,8 +51,7 @@ void Membership::on_lifecycle_object(const DeviceId &origin, ByteView cose, Mono
     peer_.delegation = id.delegation(); // the worker reads this copy only
     if (start_verify(Step::RenewVerify) != Status::Ok) {
         ++stats_.renew_dropped;
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         peer_ = link::JoinPeerOut{};
     }
     (void)now;
@@ -64,24 +66,35 @@ void Membership::renew_step(Step step, Status s, MonoTime now) {
         }
     }
     if (s == Status::Ok) {
-        renew_adopt(now);
+        renew_adopt(now); // RenewCommit, or RenewReload: the committed credential is in the record memory
         return;
     }
     // Refused, or the commit's result is unknown (the record is the old or the new credential, both valid): the
     // live credential stays; the root sends the renewal again.
     ++stats_.renew_dropped;
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_);
     peer_ = link::JoinPeerOut{};
 }
 
 // The committed credential goes live once no handshake is sending our bundle, and every link session is made
 // again: the fresh handshake is what hands each neighbour the new lease (its old session ends at the old one).
+// [P4] A handshake may run for seconds: meanwhile the record memory goes back and the committed credential is read
+// again when it may go live (the record is the truth; whatever replaced it since, a leave or a switch, wins).
 void Membership::renew_adopt(MonoTime now) {
     renew_adopt_ = false;
     if (engine_.link().exchange().busy()) {
+        engine_.identity().return_record(rec_);
         renew_adopt_ = true;
         retry_at_ = now + k_busy_retry;
+        return;
+    }
+    if (rec_ == nullptr) { // it went back while a handshake ran: the committed credential is read again
+        if (!lend_record_or_retry(now) ||
+            start_flash(Step::RenewReload, store::RecordJob::Op::Load, store::rec::membership, 0, 0, now) != Status::Ok) {
+            engine_.identity().return_record(rec_);
+            renew_adopt_ = true;
+            retry_at_ = now + k_busy_retry;
+        }
         return;
     }
     LocalIdentity &id = engine_.identity();
@@ -89,17 +102,32 @@ void Membership::renew_adopt(MonoTime now) {
     Envelope env;
     ByteView data;
     MemberCredential mc;
-    if (peek_signed(cose, k_type_member_credential, env, data) == Status::Ok &&
-        decode_member_credential(data, mc) == Status::Ok && id.adopt_member(id.delegation(), mc, cose) == Status::Ok) {
+    const RootTerm before = id.term();
+    const RootTerm old_cred = id.member().root_term;
+    if (rec_->state == k_membership_active && peek_signed(cose, k_type_member_credential, env, data) == Status::Ok &&
+        decode_member_credential(data, mc) == Status::Ok && renews(id.member(), mc) &&
+        id.adopt_member(id.delegation(), mc, cose) == Status::Ok) {
         ++stats_.renewals;
-        engine_.link().neighbors().for_each([](Handle, link::Neighbor &n) {
-            n.rotate_wanted = n.rotate_wanted || (!n.join_only && n.cur.active);
+        if (before < id.term()) {
+            engine_.on_new_term(now); // the renewal is the root's signed word of its newer term (ARCH2-D1)
+        }
+        if (old_cred < mc.root_term) {
+            // After a root restart every member is renewed within a minute or two: rotating all their links at once
+            // made the neighbourhoods lose READY/LEASE records in the churn and re-attach (measured, R07-sim). The
+            // rotations of a term-change renewal start at a random point of the next 30 s (ARCH2-D1).
+            std::array<uint8_t, 2> r{};
+            engine_.random(MutByteView{r});
+            engine_.link().hold_rotations(now + Duration::from_ms((uint32_t{r[0]} << 8U | r[1]) % 30000));
+        }
+        // The root admits by its ledger, never by the lease (S18-D1): the link with it keeps its session.
+        const DeviceId &root = id.delegation().root;
+        engine_.link().neighbors().for_each([&root](Handle, link::Neighbor &n) {
+            n.rotate_wanted = n.rotate_wanted || (!n.join_only && n.cur.active && n.device != root);
         });
     } else {
         ++stats_.renew_dropped;
     }
-    id.return_record();
-    rec_ = nullptr;
+    id.return_record(rec_);
     peer_ = link::JoinPeerOut{};
 }
 
@@ -117,8 +145,7 @@ void Membership::on_revoke_notice(ByteView cose, MonoTime now) {
     verify_input_ = ByteView{rec_->payload.data(), cose.size()};
     peer_.delegation = engine_.identity().delegation();
     if (start_verify(Step::RevokeVerify) != Status::Ok) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
     }
     (void)now;
 }
@@ -132,8 +159,7 @@ void Membership::revoke_verified(Status s, MonoTime now) {
                       decode_revoke(data, rv) == Status::Ok && rv.device == id.self() &&
                       (id.member().assignment.value() < rv.assignment_floor ||
                        id.member().membership.value() < rv.membership_floor);
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_);
     peer_ = link::JoinPeerOut{};
     if (!mine) {
         return; // not for this device, or not below its generations: nothing to erase
@@ -166,8 +192,7 @@ void Membership::switch_peeked(Status s, MonoTime now) {
         finish_join(s == Status::Ok || s == Status::NotFound ? Status::AuthPending : s, LM_OUTCOME_REJECTED, now);
         return;
     }
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_);
     begin_discovery(now);
     disc_.clear_suppress();
     emit_state(0);

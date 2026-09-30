@@ -120,9 +120,12 @@ struct MNet {
             }
         }
     }
+    // The root's clock is of its current term (ARCH2-D1: one per root boot); a root that is still loading its identity
+    // is given a moment to publish it.
     void set_time_at(unsigned i) {
+        (void)until([&] { return !node(root_idx).powered() || eng(root_idx).identity().is_member(); }, 5000, 1);
         RootTimeBound b;
-        b.term = RootTerm{1};
+        b.term = node(root_idx).powered() ? eng(root_idx).identity().term() : RootTerm{1};
         b.earliest_ms = b.latest_ms = root_ms();
         b.valid = true;
         eng(i).set_root_time(b, now(i));
@@ -217,7 +220,8 @@ struct MNet {
         rq.storage = LM_VOLATILE;
         rq.priority = LM_PRIORITY_NORMAL;
         rq.queue_mode = LM_FIFO;
-        rq.root_term = 1;
+        const RootTimeBound b = eng(from).delivery().root_time(now(from)); // the sender's root clock (ARCH2-D1: its term)
+        rq.root_term = b.valid ? b.term.value() : 1;
         rq.expires_root_ms = root_ms() + ttl_ms;
         Sent s;
         s.st = lm_send(ctx(from), &rq, payload.data(), payload.size(), &s.op);
@@ -513,9 +517,27 @@ LM_TEST("R07 sim: 20 cold boots of the whole network converge again, memberships
     std::printf("  R07-sim 20 cold boots (21 nodes, 20 hops): formation min %llu / mean %llu / max %llu ms\n",
                 static_cast<unsigned long long>(lo), static_cast<unsigned long long>(sum / times.size()),
                 static_cast<unsigned long long>(hi));
-    // Delivery works after the last cycle without any hand-made route.
-    const auto s = n.send(20, 0, LM_RECEIVED, payload_of(2, 30));
-    (void)await_received(n, 20, s.op, 30'000);
+    // Delivery works after the last cycle without any hand-made route. Every cold boot was a new root term (ARCH2-D1):
+    // application DATA over a link needs both ends' credentials of the new term, which the root re-issues at each
+    // member's first lease refresh after its attach (<= 66 s), so the send waits for those renewals.
+    const uint64_t t_formed = n.world.now_us();
+    const bool renewed = n.until([&] {
+        for (unsigned i = 0; i < n.n; ++i) {
+            if (n.eng(i).identity().member().root_term != n.eng(0).identity().term()) {
+                return false;
+            }
+        }
+        return true;
+    }, 300'000, 50);
+    LM_CHECK(renewed);
+    std::printf("  R07-sim last cycle: every member renewed into term %u %llu ms after formation\n",
+                n.eng(0).identity().term().value(), static_cast<unsigned long long>((n.world.now_us() - t_formed) / 1000));
+    // The links are made again with the renewed credentials (each member starts its rotations within 30 s of its renewal,
+    // desynchronised); the message waits for its path's links like any other traffic.
+    const auto s = n.send(20, 0, LM_RECEIVED, payload_of(2, 30), 120'000);
+    const uint64_t rx_ms = await_received(n, 20, s.op, 120'000);
+    std::printf("  R07-sim last cycle: a 20-hop message END_RECEIVED %llu ms after the renewals\n",
+                static_cast<unsigned long long>(rx_ms));
 }
 
 // A chain 0..20 (root 0) plus a spare relay S (index 21) that hears node 9 and node 11 only.
@@ -688,7 +710,7 @@ LM_TEST("J01 sim: an unjoined device 19 hops from the root joins through the pro
     LM_CHECK(n.eng(0).proxy().stats().up > 0);
     LM_CHECK_EQ(n.eng(0).ledger().stats().requests, 1ull);
     LM_CHECK_EQ(n.eng(0).ledger().stats().activated, 1ull);
-    LM_CHECK_EQ(n.eng(k_far - 1).ledger().stats().requests, 0ull); // the relay decided nothing
+    LM_CHECK(n.eng(k_far - 1).config().role != Role::Root); // the relay decided nothing: it holds no ledger (P8)
     // The new member then forms like any other node: parent = the relay it joined through, depth 20.
     n.set_time_at(k_far);
     const bool joined_ready = n.until([&] { return n.ready(k_far); }, 120'000, 20);

@@ -177,6 +177,14 @@ typedef struct {
 typedef struct {
  uint64_t id, state_generation, expires_mono_ms;
 } lm_sleep_ticket_t;
+/* The node's root clock estimate (docs/05 §5, docs/10 §4): the root's clock of root_term reads between
+   earliest_root_ms and latest_root_ms now. valid=0: no estimate of the node's current term (a send with a
+   deadline is then TIME_UNCERTAIN). A deadline is root_term + expires_root_ms, e.g. earliest_root_ms + validity. */
+typedef struct {
+ uint32_t struct_size, abi_version;
+ uint32_t root_term, valid;
+ uint64_t earliest_root_ms, latest_root_ms;
+} lm_root_time_t;
 
 lm_status_t lm_config_init(lm_config_t *out, size_t out_size);
 lm_status_t lm_workspace_required(const lm_config_t*, lm_workspace_size_t*);
@@ -217,6 +225,7 @@ lm_status_t lm_channel_request(lm_context_t*, uint32_t action,
                                uint64_t expected_revision, lm_operation_id_t*);
 lm_status_t lm_get_capabilities(lm_context_t*, lm_capabilities_t*);
 lm_status_t lm_diagnostics_get(lm_context_t*, lm_diagnostics_t*);
+lm_status_t lm_root_time_get(lm_context_t*, lm_root_time_t*);
 lm_status_t lm_sleep_prepare(lm_context_t*, uint32_t awake_budget_ms,
                              lm_operation_id_t*);
 lm_status_t lm_sleep_ticket_get(lm_context_t*, lm_operation_id_t, lm_sleep_ticket_t*);

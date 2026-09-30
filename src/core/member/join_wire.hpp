@@ -41,15 +41,8 @@ inline constexpr std::size_t k_join_chunk_header = 5;
 inline constexpr std::size_t k_join_max_object = 1100;
 
 // ---- credential swap ----
-// CredR of a JOIN handshake: CBOR [DeviceCredential COSE, RootDelegation COSE]. (CredI is the raw
-// DeviceCredential COSE alone.)
-struct JoinBundle {
-    ByteView device_cose;
-    ByteView delegation_cose;
-};
-[[nodiscard]] Status join_bundle_encode(ByteView device_cose, ByteView delegation_cose, MutByteView out,
-                                        std::size_t &len);
-[[nodiscard]] Status join_bundle_parse(ByteView in, JoinBundle &out);
+// CredR of a JOIN handshake is the credential pair [DeviceCredential COSE, RootDelegation COSE]
+// (cred_pair_encode/parse with k_max_delegation_cose). CredI is the raw DeviceCredential COSE alone.
 
 // ---- discovery hints (JOIN_PROXY carrier object kinds outside the exchange's 1..6) ----
 inline constexpr uint8_t k_obj_join_hello = 0x10; // broadcast by an unjoined device; exchange_id = nonce

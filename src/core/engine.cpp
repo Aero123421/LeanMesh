@@ -106,7 +106,7 @@ void Engine::control_sink(void *ctx, const DeviceId &origin, const std::array<ui
     ByteView data;
     if (!e->is_root() && (member::peek_signed(payload, member::k_type_member_credential, env, data) == Status::Ok ||
                           member::peek_signed(payload, member::k_type_revoke, env, data) == Status::Ok)) {
-        e->membership_.on_lifecycle_object(origin, payload, now); // a renewal or a revocation notice
+        e->membership().on_lifecycle_object(origin, payload, now); // a renewal or a revocation notice
         return;
     }
     e->group_.on_control(origin, payload, now);
@@ -177,9 +177,9 @@ MonoTime Engine::step(MonoTime now) {
     link_.on_timer(now); // [SLICE:S5] session expiry, rotation, exchange RTO: all real deadlines
     delivery_.on_timer(now); // [SLICE:S9] link retry, E2E rounds, exchange RTO, receipts
     if (is_root()) { // [SLICE:S8] join transactions, reservations, queued commits: real deadlines
-        ledger_.on_timer(now);
+        ledger().on_timer(now);
     } else {
-        membership_.on_timer(now);
+        membership().on_timer(now);
     }
     power_.on_timer(now); // [SLICE:S16] episode/window ends, poll retry, mailbox expiry, ticket
     if (power_.asleep()) { // this very step put the node to sleep: nothing else may run on a stopped radio
@@ -235,9 +235,9 @@ void Engine::on_tx_outcome(const TxOutcome &o, MonoTime now) {
     mesh_.on_tx_outcome(o, now); // [SLICE:S11] probe results (the only RF samples the mesh takes from beacons/probes)
     if (member::is_join_tag(o.tag)) { // [SLICE:S8]
         if (is_root()) {
-            ledger_.on_tx_outcome(o, now);
+            ledger().on_tx_outcome(o, now);
         } else {
-            membership_.on_tx_outcome(o, now);
+            membership().on_tx_outcome(o, now);
         }
     }
 }
@@ -274,9 +274,9 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
             power_.on_identity_ready(now); // [SLICE:S16] the power policy record, before anything runs on it
             chan_.on_identity_ready(now); // [SLICE:S17] the stored channel is applied before the mesh starts
             if (is_root()) {
-                ledger_.on_identity_ready(now);
+                ledger().on_identity_ready(now);
             } else {
-                membership_.on_identity_ready(now);
+                membership().on_identity_ready(now);
             }
         }
         if (serial_ != nullptr) {
@@ -289,11 +289,15 @@ void Engine::on_job_completion(const port::JobCompletion &c, MonoTime now) {
     case JobOwner::Link:
         link_.on_job_done(origin.slot, c.status, now);
         return;
-    case JobOwner::Join: // [SLICE:S8]
-        membership_.on_job_done(origin.slot, c.status, now);
+    case JobOwner::Join: // [SLICE:S8] (only the joiner side submits these, the ledger only on the root: P8)
+        if (!is_root()) {
+            membership().on_job_done(origin.slot, c.status, now);
+        }
         return;
     case JobOwner::Ledger:
-        ledger_.on_job_done(origin.slot, c.status, now);
+        if (is_root()) {
+            ledger().on_job_done(origin.slot, c.status, now);
+        }
         return;
     case JobOwner::Channel: // [SLICE:S17]
         chan_.on_job_done(origin.slot, c.status, now);
@@ -322,7 +326,7 @@ MonoTime Engine::next_deadline() const {
     // [SLICE] next = earliest(next, x_.deadline()); over module deadlines.
     next = earliest(next, link_.deadline());
     next = earliest(next, delivery_.deadline()); // [SLICE:S9]
-    next = earliest(next, is_root() ? ledger_.deadline() : membership_.deadline()); // [SLICE:S8]
+    next = earliest(next, is_root() ? roles_.b().deadline() : roles_.a().deadline()); // [SLICE:S8]
     next = earliest(next, mesh_.deadline()); // [SLICE:S11]
     next = earliest(next, proxy_.deadline());
     next = earliest(next, group_.deadline()); // [SLICE:S15]
@@ -367,6 +371,12 @@ Status Engine::transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTi
         sched_.charge(cls, frame.size(), now, queued); // the one accounting point of the node's airtime
     }
     return st;
+}
+
+void Engine::on_new_term(MonoTime now) {
+    delivery_.invalidate_routes(); // routes of the old term (a lookup would refuse them anyway)
+    mesh_.on_term(now);
+    chan_.on_term(now);
 }
 
 Status Engine::set_channel(uint8_t channel) {
@@ -422,12 +432,14 @@ Reply Engine::start_radio(MonoTime now) {
     channel_ = 0; // a fresh start uses the profile channel
     Status s = bring_up_radio();
     if (s == Status::Ok) {
-        s = delivery_.start(now); // [SLICE:S9] boot incarnation, journal, durable recovery
+        s = ident_.begin_load(*this); // [SLICE:S5] identity/membership come from sealed records
     }
     if (s == Status::Ok) {
-        s = ident_.begin_load(*this); // [SLICE:S5] identity/membership come from sealed records
+        // [SLICE:S9] boot incarnation, journal, durable recovery. Its job borrows the node's one record memory
+        // (ADR-002 P4), which the identity load above holds first: it runs once the identity has it back.
+        s = delivery_.start(now);
         if (s != Status::Ok) {
-            delivery_.stop();
+            ident_.release();
         }
     }
     if (s != Status::Ok) {
@@ -465,8 +477,11 @@ Reply Engine::stop_radio() {
     mesh_.stop(); // [SLICE:S11] candidates, leases and the tree go before the sessions they name
     routes_.stop();
     delivery_.stop(); // [SLICE:S9] operations, end sessions and their frames go before the link
-    membership_.stop(); // [SLICE:S8] join session and borrowed buffers go back before link/identity
-    ledger_.stop();
+    if (is_root()) { // [SLICE:S8] join sessions and borrowed buffers go back before link/identity
+        ledger().stop();
+    } else {
+        membership().stop();
+    }
     link_.stop(); // [SLICE:S5] sessions and the exchange go first (their peers are still registered)
     frames_.clear(); // [S14] every owner returned its frames above; a leak would not survive a restart
     ident_.release();
@@ -532,6 +547,18 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
         diag::to_abi(snap, *static_cast<lm_diagnostics_t *>(cmd.response));
         return Reply{Status::Ok, 0, 0};
     }
+    case CommandKind::RootTimeGet: { // [ARCH2-D1] valid only for the term this node's frames carry
+        if (cmd.response == nullptr || cmd.response_size != sizeof(lm_root_time_t)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        const RootTimeBound b = delivery_.root_time(now);
+        auto &out = *static_cast<lm_root_time_t *>(cmd.response);
+        out.valid = b.valid && ident_.is_member() && b.term == ident_.term() ? 1U : 0U;
+        out.root_term = out.valid != 0 ? b.term.value() : ident_.term().value();
+        out.earliest_root_ms = out.valid != 0 ? b.earliest_ms : 0;
+        out.latest_root_ms = out.valid != 0 ? b.latest_ms : 0;
+        return Reply{Status::Ok, 0, 0};
+    }
     case CommandKind::NextEvent:
         return next_event(cmd, now);
     case CommandKind::Start:
@@ -539,9 +566,8 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     case CommandKind::Stop:
         return stop_radio();
     case CommandKind::Destroy:
-        return Reply{radio_state_ == RadioState::Stopped && !delivery_.job_pending() && !membership_.job_pending() &&
-                             !ledger_.job_pending() && !group_.job_pending() && !chan_.job_pending() &&
-                             !power_.job_pending()
+        return Reply{radio_state_ == RadioState::Stopped && !delivery_.job_pending() && !role_job_pending() &&
+                             !group_.job_pending() && !chan_.job_pending() && !power_.job_pending()
                          ? Status::Ok
                          : Status::Busy,
                      0, 0}; // [SLICE:S8] a cancelled join/ledger job still owns borrowed buffers
@@ -574,9 +600,11 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
         return power_.execute(cmd, now);
     case CommandKind::ChannelRequest: { // [SLICE:S17] lm_channel_request (request: {action, expected_revision})
         const auto *rq = static_cast<const std::array<uint64_t, 2> *>(cmd.request);
-        return rq == nullptr || cmd.request_size != sizeof(*rq)
-                   ? Reply{Status::InvalidArgument, 0, 0}
-                   : coord_.request(static_cast<uint32_t>((*rq)[0]), (*rq)[1], now);
+        if (rq == nullptr || cmd.request_size != sizeof(*rq)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        // Only the root plans: another role answers as an image without the coordinator does (P8: it has no ledger).
+        return is_root() ? coord_.request(static_cast<uint32_t>((*rq)[0]), (*rq)[1], now) : Reply{Status::Unsupported, 0, 0};
     }
     case CommandKind::GetMessage: { // [SLICE:S15] the Host's group send is found by its MessageId, too
         const Reply r = delivery_.execute(cmd, now);

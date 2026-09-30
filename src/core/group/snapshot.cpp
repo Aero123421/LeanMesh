@@ -107,20 +107,12 @@ void Fanout::request_page(Op &g, MonoTime now) {
     b.data = d.written();
     std::array<uint8_t, 160> body{};
     std::size_t n = 0;
-    delivery::ControlSendRequest cr;
-    cr.dest = id.delegation().root;
-    cr.root_term = g.term;
-    cr.expires_root_ms = g.expires;
-    Command cmd;
-    cmd.kind = CommandKind::SendControl;
-    cmd.request = &cr;
-    cmd.request_size = sizeof(cr);
     if (d.finish() != Status::Ok || wire::encode_control_body(b, MutByteView{body}, n) != Status::Ok) {
         fetch_failed(g, static_cast<uint32_t>(Status::InvalidArgument));
         return;
     }
-    cmd.payload = ByteView{body.data(), n};
-    const Reply r = engine_.delivery().execute(cmd, now);
+    const delivery::ControlSendRequest cr{id.delegation().root, g.term, g.expires};
+    const Reply r = engine_.delivery().send_control(cr, ByteView{body.data(), n}, now);
     if (r.status == Status::Ok) {
         ++g.tries;
         g.at = now + k_fetch_rto; // repeated with the same request id if no page comes back
@@ -362,16 +354,8 @@ void Fanout::send_page(Op &s, MonoTime now) {
     if (!b.valid) {
         return;
     }
-    delivery::ControlSendRequest cr;
-    cr.dest = s.origin;
-    cr.root_term = b.term.value();
-    cr.expires_root_ms = b.latest_ms + 30000;
-    Command cmd;
-    cmd.kind = CommandKind::SendControl;
-    cmd.request = &cr;
-    cmd.request_size = sizeof(cr);
-    cmd.payload = ByteView{scratch_.data(), cose_len_};
-    if (dv.execute(cmd, now).status == Status::Ok) {
+    const delivery::ControlSendRequest cr{s.origin, b.term.value(), b.latest_ms + 30000};
+    if (dv.send_control(cr, ByteView{scratch_.data(), cose_len_}, now).status == Status::Ok) {
         ++stats_.pages_served;
     }
 }

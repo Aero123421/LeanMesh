@@ -438,21 +438,17 @@ Reply Power::policy_set(const Command &cmd, MonoTime now) {
         return Reply{Status::Busy, 0, 0};
     }
     std::size_t len = 0;
-    job->op = store::RecordJob::Op::Commit;
-    job->id = store::rec::power_policy;
-    job->state = 1;
     if (encode_policy(rq.policy, MutByteView{job->payload}, len) != Status::Ok) {
         engine_.identity().return_record();
         return Reply{Status::InvalidArgument, 0, 0};
     }
-    job->payload_len = static_cast<uint32_t>(len);
+    job->arm(store::RecordJob::Op::Commit, store::rec::power_policy, 1, len);
     rec_ = job;
     policy_job_ = true;
     if (const Status sub = engine_.submit_job(JobOwner::Power, Handle{}, JobClass::Flash, &store::record_job, job);
         sub != Status::Ok) {
         policy_job_ = false;
-        rec_ = nullptr;
-        engine_.identity().return_record();
+        engine_.identity().return_record(rec_);
         return Reply{sub, 0, 0};
     }
     policy_op_ = new_op(now);
@@ -491,8 +487,8 @@ Reply Power::prepare(const SleepRequest &req, MonoTime now) {
 // Nothing in flight that a sleep would cut. Frames waiting for a HOP_ACK are not "in flight": the sender's
 // journal (SAVE_AND_SLEEP) or the caller's own wait (REQUIRE_SETTLED) is what keeps them (docs/20 §6).
 bool Power::quiet_now() const {
-    return !engine_.tx().in_flight() && !engine_.delivery().job_pending() && !engine_.membership().job_pending() &&
-           !engine_.ledger().job_pending() && !engine_.identity().busy() && !policy_job_ && !engine_.jobs_busy() && !engine_.chan().unsettled();
+    return !engine_.tx().in_flight() && !engine_.delivery().job_pending() && !engine_.role_job_pending() &&
+           !engine_.identity().busy() && !policy_job_ && !engine_.jobs_busy() && !engine_.chan().unsettled();
 }
 
 void Power::progress_prepare(MonoTime now) {

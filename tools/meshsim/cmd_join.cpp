@@ -162,6 +162,7 @@ std::string cmd_membership(Sim &sim, const Args &a) {
         return status_json(s);
     }
     lm::Engine &e = sim.world.node(i).ctx()->engine;
+    const bool joiner = e.config().role != lm::Role::Root; // the root holds no joiner side (ADR-002 P8)
     char buf[512];
     std::snprintf(buf, sizeof buf,
                   "{\"ok\":true,\"state\":%u,\"reason\":%u,\"assignment\":%" PRIu64 ",\"membership\":%" PRIu64
@@ -169,8 +170,9 @@ std::string cmd_membership(Sim &sim, const Args &a) {
                   "\"phase\":%u}",
                   m.state, m.reason, m.assignment_generation, m.membership_generation,
                   hex(lm::ByteView{m.device.bytes, 32}).c_str(), hex(lm::ByteView{m.domain.bytes, 16}).c_str(),
-                  e.membership().prepared_record() ? "true" : "false", e.membership().confirm_pending() ? "true" : "false",
-                  static_cast<unsigned>(e.membership().phase()));
+                  joiner && e.membership().prepared_record() ? "true" : "false",
+                  joiner && e.membership().confirm_pending() ? "true" : "false",
+                  joiner ? static_cast<unsigned>(e.membership().phase()) : 0U);
     return buf;
 }
 

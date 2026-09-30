@@ -40,7 +40,7 @@ Status Membership::check_request_object(ByteView obj, uint64_t &assignment) {
         }
         if (h.new_root != peer_.delegation.root || h.new_delegation_hash != peer_.delegation_hash ||
             h.new_generation != peer_.delegation.generation || h.new_generation <= h.old_generation ||
-            !(id.member().root_term < h.new_term)) {
+            !(id.term() < h.new_term)) {
             return Status::NetworkMismatch; // not the new root (a term above the known one: docs/21 §8, LC09)
         }
         assignment = id.member().assignment.value();
@@ -133,8 +133,7 @@ void Membership::request_ready(MonoTime now) {
         finish_join(st, LM_OUTCOME_REJECTED, now);
         return;
     }
-    engine_.identity().return_record(); // the ticket now lives inside the request object
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_); // the ticket now lives inside the request object
     req_.evidence |= kEvRequested;
     request_deadline_ = now + k_request_wait;
     phase_ = JoinPhase::RequestOut;
@@ -417,8 +416,7 @@ void Membership::activate_commit(MonoTime now) {
 }
 
 void Membership::active_out(MonoTime now) {
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_);
     phase_ = JoinPhase::ActiveOut;
     // 5 s for a neighbour; a proxied join adds three of its (longer) retransmission periods.
     final_wait_until_ = now + Duration::from_s(5) + Duration{3 * (engine_.link().policy().rto - link::LinkPolicy{}.rto).us};
@@ -573,12 +571,9 @@ void Membership::send_confirm(MonoTime now) {
     if (st == Status::Ok) {
         st = encode_join_ack(a, MutByteView{obj}.from(plen), dlen);
     }
-    link::SealedFrame f;
     if (st == Status::Ok) {
-        st = engine_.link().seal(root->device, wire::FrameKind::Control, ByteView{obj.data(), plen + dlen}, f, now);
-    }
-    if (st == Status::Ok) {
-        st = engine_.transmit(root->mac, f.view(), k_tag_confirm, now);
+        st = engine_.link().send_sealed(root->device, root->mac, wire::FrameKind::Control,
+                                        ByteView{obj.data(), plen + dlen}, k_tag_confirm, now);
     }
     if (st == Status::Busy || st == Status::DriverResultUnknown) {
         confirm_at_ = now + Duration::from_ms(20); // radio occupied: local, not an attempt

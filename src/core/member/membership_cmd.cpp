@@ -13,7 +13,11 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
             return Reply{Status::InvalidArgument, 0, 0};
         }
         lm_membership_t out{};
-        membership_.get_membership(out, now);
+        if (is_root()) {
+            member::Membership::view(ident_, nullptr, MonoTime{}, out); // P8: the root holds no joiner side
+        } else {
+            membership().get_membership(out, now);
+        }
         std::memcpy(cmd.response, &out, sizeof(out));
         return Reply{Status::Ok, 0, 0};
     }
@@ -32,7 +36,7 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         std::memcpy(a.target.bytes.data(), r.target_domain.bytes, 16);
         a.constrain = r.constrain_target != 0;
         uint64_t op = 0;
-        const Status s = membership_.join(a, now, op);
+        const Status s = membership().join(a, now, op);
         return Reply{s, s == Status::Ok ? op : 0, 0};
     }
     case CommandKind::Leave: {
@@ -44,7 +48,7 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         }
         const auto &a = *static_cast<const member::LeaveArgs *>(cmd.request);
         uint64_t op = 0;
-        const Status s = membership_.leave(static_cast<uint8_t>(a.mode), a.deadline_ms, now, op);
+        const Status s = membership().leave(static_cast<uint8_t>(a.mode), a.deadline_ms, now, op);
         return Reply{s, s == Status::Ok ? op : 0, 0};
     }
     case CommandKind::InstallControl: {
@@ -57,15 +61,15 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         switch (type) {
         case member::k_type_assignment_ticket: // [S18] on the root: a member of this domain moved away
         case member::k_type_root_handover:     // [S18] a member's authorisation for its domain's new root
-            s = is_root() ? ledger_.install_lifecycle(static_cast<uint8_t>(type), cmd.payload, now, op)
-                          : membership_.install_ticket(cmd.payload, now, op);
+            s = is_root() ? ledger().install_lifecycle(static_cast<uint8_t>(type), cmd.payload, now, op)
+                          : membership().install_ticket(cmd.payload, now, op);
             break;
         case member::k_type_expected_set:
-            s = is_root() ? ledger_.install_expected(cmd.payload, now, op) : Status::RoleNotAllowed;
+            s = is_root() ? ledger().install_expected(cmd.payload, now, op) : Status::RoleNotAllowed;
             break;
         case member::k_type_revoke: // [S18]
         case member::k_type_commissioning_window:
-            s = is_root() ? ledger_.install_lifecycle(static_cast<uint8_t>(type), cmd.payload, now, op)
+            s = is_root() ? ledger().install_lifecycle(static_cast<uint8_t>(type), cmd.payload, now, op)
                           : Status::RoleNotAllowed;
             break;
         default:
@@ -81,7 +85,8 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         RequestId id;
         std::memcpy(id.bytes.data(), static_cast<const lm_request_id_t *>(cmd.request)->bytes, 16);
         lm_operation_t out{};
-        const Status s = membership_.get_request(id, out, now);
+        // The root joins nothing: its own requests do not exist (the Host asks its ledger through the bridge).
+        const Status s = is_root() ? Status::NotFound : membership().get_request(id, out, now);
         if (s == Status::Ok) {
             std::memcpy(cmd.response, &out, sizeof(out));
         }
@@ -92,7 +97,7 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         if (is_root() || cmd.response == nullptr || cmd.response_size != nonce.size()) {
             return Reply{is_root() ? Status::RoleNotAllowed : Status::InvalidArgument, 0, 0};
         }
-        const Status s = membership_.transfer_nonce(nonce);
+        const Status s = membership().transfer_nonce(nonce);
         if (s == Status::Ok) {
             std::memcpy(cmd.response, nonce.data(), nonce.size());
         }
@@ -102,7 +107,7 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         if (!is_root() || cmd.request == nullptr || cmd.request_size != sizeof(root::JoinDecision)) {
             return Reply{Status::InvalidArgument, 0, 0};
         }
-        return Reply{ledger_.decide(*static_cast<const root::JoinDecision *>(cmd.request), now), 0, 0};
+        return Reply{ledger().decide(*static_cast<const root::JoinDecision *>(cmd.request), now), 0, 0};
     }
     default:
         return Reply{Status::Unsupported, 0, 0};

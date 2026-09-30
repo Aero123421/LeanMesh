@@ -23,7 +23,6 @@ enum class DropReason : uint8_t {
     NoBudget,       // total_budget == 0 or inconsistent with the remaining hops
     NotSimple,      // zero/broadcast address, duplicate, or origin inside the path
     FinalMismatch,  // last path entry differs from final
-    StaleTerm,      // root_term of the packet differs from the local one
     OriginIsSelf,   // a packet we originated came back
 };
 
@@ -34,13 +33,16 @@ struct Decision {
 };
 
 // `header` is updated in place only for Forward: next_index += 1, budget -= 1. Deliver leaves it
-// untouched (the end record is consumed by the delivery layer).
-[[nodiscard]] Decision decide_forward(wire::RouteHeader &header, ShortAddr self,
-                                      ShortAddr previous_sender, RootTerm local_term);
+// untouched (the end record is consumed by the delivery layer). The root_term of the header is not a forwarding
+// condition (docs/04 §4): it names the clock of the end record's deadline, which the relay judges separately (a term it
+// does not know is TIME_UNCERTAIN, never a drop), and a node that has not learnt the root's new term yet must still
+// reach the root to learn it (docs/04 §7 "新termでsession/pathを再同期").
+[[nodiscard]] Decision decide_forward(wire::RouteHeader &header, ShortAddr self, ShortAddr previous_sender);
 
 // docs/04 §3 step 4: a candidate's root path (root first, candidate last, `n` entries) extended by
 // `self` must stay simple and within root_depth 20. InvalidArgument: empty, zero/broadcast or
-// duplicate address, or `self` already on it; NetworkMismatch: other root_term; Expired: the
+// duplicate address, or `self` already on it; NetworkMismatch: an older root_term (a newer one is a hint the caller
+// may try: the root's answer then tells it the term with authority); Expired: the
 // advertisement is past its lease; NoRoute: joining would make depth 21.
 [[nodiscard]] Status check_candidate_path(ShortAddr self, const uint16_t *path, std::size_t n,
                                           RootTerm advertised_term, RootTerm local_term,

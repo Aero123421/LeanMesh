@@ -103,28 +103,33 @@ struct CapacityRequest {
     uint32_t path_hops = 0;
 };
 
+// Fields are ordered by alignment (8, 4, byte arrays, then the small ones): no padding between them.
 struct Op {
-    bool used = false;
     uint64_t id = 0;
-    uint32_t seq = 0; // eviction order (oldest final goes first)
     MessageId mid;
+    // The origin's assignment_generation the message was accepted under: with the origin and `mid` it is the message's
+    // identity (FIX2-D1). A send exists only in that membership: after a transfer it is never sent under another one
+    // (ARCH2, docs/21 §6). A report names the local assignment at the time of the report.
+    uint64_t assignment = 0;
+    uint64_t expires = 0;
+    uint64_t accepted_ms = 0;
+    uint64_t last_evidence_ms = 0;
+    uint32_t seq = 0; // eviction order (oldest final goes first)
+    uint32_t term = 0;
+    uint32_t reason = 0;
+    uint32_t evidence = 0;
+    Handle active; // none once the send is over
     DeviceId dest;
+    Sha256Digest hash{};
+    std::array<uint8_t, k_result_bytes> result{};
     uint16_t port = 0;
+    bool used = false;
     uint8_t delivery = 0;
     uint8_t storage = 0;
     uint8_t priority = 0;
-    uint32_t term = 0;
-    uint64_t expires = 0;
-    Sha256Digest hash{};
     Phase phase = Phase::Pending;
     uint8_t outcome = LM_OUTCOME_PENDING;
-    uint32_t reason = 0;
-    uint32_t evidence = 0;
-    uint64_t accepted_ms = 0;
-    uint64_t last_evidence_ms = 0;
     uint8_t result_len = 0;
-    std::array<uint8_t, k_result_bytes> result{};
-    Handle active; // none once the send is over
     bool report = false; // created by lm_report_application_result, not a send
     bool group = false;  // [S15] one target of a group operation: its events are the group's
 };
@@ -243,6 +248,7 @@ struct DeliveryStats {
     uint64_t superseded = 0;       // [S14] LATEST sends replaced before anything left the node
     uint64_t admit_refused = 0;    // [S14] sends refused by the class share of the operation slots
     uint64_t journal_puts = 0;
+    uint64_t old_assignment = 0;   // sends of an earlier assignment (moved away since): ended, never sent in the new one
 };
 
 // [S16] What a sleep would cut (Delivery::settle_state, src/core/power/delivery_power.cpp).
@@ -300,6 +306,11 @@ class Delivery {
         frag_.sink_ctx = ctx;
     }
     [[nodiscard]] const FragStats &frag_stats() const { return frag_.stats; }
+    // A control object (> 1 frame allowed) to `rq.dest` over its end session: what CommandKind::SendControl runs
+    // (the root's lifecycle objects, snapshot pages and requests). No receipt; done when every fragment is confirmed.
+    [[nodiscard]] Reply send_control(const ControlSendRequest &rq, ByteView payload, MonoTime now);
+    // The one outgoing control-object lane is free (a send_control of more than one frame would be taken).
+    [[nodiscard]] bool control_lane_free() const { return lane_free(Lane::Control); }
     // ---- [S15] group fan-out plug points (delivery_group.cpp) ----
     // A group target is an ordinary send with a MessageId the group reserved (a repeated call with the
     // same id is the same operation) whose events and generation check belong to the group.
@@ -335,6 +346,9 @@ class Delivery {
     // Paths changed (repair, new lease): sends that waited for a route go on now.
     void routes_changed(MonoTime now) { kick_all_waiting(now); }
     void invalidate_routes() { routes_.clear(); }
+    // The owner or the membership generation of `a` changed (docs/04 §7): every route to it or through it goes;
+    // routes that never touch it stay.
+    void invalidate_addr(ShortAddr a) { routes_.invalidate_addr(a); }
 
     // ---- [S16] power (delivery_power.cpp) ----
     [[nodiscard]] Settle settle_state() const;
@@ -408,6 +422,7 @@ class Delivery {
                                       MonoTime now, Status &why);
     [[nodiscard]] link::Neighbor *neighbor_at(uint16_t addr);
     [[nodiscard]] DeadlineCheck deadline_state(uint64_t expires, uint32_t term) const;
+    [[nodiscard]] DeadlineCheck own_deadline(uint64_t expires, uint32_t term) const;
     [[nodiscard]] MonoTime local_deadline(uint64_t expires, uint32_t term, MonoTime now) const;
 
     // -- admission and LATEST coalescing (delivery_sched.cpp) [S14] --
@@ -477,7 +492,6 @@ class Delivery {
     // -- fragments (fragment.cpp) [S12] --
     enum class SendMode : uint8_t { Api, Object, Control };
     [[nodiscard]] Reply send_mode(SendMode m, const lm_send_request_t &rq, ByteView payload, MonoTime now);
-    [[nodiscard]] Reply send_control(const ControlSendRequest &rq, ByteView payload, MonoTime now);
     [[nodiscard]] bool object_enabled() const;
     [[nodiscard]] bool lane_free(Lane lane) const;
     [[nodiscard]] ByteView active_payload(const Active &a) const;

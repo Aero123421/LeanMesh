@@ -136,6 +136,8 @@ class Membership {
     [[nodiscard]] Status leave(uint8_t mode, uint32_t deadline_ms, MonoTime now, uint64_t &operation);
     [[nodiscard]] Status install_ticket(ByteView signed_cose, MonoTime now, uint64_t &operation);
     void get_membership(lm_membership_t &out, MonoTime now) const;
+    // The same answer for a node without the joiner side (the root, ADR-002 P8): `m` null.
+    static void view(const LocalIdentity &id, const Membership *m, MonoTime since, lm_membership_t &out);
     [[nodiscard]] Status get_request(const RequestId &id, lm_operation_t &out, MonoTime now) const;
     void set_hooks(const MembershipHooks &h) { hooks_ = h; }
 
@@ -193,6 +195,7 @@ class Membership {
         LeaveCommit,
         RenewVerify, // [S18] worker: the renewed credential under the delegation
         RenewCommit, // [S18] membership record := the renewed credential
+        RenewReload, // [P4] ... read again after a handshake made it wait without the record memory
         RevokeVerify,  // [S18] worker: the root's RevokeObject for this device
         CommitPending, // [S18] pending_delegation := the new root's delegation (transfer/handover)
         SwitchLoad,    // [S18] after the ACTIVE commit: the pending delegation ...
@@ -249,6 +252,7 @@ class Membership {
     void fail_and_consume(Status why, MonoTime now);
     void pipe_failed(Status why, MonoTime now);
     void retry_work(MonoTime now);
+    void boot_load(MonoTime now); // the PREPARED/ACTIVATED record at boot, once the record memory is free
     void emit_state(uint32_t reason);
     [[nodiscard]] bool lend_scratch_only();
     [[nodiscard]] bool lend_record_only();
@@ -341,6 +345,7 @@ class Membership {
     uint64_t install_op_ = 0;
     bool boot_failed_ = false;       // reading the PREPARED record failed: unknown state, refuse to join
     bool renew_adopt_ = false;       // [S18] a renewed credential is durable and waits for an idle exchange
+    bool boot_load_ = false;         // [P4] the boot load waits for the record memory
     bool switch_ = false;            // [S18] this join moves an ACTIVE member to another root (transfer/handover)
     bool handover_ = false;          // [S18] ... to its own domain's new root (the object is a RootHandover)
     DomainId switch_domain_;         // [S18] the domain whose root that switch asks (offers of others are skipped)

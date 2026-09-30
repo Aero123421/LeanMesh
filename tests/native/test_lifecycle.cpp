@@ -13,6 +13,7 @@
 #include "capi/context.hpp"
 #include "core/wire/cbor.hpp"
 #include "fleet.hpp"
+#include "cut_matrix.hpp"
 #include "lmtest.hpp"
 #include "port/sim/sim_node.hpp"
 #include "port/sim/sim_provision.hpp"
@@ -522,8 +523,9 @@ LM_TEST("S18 renewal soak: three hours on 15 min leases, members stay authorised
         LM_CHECK_EQ(n.eng(i).delivery().end_stats().lease_expired, 0u);
         LM_CHECK_EQ(l.renew_only, 0u);                  // nobody needed the expired-lease path
     }
-    // Every neighbour holds the renewed lease of its peer (the rotation after each renewal handed it over).
-    for (auto [a, b] : {std::pair{0U, 1U}, {1U, 2U}, {2U, 3U}, {2U, 4U}}) {
+    // Every neighbour holds the renewed lease of its peer (the rotation after each renewal handed it over). The root
+    // admits by its ledger, never by the lease (S18-D1), so a renewal does not rotate the link with it (ARCH2-D1).
+    for (auto [a, b] : {std::pair{1U, 2U}, {2U, 3U}, {2U, 4U}}) {
         LM_CHECK(n.lease_at(a, b) + 20'000 >= n.lease(b) || n.lease_at(a, b) == n.lease(b));
         LM_CHECK(n.lease_at(a, b) > n.root_ms());
     }
@@ -557,6 +559,43 @@ LM_TEST("LP12 S18 sim: a lease that ran out while powered off is renewed, not re
     LM_CHECK(o != 0);
     LM_CHECK(n.until([&] { return n.op(2, o).phase == 3; }, 30'000));
     LM_CHECK_EQ(n.op(2, o).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+}
+
+// ADR-002 P4: a renewed credential is committed at once but goes live only when no handshake is sending the bundle.
+// That wait can be a whole handshake; it must not keep the node's one record memory (a durable send's journal
+// write would wait for it). The record goes back meanwhile and the committed credential is read again at adoption.
+LM_TEST("P4 S18 sim: a renewal waiting for a busy exchange gives the record memory back and goes live afterwards") {
+    LNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    for (unsigned i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    const uint64_t first = n.lease(2);
+    // The leaf's exchange is taken (as by a long handshake) just before its renewal comes (due 5 min before the end).
+    LM_CHECK(n.until([&] { return n.root_ms() + 6 * k_min >= first; }, 15 * k_min, 1000));
+    link::Exchange &x = n.eng(2).link().exchange();
+    MutByteView lent;
+    LM_CHECK(n.until([&] { return !(lent = x.lend_scratch()).empty(); }, 60'000, 5));
+    const uint64_t writes = n.node(2).store.slot_writes();
+    // The renewal is due within 5 min of the lease end: verified and committed although the exchange is busy.
+    LM_CHECK(n.until([&] { return n.node(2).store.slot_writes() > writes; }, 15 * k_min, 50));
+    n.run_ms(200);
+    LM_CHECK_EQ(n.lease(2), first); // not live yet: the bundle may be on its way to a neighbour
+    store::RecordJob *r = n.eng(2).identity().lend_record();
+    LM_CHECK(r != nullptr); // ... and the record memory is free meanwhile
+    if (r != nullptr) {
+        n.eng(2).identity().return_record();
+    }
+    if (!lent.empty()) {
+        x.return_scratch();
+    }
+    n.node(2).notify();
+    LM_CHECK(n.until([&] { return n.lease(2) > first; }, 5000, 5)); // the committed credential went live
+    LM_CHECK(n.eng(2).membership().stats().renewals >= 1u);
+    // The relay holds the new lease at the latest once the old one has run out (in this bench the relay renewed at
+    // the same moment against the blocked exchange, and the rate gate keeps their rotation from finishing earlier:
+    // the same before P4).
+    LM_CHECK(n.until([&] { return n.lease_at(1, 2) > first; }, 10 * k_min));
 }
 
 // R09 + external review finding 20: an address given to another device (the ledger is full, the old owner left) must
@@ -609,6 +648,106 @@ LM_TEST("R09 REV-20 sim: a reused address leaves no stale route at the root or a
     LM_CHECK_EQ(n.op(2, o2).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
     LM_CHECK(n.eng(2).delivery().sessions().find_peer(n.id(1)) == nullptr);
     LM_CHECK(!n.has_route(2, n.id(1)));
+}
+
+// R09 + review finding 20, precision (docs/04 §7): only what depends on the reused address goes. A route of the
+// same node that never touches that address survives the reuse; the routes to and through it do not.
+LM_TEST("R09 ARCH2 sim: a reused address drops the routes through it and keeps the others") {
+    LNet n({Spec{}, Spec{Role::Relay, 0xFFFFFFFFFFULL}, Spec{Role::Relay, 0xFFFFFFFFFFULL},
+            Spec{Role::Leaf, 0xFFFFFFFFFFULL}, Spec{Role::Leaf, 0, true}},
+           74, 61);
+    n.link(1, 2, false); // D1 (node 1, address 2) hangs below the root only
+    n.link(0, 2);        // X (node 2) below the root
+    n.link(2, 3, false);
+    n.link(0, 3);        // Y (node 3, address 4) below the root: X reaches it without address 2
+    n.link(3, 4, false);
+    n.link(2, 4);        // the new device D2 (node 4) reaches the root through X
+    for (unsigned i = 0; i < 4; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.ready(1) && n.ready(2) && n.ready(3); }, 120'000));
+    LM_CHECK_EQ(n.eng(0).ledger().count(root::EntryState::Free), 0u); // every slot is used
+    const lm_operation_id_t o1 = n.send_to(2, n.id(1));
+    LM_CHECK(n.until([&] { return n.op(2, o1).phase == 3; }, 30'000));
+    LM_CHECK_EQ(n.op(2, o1).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    n.node(1).notify();
+    LM_CHECK(n.until([&] {
+        const root::Entry *e = n.eng(0).ledger().find(n.id(1));
+        return e != nullptr && e->state == root::EntryState::Left;
+    }, 10'000));
+    n.node(1).power_cut(); // gone for good
+    n.run_ms(1000);
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.boot(4);
+    n.run_ms(500);
+    n.grant(4, 1, 1); // the expected entry of D2 takes the left slot: address 2
+    const root::Entry *e2 = n.eng(0).ledger().find(n.id(4));
+    LM_CHECK(e2 != nullptr && e2->address == ShortAddr{2});
+    LM_CHECK_EQ(n.join(4, 90), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(4).identity().is_member() && n.ready(4); }, 120'000));
+    // X gets a route that does not touch address 2, then meets the new owner of address 2.
+    const lm_operation_id_t oy = n.send_to(2, n.id(3));
+    LM_CHECK(n.until([&] { return n.op(2, oy).phase == 3; }, 30'000));
+    LM_CHECK_EQ(n.op(2, oy).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+    LM_CHECK(n.has_route(2, n.id(3)));
+    const lm_operation_id_t o2 = n.send_to(2, n.id(4));
+    LM_CHECK(n.until([&] { return n.op(2, o2).phase == 3; }, 30'000));
+    LM_CHECK_EQ(n.op(2, o2).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+    LM_CHECK(n.eng(2).delivery().sessions().find_peer(n.id(1)) == nullptr); // D1's session at address 2 went
+    LM_CHECK(!n.has_route(2, n.id(1)));                                    // with its route
+    LM_CHECK(n.has_route(2, n.id(3)));                                     // Y's route never used address 2
+}
+
+// docs/04 §7, generation: the same device at the same address with a new membership generation (it left and joined
+// again under a new grant) is a new owner of that address for the routes that went through it. The device's end
+// sessions of the old membership end with its leave, so a peer that still holds one finds out at its next message
+// (a fresh handshake shows the new generation) and drops every route through that address.
+LM_TEST("R09 ARCH2 sim: a new membership generation at an address drops the routes through it") {
+    LNet n({Spec{}, Spec{Role::Relay, 0xFFFFFFFFFFULL}, Spec{Role::Relay, 0xFFFFFFFFFFULL},
+            Spec{Role::Leaf, 0xFFFFFFFFFFULL}},
+           75);
+    n.link(1, 2, false); // D1 (node 1, address 2) below the root, X (node 2) below the root
+    n.link(0, 2);
+    n.link(2, 3, false);
+    n.link(1, 3);        // Z (node 3, address 4) below D1: X reaches it through address 2
+    for (unsigned i = 0; i < 4; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.ready(1) && n.ready(2) && n.ready(3); }, 120'000));
+    const lm_operation_id_t o1 = n.send_to(2, n.id(1)); // X holds an end session with D1 (membership 1)
+    LM_CHECK(n.until([&] { return n.op(2, o1).phase == 3; }, 30'000));
+    LM_CHECK_EQ(n.op(2, o1).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+    const uint64_t m1 = n.eng(1).identity().member().membership.value();
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    n.node(1).notify();
+    LM_CHECK(n.until([&] { return !n.eng(1).identity().is_member(); }, 10'000));
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Preapproved);
+    n.grant(1, 2, 1);
+    n.run_ms(31'000); // one full handshake per peer per 30 s (docs/06 §8)
+    LM_CHECK_EQ(n.join(1, 0x63), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.eng(1).identity().is_member() && n.ready(1) && n.ready(3); }, 180'000));
+    LM_CHECK_EQ(n.eng(1).identity().member().address.value(), 2u); // the same address ...
+    const uint64_t m2 = n.eng(1).identity().member().membership.value();
+    LM_CHECK(m2 > m1);                                              // ... a new membership generation
+    const lm_operation_id_t oz = n.send_to(2, n.id(3)); // X's route to Z goes through address 2
+    LM_CHECK(n.until([&] { return n.op(2, oz).phase == 3; }, 60'000));
+    LM_CHECK_EQ(n.op(2, oz).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+    LM_CHECK(n.has_route(2, n.id(3)));
+    // X's next message to D1 still goes under the session of membership 1, which D1 ended with its leave: no answer,
+    // INDETERMINATE (never "received" under a membership that no longer exists), and the session is suspect.
+    const lm_operation_id_t o2 = n.send_to(2, n.id(1));
+    LM_CHECK(n.until([&] { return n.op(2, o2).phase == 3; }, 60'000));
+    LM_CHECK_EQ(n.op(2, o2).outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE));
+    // The message after that makes a fresh session: it shows the new generation at address 2.
+    const lm_operation_id_t o3 = n.send_to(2, n.id(1));
+    LM_CHECK(n.until([&] { return n.op(2, o3).phase == 3; }, 60'000));
+    LM_CHECK_EQ(n.op(2, o3).outcome, static_cast<uint32_t>(LM_OUTCOME_RECEIVED));
+    const delivery::EndSession *s = n.eng(2).delivery().sessions().find_peer(n.id(1));
+    LM_CHECK(s != nullptr && s->peer_membership.value() == m2); // never the old membership's session
+    LM_CHECK(!n.has_route(2, n.id(3))); // the route through address 2 went with the old generation
 }
 
 // M02 + M03 (sim): both roots run. The member moves A -> B with the fleet's ticket: it is never ACTIVE in both, A's
@@ -874,31 +1013,12 @@ CutRun transfer_cut(unsigned target, uint64_t k, CutMode mode) {
 } // namespace
 
 LM_TEST("M05 sim: power cut at each record-write boundary of a transfer (device, B's root) leaves exactly old or new") {
-    unsigned iterations = 0;
-    unsigned moved = 0;
-    for (const unsigned target : {2U, 1U}) { // the device's store, then B's root's
-        for (const CutMode mode : {CutMode::Before, CutMode::Torn, CutMode::After}) {
-            for (uint64_t k = 0; k < 40; ++k) {
-                if (const char *only = std::getenv("LM_M05_ONLY"); only != nullptr &&
-                    std::string(only) != std::to_string(target) + cut_name(mode) + std::to_string(k)) {
-                    continue;
-                }
-                const CutRun r = transfer_cut(target, k, mode);
-                if (!r.ok) {
-                    std::fprintf(stderr, "  sweep node=%s mode=%s k=%llu: %s\n", target == 2 ? "device" : "B root",
-                                 cut_name(mode), static_cast<unsigned long long>(k), r.why.c_str());
-                }
-                LM_CHECK(r.ok);
-                if (!r.fired) {
-                    break; // fewer store operations than k in a transfer: this node/mode is complete
-                }
-                ++iterations;
-                moved += r.moved ? 1 : 0;
-            }
-        }
-    }
-    std::printf("  [measure] transfer power-cut sweep: %u cut points, %u converged on B afterwards\n", iterations, moved);
-    LM_CHECK(iterations >= 20);
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "transfer", {{2, "device"}, {1, "B root"}}, [](unsigned target, uint64_t k, CutMode mode) {
+            const CutRun r = transfer_cut(target, k, mode);
+            return lmtest::CutRun{r.fired, r.ok, r.moved, r.why};
+        });
+    LM_CHECK(t.points >= 20);
 }
 
 // S06 (sim): the revoked member is out of range. The network side proceeds at once (its root admits and renews it no
@@ -1036,7 +1156,9 @@ LM_TEST("LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term mu
         n.boot(1);
         n.run_ms(300);
         const Bytes stale = n.a.fleet.handover(n.a.domain, n.handover(1)); // term 1: not above the known term
-        LM_CHECK_EQ(n.install(1, 31, stale), static_cast<uint32_t>(LM_STATUS_NETWORK_MISMATCH));
+        // The new root cannot tell which of its boots' terms the fleet named (ARCH2-D1: one term per boot); it only
+        // refuses a term it has not reached. The floor is the device's check: above the term it knows.
+        LM_CHECK_EQ(n.install(1, 31, stale), 0u);
         LM_CHECK_EQ(n.install(2, 31, stale), 0u); // (the device checks the term against the root it meets)
         LM_CHECK(!hand_over(n, 2, 0x52, 40'000));
         LM_CHECK(n.eng(2).identity().delegation().generation == 1);
@@ -1385,27 +1507,12 @@ CutRun handover_cut(unsigned target, uint64_t k, CutMode mode) {
 } // namespace
 
 LM_TEST("LC08 POWER sim: power cut at each record-write boundary of a handover (device, new root) leaves old or new") {
-    unsigned iterations = 0;
-    unsigned moved = 0;
-    for (const unsigned target : {2U, 1U}) {
-        for (const CutMode mode : {CutMode::Before, CutMode::Torn, CutMode::After}) {
-            for (uint64_t k = 0; k < 40; ++k) {
-                const CutRun r = handover_cut(target, k, mode);
-                if (!r.ok) {
-                    std::fprintf(stderr, "  sweep node=%s mode=%s k=%llu: %s\n", target == 2 ? "device" : "new root",
-                                 cut_name(mode), static_cast<unsigned long long>(k), r.why.c_str());
-                }
-                LM_CHECK(r.ok);
-                if (!r.fired) {
-                    break;
-                }
-                ++iterations;
-                moved += r.moved ? 1 : 0;
-            }
-        }
-    }
-    std::printf("  [measure] handover power-cut sweep: %u cut points, %u converged on the new root\n", iterations, moved);
-    LM_CHECK(iterations >= 20);
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "handover", {{2, "device"}, {1, "new root"}}, [](unsigned target, uint64_t k, CutMode mode) {
+            const CutRun r = handover_cut(target, k, mode);
+            return lmtest::CutRun{r.fired, r.ok, r.moved, r.why};
+        });
+    LM_CHECK(t.points >= 20);
 }
 
 // POWER (sim): a cut at the old root's retirement commit. After the restart it is retired or not - never half (its
@@ -1439,10 +1546,10 @@ LM_TEST("LC08 POWER sim: power cut at the old root's retirement commit - retired
 }
 
 // LC07 (sim): A-bound history at the move (docs/21 §6). A durable message to the domain root's application is still
-// unacknowledged (A's root is off) when the device moves to B. The history stays A's: its destination is A's root, so it
-// is never re-addressed to B's root nor published there as new data; it is kept until its own deadline (or the
-// application's explicit cancel) and then ends without delivery.
-LM_TEST("LC07 sim: unacknowledged A-bound history is never sent to B as new data; it ends at its own deadline") {
+// unacknowledged (A's root is off) when the device moves to B. The history stays A's: it was accepted under assignment 1,
+// so it is never re-addressed to B's root nor published there as new data; once the device is B's member it ends
+// INDETERMINATE (NETWORK_MISMATCH: it may have left before the move), its record retired, counted (ARCH2).
+LM_TEST("LC07 sim: unacknowledged A-bound history is never sent to B as new data; it ends as A's history") {
     DNet n(1, 89);
     const unsigned d = 2;
     n.eng(1).ledger().set_join_mode(root::JoinMode::Preapproved);
@@ -1477,7 +1584,92 @@ LM_TEST("LC07 sim: unacknowledged A-bound history is never sent to B as new data
     n.run_ms(150'000); // past the message's own deadline
     LM_CHECK_EQ(n.eng(1).delivery().stats().rx_data, 0u);   // B's root never got it ...
     LM_CHECK_EQ(n.eng(1).delivery().stats().delivered, 0u); // ... nor handed it to its application
-    LM_CHECK(n.eng(d).delivery().stats().expired >= 1u);   // it ended at its deadline, undelivered
+    LM_CHECK_EQ(n.eng(d).delivery().stats().old_assignment, 1u); // it ended as history of assignment 1, undelivered
+    LM_CHECK_EQ(n.eng(d).delivery().durable().live_count(), 0u);
+}
+
+// LC07 / FIX2-D1 (sim): A-bound history to a peer that moved too. The message identity is (origin, origin's assignment
+// generation, MessageId): a durable send accepted under assignment 1 (A) is that message only. The origin and its peer
+// both move to B; the recovered record must never be sent under assignment 2 (it would be a new message in B, the old
+// payload published there as today's data, docs/21 §6). It ends INDETERMINATE (it may have left before the restart),
+// its OPERATION event names the assignment it was accepted under, and the application finds it by that message ref.
+LM_TEST("LC07 ARCH2 sim: a durable send accepted in A is never sent under the B assignment after both ends moved") {
+    DNet n(2, 90);
+    const unsigned o = 2; // the origin
+    const unsigned p = 3; // its peer
+    n.eng(1).ledger().set_join_mode(root::JoinMode::Preapproved);
+    const Bytes to_o = n.transfer_ticket(o, n.a, n.b, 1, 2);
+    const Bytes to_p = n.transfer_ticket(p, n.a, n.b, 1, 2);
+    LM_CHECK_EQ(n.expect(1, n.b, o, 2, to_o, 1), 0u);
+    LM_CHECK_EQ(n.expect(1, n.b, p, 2, to_p, 2), 0u);
+    LM_CHECK_EQ(n.install(o, 3, to_o), 0u);
+    LM_CHECK_EQ(n.install(p, 3, to_p), 0u);
+    // A durable RECEIVED message without a deadline (history) to the peer; no route in A (the mesh is off): persisted,
+    // never sent, unacknowledged when the origin moves.
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_NODE;
+    std::memcpy(rq.destination.node.bytes, n.id(p).bytes.data(), 32);
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_DURABLE;
+    rq.priority = LM_PRIORITY_NORMAL;
+    rq.queue_mode = LM_FIFO;
+    const uint8_t payload[16] = {0xA7};
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(o), &rq, payload, sizeof(payload), &op), LM_STATUS_OK);
+    n.node(o).notify();
+    lm_operation_t before{};
+    before.struct_size = sizeof(before);
+    before.abi_version = LM_ABI_VERSION;
+    LM_CHECK(n.until([&] {
+        (void)lm_get_operation(n.ctx(o), op, &before);
+        return (before.evidence_bits & delivery::ev::persisted) != 0;
+    }, 2000));
+    LM_CHECK((before.evidence_bits & delivery::ev::sent) == 0);
+    LM_CHECK(n.transfer(o, n.b, 0x71));
+    LM_CHECK(n.transfer(p, n.b, 0x72));
+    LM_CHECK_EQ(n.assignment(o), 2u);
+    LM_CHECK_EQ(n.assignment(p), 2u);
+    // In B the peer is reachable: a link session and a route (what the mesh would provide).
+    n.run_ms(31'000);
+    n.set_time();
+    LM_CHECK_OK(n.eng(o).link().connect(n.mac(p), n.node(o).clock.now()));
+    n.node(o).notify();
+    LM_CHECK(n.until([&] {
+        const link::Neighbor *nb = n.eng(o).link().neighbors().find_device(n.id(p));
+        return nb != nullptr && nb->cur.active;
+    }, 6000));
+    delivery::PathSpec ps;
+    ps.origin = n.eng(o).identity().member().address;
+    ps.dest = n.eng(p).identity().member().address;
+    ps.len = 1;
+    ps.path[0] = ps.dest.value();
+    ps.term = n.eng(o).identity().member().root_term;
+    ps.revision = PathRevision{1};
+    LM_CHECK_OK(n.eng(o).delivery().install_route(n.id(p), ps, MonoTime::never()));
+    n.eng(o).delivery().routes_changed(n.node(o).clock.now());
+    n.node(o).notify();
+    n.run_ms(60'000);
+    LM_CHECK_EQ(n.eng(p).delivery().stats().rx_data, 0u);   // never sent in B ...
+    LM_CHECK_EQ(n.eng(p).delivery().stats().delivered, 0u); // ... nor handed to the peer's application
+    LM_CHECK_EQ(n.eng(o).delivery().stats().old_assignment, 1u);
+    LM_CHECK_EQ(n.eng(o).delivery().durable().live_count(), 0u); // the record is retired, its outcome is history
+    // The history, by the message ref it was accepted under: INDETERMINATE (it might have left before the restart).
+    lm_message_ref_t ref{};
+    std::memcpy(ref.origin.bytes, n.id(o).bytes.data(), 32);
+    ref.assignment_generation = 1;
+    ref.id = before.message_id;
+    std::memcpy(ref.intent_hash, before.intent_hash, 32);
+    lm_operation_t after{};
+    after.struct_size = sizeof(after);
+    after.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_message(n.ctx(o), &ref, &after), LM_STATUS_OK);
+    LM_CHECK_EQ(after.outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE));
+    LM_CHECK_EQ(after.reason, static_cast<uint32_t>(Status::NetworkMismatch));
+    ref.assignment_generation = 2; // the same MessageId under the B assignment is another message: unknown here
+    LM_CHECK_EQ(lm_get_message(n.ctx(o), &ref, &after), LM_STATUS_NOT_FOUND);
 }
 
 // LC03 (sim): powered on before the plan (docs/21 §3). The root does not expect the device yet: NOT_EXPECTED is a hold

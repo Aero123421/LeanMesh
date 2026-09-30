@@ -26,34 +26,6 @@ bool path_ok(const uint16_t *p, std::size_t n) {
     return true;
 }
 
-namespace {
-
-void put_path(Writer &w, const uint16_t *p, std::size_t n) {
-    w.u8(static_cast<uint8_t>(n));
-    for (std::size_t i = 0; i < n; ++i) {
-        w.u16be(p[i]);
-    }
-}
-
-// n path entries (n >= min, 0 allowed only when min is 0), simple and bounded.
-bool get_path(Reader &r, uint8_t &n, std::array<uint16_t, k_max_root_path> &p, std::size_t min) {
-    n = r.u8();
-    if (n < min || n > k_max_root_path) {
-        return false;
-    }
-    for (std::size_t i = 0; i < n; ++i) {
-        p[i] = r.u16be();
-    }
-    return r.ok() && (n == 0 || path_ok(p.data(), n));
-}
-
-Status finish(const Writer &w, std::size_t &len) {
-    len = w.size();
-    return w.finish();
-}
-
-} // namespace
-
 // ---- beacon ----
 Status encode_beacon(const Beacon &b, uint32_t domain_hint, MutByteView out, std::size_t &len) {
     if (b.n > k_max_root_path || (b.n != 0 && !path_ok(b.path.data(), b.n))) {
@@ -157,139 +129,84 @@ Status decode_probe(ByteView plain, Probe &out, DeviceId &issuer) {
 }
 
 // ---- mesh records ----
-Status encode(const Register &m, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(static_cast<uint8_t>(Op::Register));
-    w.u32be(m.sequence);
-    w.u16be(m.parent);
-    w.u32be(m.parent_revision);
-    w.u32be(m.term);
-    return finish(w, len);
+namespace {
+
+// One field list per record (core/codec.hpp): it writes and reads the same layout.
+template <class F> void io(F &f, Register &m) {
+    f.is(Op::Register);
+    f.u32(m.sequence);
+    f.u16(m.parent);
+    f.u32(m.parent_revision);
+    f.u32(m.term);
 }
-Status encode(const Ready &m, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(static_cast<uint8_t>(Op::Ready));
-    w.u32be(m.term);
-    w.u32be(m.revision);
-    w.u64be(m.credential_lease_ms);
-    return finish(w, len);
+template <class F> void io(F &f, Ready &m) {
+    f.is(Op::Ready);
+    f.u32(m.term);
+    f.u32(m.revision);
+    f.u64(m.credential_lease_ms);
 }
-Status encode(const LeaseRec &m, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(static_cast<uint8_t>(Op::Lease));
-    w.u8(static_cast<uint8_t>((m.push ? 0x80 : 0) | static_cast<uint8_t>(m.status)));
-    w.u32be(m.term);
-    w.u32be(m.revision);
-    w.u32be(m.lease_ms);
-    w.u32be(m.expected_revision);
-    put_path(w, m.path.data(), m.n);
-    return finish(w, len);
+template <class F> void io(F &f, LeaseRec &m) {
+    f.is(Op::Lease);
+    f.flag_en(m.push, m.status); // push and status share a byte
+    f.u32(m.term);
+    f.u32(m.revision);
+    f.u32(m.lease_ms);
+    f.u32(m.expected_revision);
+    f.list(m.n, m.path);
 }
-Status encode(const Query &m, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(static_cast<uint8_t>(Op::Query));
-    w.u8(m.qid);
-    w.bytes(m.dest.view());
-    w.u32be(m.known_revision);
-    return finish(w, len);
+template <class F> void io(F &f, Query &m) {
+    f.is(Op::Query);
+    f.u8(m.qid);
+    f.raw(m.dest.bytes);
+    f.u32(m.known_revision);
 }
-Status encode(const Answer &m, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(static_cast<uint8_t>(Op::Answer));
-    w.u8(m.qid);
-    w.u8(static_cast<uint8_t>(m.status));
-    w.u16be(m.dest);
-    w.u32be(m.revision);
-    put_path(w, m.path.data(), m.n);
-    return finish(w, len);
+template <class F> void io(F &f, Answer &m) {
+    f.is(Op::Answer);
+    f.u8(m.qid);
+    f.en(m.status);
+    f.u16(m.dest);
+    f.u32(m.revision);
+    f.list(m.n, m.path);
 }
+
+// A path of at least `min` entries (0 allowed only when min is 0), simple.
+bool path_min(uint8_t n, const std::array<uint16_t, k_max_root_path> &p, std::size_t min) {
+    return n >= min && (n == 0 || path_ok(p.data(), n));
+}
+bool valid(const Register &m) { return is_valid_short_addr(ShortAddr{m.parent}); }
+bool valid(const Ready &) { return true; }
+bool valid(const LeaseRec &m) { return path_min(m.n, m.path, m.status == Status::Ok ? 2 : 0); }
+bool valid(const Query &m) { return !m.dest.is_zero(); }
+bool valid(const Answer &m) { return path_min(m.n, m.path, m.status == Status::Ok ? 1 : 0); }
+
+} // namespace
+
+template <class M> Status encode(const M &m, MutByteView out, std::size_t &len) {
+    return put_record(m, out, len, [](auto &f, auto &r) { io(f, r); });
+}
+
+template <class M> Status decode(ByteView body, M &out) {
+    M m;
+    if (get_record(body, m, [](auto &f, auto &r) { io(f, r); }) != Status::Ok || !valid(m)) {
+        return Status::BadFrame;
+    }
+    out = m;
+    return Status::Ok;
+}
+
+#define LM_MESH_RECORD(T) \
+    template Status encode<T>(const T &, MutByteView, std::size_t &); \
+    template Status decode<T>(ByteView, T &);
+LM_MESH_RECORD(Register)
+LM_MESH_RECORD(Ready)
+LM_MESH_RECORD(LeaseRec)
+LM_MESH_RECORD(Query)
+LM_MESH_RECORD(Answer)
+#undef LM_MESH_RECORD
 
 bool is_mesh_record(ByteView body) {
     return !body.empty() && ((body[0] >= static_cast<uint8_t>(Op::Register) && body[0] <= static_cast<uint8_t>(Op::Answer)) ||
                              body[0] == static_cast<uint8_t>(Op::Power)); // Power: the S16 schedule report
-}
-
-namespace {
-bool op_is(Reader &r, Op op) { return r.u8() == static_cast<uint8_t>(op); }
-} // namespace
-
-Status decode(ByteView body, Register &out) {
-    Reader r{body};
-    Register m;
-    const bool op = op_is(r, Op::Register);
-    m.sequence = r.u32be();
-    m.parent = r.u16be();
-    m.parent_revision = r.u32be();
-    m.term = r.u32be();
-    LM_TRY(r.finish());
-    if (!op || !is_valid_short_addr(ShortAddr{m.parent})) {
-        return Status::BadFrame;
-    }
-    out = m;
-    return Status::Ok;
-}
-Status decode(ByteView body, Ready &out) {
-    Reader r{body};
-    Ready m;
-    const bool op = op_is(r, Op::Ready);
-    m.term = r.u32be();
-    m.revision = r.u32be();
-    m.credential_lease_ms = r.u64be();
-    LM_TRY(r.finish());
-    if (!op) {
-        return Status::BadFrame;
-    }
-    out = m;
-    return Status::Ok;
-}
-Status decode(ByteView body, LeaseRec &out) {
-    Reader r{body};
-    LeaseRec m;
-    const bool op = op_is(r, Op::Lease);
-    const uint8_t st = r.u8();
-    m.push = (st & 0x80) != 0;
-    m.status = static_cast<Status>(st & 0x7F);
-    m.term = r.u32be();
-    m.revision = r.u32be();
-    m.lease_ms = r.u32be();
-    m.expected_revision = r.u32be();
-    const bool path = get_path(r, m.n, m.path, m.status == Status::Ok ? 2 : 0);
-    LM_TRY(r.finish());
-    if (!op || !path) {
-        return Status::BadFrame;
-    }
-    out = m;
-    return Status::Ok;
-}
-Status decode(ByteView body, Query &out) {
-    Reader r{body};
-    Query m;
-    const bool op = op_is(r, Op::Query);
-    m.qid = r.u8();
-    r.copy_to(m.dest.bytes);
-    m.known_revision = r.u32be();
-    LM_TRY(r.finish());
-    if (!op || m.dest.is_zero()) {
-        return Status::BadFrame;
-    }
-    out = m;
-    return Status::Ok;
-}
-Status decode(ByteView body, Answer &out) {
-    Reader r{body};
-    Answer m;
-    const bool op = op_is(r, Op::Answer);
-    m.qid = r.u8();
-    m.status = static_cast<Status>(r.u8());
-    m.dest = r.u16be();
-    m.revision = r.u32be();
-    const bool path = get_path(r, m.n, m.path, m.status == Status::Ok ? 1 : 0);
-    LM_TRY(r.finish());
-    if (!op || !path) {
-        return Status::BadFrame;
-    }
-    out = m;
-    return Status::Ok;
 }
 
 } // namespace lm::route

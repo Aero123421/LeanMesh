@@ -6,10 +6,10 @@
 
 namespace lm::root {
 Status Groups::set(const group::SetRequest &rq) {
-    Ledger &led = engine_.ledger();
     if (engine_.config().role != Role::Root) {
-        return Status::RoleNotAllowed;
+        return Status::RoleNotAllowed; // (and a node of another role holds no ledger: P8)
     }
+    Ledger &led = engine_.ledger();
     if (!led.ready()) {
         return Status::Busy; // the ledger is still loading: no member is known yet
     }

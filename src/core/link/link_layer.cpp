@@ -140,7 +140,7 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
 
 // The minimum checks of docs/06 §6 ("AEAD成功と宛先/長さ検査前にwindowを消費しない"), SEC-D11. The frame
 // decoder already fixed the lengths of every kind. DATA must also be a routed body whose header names this
-// node as the next hop of this very sender in the current term (the forwarding decision of docs/04 §4 the
+// node as the next hop of this very sender (the forwarding decision of docs/04 §4 the
 // delivery layer takes again), with an end record a relay may carry or this node may open; a HOP_ACK must
 // parse. The bodies of ROUTE / CONTROL / POWER are their consumers' formats and are not judged here.
 bool LinkLayer::admissible(const Neighbor &n, wire::FrameKind kind, ByteView plain) const {
@@ -159,8 +159,7 @@ bool LinkLayer::admissible(const Neighbor &n, wire::FrameKind kind, ByteView pla
     if (wire::decode_route(plain, h, record) != Status::Ok) {
         return false;
     }
-    const member::MemberCredential &self = identity_.member();
-    const route::Decision d = route::decide_forward(h, self.address, n.address, self.root_term);
+    const route::Decision d = route::decide_forward(h, identity_.member().address, n.address);
     if (d.action == route::Action::Drop) {
         return false;
     }
@@ -300,6 +299,13 @@ Status LinkLayer::connect(const MacAddr &mac, MonoTime now, bool replace) {
     return exchange_.start_initiator(mac, now);
 }
 
+Status LinkLayer::send_sealed(const DeviceId &peer, const MacAddr &mac, wire::FrameKind kind, ByteView plain,
+                              uint32_t tag, MonoTime now) {
+    SealedFrame f;
+    LM_TRY(seal(peer, kind, plain, f, now));
+    return shared_.engine.transmit(mac, f.view(), tag, now);
+}
+
 Status LinkLayer::seal(const DeviceId &peer, wire::FrameKind kind, ByteView plain, SealedFrame &out,
                        MonoTime now) {
     if (!is_session_kind(kind)) {
@@ -376,7 +382,12 @@ void LinkLayer::revalidate(const RootTimeBound &bound, MonoTime now) {
             nb.cur.valid_until = earliest(nb.cur.valid_until, member::lease_local_end(bound, nb.lease, now));
             break;
         case DeadlineCheck::Uncertain:
-            nb.lease_uncertain = true;
+            // ARCH2-D1: a lease of an earlier term cannot be placed on the new clock. One that was proven under the old
+            // clock keeps the local end it was capped to then (valid_until, local monotonic time with the drift
+            // margin): a root restart does not interrupt links whose leases were proven. Anything else is unprovable.
+            if (!(nb.lease.term < bound.term)) {
+                nb.lease_uncertain = true;
+            }
             break;
         }
     });

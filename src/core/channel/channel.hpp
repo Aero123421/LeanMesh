@@ -86,6 +86,7 @@ class Channel {
     // ---- hooks from the mesh module ----
     void on_ready(MonoTime now); // an approved path with a lease exists (again)
     void on_lost(MonoTime now);  // the path is gone
+    void on_term(MonoTime now);  // ARCH2-D1: the node follows a newer root term (a committed plan of the old one switches)
     void on_link_sample(bool ok, MonoTime now); // one RF attempt towards the parent
     // Planned off-channel time (guard of a switch, survey visit): failures in it are not RF loss.
     [[nodiscard]] bool planned_gap(MonoTime now) const { return now < gap_end_; }
@@ -125,13 +126,6 @@ class Channel {
     enum class Sw : uint8_t { None, Hold, Switch, Release };
     enum class Sv : uint8_t { None, Wait, Prep, Away };
 
-    struct Snap { // what the channel record holds
-        Ph phase = Ph::Idle;
-        uint8_t cur = 0;
-        ChannelEpoch epoch;
-        Plan plan;
-    };
-
     [[nodiscard]] bool is_root() const;
     [[nodiscard]] RootTerm term() const;
     [[nodiscard]] uint16_t allowed_mask() const;
@@ -142,7 +136,10 @@ class Channel {
 
     // persistence (one job at a time, the identity's lent record memory)
     void kick(MonoTime now);
-    [[nodiscard]] Status begin_job(Job kind, const Snap *snap, After after, MonoTime now);
+    // Load, or Persist of the record (version | phase | current channel | epoch | plan | root extras) with `phase`
+    // and `plan` next to the live channel and epoch.
+    [[nodiscard]] Status begin_job(Job kind, Ph phase, const Plan &plan, After after, MonoTime now);
+    [[nodiscard]] bool adopt_record(Reader &rd);
     void loaded_ok(Status s, MonoTime now);
     void persisted(Status s, MonoTime now);
 

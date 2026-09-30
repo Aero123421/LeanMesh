@@ -196,8 +196,8 @@ LM_TEST("S02 session context binds full identities, generations and credential h
     ctx.membership_r = MembershipGen{1};
     LM_CHECK_OK(sec::sha256(ByteView{n.kits[1].member_cose.data(), n.kits[1].member_cose.size()},
                             ctx.credential_hash_i));
-    LM_CHECK_OK(sec::sha256(ByteView{n.kits[0].member_cose.data(), n.kits[0].member_cose.size()},
-                            ctx.credential_hash_r));
+    // The root re-issues its own credential at every boot (ARCH2-D1: one root term per boot): its live one counts.
+    LM_CHECK_OK(sec::sha256(n.eng(0).identity().member_cose(), ctx.credential_hash_r));
     Sha256Digest expect{};
     LM_CHECK_OK(sec::context_hash(ctx, expect));
     LM_CHECK(n.nb(0, 1)->cur.ctx_hash == expect);
@@ -325,9 +325,9 @@ namespace {
 std::vector<Bytes> cred_i_frames(const fleet::NodeKit &kit, const DomainId &domain) {
     Bytes bundle(member::k_max_bundle);
     std::size_t blen = 0;
-    LM_CHECK_OK(member::bundle_encode(ByteView{kit.kit.device_cose.data(), kit.kit.device_cose.size()},
-                                      ByteView{kit.member_cose.data(), kit.member_cose.size()},
-                                      MutByteView{bundle.data(), bundle.size()}, blen));
+    LM_CHECK_OK(member::cred_pair_encode(ByteView{kit.kit.device_cose.data(), kit.kit.device_cose.size()},
+                                         ByteView{kit.member_cose.data(), kit.member_cose.size()},
+                                         member::k_max_member_cose, MutByteView{bundle.data(), bundle.size()}, blen));
     std::array<uint8_t, 16> xid{};
     xid.fill(0x77);
     std::vector<Bytes> frames;

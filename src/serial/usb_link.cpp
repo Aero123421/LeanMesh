@@ -44,26 +44,25 @@ Status UsbLink::configure(const UsbKit &kit) {
     if (phase_ != Phase::Idle) {
         return Status::Busy;
     }
-    LM_TRY(copy_bytes(MutByteView{ccs_}, kit.ccs));
-    ccs_len_ = kit.ccs.size();
+    if (kit.ccs.size() > sec::k_ccs_max_bytes) {
+        return Status::NoCapacity;
+    }
+    ccs_ = kit.ccs;
     key_ = kit.key;
     trust_ = kit.trust;
     self_ = kit.self;
     domain_ = kit.domain;
     paired_ = kit.paired;
-    // Own credential object: CBOR [device] (Host) or [device, delegation] (root).
-    wire::CborWriter w{MutByteView{own_cred_}};
+    // Own credential object CBOR [device] (Host) or [device, delegation] (root), written by stage_cred().
     const bool root = role_ == UsbRole::Root;
     if (root && kit.delegation_cose.empty()) {
         return Status::InvalidArgument;
     }
-    w.array(root ? 2 : 1);
-    w.bytes(kit.device_cose);
-    if (root) {
-        w.bytes(kit.delegation_cose);
+    own_dc_ = kit.device_cose;
+    own_deleg_ = root ? kit.delegation_cose : ByteView{};
+    if (cred_size() > k_cred_bytes) {
+        return Status::NoCapacity;
     }
-    LM_TRY(w.finish());
-    own_cred_len_ = w.size();
     LM_TRY(sec::sha256(kit.device_cose, own_hash_));
     configured_ = true;
     return Status::Ok;

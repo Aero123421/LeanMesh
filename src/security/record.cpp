@@ -67,6 +67,54 @@ void wipe_direction(DirectionKey &k) {
     secure_zero(MutByteView{k.prefix.data(), k.prefix.size()});
 }
 
+// Multi-part AES-GCM over `buf` (payload `len` bytes, then the 16-byte tag) in place, through a 64 B bounce buffer:
+// MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS forbids overlapping input and output. Chunks are whole AES blocks, so one update
+// never outputs more than it consumed: the bytes written back (`w`) never overtake those still to be read. Encrypting
+// writes the tag after the payload; decrypting verifies the tag found there. The key is the caller's (one-shot).
+psa_status_t gcm_in_place(psa_key_id_t key, bool encrypt, const std::array<uint8_t, k_nonce_bytes> &nonce, ByteView aad,
+                          uint8_t *buf, std::size_t len, std::size_t &w) {
+    std::array<uint8_t, 64 + 16> bounce{};
+    w = 0;
+    psa_aead_operation_t op = PSA_AEAD_OPERATION_INIT;
+    psa_status_t st = encrypt ? psa_aead_encrypt_setup(&op, key, PSA_ALG_GCM) : psa_aead_decrypt_setup(&op, key, PSA_ALG_GCM);
+    if (st == PSA_SUCCESS) {
+        st = psa_aead_set_nonce(&op, nonce.data(), nonce.size());
+    }
+    if (st == PSA_SUCCESS) {
+        st = psa_aead_update_ad(&op, aad.data(), aad.size());
+    }
+    for (std::size_t r = 0; st == PSA_SUCCESS && r < len; r += 64) {
+        const std::size_t n = len - r < 64 ? len - r : 64;
+        std::size_t out = 0;
+        st = psa_aead_update(&op, buf + r, n, bounce.data(), bounce.size(), &out);
+        if (st == PSA_SUCCESS && w + out <= r + n) {
+            std::memcpy(buf + w, bounce.data(), out);
+            w += out;
+        } else if (st == PSA_SUCCESS) {
+            st = PSA_ERROR_CORRUPTION_DETECTED; // would overwrite unread input: never
+        }
+    }
+    if (st == PSA_SUCCESS) {
+        std::array<uint8_t, k_aead_tag_bytes> tag{};
+        std::size_t out = 0;
+        std::size_t tag_len = k_aead_tag_bytes;
+        st = encrypt ? psa_aead_finish(&op, bounce.data(), bounce.size(), &out, tag.data(), tag.size(), &tag_len)
+                     : psa_aead_verify(&op, bounce.data(), bounce.size(), &out, buf + len, k_aead_tag_bytes);
+        if (st == PSA_SUCCESS && w + out <= len && tag_len == k_aead_tag_bytes) {
+            std::memcpy(buf + w, bounce.data(), out);
+            w += out;
+            if (encrypt) {
+                std::memcpy(buf + len, tag.data(), k_aead_tag_bytes);
+            }
+        } else if (st == PSA_SUCCESS) {
+            st = PSA_ERROR_CORRUPTION_DETECTED;
+        }
+    }
+    psa_aead_abort(&op);
+    secure_zero(MutByteView{bounce.data(), bounce.size()});
+    return st;
+}
+
 } // namespace
 
 Status context_encode(const SessionContext &c, MutByteView out, std::size_t &len) {
@@ -295,45 +343,10 @@ Status RecordSession::seal_in_place(uint64_t counter, ByteView aad, MutByteView 
     tx_sealed_ = counter;
     OneShotKey key{keys_.tx, PSA_KEY_USAGE_ENCRYPT};
     LM_TRY(from_psa(key.status()));
-    const auto nonce = make_nonce(keys_.tx, counter);
     const std::size_t pt_len = buf.size() - k_aead_tag_bytes;
-    std::array<uint8_t, 64 + 16> bounce{};
     std::size_t w = 0;
-    psa_aead_operation_t op = PSA_AEAD_OPERATION_INIT;
-    psa_status_t st = psa_aead_encrypt_setup(&op, key.id(), PSA_ALG_GCM);
-    if (st == PSA_SUCCESS) {
-        st = psa_aead_set_nonce(&op, nonce.data(), nonce.size());
-    }
-    if (st == PSA_SUCCESS) {
-        st = psa_aead_update_ad(&op, aad.data(), aad.size());
-    }
-    for (std::size_t r = 0; st == PSA_SUCCESS && r < pt_len; r += 64) {
-        const std::size_t n = pt_len - r < 64 ? pt_len - r : 64;
-        std::size_t out = 0;
-        st = psa_aead_update(&op, buf.data() + r, n, bounce.data(), bounce.size(), &out);
-        if (st == PSA_SUCCESS && w + out <= r + n) {
-            std::memcpy(buf.data() + w, bounce.data(), out); // never behind unread plaintext
-            w += out;
-        } else if (st == PSA_SUCCESS) {
-            st = PSA_ERROR_CORRUPTION_DETECTED;
-        }
-    }
-    if (st == PSA_SUCCESS) {
-        std::array<uint8_t, k_aead_tag_bytes> tag{};
-        std::size_t out = 0;
-        std::size_t tag_len = 0;
-        st = psa_aead_finish(&op, bounce.data(), bounce.size(), &out, tag.data(), tag.size(), &tag_len);
-        if (st == PSA_SUCCESS && w + out == pt_len && tag_len == k_aead_tag_bytes) {
-            std::memcpy(buf.data() + w, bounce.data(), out);
-            std::memcpy(buf.data() + pt_len, tag.data(), k_aead_tag_bytes);
-            w += out;
-        } else if (st == PSA_SUCCESS) {
-            st = PSA_ERROR_CORRUPTION_DETECTED;
-        }
-    }
-    psa_aead_abort(&op);
-    secure_zero(MutByteView{bounce.data(), bounce.size()});
-    if (key.destroy() != PSA_SUCCESS) {
+    psa_status_t st = gcm_in_place(key.id(), true, make_nonce(keys_.tx, counter), aad, buf.data(), pt_len, w);
+    if (key.destroy() != PSA_SUCCESS || (st == PSA_SUCCESS && w != pt_len)) {
         st = PSA_ERROR_CORRUPTION_DETECTED;
     }
     if (st != PSA_SUCCESS) {
@@ -343,23 +356,27 @@ Status RecordSession::seal_in_place(uint64_t counter, ByteView aad, MutByteView 
     return Status::Ok;
 }
 
-Status RecordSession::open(uint64_t counter, ByteView aad, ByteView ciphertext,
-                           MutByteView plaintext, std::size_t &plaintext_len,
-                           ReplayVerdict &verdict) {
-    plaintext_len = 0;
+// Before any crypto (open and open_in_place): the replay window's verdict, the key's record limit, and an old packet
+// that is not worth an AEAD. Ok = go on and decrypt.
+Status RecordSession::open_precheck(uint64_t counter, std::size_t sealed_len, ReplayVerdict &verdict) const {
     verdict = window_.check(counter);
     if (!active_) {
         return Status::RecoveryRequired;
     }
-    if (verdict == ReplayVerdict::Reserved || ciphertext.size() < k_aead_tag_bytes) {
+    if (verdict == ReplayVerdict::Reserved || sealed_len < k_aead_tag_bytes) {
         return Status::BadFrame;
     }
     if (counter > k_max_records_per_key) {
         return Status::SessionRefreshRequired;
     }
-    if (verdict == ReplayVerdict::TooOld) {
-        return Status::Replay; // dropped before any crypto: an old packet is not worth an AEAD
-    }
+    return verdict == ReplayVerdict::TooOld ? Status::Replay : Status::Ok;
+}
+
+Status RecordSession::open(uint64_t counter, ByteView aad, ByteView ciphertext,
+                           MutByteView plaintext, std::size_t &plaintext_len,
+                           ReplayVerdict &verdict) {
+    plaintext_len = 0;
+    LM_TRY(open_precheck(counter, ciphertext.size(), verdict));
     if (plaintext.size() < ciphertext.size() - k_aead_tag_bytes) {
         return Status::BufferTooSmall;
     }
@@ -386,59 +403,12 @@ Status RecordSession::open(uint64_t counter, ByteView aad, ByteView ciphertext,
 Status RecordSession::open_in_place(uint64_t counter, ByteView aad, MutByteView sealed,
                                     std::size_t &plaintext_len, ReplayVerdict &verdict) {
     plaintext_len = 0;
-    verdict = window_.check(counter);
-    if (!active_) {
-        return Status::RecoveryRequired;
-    }
-    if (verdict == ReplayVerdict::Reserved || sealed.size() < k_aead_tag_bytes) {
-        return Status::BadFrame;
-    }
-    if (counter > k_max_records_per_key) {
-        return Status::SessionRefreshRequired;
-    }
-    if (verdict == ReplayVerdict::TooOld) {
-        return Status::Replay; // dropped before any crypto: an old packet is not worth an AEAD
-    }
+    LM_TRY(open_precheck(counter, sealed.size(), verdict));
     OneShotKey key{keys_.rx, PSA_KEY_USAGE_DECRYPT};
     LM_TRY(from_psa(key.status()));
-    const auto nonce = make_nonce(keys_.rx, counter);
     const std::size_t ct_len = sealed.size() - k_aead_tag_bytes;
-    // Chunks are whole AES blocks, so one update never outputs more than it consumed: the plaintext
-    // written back (w) never overtakes the ciphertext still to be read (r).
-    std::array<uint8_t, 64 + 16> bounce{};
     std::size_t w = 0;
-    psa_aead_operation_t op = PSA_AEAD_OPERATION_INIT;
-    psa_status_t st = psa_aead_decrypt_setup(&op, key.id(), PSA_ALG_GCM);
-    if (st == PSA_SUCCESS) {
-        st = psa_aead_set_nonce(&op, nonce.data(), nonce.size());
-    }
-    if (st == PSA_SUCCESS) {
-        st = psa_aead_update_ad(&op, aad.data(), aad.size());
-    }
-    for (std::size_t r = 0; st == PSA_SUCCESS && r < ct_len; r += 64) {
-        const std::size_t n = ct_len - r < 64 ? ct_len - r : 64;
-        std::size_t out = 0;
-        st = psa_aead_update(&op, sealed.data() + r, n, bounce.data(), bounce.size(), &out);
-        if (st == PSA_SUCCESS && w + out <= r + n) {
-            std::memcpy(sealed.data() + w, bounce.data(), out);
-            w += out;
-        } else if (st == PSA_SUCCESS) {
-            st = PSA_ERROR_CORRUPTION_DETECTED; // would overwrite unread ciphertext: never
-        }
-    }
-    if (st == PSA_SUCCESS) {
-        std::size_t out = 0;
-        st = psa_aead_verify(&op, bounce.data(), bounce.size(), &out, sealed.data() + ct_len,
-                             k_aead_tag_bytes);
-        if (st == PSA_SUCCESS && w + out <= ct_len) {
-            std::memcpy(sealed.data() + w, bounce.data(), out);
-            w += out;
-        } else if (st == PSA_SUCCESS) {
-            st = PSA_ERROR_CORRUPTION_DETECTED;
-        }
-    }
-    psa_aead_abort(&op);
-    secure_zero(MutByteView{bounce.data(), bounce.size()});
+    psa_status_t st = gcm_in_place(key.id(), false, make_nonce(keys_.rx, counter), aad, sealed.data(), ct_len, w);
     if (key.destroy() != PSA_SUCCESS) {
         st = PSA_ERROR_CORRUPTION_DETECTED; // the key is still live: do not report an opened record
     }

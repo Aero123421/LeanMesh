@@ -66,6 +66,11 @@ add_library(lm_sim STATIC ${LM_PORT_SIM_SOURCES})
 target_compile_options(lm_sim PRIVATE ${LM_CXX_WARNINGS} -fno-exceptions -fno-rtti)
 target_link_libraries(lm_sim PUBLIC lm_sdk)
 
+# Example applications (docs/17 G6): public C API only. Native tests and meshsim run them; no firmware links them.
+add_library(lm_example_apps STATIC examples/apps/equipment_control.c examples/apps/battery_measurement.c)
+target_include_directories(lm_example_apps PUBLIC api examples/apps)
+target_compile_options(lm_example_apps PRIVATE -Wall -Wextra -Werror)
+
 # One source per line: slices append their cmd_<slice>.cpp here.
 add_executable(meshsim
     tools/meshsim/main.cpp
@@ -83,10 +88,11 @@ add_executable(meshsim
     tools/meshsim/cmd_channel.cpp
     tools/meshsim/cmd_diag.cpp
     tools/meshsim/cmd_lifecycle.cpp
+    tools/meshsim/cmd_apps.cpp
     tools/meshsim/topology.cpp
     tools/meshsim/pty.cpp)
 target_compile_options(meshsim PRIVATE ${LM_CXX_WARNINGS})
-target_link_libraries(meshsim PRIVATE lm_sim lm_fleet)
+target_link_libraries(meshsim PRIVATE lm_sim lm_fleet lm_example_apps)
 
 # ---- Host native helper (S10): the USB serial session for the Python Host (ctypes) ----
 # Same security/serial sources as the firmware; no first-party code is duplicated in Python.

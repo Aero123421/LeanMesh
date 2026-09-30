@@ -7,16 +7,12 @@
 
 extern "C" lm_status_t lm_channel_request(lm_context_t *ctx, uint32_t action, uint64_t expected_revision,
                                           lm_operation_id_t *operation) {
-    if (ctx == nullptr || ctx->magic != lm_context::k_magic || operation == nullptr || action > LM_CHANNEL_RECALCULATE ||
+    if (!lm::capi::valid_ctx(ctx) || operation == nullptr || action > LM_CHANNEL_RECALCULATE ||
         expected_revision > lm::k_u63_max) {
         return lm::to_abi(lm::Status::InvalidArgument);
     }
     const std::array<uint64_t, 2> rq{action, expected_revision};
-    lm::Command cmd;
-    cmd.kind = lm::CommandKind::ChannelRequest;
-    cmd.request = &rq;
-    cmd.request_size = sizeof(rq);
-    const lm::Reply r = ctx->owner.call(cmd);
+    const lm::Reply r = lm::capi::call(ctx, lm::CommandKind::ChannelRequest, &rq, sizeof(rq));
     if (r.status == lm::Status::Ok) {
         *operation = r.operation_id; // 0: applied on acceptance (no asynchronous operation follows)
     }

@@ -13,6 +13,7 @@ send/join/leave/transfer/group/policy/channel/objectの受付はoperation_id64�
 
 ## 4. send
 requestにdestination（DeviceId/group/root app）、port、delivery/storage/priority/queue_mode、coalesce_key64、deadlineを指定。short addressをアプリの永続宛先にしない。最大512B、object API有効時4096B。
+`lm_root_time_get(ctx,&t)`（ARCH2）：Nodeのroot時計推定。現在root_termの時計が`[earliest_root_ms, latest_root_ms]`にある。`valid=0`は現在termの推定が無い（期限付き送信はTIME_UNCERTAIN）。期限は`root_term`と`expires_root_ms`（例：earliest_root_ms + 有効時間。延長側に丸めない）。root再起動でtermが変わると旧termの期限は無効（08 §5）。
 DURABLEは予めjournal capacityを予約。APPLIEDは受信アプリの`lm_report_application_result`を待つ。サンプルは`examples/application.c`。副作用を起こす前にアプリpayload内の世代番号を検査し、自分の保存/実機ACKが揃ってからresultを返す。
 
 ## 5. lifecycle

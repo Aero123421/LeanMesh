@@ -2,7 +2,7 @@
 ## 実装仕様書セット v0.2 / 2026-09-28
 
 **LeanMesh は本資料内の仮称。既存RouteLoomの新しい正式名称・公開リリースではありません。**
-本ZIPは、新規・非Wire互換実装のための設計基準、公開契約、試験仕様です。動作するMesh SDK、ESP32 firmware、FastAPI製品サービスは含みません。Cヘッダーはインターフェース契約、Pythonは仕様検査用です。
+本リポジトリは、新規・非Wire互換実装のための設計基準、公開契約、試験仕様に加え、`feat/sdk-impl` ブランチにソフトウェア実装（core、ESP-IDF port、Host、シミュレータ）を含みます。**実機で認定された製品SDK・firmware・FastAPI製品サービスではありません**（下の「実装」を参照）。
 
 ### 何を作るか
 ESP32-S3 / C3 / C5 / C6が混在できる、ESP-NOW + 2.4GHz Wi-Fi LRの汎用メッセージSDK。親機から20無線hopの端末へ到達し、自動経路修復・チャネル最適化・安全なJoin/移設・配送証拠・省電力leafを提供します。HostはPython/FastAPIの1サービス。KGuardは適用例であり、トイレ、校正、安全ルール、Cloud契約をcoreへ入れません。
@@ -42,6 +42,12 @@ python -m pip install -r scripts/requirements-check.txt
 python scripts/check_spec.py
 ```
 [検査結果](evidence/VALIDATION.json)に今回実行した検査と未実施項目を記録します。インターネットから製品SDKを取り寄せたり、実機を変更したりするスクリプトではありません。
+
+### 実装
+`feat/sdk-impl` には、仕様に沿った実装があります。使い方は **[docs/sdk/](docs/sdk/README.md)**（[はじめに](docs/sdk/getting-started.md)、[Device API](docs/sdk/device-api.md)、[Host](docs/sdk/host.md)、[構造](docs/sdk/architecture.md)、[試験](docs/sdk/testing.md)）。
+- 実装済み・検証済みなのは**ソフトウェアとシミュレーションの範囲**です: native ctest（ASan/UBSan含む）、Host pytest、meshsim上のE2E（21 node / 20 hop）、4 SoC（S3/C3/C5/C6）のESP-IDF build。
+- **未検証**: RF、実機（HIL）、消費電力、実電源断、鍵のcustody。ROOTのESP32-C3搭載は実機のheap測定まで未対応（[ADR-002](decisions/ADR-002-budget-status.md)）。量産用provisioningツールはありません。
+- 実装の判断は[実装ガイド](docs/IMPLEMENTATION.md)、未検証の一覧は[試験](docs/sdk/testing.md)の§5。仕様検査（下）は引き続き仕様側のG0のみです。
 
 ### 最初の実装着手
 [実装計画](docs/17-implementation-plan.md)のT01から開始します。最初はparser・保存・署名検査・1hopの縦経路を実装し、その後root深度20と自動channelを同じengine上で認定します。初期段階の1hop動作を完成版としてリリースする計画ではありません。

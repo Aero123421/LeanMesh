@@ -18,7 +18,7 @@ bool valid_channel(uint8_t c) { return c >= 1 && c <= 13; }
 } // namespace
 
 bool Channel::is_root() const { return k_root_capable && engine_.config().role == lm::Role::Root; }
-RootTerm Channel::term() const { return engine_.identity().member().root_term; }
+RootTerm Channel::term() const { return engine_.identity().term(); }
 uint16_t Channel::allowed_mask() const { return engine_.config().rf.allowed_channels_mask; }
 
 uint16_t Channel::jitter(uint16_t modulus) {
@@ -66,12 +66,12 @@ void Channel::on_identity_ready(MonoTime now) {
     if (!enabled_ || job_ != Job::None) {
         return;
     }
-    if (begin_job(Job::Load, nullptr, After::None, now) != Status::Ok) {
+    if (begin_job(Job::Load, Ph::Idle, plan_, After::None, now) != Status::Ok) {
         retry_at_ = now + k_retry;
     }
 }
 
-Status Channel::begin_job(Job kind, const Snap *snap, After after, MonoTime now) {
+Status Channel::begin_job(Job kind, Ph phase, const Plan &plan, After after, MonoTime now) {
     (void)now;
     if (job_ != Job::None || cancelled_) {
         return Status::Busy;
@@ -80,31 +80,28 @@ Status Channel::begin_job(Job kind, const Snap *snap, After after, MonoTime now)
     if (rec_ == nullptr) {
         return Status::Busy;
     }
-    rec_->id = store::rec::channel_plan;
-    rec_->op = kind == Job::Load ? store::RecordJob::Op::Load : store::RecordJob::Op::Commit;
+    rec_->arm(kind == Job::Load ? store::RecordJob::Op::Load : store::RecordJob::Op::Commit, store::rec::channel_plan);
     if (kind == Job::Persist) {
         Writer w{MutByteView{rec_->payload}};
         w.u8(k_rec_version);
-        w.u8(static_cast<uint8_t>(snap->phase));
-        w.u8(snap->cur);
-        w.u32be(snap->epoch.value());
-        put_plan(w, snap->plan);
+        w.u8(static_cast<uint8_t>(phase));
+        w.u8(cur_);
+        w.u32be(epoch_.value());
+        put_plan(w, plan);
         if (is_root()) {
             engine_.coordinator().save(w);
         }
         if (!w.ok()) {
-            engine_.identity().return_record();
-            rec_ = nullptr;
+            engine_.identity().return_record(rec_);
             return Status::NoCapacity;
         }
-        rec_->state = static_cast<uint8_t>(snap->phase);
+        rec_->state = static_cast<uint8_t>(phase);
         rec_->payload_len = static_cast<uint32_t>(w.size());
     }
     job_slot_ = Handle{0, ++job_gen_};
     const Status st = engine_.submit_job(JobOwner::Channel, job_slot_, JobClass::Flash, &store::record_job, rec_);
     if (st != Status::Ok) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         return st;
     }
     job_ = kind;
@@ -116,12 +113,7 @@ void Channel::kick(MonoTime now) {
     if (!dirty_ || !loaded_ || job_ != Job::None) {
         return;
     }
-    Snap s;
-    s.phase = phase_;
-    s.cur = cur_;
-    s.epoch = epoch_;
-    s.plan = plan_;
-    if (begin_job(Job::Persist, &s, After::None, now) == Status::Ok) {
+    if (begin_job(Job::Persist, phase_, plan_, After::None, now) == Status::Ok) {
         dirty_ = false;
     } else {
         retry_at_ = now + k_retry;
@@ -133,8 +125,7 @@ void Channel::on_job_done(Handle slot, Status s, MonoTime now) {
     job_ = Job::None;
     if (cancelled_) { // stop() kept the borrowed memory reserved for this job: the late result is discarded
         cancelled_ = false;
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         return;
     }
     if (j == Job::None || slot != job_slot_) {
@@ -147,28 +138,27 @@ void Channel::on_job_done(Handle slot, Status s, MonoTime now) {
     }
 }
 
-// Parses the record memory into the live state (used by load and by a successful persist).
-static bool parse_record(const store::RecordJob &r, uint8_t &phase, uint8_t &cur, ChannelEpoch &epoch, Plan &plan,
-                         Reader &rd) {
+// Parses the record memory into the live state (used by load and by a successful persist): only a complete, valid
+// record is adopted; `rd` is left behind the plan (the root's extras follow).
+bool Channel::adopt_record(Reader &rd) {
     const uint8_t ver = rd.u8();
-    phase = rd.u8();
-    cur = rd.u8();
-    epoch = ChannelEpoch{rd.u32be()};
-    plan = get_plan(rd);
-    (void)r;
-    return rd.ok() && ver == k_rec_version && phase <= 2 && valid_channel(cur) && (phase == 0 || valid_plan(plan));
+    const uint8_t phase = rd.u8();
+    const uint8_t cur = rd.u8();
+    const ChannelEpoch epoch{rd.u32be()};
+    const Plan plan = get_plan(rd);
+    if (!rd.ok() || ver != k_rec_version || phase > 2 || !valid_channel(cur) || (phase != 0 && !valid_plan(plan))) {
+        return false;
+    }
+    phase_ = static_cast<Ph>(phase);
+    cur_ = cur;
+    epoch_ = epoch;
+    plan_ = plan;
+    return true;
 }
 
 void Channel::loaded_ok(Status s, MonoTime now) {
-    uint8_t phase = 0, cur = 0;
-    ChannelEpoch epoch;
-    Plan plan;
     Reader rd{ByteView{rec_->payload.data(), s == Status::Ok ? rec_->payload_len : 0}};
-    if (s == Status::Ok && parse_record(*rec_, phase, cur, epoch, plan, rd)) {
-        phase_ = static_cast<Ph>(phase);
-        cur_ = cur;
-        epoch_ = epoch;
-        plan_ = plan;
+    if (s == Status::Ok && adopt_record(rd)) {
         if (is_root()) {
             engine_.coordinator().restore(rd, phase_ == Ph::Committed ? &plan_ : nullptr);
         }
@@ -179,8 +169,7 @@ void Channel::loaded_ok(Status s, MonoTime now) {
         cur_ = engine_.channel();
         engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(s == Status::Ok ? Status::RecoveryRequired : s), 0, nullptr);
     }
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_);
     loaded_ = true;
     if (phase_ == Ph::Committed) {
         apply_target(now); // a committed plan is followed even when nobody knows the schedule any more
@@ -198,26 +187,16 @@ void Channel::persisted(Status s, MonoTime now) {
     const After a = after_;
     after_ = After::None;
     if (s != Status::Ok) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         ++stats_.refused;
         // Nothing was stored, so no receipt claims it: the root asks again (and the plan times out there).
         dirty_ = a == After::None; // a failed state write of our own is tried again
         retry_at_ = now + Duration::from_s(1);
         return;
     }
-    uint8_t phase = 0, cur = 0;
-    ChannelEpoch epoch;
-    Plan plan;
     Reader rd{ByteView{rec_->payload.data(), rec_->payload_len}};
-    if (parse_record(*rec_, phase, cur, epoch, plan, rd)) { // adopt what is now durable
-        phase_ = static_cast<Ph>(phase);
-        cur_ = cur;
-        epoch_ = epoch;
-        plan_ = plan;
-    }
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    (void)adopt_record(rd); // adopt what is now durable
+    engine_.identity().return_record(rec_);
     engine_.power().note_state_change();
     if (a == After::Prepared) {
         ++stats_.prepared;
@@ -259,10 +238,7 @@ void Channel::on_plan(const PlanRec &rec, bool local, MonoTime now) {
                 reply(rec.plan, Evidence::Refused, Status::Conflict, local, now);
                 break;
             }
-            Snap s;
-            s.cur = cur_;
-            s.epoch = epoch_;
-            (void)begin_job(Job::Persist, &s, After::None, now);
+            (void)begin_job(Job::Persist, Ph::Idle, Plan{}, After::None, now);
         }
         break;
     }
@@ -314,12 +290,7 @@ void Channel::prepare(const Plan &p, bool local, MonoTime now) {
         why = Status::Expired;
     }
     if (why == Status::Ok) {
-        Snap s;
-        s.phase = Ph::Prepared;
-        s.cur = cur_;
-        s.epoch = epoch_;
-        s.plan = p;
-        why = begin_job(Job::Persist, &s, After::Prepared, now);
+        why = begin_job(Job::Persist, Ph::Prepared, p, After::Prepared, now);
     }
     if (why != Status::Ok) {
         ++stats_.refused;
@@ -331,16 +302,19 @@ void Channel::commit(const Plan &p, bool local, MonoTime now) {
     Status why = Status::Ok;
     const bool held = phase_ != Ph::Idle && plan_.id == p.id;
     const bool prepared = held && phase_ == Ph::Prepared && same_plan(plan_, p);
+    const bool done = phase_ == Ph::Idle && epoch_ == p.epoch && cur_ == p.new_ch && (plan_.id != p.id || same_plan(plan_, p));
     if (faulted_) {
         why = Status::RecoveryRequired;
-    } else if (p.term != term()) {
+    } else if (term() < p.term || (p.term < term() && !held && !done)) {
+        // A plan of an earlier term (the root committed it, then restarted, docs/05 §7) is completed only where it is
+        // held or done already; nobody new is dragged into it (ARCH2-D1).
         why = Status::NetworkMismatch;
     } else if (held && !same_plan(plan_, p)) {
         why = Status::Conflict; // same id, other channel / epoch / time: never matched by the id alone
     } else if (phase_ == Ph::Committed && plan_.id == p.id) {
         reply(p, Evidence::Stored, Status::Ok, local, now); // repeated COMMIT: stored already
         return;
-    } else if (phase_ == Ph::Idle && epoch_ == p.epoch && cur_ == p.new_ch && (plan_.id != p.id || same_plan(plan_, p))) {
+    } else if (done) {
         reply(p, Evidence::Applied, Status::Ok, local, now); // this plan is done here
         return;
     } else if (p.epoch <= epoch_ || phase_ == Ph::Committed) {
@@ -351,12 +325,7 @@ void Channel::commit(const Plan &p, bool local, MonoTime now) {
         why = Status::NotFound;
     }
     if (why == Status::Ok) {
-        Snap s;
-        s.phase = Ph::Committed;
-        s.cur = cur_;
-        s.epoch = epoch_;
-        s.plan = p;
-        why = begin_job(Job::Persist, &s, After::Stored, now);
+        why = begin_job(Job::Persist, Ph::Committed, p, After::Stored, now);
     }
     if (why != Status::Ok) {
         ++stats_.refused;
@@ -373,6 +342,10 @@ void Channel::arm_switch(MonoTime now) {
         return;
     }
     const RootTimeBound b = engine_.delivery().root_time(now);
+    if (b.valid && plan_.term < b.term) {
+        on_term(now); // its switch time is root time of a term that is over: the root switched when it restarted
+        return;
+    }
     if (!b.valid || b.term != plan_.term) {
         return; // waits for a clock: on_time_resp() arms it again
     }
@@ -434,6 +407,22 @@ void Channel::apply_target(MonoTime now) {
     if (is_root()) {
         engine_.coordinator().on_local_switch(now);
     }
+}
+
+// ARCH2-D1 (docs/05 §7 "root再起動は保存済みcommitted channelを先に適用してから新root_termを公開する"): the root applies a
+// committed plan when it restarts, before its new term exists. A plan of an earlier term held COMMITTED here therefore
+// switches now: its switch time is root time of the old clock, which nothing of the new term can place.
+void Channel::on_term(MonoTime now) {
+    if (!loaded_ || faulted_ || phase_ != Ph::Committed || !(plan_.term < term())) {
+        return;
+    }
+    sw_ = Sw::None;
+    sw_at_ = MonoTime::never();
+    apply_target(now);
+    engine_.power().note_state_change();
+    ++stats_.switched;
+    notify(0);
+    kick(now);
 }
 
 // ---- time ----------------------------------------------------------------------------------------------
@@ -908,9 +897,8 @@ void Channel::stop() {
     dwell_open_ = false;
     if (job_ != Job::None) {
         cancelled_ = true; // the worker may still write into the borrowed record memory (zombie rule)
-    } else if (rec_ != nullptr) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+    } else {
+        engine_.identity().return_record(rec_);
     }
 }
 

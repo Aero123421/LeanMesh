@@ -188,6 +188,7 @@ const Entry k_commands[] = {
     {"channel", cmd_channel},
     {"diag", cmd_diag},
     {"lc-object", cmd_lc_object},
+    {"app-equipment", cmd_app_equipment}, {"app-battery", cmd_app_battery},
 };
 
 } // namespace

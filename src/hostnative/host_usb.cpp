@@ -35,6 +35,9 @@ HostUsb::HostUsb(uint64_t boot_id)
 }
 
 Status HostUsb::load_kit(ByteView kit) {
+    if (link_.configured()) {
+        return Status::Busy; // one kit per adapter: the link views the bytes below (UsbKit)
+    }
     LM_TRY(wire::cbor_validate(kit));
     wire::CborReader r{kit};
     (void)r.array(4, 4);

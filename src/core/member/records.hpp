@@ -56,7 +56,7 @@ class LocalIdentity {
     LocalIdentity &operator=(const LocalIdentity &) = delete;
     ~LocalIdentity() { clear(); }
 
-    // Owner. Submits the load job (Busy while a cancelled job still owns the memory).
+    // Owner. Submits the load job (Busy while a cancelled load or a borrower's job still owns the record memory).
     [[nodiscard]] Status begin_load(Engine &engine);
     // Owner, for the completion of the load job (slot checked by the caller's Handle).
     void on_job_done(Status job_status, Handle slot);
@@ -71,6 +71,19 @@ class LocalIdentity {
     [[nodiscard]] bool is_member() const { return state_ == State::Ready && has_member_; }
     [[nodiscard]] Status member_status() const { return member_status_; }
 
+    // The root_term this node lives in (docs/04 §7): routes, route headers, registrations, the root clock and plans
+    // use it. A root publishes a new one at every boot (its own credential, re-issued one higher and committed by
+    // the load job before anything else runs). A member starts with its credential's term and follows the root's
+    // newer one only on the root's authenticated word (note_term); its credential catches up by the next renewal.
+    [[nodiscard]] RootTerm term() const { return term_; }
+    // Raises the term (never lowers it). True when it moved.
+    [[nodiscard]] bool note_term(RootTerm t) {
+        if (!is_member() || !(term_ < t)) {
+            return false;
+        }
+        term_ = t;
+        return true;
+    }
     [[nodiscard]] sec::KeyHandle key() const { return key_; }
     [[nodiscard]] const DeviceId &self() const { return dc_.device; }
     [[nodiscard]] const TrustAnchor &trust() const { return trust_; }
@@ -120,9 +133,12 @@ class LocalIdentity {
     // delegation, which is live now; root_delegation must be rewritten from the pending record.
     [[nodiscard]] bool delegation_behind() const { return delegation_behind_; }
     void delegation_repaired() { delegation_behind_ = false; }
-    // Borrow of the record I/O memory (docs/IMPLEMENTATION.md §13: no per-feature buffers). Null while
-    // the boot load owns it or another module holds it. The lender returns it after the job's
-    // completion was polled.
+    // Borrow of the record I/O memory, the node's one RecordJob (docs/IMPLEMENTATION.md §13: no per-feature
+    // buffers; ADR-002 P4: the journal borrows it too). Null while the boot load owns it or another module
+    // holds it. The borrower returns it after the job's completion was polled (a stopped engine's job keeps
+    // it until then: the next load waits, see begin_load). A borrower that got null either retries on a real
+    // deadline or asks record_free() in its deadline() and runs when the memory is back (Durable).
+    [[nodiscard]] bool record_free() const { return !job_in_flight_ && !rec_lent_; }
     [[nodiscard]] store::RecordJob *lend_record() {
         if (job_in_flight_ || rec_lent_) {
             return nullptr;
@@ -134,12 +150,20 @@ class LocalIdentity {
         sec::secure_zero(MutByteView{rec_.payload});
         rec_lent_ = false;
     }
+    // The same for a borrower that keeps the pointer: it is forgotten with the return (nothing held: nothing to do).
+    void return_record(store::RecordJob *&borrowed) {
+        if (borrowed != nullptr) {
+            borrowed = nullptr;
+            return_record();
+        }
+    }
 
   private:
     static Status load_job(port::JobEnv &env, void *arg);
     [[nodiscard]] Status run_load(port::JobEnv &env);
     [[nodiscard]] Status load_record(port::JobEnv &env, uint16_t id);
     [[nodiscard]] Status load_membership(port::JobEnv &env);
+    [[nodiscard]] Status advance_term(port::JobEnv &env);
     [[nodiscard]] Status load_pending_delegation(port::JobEnv &env, ByteView mc);
     void load_paired_host(port::JobEnv &env);
     void load_power(port::JobEnv &env);
@@ -163,6 +187,7 @@ class LocalIdentity {
     DeviceCredential dc_;
     RootDelegation delegation_;
     MemberCredential mc_;
+    RootTerm term_;
     Floors floors_;
     Floors::Entry own_floor_;
     std::array<uint8_t, sec::k_ccs_max_bytes> ccs_{};

@@ -14,6 +14,7 @@
 #include "core/codec.hpp"
 #include "core/wire/cbor.hpp"
 #include "fleet.hpp"
+#include "cut_matrix.hpp"
 #include "lmtest.hpp"
 #include "port/sim/sim_node.hpp"
 #include "port/sim/sim_provision.hpp"
@@ -46,12 +47,14 @@ lm_request_id_t rid(uint8_t seed) {
 }
 
 struct JNet {
-    // Node 0 is the root (preapproved by default), 1..n-1 are provisioned but unjoined devices.
-    explicit JNet(unsigned n, uint64_t seed = 31, bool boot_all = true)
+    // Node 0 is the root (preapproved by default), 1..n-1 are provisioned but unjoined devices. `channel`: the
+    // devices run the channel module (as firmware does), which borrows the record memory at boot too.
+    explicit JNet(unsigned n, uint64_t seed = 31, bool boot_all = true, bool channel = false)
         : net(seed), world(WorldOptions{seed, 0}), events(n), tickets(n) {
         for (unsigned i = 0; i < n; ++i) {
             NodeOptions o;
             o.role = i == 0 ? Role::Root : Role::Leaf;
+            o.channel = channel && i != 0;
             (void)world.add_node(o);
             kits.push_back(i == 0 ? net.make_root() : net.make_unjoined(i));
         }
@@ -549,6 +552,31 @@ LM_TEST("J04 external approval: pending without a decision, no automatic approve
     LM_CHECK_EQ(n.wait_operation(2, op3, 30000), static_cast<uint32_t>(Status::AuthRejected));
 }
 
+LM_TEST("LC05 sim: a pending external request, the device restarts (deep sleep) and asks again with the same request id: one approval, one reservation") {
+    JNet n(2);
+    n.eng(0).ledger().set_join_mode(root::JoinMode::External);
+    LM_CHECK_OK(n.install_ticket(1, n.ticket_for(1, 1)));
+    lm_status_t st = 0;
+    (void)n.join(1, 0x80, LM_JOIN_NEW, &st);
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    auto pending = [&] {
+        return n.ledger().txn_state(0) == root::Ledger::TxnState::Pending || n.ledger().txn_state(1) == root::Ledger::TxnState::Pending;
+    };
+    LM_CHECK(n.run_until(pending, 10000, 5000));
+    n.reboot(1); // the application sleeps: RAM is gone, the ticket and the identity are in Flash
+    n.run_ms(31000); // (a full handshake with one peer is allowed once per 30 s)
+    LM_CHECK_EQ(n.ledger().stats().prepared, 0ull); // nothing was reserved meanwhile
+    const uint64_t op = n.join(1, 0x80, LM_JOIN_NEW, &st, 30000);
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    LM_CHECK(n.run_until([&] { return n.membership(1).state == static_cast<uint32_t>(LM_APPROVAL_PENDING); }, 25000, 5000));
+    LM_CHECK(n.run_until(pending, 5000, 5000));
+    LM_CHECK_EQ(n.decide(0x80, true), Status::Ok);
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), 0u);
+    LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
+    LM_CHECK_EQ(n.ledger().stats().prepared, 1ull);
+    LM_CHECK_EQ(n.ledger().count(root::EntryState::Active), 1u);
+}
+
 LM_TEST("J02 policy: closed root offers nothing; preapproved refuses an unexpected device; foreign tickets never reach the root") {
     JNet n(2);
     const Bytes t = n.ticket_for(1, 1);
@@ -752,7 +780,6 @@ struct SweepOutcome {
     bool joined_after_cut = false;
 };
 
-const char *mode_name(CutMode m) { return m == CutMode::Before ? "before" : (m == CutMode::Torn ? "torn" : "after"); }
 
 // One join with a power cut at mutating store call `k` of node `target` (0 = root, 1 = device).
 SweepOutcome run_cut(unsigned target, uint64_t k, CutMode mode) {
@@ -847,28 +874,12 @@ SweepOutcome run_cut(unsigned target, uint64_t k, CutMode mode) {
 } // namespace
 
 LM_TEST("POWER-* join (sim): power cut before/torn/after every record commit of the device and of the root leaves only allowed states") {
-    unsigned iterations = 0;
-    unsigned recovered = 0;
-    for (const unsigned target : {1U, 0U}) { // device store, then root store
-        for (const CutMode mode : {CutMode::Before, CutMode::Torn, CutMode::After}) {
-            for (uint64_t k = 0; k < 40; ++k) {
-                const SweepOutcome r = run_cut(target, k, mode);
-                if (!r.fired) {
-                    break; // fewer store calls than k in a join: the sweep of this node/mode is complete
-                }
-                ++iterations;
-                recovered += r.joined_after_cut ? 1 : 0;
-                if (!r.ok) {
-                    std::fprintf(stderr, "  sweep node=%s mode=%s k=%llu: %s\n", target == 0 ? "root" : "device",
-                                 mode_name(mode), static_cast<unsigned long long>(k), r.why.c_str());
-                }
-                LM_CHECK(r.ok);
-            }
-        }
-    }
-    std::printf("  [measure] power-cut sweep: %u cut points, %u converged to ACTIVE+confirmed after the restart\n",
-                iterations, recovered);
-    LM_CHECK(iterations >= 30);
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "join", {{1, "device"}, {0, "root"}}, [](unsigned target, uint64_t k, CutMode mode) {
+            const SweepOutcome r = run_cut(target, k, mode);
+            return lmtest::CutRun{r.fired, r.ok, r.joined_after_cut, r.why};
+        });
+    LM_CHECK(t.points >= 30);
 }
 
 LM_TEST("S8 lm_stop in the middle of a join gives every borrowed buffer back; the restarted device joins") {
@@ -966,25 +977,12 @@ SweepOutcome run_leave_cut(unsigned target, uint64_t k, CutMode mode) {
 } // namespace
 
 LM_TEST("POWER-* leave (sim): power cut before/torn/after every record commit of a leave leaves only allowed states") {
-    unsigned iterations = 0;
-    for (const unsigned target : {1U, 0U}) {
-        for (const CutMode mode : {CutMode::Before, CutMode::Torn, CutMode::After}) {
-            for (uint64_t k = 0; k < 40; ++k) {
-                const SweepOutcome r = run_leave_cut(target, k, mode);
-                if (!r.fired) {
-                    break;
-                }
-                ++iterations;
-                if (!r.ok) {
-                    std::fprintf(stderr, "  leave sweep node=%s mode=%s k=%llu: %s\n", target == 0 ? "root" : "device",
-                                 mode_name(mode), static_cast<unsigned long long>(k), r.why.c_str());
-                }
-                LM_CHECK(r.ok);
-            }
-        }
-    }
-    std::printf("  [measure] leave power-cut sweep: %u cut points\n", iterations);
-    LM_CHECK(iterations >= 15); // SEC-D8: the device's leave is one record commit (tombstone + floor), was two
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "leave", {{1, "device"}, {0, "root"}}, [](unsigned target, uint64_t k, CutMode mode) {
+            const SweepOutcome r = run_leave_cut(target, k, mode);
+            return lmtest::CutRun{r.fired, r.ok, r.ok, r.why};
+        });
+    LM_CHECK(t.points >= 15); // SEC-D8: the device's leave is one record commit (tombstone + floor), was two
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1413,6 +1411,159 @@ LM_TEST("S8 root restart between PREPARED and STORED: the old reservation is abo
     LM_CHECK_EQ(n.membership(1).membership_generation, 2ull);
     LM_CHECK_EQ(n.ledger().find(n.id(1))->address.value(), 2u);
     LM_CHECK_EQ(n.ledger().count(root::EntryState::Active), 1u);
+}
+
+// ADR-002 P4: the node has one record memory (the identity's RecordJob). A root join transaction keeps the
+// credential buffer for its whole life, but takes the record memory only for its own record jobs: while it waits
+// for the device (PREPARE out), anything else may use it; when its commit is due and the memory is lent, the step
+// waits for it on the transaction's retry timer and completes once it is back. Before P4 the transaction held it
+// from the JoinRequest to the confirmation (minutes with a slow device), blocking every other record job.
+LM_TEST("P4 root: a join transaction lends the record memory out while it waits for the device; its commit waits for it") {
+    JNet n(2);
+    n.grant(1, 1, 1);
+    const uint64_t op = n.join(1, 0x51);
+    LM_CHECK(op != 0);
+    const auto in_state = [&](root::Ledger::TxnState s) {
+        for (std::size_t i = 0; i < root::k_join_txns; ++i) {
+            if (n.ledger().txn_state(i) == s) {
+                return true;
+            }
+        }
+        return false;
+    };
+    LM_CHECK(n.run_until([&] { return in_state(root::Ledger::TxnState::PrepareOut); }, 20000, 100));
+    member::LocalIdentity &rid0 = n.eng(0).identity();
+    store::RecordJob *held = rid0.lend_record(); // what a journal, channel or power job would do right now
+    LM_CHECK(held != nullptr);                   // nothing holds it while the transaction waits for the device
+    // STORED arrives while the memory is lent: the ACTIVE commit waits (no refusal, no second reservation).
+    LM_CHECK(n.run_until([&] { return in_state(root::Ledger::TxnState::Activating); }, 5000, 100));
+    n.run_ms(1000);
+    LM_CHECK(in_state(root::Ledger::TxnState::Activating));
+    const root::Entry *e = n.ledger().find(n.id(1));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Prepared);
+    LM_CHECK_EQ(n.ledger().stats().refused, 0ull);
+    if (held != nullptr) {
+        rid0.return_record(); // (a module returns it inside the owner's step; the test wakes the owner)
+        n.node(0).notify();
+    }
+    LM_CHECK_EQ(n.wait_operation(1, op, 60000), 0u);
+    e = n.ledger().find(n.id(1));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Active && e->confirmed);
+    LM_CHECK_EQ(n.ledger().stats().prepared, 1ull);
+    n.run_ms(500);
+    store::RecordJob *again = rid0.lend_record(); // every job gave it back
+    LM_CHECK(again != nullptr);
+    if (again != nullptr) {
+        rid0.return_record();
+    }
+}
+
+// ADR-002 P4: the journal borrows the same record memory per job. A durable send's commit waits while another
+// module holds it (the send stays "accepted", nothing is sent before it is durable), the owner sleeps meanwhile
+// (no retry poll), and the commit runs in the owner's next pass once the memory is back.
+LM_TEST("P4 member: a durable commit waits for the record memory without polling and runs as soon as it is back") {
+    JNet n(2);
+    LM_CHECK_EQ(n.join_device(1, 0x52, 1, 1), 0u);
+    n.run_ms(10000); // lingering join timers end
+    member::LocalIdentity &id1 = n.eng(1).identity();
+    store::RecordJob *held = id1.lend_record();
+    LM_CHECK(held != nullptr);
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_NODE;
+    std::memcpy(rq.destination.node.bytes, n.id(0).bytes.data(), 32);
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_DURABLE; // RECEIVED+DURABLE may go without a deadline (docs/08 §5)
+    rq.priority = LM_PRIORITY_NORMAL;
+    rq.queue_mode = LM_FIFO;
+    const std::array<uint8_t, 8> payload{1, 2, 3, 4, 5, 6, 7, 8};
+    lm_operation_id_t sop = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(1), &rq, payload.data(), payload.size(), &sop), LM_STATUS_OK);
+    n.node(1).notify();
+    n.run_ms(20);
+    const auto evidence = [&] {
+        lm_operation_t o{};
+        o.struct_size = sizeof(o);
+        o.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_get_operation(n.ctx(1), sop, &o), LM_STATUS_OK);
+        return o.evidence_bits;
+    };
+    const uint64_t steps0 = n.eng(1).stats().steps;
+    n.run_ms(3000);
+    LM_CHECK((evidence() & delivery::ev::accepted) != 0);
+    LM_CHECK((evidence() & (delivery::ev::persisted | delivery::ev::sent)) == 0); // waits, sends nothing
+    LM_CHECK(n.eng(1).stats().steps - steps0 <= 3); // asleep while it waits (a 20 ms retry would be 150 passes)
+    LM_CHECK(n.eng(1).delivery().durable().live_count() == 0);
+    if (held != nullptr) {
+        id1.return_record();
+        n.node(1).notify();
+    }
+    n.run_ms(20); // one journal write
+    LM_CHECK((evidence() & delivery::ev::persisted) != 0);
+    LM_CHECK_EQ(n.eng(1).delivery().durable().live_count(), 1u);
+    store::RecordJob *again = id1.lend_record(); // the journal gave it back after its job
+    LM_CHECK(again != nullptr);
+    if (again != nullptr) {
+        id1.return_record();
+    }
+}
+
+// ADR-002 P4 (every borrower waits, none gives up): at boot the channel module and the membership both need the one
+// record memory as soon as the identity is loaded. The membership's load of its PREPARED/ACTIVATED record must wait
+// for the channel's job, not be skipped: before, a device with the channel module (every firmware image) lost the
+// "root acknowledgement owed" state of LC06 on a reboot.
+LM_TEST("P4 LC06 sim: with the channel module, the boot load of the ACTIVATED record waits for the record memory") {
+    JNet n(2, 31, true, true);
+    n.grant(1, 1, 1);
+    const uint64_t op = n.join(1, 0x53);
+    LM_CHECK(n.run_until([&] { return n.eng(1).identity().is_member(); }, 10000, 50));
+    n.set_link(0, 1, false); // JOIN_ACTIVE never reaches the root
+    LM_CHECK_EQ(n.wait_operation(1, op, 30000), static_cast<uint32_t>(Status::Expired));
+    LM_CHECK(n.mem(1).confirm_pending());
+    n.reboot(1);
+    n.run_ms(500);
+    LM_CHECK(n.eng(1).chan().loaded()); // the channel record was loaded at boot as well
+    LM_CHECK(n.mem(1).confirm_pending()); // the owed acknowledgement came back from Flash
+    n.set_link(0, 1, true);
+    n.run_ms(31000);
+    lm_status_t st = 0;
+    const uint64_t rop = n.join(1, 0x54, LM_JOIN_RESUME, &st);
+    LM_CHECK_EQ(st, LM_STATUS_OK);
+    LM_CHECK_EQ(n.wait_operation(1, rop, 30000), 0u);
+    LM_CHECK(n.run_until([&] { return !n.mem(1).confirm_pending(); }, 10000, 5000));
+    const root::Entry *e = n.ledger().find(n.id(1));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Active && e->confirmed);
+}
+
+// ADR-002 P8: a node holds the joiner side or the root's ledger, never both (one storage by role; the other is an
+// invariant failure to touch). The root's membership answers come from its identity alone, unchanged; the member API
+// the root never had stays refused; a non-root node has no coordinator to plan with (as on an image without one).
+LM_TEST("P8 sim: one membership object per role; the root's answers are unchanged, a leaf plans no channel") {
+    JNet n(2);
+    LM_CHECK_EQ(n.join_device(1, 0x55, 1, 1), 0u);
+    const lm_membership_t r = n.membership(0);
+    LM_CHECK_EQ(r.state, static_cast<uint32_t>(LM_ACTIVE));
+    LM_CHECK_EQ(r.reason, 0u);
+    LM_CHECK(std::memcmp(r.device.bytes, n.id(0).bytes.data(), 32) == 0);
+    LM_CHECK(std::memcmp(r.domain.bytes, n.net.domain.bytes.data(), 16) == 0);
+    LM_CHECK_EQ(r.state_since_mono_ms, 0ull); // (the root never ran a joiner: as before)
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    const lm_request_id_t req = rid(0x55);
+    LM_CHECK_EQ(lm_get_request(n.ctx(0), &req, &o), LM_STATUS_NOT_FOUND); // the root joins nothing
+    LM_CHECK_EQ(lm_get_request(n.ctx(1), &req, &o), LM_STATUS_OK);
+    lm_status_t st = 0;
+    LM_CHECK_EQ(n.join(0, 0x56, LM_JOIN_NEW, &st), 0ull);
+    LM_CHECK_EQ(st, LM_STATUS_ROLE_NOT_ALLOWED);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(0), LM_LEAVE_DRAIN, 0, &op), LM_STATUS_ROLE_NOT_ALLOWED);
+    const lm_membership_t d = n.membership(1);
+    LM_CHECK_EQ(d.state, static_cast<uint32_t>(LM_ACTIVE));
+    LM_CHECK_EQ(lm_channel_request(n.ctx(1), LM_CHANNEL_RECALCULATE, 0, &op), LM_STATUS_UNSUPPORTED);
+    LM_CHECK(n.eng(0).role_job_pending() == false && n.eng(1).role_job_pending() == false);
 }
 
 LM_TEST("measure: sizeof of the join/membership state") {

@@ -504,29 +504,28 @@ MonoTime lease_local_end(const RootTimeBound &bound, const RootTime &lease, Mono
     return ms > margin_ms ? now + Duration::from_ms(static_cast<int64_t>(ms - margin_ms)) : now;
 }
 
-// ---- bundle ----
-Status bundle_encode(ByteView device_cose, ByteView member_cose, MutByteView out, std::size_t &len) {
-    if (device_cose.empty() || device_cose.size() > k_max_device_cose || member_cose.empty() ||
-        member_cose.size() > k_max_member_cose) {
+// ---- credential pair ----
+Status cred_pair_encode(ByteView device_cose, ByteView x, std::size_t x_max, MutByteView out, std::size_t &len) {
+    if (device_cose.empty() || device_cose.size() > k_max_device_cose || x.empty() || x.size() > x_max) {
         return Status::InvalidArgument;
     }
     CborWriter w{out};
     w.array(2);
     w.bytes(device_cose);
-    w.bytes(member_cose);
+    w.bytes(x);
     len = w.size();
     return w.finish();
 }
 
-Status bundle_parse(ByteView in, Bundle &out) {
+Status cred_pair_parse(ByteView in, std::size_t x_max, ByteView &device_cose, ByteView &x) {
     LM_TRY(wire::cbor_validate(in));
     CborReader r{in};
     (void)r.array(2, 2);
     const ByteView dc = r.bstr(1, k_max_device_cose);
-    const ByteView mc = r.bstr(1, k_max_member_cose);
+    const ByteView second = r.bstr(1, x_max);
     LM_TRY(r.finish());
-    out.device_cose = dc;
-    out.member_cose = mc;
+    device_cose = dc;
+    x = second;
     return Status::Ok;
 }
 

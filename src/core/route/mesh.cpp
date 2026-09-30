@@ -66,7 +66,7 @@ void Mesh::hook_slot_free(void *ctx, MonoTime now) { static_cast<Mesh *>(ctx)->o
 
 // ---- small helpers ----
 bool Mesh::is_root() const { return k_root_capable && engine_.config().role == Role::Root; }
-RootTerm Mesh::term() const { return engine_.identity().member().root_term; }
+RootTerm Mesh::term() const { return engine_.identity().term(); }
 ShortAddr Mesh::self_addr() const { return engine_.identity().member().address; }
 const DeviceId &Mesh::root_id() const { return engine_.identity().delegation().root; }
 
@@ -74,6 +74,32 @@ uint16_t Mesh::jitter(uint16_t modulus) {
     std::array<uint8_t, 2> r{};
     engine_.random(MutByteView{r});
     return modulus == 0 ? 0 : static_cast<uint16_t>((uint32_t{r[0]} << 8U | r[1]) % modulus);
+}
+
+// [S18] The lease READY shows the root (it renews a credential that is due). A lease of an older term is no lease on
+// the root's clock at all (ARCH2-D1): the READY that confirms an attach says "not now" (UINT64_MAX: the tree forms
+// first, renewals are maintenance), the next lease refresh says "due now" (0).
+uint64_t Mesh::credential_lease(bool attach) const {
+    const member::MemberCredential &mc = engine_.identity().member();
+    if (mc.root_term == term()) {
+        return mc.lease_expires_root_ms;
+    }
+    return attach ? UINT64_MAX : 0;
+}
+
+// ARCH2-D1: the root is in a newer term. Its tree of the old term is gone (docs/04 §7 "旧termの未確定登録は破棄"): a
+// node on an approved path registers again with the same parent, one in the middle of an attach registers again in the
+// new term. Candidates stay (their advertisements are hints; the root checks every registration against its tree).
+void Mesh::on_term(MonoTime now) {
+    if (state_ == State::Ready) {
+        lose_path(now);
+    } else if (att_.step == Step::Register || att_.step == Step::Confirm) {
+        att_.step = Step::Register;
+        att_.tries = 0;
+        att_.sequence = next_sequence();
+        att_.next_at = now;
+    }
+    asks_ = {};
 }
 
 uint32_t Mesh::next_sequence() {
@@ -445,7 +471,7 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
         return;
     }
     Beacon b;
-    if (decode_beacon(body, b) != Status::Ok || b.term != term().value()) {
+    if (decode_beacon(body, b) != Status::Ok) {
         return;
     }
     ++stats_.beacons_rx;
@@ -459,7 +485,7 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
     }
     if (is_root() || b.n == 0 || (b.flags & k_beacon_accepting) == 0 ||
         check_candidate_path(self_addr(), b.path.data(), b.n, RootTerm{b.term}, term(), false) != Status::Ok) {
-        return; // depth 21, a path through myself, another term: not a candidate (docs/04 §3 step 4)
+        return; // depth 21, a path through myself, an older term: not a candidate (docs/04 §3 step 4)
     }
     Cand *c = find_cand(src);
     const bool fresh = c == nullptr;
@@ -525,15 +551,11 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
     p.membership = mc.membership.value();
     std::array<uint8_t, 192> plain{};
     std::size_t len = 0;
-    link::SealedFrame f;
     Status st = encode_probe(p, engine_.identity().delegation().domain, engine_.identity().self(),
                              MutByteView{plain}, len);
     if (st == Status::Ok) {
-        st = engine_.link().seal(n->device, wire::FrameKind::Route, ByteView{plain.data(), len}, f, now);
-    }
-    if (st == Status::Ok) {
-        st = engine_.transmit(n->mac, f.view(),
-                              k_tag_mesh | (uint32_t{k_kind_probe} << 8U) | static_cast<uint32_t>(index_of(&c)), now);
+        st = engine_.link().send_sealed(n->device, n->mac, wire::FrameKind::Route, ByteView{plain.data(), len},
+                                        k_tag_mesh | (uint32_t{k_kind_probe} << 8U) | static_cast<uint32_t>(index_of(&c)), now);
     }
     if (st == Status::Ok) {
         ++stats_.probes_tx;
@@ -573,12 +595,10 @@ void Mesh::on_probe(const link::RxInfo &info, const Probe &p, MonoTime now) {
         r.membership = mc.membership.value();
         std::array<uint8_t, 192> plain{};
         std::size_t len = 0;
-        link::SealedFrame f;
         if (encode_probe(r, engine_.identity().delegation().domain, engine_.identity().self(), MutByteView{plain},
-                         len) == Status::Ok &&
-            engine_.link().seal(n->device, wire::FrameKind::Route, ByteView{plain.data(), len}, f, now) ==
-                Status::Ok) {
-            (void)engine_.transmit(n->mac, f.view(), k_tag_mesh | (uint32_t{k_kind_probe} << 8U) | 0xFFU, now);
+                         len) == Status::Ok) {
+            (void)engine_.link().send_sealed(n->device, n->mac, wire::FrameKind::Route, ByteView{plain.data(), len},
+                                             k_tag_mesh | (uint32_t{k_kind_probe} << 8U) | 0xFFU, now);
         }
         return;
     }
@@ -590,7 +610,7 @@ void Mesh::on_probe(const link::RxInfo &info, const Probe &p, MonoTime now) {
     c->probe_wait = MonoTime::never();
     c->probe_miss = 0;
     c->nonce.fill(0);
-    heard(*c, now);
+    alive(*c, now);
     // The neighbour's queue pressure (credit) is its queue delay, an input of the parent score.
     c->q.record_queue_ms(static_cast<uint32_t>(255U - p.credit) * k_queue_ms_max / 255U);
     rf_sample(*c, true, now);
@@ -600,6 +620,12 @@ void Mesh::on_probe(const link::RxInfo &info, const Probe &p, MonoTime now) {
 }
 
 void Mesh::heard(Cand &c, MonoTime now) { c.heard = now; }
+// An authenticated answer under the link session (probe reply, HOP_ACK, the root's LEASE along it): the session is
+// alive at the peer too. A radio ACK or a beacon only says the peer's radio is on (ARCH2-D2).
+void Mesh::alive(Cand &c, MonoTime now) {
+    c.heard = now;
+    c.unproven = false;
+}
 
 void Mesh::note(Cand &c, bool ok, MonoTime now) {
     c.q.record_attempt(ok);
@@ -815,8 +841,10 @@ void Mesh::attach_step(MonoTime now) {
         }
     }
     // A link that was silent for a while must prove itself again before a registration relies on it: the peer
-    // may have restarted and dropped its side of the session without the radio ever telling us.
-    if (!c.q.known() || now - c.heard > k_probe_fresh) {
+    // may have restarted and dropped its side of the session without the radio ever telling us. Its radio still
+    // acknowledges our frames, so after an end session through it failed only an authenticated answer counts
+    // (ARCH2-D2: a quickly restarted root was never found again by its 1-hop members).
+    if (!c.q.known() || now - c.heard > k_probe_fresh || c.unproven) {
         if (att_.step != Step::Probe) {
             att_.step = Step::Probe;
             att_.tries = 0;
@@ -909,7 +937,7 @@ void Mesh::send_ready(MonoTime now) {
     Ready r;
     r.term = term().value();
     r.revision = att_.revision;
-    r.credential_lease_ms = engine_.identity().member().lease_expires_root_ms; // [S18] the root renews it when due
+    r.credential_lease_ms = credential_lease(true); // [S18] the root renews it when due
     if (!route_via(att_.path.data(), static_cast<uint8_t>(att_.n - 1U), att_.revision, route) ||
         encode(r, MutByteView{body}, len) != Status::Ok) {
         attach_fail(now);
@@ -996,7 +1024,10 @@ void Mesh::on_session(const DeviceId &peer, Status st, MonoTime now) {
     }
     if (st == Status::Ok) {
         attach_step(now);
-    } else if (++att_.tries >= 3) {
+        return;
+    }
+    cands_[static_cast<std::size_t>(att_.cand)].unproven = true; // the link may be dead at the peer (ARCH2-D2)
+    if (++att_.tries >= 3) {
         attach_fail(now);
     } else {
         att_.next_at = now + Duration::from_s(2); // RateLimited (30 s gate) and friends: try again
@@ -1042,6 +1073,12 @@ void Mesh::on_control(const DeviceId &peer, const delivery::PathSpec &reply, Byt
 
 void Mesh::on_lease(const LeaseRec &l, MonoTime now) {
     ++stats_.leases;
+    // The root runs a newer term (it restarted, docs/04 §7): its authenticated answer is the authority to follow it.
+    // Whatever this node registered or holds belongs to the old term; the engine re-syncs every module.
+    if (l.term > term().value() && engine_.identity().note_term(RootTerm{l.term})) {
+        engine_.on_new_term(now);
+        return;
+    }
     if (l.term != term().value() && l.status == Status::Ok) {
         return;
     }
@@ -1116,7 +1153,7 @@ void Mesh::on_lease(const LeaseRec &l, MonoTime now) {
     lease_lapsed_ = false;
     renew_at_ = now + k_lease_refresh + Duration::from_ms(jitter(6000));
     if (parent_ >= 0) {
-        heard(cands_[static_cast<std::size_t>(parent_)], now);
+        alive(cands_[static_cast<std::size_t>(parent_)], now);
     }
 }
 
@@ -1131,7 +1168,7 @@ void Mesh::commit(const LeaseRec &l, MonoTime now) {
     Cand &p = cands_[static_cast<std::size_t>(parent_)];
     p.fails = 0;
     p.rf_streak = 0;
-    heard(p, now);
+    alive(p, now);
     att_ = Attach{};
     state_ = State::Ready;
     attempt_at_ = MonoTime::never();
@@ -1165,7 +1202,7 @@ void Mesh::renew(MonoTime now) {
     Ready r;
     r.term = term().value();
     r.revision = rev_;
-    r.credential_lease_ms = engine_.identity().member().lease_expires_root_ms; // [S18]
+    r.credential_lease_ms = credential_lease(false); // [S18]
     if (path_n_ < 2 || !route_via(path_.data(), static_cast<uint8_t>(path_n_ - 1U), rev_, route) ||
         encode(r, MutByteView{body}, len) != Status::Ok) {
         return;
@@ -1239,7 +1276,7 @@ void Mesh::on_frame_done(const delivery::FrameDone &f, delivery::HopEnd end, Mon
         }
         note(*c, true, now);
         c->rf_streak = 0;
-        heard(*c, now);
+        alive(*c, now);
     } else if (end == delivery::HopEnd::Failed && f.attempts >= 3 && !engine_.chan().planned_gap(now)) {
         // Three attempts, no HOP_ACK: targeted RF failures. (Failed after BUSY deferrals has fewer
         // attempts and is not counted.)

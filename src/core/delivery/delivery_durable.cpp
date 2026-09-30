@@ -6,9 +6,10 @@
 //               replaces the payload; a RECEIVED-only message drops its payload when taken
 //
 // After a power cut a record is authoritative: an unfinished send resumes under a fresh end
-// session with the same MessageId and the ORIGINAL deadline; a reception that the application may
-// or may not have handled comes back as a MESSAGE event flagged "recovered" (reason 1) - never
-// silently as new, never as exactly-once.
+// session with the same MessageId and the ORIGINAL deadline - in the assignment it was accepted in
+// only (after a transfer it ends INDETERMINATE, never sent under the new one); a reception that the
+// application may or may not have handled comes back as a MESSAGE event flagged "recovered"
+// (reason 1) - never silently as new, never as exactly-once.
 #include <cstring>
 
 #include "core/codec.hpp"
@@ -18,10 +19,12 @@
 namespace lm::delivery {
 namespace {
 
-constexpr uint8_t k_rec_version = 1;
+// Version 2: the out record carries the origin's assignment generation (ARCH2). Pre-release, no migration: a record
+// of another version fails the recovery closed (FAULT, nothing sent), as any unreadable record does.
+constexpr uint8_t k_rec_version = 2;
 constexpr uint8_t k_kind_out = 1;
 constexpr uint8_t k_kind_in = 2;
-constexpr std::size_t k_out_fixed = 4 + 2 + 4 + 8 + 32 + 16 + 32 + 2;
+constexpr std::size_t k_out_fixed = 4 + 2 + 4 + 8 + 8 + 32 + 16 + 32 + 2;
 constexpr std::size_t k_in_fixed = 4 + 2 + 4 + 8 + 32 + 16 + 32 + 8 + 4 + 1 + k_result_bytes + 2;
 // A durable 512 B message (the spec's small-message limit) fits one journal entry (FIX2-D6).
 static_assert(k_in_fixed + k_msg_bytes <= store::k_journal_max_payload);
@@ -105,6 +108,7 @@ Status Delivery::durable_fill(void *ctx, const DurableReq &req, MutByteView out,
         w.u16be(op.port);
         w.u32be(op.term);
         w.u64be(op.expires);
+        w.u64be(op.assignment);
         w.bytes(op.dest.view());
         w.bytes(ByteView{to_bytes(op.mid)});
         w.bytes(ByteView{op.hash});
@@ -253,7 +257,7 @@ void Delivery::durable_boot_done(void *ctx, Status st, MonoTime now) {
 void Delivery::recover_next(MonoTime now) {
     while (recovering_ && recover_pos_ < recover_total_) {
         const uint32_t id = durable_.live_id(recover_pos_++);
-        if (durable_.read(id) == Status::Ok) {
+        if (durable_.read(id, now) == Status::Ok) {
             return; // the completion continues the walk
         }
         recovering_ = false;
@@ -320,6 +324,7 @@ void Delivery::recovered_out(uint32_t slot, ByteView rec, MonoTime now) {
     op->port = r.u16be();
     op->term = r.u32be();
     op->expires = r.u64be();
+    op->assignment = r.u64be(); // drive() never sends it under another one
     r.copy_to(op->dest.bytes);
     std::array<uint8_t, 16> mid{};
     r.copy_to(mid);

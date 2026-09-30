@@ -6,31 +6,48 @@
 namespace lm::wire {
 namespace {
 constexpr uint32_t k_max_interval_ms = 86400000;
+
+// One field list per frame (core/codec.hpp). The version and the must-be-zero fields are read as values: a frame of
+// another version is Unsupported before its fields are judged, and only a structurally broken one is BadFrame first.
+template <class F> void io(F &f, PowerPoll &p, uint8_t &version, uint16_t &flags, uint32_t &reserved) {
+    f.is(k_power_poll_subtype);
+    f.u8(version);
+    f.u16(p.rx_credit);
+    f.u64(p.poll_nonce);
+    f.u32(p.revision_hint);
+    f.u32(p.planned_interval_ms);
+    f.u16(p.window_ms);
+    f.u16(flags);
+    f.u32(reserved);
 }
+template <class F> void io(F &f, PowerGrant &g, uint8_t &version, uint16_t &reserved) {
+    f.is(k_power_grant_subtype);
+    f.u8(version);
+    f.u16(g.pending_frames);
+    f.u64(g.poll_nonce);
+    f.u32(g.window_ttl_ms);
+    f.u16(g.granted_credit);
+    f.u16(reserved);
+    f.u32(g.reason);
+}
+
+} // namespace
 
 uint8_t power_subtype(ByteView plain) { return plain.empty() ? 0 : plain[0]; }
 
 Status decode_power_poll(ByteView plain, PowerPoll &out) {
-    Reader r{plain};
     PowerPoll p;
-    const uint8_t subtype = r.u8();
-    const uint8_t version = r.u8();
-    p.rx_credit = r.u16be();
-    p.poll_nonce = r.u64be();
-    p.revision_hint = r.u32be();
-    p.planned_interval_ms = r.u32be();
-    p.window_ms = r.u16be();
-    const uint16_t flags = r.u16be();
-    const uint32_t reserved = r.u32be();
-    if (!r.ok() || r.finish() != Status::Ok || plain.size() != gen::layout::power_poll_bytes ||
-        subtype != k_power_poll_subtype) {
+    uint8_t version = 0;
+    uint16_t flags = 0;
+    uint32_t reserved = 0;
+    if (get_record(plain, p, [&](auto &f, auto &m) { io(f, m, version, flags, reserved); }) != Status::Ok ||
+        plain.size() != gen::layout::power_poll_bytes) {
         return Status::BadFrame;
     }
     if (version != k_power_version) {
         return Status::Unsupported;
     }
-    if (p.poll_nonce == 0 || p.planned_interval_ms > k_max_interval_ms || p.window_ms == 0 ||
-        flags != 0 || reserved != 0) {
+    if (p.poll_nonce == 0 || p.planned_interval_ms > k_max_interval_ms || p.window_ms == 0 || flags != 0 || reserved != 0) {
         return Status::BadFrame;
     }
     out = p;
@@ -38,18 +55,11 @@ Status decode_power_poll(ByteView plain, PowerPoll &out) {
 }
 
 Status decode_power_grant(ByteView plain, PowerGrant &out) {
-    Reader r{plain};
     PowerGrant g;
-    const uint8_t subtype = r.u8();
-    const uint8_t version = r.u8();
-    g.pending_frames = r.u16be();
-    g.poll_nonce = r.u64be();
-    g.window_ttl_ms = r.u32be();
-    g.granted_credit = r.u16be();
-    const uint16_t reserved = r.u16be();
-    g.reason = r.u32be();
-    if (!r.ok() || r.finish() != Status::Ok || plain.size() != gen::layout::power_grant_bytes ||
-        subtype != k_power_grant_subtype) {
+    uint8_t version = 0;
+    uint16_t reserved = 0;
+    if (get_record(plain, g, [&](auto &f, auto &m) { io(f, m, version, reserved); }) != Status::Ok ||
+        plain.size() != gen::layout::power_grant_bytes) {
         return Status::BadFrame;
     }
     if (version != k_power_version) {
@@ -63,32 +73,16 @@ Status decode_power_grant(ByteView plain, PowerGrant &out) {
 }
 
 Status encode_power_poll(const PowerPoll &p, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(k_power_poll_subtype);
-    w.u8(k_power_version);
-    w.u16be(p.rx_credit);
-    w.u64be(p.poll_nonce);
-    w.u32be(p.revision_hint);
-    w.u32be(p.planned_interval_ms);
-    w.u16be(p.window_ms);
-    w.u16be(0);
-    w.u32be(0);
-    len = w.size();
-    return w.finish();
+    uint8_t version = k_power_version;
+    uint16_t flags = 0;
+    uint32_t reserved = 0;
+    return put_record(p, out, len, [&](auto &f, auto &m) { io(f, m, version, flags, reserved); });
 }
 
 Status encode_power_grant(const PowerGrant &g, MutByteView out, std::size_t &len) {
-    Writer w{out};
-    w.u8(k_power_grant_subtype);
-    w.u8(k_power_version);
-    w.u16be(g.pending_frames);
-    w.u64be(g.poll_nonce);
-    w.u32be(g.window_ttl_ms);
-    w.u16be(g.granted_credit);
-    w.u16be(0);
-    w.u32be(g.reason);
-    len = w.size();
-    return w.finish();
+    uint8_t version = k_power_version;
+    uint16_t reserved = 0;
+    return put_record(g, out, len, [&](auto &f, auto &m) { io(f, m, version, reserved); });
 }
 
 Status check_grant_against_poll(const PowerPoll &poll, const PowerGrant &grant) {

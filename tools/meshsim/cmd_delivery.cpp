@@ -78,7 +78,7 @@ std::string cmd_route(Sim &sim, const Args &a) {
     ps.len = static_cast<uint8_t>(a.size() - 3);
     ps.dest = lm::ShortAddr{ps.path[ps.len - 1U]};
     lm::Engine &e = sim.world.node(i).ctx()->engine;
-    ps.term = e.identity().member().root_term;
+    ps.term = e.identity().term(); // the node's current root term (ARCH2-D1)
     ps.revision = lm::PathRevision{1};
     const lm::Status st = e.delivery().install_route(sim.world.node(dest).ctx()->engine.identity().self(), ps,
                                                      lm::MonoTime::never());

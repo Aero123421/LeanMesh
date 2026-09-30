@@ -78,9 +78,8 @@ void Ledger::confirm_loaded(Status s, MonoTime now) {
     rec_->op = store::RecordJob::Op::Commit;
     job_entry_ = entries_[confirm_.slot];
     job_entry_.confirmed = true;
-    job_txn_ = -2;
     job_slot_index_ = confirm_.slot;
-    if (submit(Step::ConfirmCommit, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+    if (submit(Step::ConfirmCommit, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
         confirm_pending_ = false;
         release(-2);
     }
@@ -120,12 +119,9 @@ void Ledger::send_echo(MonoTime now) {
     if (st == Status::Ok) {
         st = member::encode_join_ack(a, MutByteView{obj}.from(plen), dlen);
     }
-    link::SealedFrame f;
-    if (st == Status::Ok) {
-        st = engine_.link().seal(confirm_.device, wire::FrameKind::Control, ByteView{obj.data(), plen + dlen}, f, now);
-    }
-    if (st == Status::Ok) {
-        (void)engine_.transmit(n->mac, f.view(), k_tag_offer, now); // best effort: the device repeats
+    if (st == Status::Ok) { // best effort: the device repeats
+        (void)engine_.link().send_sealed(confirm_.device, n->mac, wire::FrameKind::Control,
+                                         ByteView{obj.data(), plen + dlen}, k_tag_offer, now);
     }
 }
 
@@ -144,56 +140,59 @@ void Ledger::leave_committed(Status s, MonoTime now) {
     const DeviceId device = e.device;
     forget_member(device, e.address);
     engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
-    member::Floors &floors = engine_.identity().floors();
-    std::size_t len = 0;
-    if (floors.raise(device, e.assignment + 1, e.membership + 1) != Status::Ok ||
-        member::encode_floors(floors, MutByteView{rec_->payload}, len) != Status::Ok) {
-        release(-2); // floor table full: the entry stays Left and its slot is not reused (pick_slot)
-        return;
-    }
-    rec_->op = store::RecordJob::Op::Commit;
-    rec_->id = store::rec::revocation_floors;
-    rec_->state = 0;
-    rec_->payload_len = static_cast<uint32_t>(len);
-    job_txn_ = -2;
-    if (submit(Step::CommitFloors, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+    // A full floor table: the entry stays Left and its slot is not reused (pick_slot).
+    if (engine_.identity().floors().raise(device, e.assignment + 1, e.membership + 1) != Status::Ok ||
+        commit_floors(Step::CommitFloors) != Status::Ok) {
         release(-2);
     }
 }
 
-// Left is durable: nothing of the member may keep serving it. Its link session and its end session end now and
-// the approved tree forgets its address (its children re-register); a lease would only lapse it within 180 s.
+// The identity's floor table into the revocation_floors record, committed by one Flash job (holder -2).
+Status Ledger::commit_floors(Step step) {
+    std::size_t len = 0;
+    LM_TRY(member::encode_floors(engine_.identity().floors(), MutByteView{rec_->payload}, len));
+    rec_->arm(store::RecordJob::Op::Commit, store::rec::revocation_floors, 0, len);
+    return submit(step, JobClass::Flash, &store::record_job, rec_, -2);
+}
+
+// Left is durable: nothing of the member may keep serving it. Its link session and its end session end now,
+// the approved tree forgets its address (its children re-register; a lease would only lapse it within 180 s) and
+// so do the routes the root learned through that address.
 void Ledger::forget_member(const DeviceId &device, ShortAddr address) {
     (void)engine_.link().close(device);
     if (delivery::EndSession *s = engine_.delivery().sessions().find_peer(device)) {
         engine_.delivery().sessions().remove(*s);
     }
     engine_.routes().forget(address);
+    engine_.delivery().invalidate_addr(address);
 }
 
 // ---- expected entries (docs/07 §2, docs/21 §4) ----
-Status Ledger::install_expected(ByteView cose, MonoTime /*now*/, uint64_t &operation) {
+Status Ledger::begin_install(ByteView cose, std::size_t max_bytes, bool other) {
     if (failed_) {
         return Status::RecoveryRequired;
     }
-    if (!loaded_ || exp_active_ || holder_ != -1 || job_in_flight_) {
+    if (!loaded_ || other || holder_ != -1 || job_in_flight_) {
         return Status::Busy;
     }
-    if (cose.empty() || cose.size() > 1024) {
+    if (cose.empty() || cose.size() > max_bytes) {
         return Status::PayloadTooLarge;
     }
     if (!acquire(-2)) {
         return Status::Busy;
     }
     std::memcpy(scratch_.data(), cose.data(), cose.size());
-    const member::LocalIdentity &id = engine_.identity();
-    vargs_.trust = id.trust();
-    vargs_.delegation = id.delegation();
+    vargs_.trust = engine_.identity().trust();
+    vargs_.delegation = engine_.identity().delegation();
+    return Status::Ok;
+}
+
+Status Ledger::install_expected(ByteView cose, MonoTime /*now*/, uint64_t &operation) {
+    LM_TRY(begin_install(cose, 1024, exp_active_));
     vargs_.ticket_cose = ByteView{scratch_.data(), cose.size()};
-    job_txn_ = -2;
     exp_active_ = true;
     exp_op_ = member::k_op_tag | ++op_counter_;
-    if (submit(Step::VerifyExpected, JobClass::PublicKey, &verify_expected_job, this) != Status::Ok) {
+    if (submit(Step::VerifyExpected, JobClass::PublicKey, &verify_expected_job, this, -2) != Status::Ok) {
         exp_active_ = false;
         release(-2);
         return Status::Busy;
@@ -363,7 +362,6 @@ void Ledger::expected_next(MonoTime /*now*/) {
         job_entry_.assignment = x.assignment;
         job_entry_.request = RequestId{};
         job_entry_.reserved_until = MonoTime::never();
-        job_txn_ = -2;
         if (commit_entry(Step::CommitExpectedEntry, slot, x.allowed ? EntryState::Expected : EntryState::Blocked,
                          false, ByteView{}, -2) != Status::Ok) {
             expected_finish(Status::RecoveryRequired); // the page is pending: the same page completes it

@@ -97,6 +97,14 @@ struct RecordJob {
     uint64_t evidence = 0;         // out on RecoveryRequired: highest committed generation proven
     std::array<uint8_t, k_max_payload> payload{};
     std::array<uint8_t, k_max_blob> scratch{};
+
+    // Sets up the next job on this memory (Load: state and payload_len are outputs; Commit/Recover: inputs).
+    void arm(Op o, uint16_t record, uint8_t st = 0, std::size_t len = 0) {
+        op = o;
+        id = record;
+        state = st;
+        payload_len = static_cast<uint32_t>(len);
+    }
 };
 
 // Load: Ok (payload/state/generation valid) | NotFound (never committed) | RecoveryRequired
@@ -115,11 +123,8 @@ struct RecordJob {
 // A missing record is a virgin device only while no identity record exists. Provisioning MUST
 // commit rec::boot_incarnation (payload u64be(0)) before rec::identity; if the counter is missing
 // on a provisioned device the advance returns RecoveryRequired instead of restarting at 1.
-struct BootJob {
-    RecordJob rec;
-    uint64_t incarnation = 0; // out: new value, valid only when the job status is Ok
-};
-[[nodiscard]] Status boot_incarnation_advance(port::Store &store, BootJob &job);
-[[nodiscard]] Status boot_job(port::JobEnv &env, void *arg);
+// `job` is the caller's record memory (P4: the node's one RecordJob, lent for this job); `incarnation`
+// is written only when the new value is durable.
+[[nodiscard]] Status boot_incarnation_advance(port::Store &store, RecordJob &job, uint64_t &incarnation);
 
 } // namespace lm::store

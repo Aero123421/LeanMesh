@@ -265,20 +265,24 @@ void Exchange::on_end_bind(ByteView record, const Origin &o, MonoTime now) {
 Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
     delivery::EndSessions &ss = *end_.sessions;
     const DeviceId &peer = peer_state_.dc.device;
-    // Review finding 20: the verified credential gives this address to `peer`. A session of another device at the
-    // same address is of an owner the root replaced (it left, the ledger reused its slot): it and every route
-    // learned before go.
-    if (delivery::EndSession *old = ss.find_addr(peer_state_.mc.address); old != nullptr && old->peer != peer) {
+    const member::MemberCredential &mc = peer_state_.mc;
+    // Review finding 20, docs/04 §7: the verified credential gives this address to `peer` under its membership
+    // generation. A session of another device at the address is of an owner the root replaced (it left, the ledger
+    // reused its slot); the same device under another generation (it left and joined again) is a new owner too. Its
+    // old session goes, and so does every route to or through the address it held.
+    if (delivery::EndSession *old = ss.find_addr(mc.address); old != nullptr && old->peer != peer) {
         ss.remove(*old);
-        s_.engine.delivery().invalidate_routes();
+        s_.engine.delivery().invalidate_addr(mc.address);
     }
     delivery::EndSession *slot = ss.find_peer(peer);
     if (slot == nullptr) {
         slot = &ss.acquire();
     } else {
+        if (slot->peer_membership != mc.membership || slot->peer_addr != mc.address) {
+            s_.engine.delivery().invalidate_addr(slot->peer_addr);
+        }
         slot->wipe();
     }
-    const member::MemberCredential &mc = peer_state_.mc;
     slot->used = true;
     slot->peer = peer;
     slot->peer_addr = mc.address;

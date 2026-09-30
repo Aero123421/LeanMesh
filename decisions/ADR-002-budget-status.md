@@ -431,3 +431,89 @@ switch (transfer with its resume after a cut, reconciliation, return), revocatio
 mode-0 nonce API and four review fixes. Not reduced: P4 (the `Durable` job memory is in `src/core/delivery/**`, owned
 by another fixer during S18) and P8 (Membership/Ledger exclusive on ROOT images: an Engine layout change in shared
 files); both stay open for their owners.
+
+## ARCH2 final core pass (2026-09-30; `scripts/budget_report.py`, all four SoCs, LEAF/RELAY/ROOT; software only)
+
+Before: HEAD `25849ed` built in a clean copy (`build-arch2-base`, `native-arch2-base`). After: the shared tree at the
+end of this pass (it also holds S20's tests, examples and ledger fix), regenerated into `build-records/budget-report.*`.
+Decisions ARCH2-D1..D8 and ARCH2-P2A..P2C are in IMPLEMENTATION.md §13.
+
+### Fixed RAM (workspace + static DRAM of libleanmesh.a), bytes
+
+| SoC | LEAF before | LEAF after | RELAY before | RELAY after | ROOT before | ROOT after |
+|---|---:|---:|---:|---:|---:|---:|
+| esp32c3 | 60,176 | 58,672 | 65,600 | 64,096 | 180,468 | 176,324 |
+| esp32c5 | 60,176 | 58,672 | 65,600 | 64,096 | 180,468 | 176,324 |
+| esp32c6 | 60,176 | 58,672 | 65,600 | 64,096 | 180,468 | 176,324 |
+| esp32s3 | 60,184 | 58,680 | 65,608 | 64,104 | 180,484 | 176,340 |
+| target | 49,152 | 49,152 | 57,344 | 57,344 | 163,840 | 163,840 |
+| over after | | +9,520 | | +6,752 | | +12,484 |
+
+What moved (esp32c3 sizeof): P4 `Durable` 2,664 -> 1,248 (its own `BootJob` is gone, -1,416 every profile); P8
+`Membership` + `Ledger` -> one role storage (ROOT 13,056 -> 11,904, -1,152; LEAF/RELAY unchanged: their ledger is an
+empty stand-in); `Op` 208 -> 192 B (fields regrouped while adding the origin assignment, -128 LEAF / -512 ROOT); the
+UsbLink keeps views instead of copies of the kit's CCS and credentials (ROOT static -1,104); the root term adds
+`LocalIdentity::term_` (+8) and a per-candidate proof flag in `Mesh` (+24); `DeliveryStats::old_assignment` +8.
+
+### Flash (image minus the empty IDF + ESP-NOW baseline), bytes
+
+| SoC | LEAF before | LEAF after | RELAY before | RELAY after | ROOT before | ROOT after |
+|---|---:|---:|---:|---:|---:|---:|
+| esp32c3 | 281,508 | 284,322 | 287,098 | 289,884 | 384,480 | 388,132 |
+| esp32c5 | 287,652 | 290,466 | 293,242 | 296,028 | 390,602 | 394,254 |
+| esp32c6 | 287,156 | 289,660 | 292,830 | 295,264 | 391,394 | 394,612 |
+| esp32s3 | 253,221 | 255,253 | 257,825 | 259,629 | 344,545 | 347,097 |
+
++1.8..2.8 KB (LEAF/RELAY) and +2.6..3.7 KB (ROOT): the per-boot term (the root's credential re-issue in the load job,
+term learning and re-sync, the channel's old-term plan rules), the P4 waiting/retry paths, the assignment binding and
+the lm_root_time_get entry. Merging P2A + P2B took back 308-1,028 B (a mid-pass build of Part 1 + P2C against the
+final build; P2C's own flash effect was not measured separately). Every ROOT image stays over the 320 KiB review line
+and every LEAF/RELAY image but esp32s3 over 256 KiB (unchanged verdicts).
+
+### First-party SLOC (sdk = core + idf + root + serial)
+
+35,633 before -> 35,662 after (+29). Part 1 peaked at 36,007 (+374): P4/P8 with their two fixes +206 and the
+assignment binding / address invalidation +21 (each measured on its own branch), the rest (+147, by difference) the
+per-boot term, ARCH2-D2 and S20's ledger fix. Part 2 removed 345, each step measured on its tree and net of the helpers
+it introduced: in-place AES-GCM helper -35 and `send_sealed` -14 (P2C), field-list codecs -89 (P2A), C API /
+record-job / credential-pair / send_control / channel plumbing and UsbLink views -203 (P2B), -4 in the merge. Per
+module: capi -35, core top level +150 (codec field
+lists, one_of.hpp), channel -47, delivery +76, group -16, link +19, member +26, power -30, route -70, wire -10, root -26,
+security -35, serial +18, store +9. Tests +1,947 (test_term, test_codec, the P4/P8/(b)/(c) tests; S20's test_model).
+
+### What remains over, and why
+
+- **LEAF +9.5 KB / RELAY +6.8 KB.** Static DRAM 17.9 / 19.0 KB is platform: owner stack 4 KiB, worker stack 10 KiB
+  (at least twice the natively measured deepest job, 4.5 KB; P3 needs a target measurement), RX ring 2.8 / 3.9 KB.
+  The workspace (40.8 / 45.1 KB) is the specified capacities (config/profiles.json) at their per-entry cost: 32
+  receipts x 144 B, 8 / 12 TX frames x 296 B, 4 x 512 B messages and 4 active sends x 280 B, one handshake slot (6.4
+  KB, of which 2.9 KB is libedhoc's context), the 1 KiB credential bundle, and a member origin's 64-target group
+  operation (1.8 KB state + 2 KiB full DeviceIds, docs/22 §1 and FIX3-D10). None of these is duplicated state;
+  reducing them changes a capacity or the spec.
+- **ROOT +12.5 KB.** Root capacities: 128 receipts (18.4 KB), 64 end sessions (13.8 KB), 16 messages (8 KB), the
+  ledger (11.9 KB), the USB link (20.2 KB, 16.5 KB of it the 8,230 B decode buffer and the TX buffer docs/19 sizes)
+  and four group operations with their full DeviceIds (8 KiB of `Fanout::ids_`). The group ids are the one large
+  item that could go (the ledger holds the same DeviceIds), but only by pinning a ledger slot while a live snapshot
+  references it, so a join could be refused meanwhile: a behaviour decision, not taken here. The ledger's
+  job-argument unions (about 0.5 KB, survey estimate) were not taken: `vargs_`/`sargs_` became possible only with
+  ARCH2-D8 at the end of the pass, and `exp_`/`lc_` first needs `lc_.active` moved out (a zombie ExpectedSet job may
+  still write `exp_` after `stop()`). Behaviour decisions the survey also listed, not taken: `Fanout::page_` pinned to
+  its sign job (~0.8 KB ROOT), the proxy's 250 B frame from the TX pool.
+- **SLOC +7.7k over 28k.** The duplication survey (a normalised clone scan: no verbatim copy longer than ~16 lines;
+  the rest is the same shape with renamed fields) found ~630 SLOC of behaviour-neutral candidates; this pass took the
+  larger ones (codecs, C API, record plumbing, credential pairs, send_control, AEAD streaming, seal-and-send: -345).
+  Not taken, with cause: the one-job/zombie helper (~40 SLOC net; nine owners differ in what a cancelled completion
+  frees and when the handle moves), an EDHOC step table shared by the radio and USB exchanges (~60, handshake code),
+  a join-object header helper and smaller items (~150 together). None of these changes the verdict. The overrun is
+  the feature set measured per slice above: S11 +1.7k, S15 +0.9k, S16 +1.3k and S18 +0.4k over their rows, the SEC
+  fixes +0.6k, the optional OTA module 320 (counted though compiled out) and this pass's correctness work (+374, of
+  which Part 2 took back 345).
+- **Not reached by this pass**: P3 (worker stack from a target measurement, up to -4 KiB every profile) needs HIL.
+- **Found, not removed** (after the final verification, to keep the verified tree): three dead fields
+  (`Exchange::cancelled_` is written, never read; `Ledger::job_state_` and `Ledger::job_confirmed_` are unused).
+
+Part 1 behaviour costs measured in sim (not RF): R07 (21 nodes, 20 hops, 20 cold boots) formation mean 36.0 -> 39.8 s
+(one more REGISTER round trip per node for the new term); after a full cold boot every member is renewed into the new
+term 130.7 s after formation and a 20-hop message follows 31.9 s later (application DATA waits for the renewals the
+old clock's misread had skipped); C05 converges in 368 s instead of 488 s (members follow the committed plan as soon as
+they learn the new term); R06 root return 159.7 -> 145.9 s. Nothing was measured on a SoC.

@@ -182,9 +182,10 @@ def compilers():
     if not compiler or not cpp:raise RuntimeError('cc/c++ required for ABI declaration syntax check')
     results=[]
     for executable,std,language in [(compiler,'c11','c'),(cpp,'c++17','c++')]:
-        cmd=[executable,'-x',language,'-std='+std,'-Wall','-Wextra','-Werror','-fsyntax-only','-I',str(ROOT/'api'),str(ROOT/'examples/application.c')]
-        p=subprocess.run(cmd,check=False,capture_output=True,text=True,timeout=20)
-        if p.returncode:raise AssertionError(p.stderr)
+        for example in ['examples/application.c','examples/apps/equipment_control.c','examples/apps/battery_measurement.c']:
+            cmd=[executable,'-x',language,'-std='+std,'-Wall','-Wextra','-Werror','-fsyntax-only','-I',str(ROOT/'api'),str(ROOT/example)]
+            p=subprocess.run(cmd,check=False,capture_output=True,text=True,timeout=20)
+            if p.returncode:raise AssertionError(p.stderr)
         results.append(language)
     return {'declarations_and_example':results,'linked_implementation':False,'esp_idf_build':False}
 

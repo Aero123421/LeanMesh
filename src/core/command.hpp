@@ -58,6 +58,7 @@ enum class CommandKind : uint8_t {
     SendControl,  // [S12] internal: a control object to a device (delivery::ControlSendRequest)
     RootHostSend, // [S13] lm_send with the Host's MessageId and intent_hash (see delivery::HostSendRequest)
     TransferNonce, // [S18] lm_transfer_nonce_get: the device's outstanding mode-0 ticket nonce (16 B response)
+    RootTimeGet,   // [ARCH2] lm_root_time_get: the node's root clock estimate (lm_root_time_t response)
 };
 
 struct Command {

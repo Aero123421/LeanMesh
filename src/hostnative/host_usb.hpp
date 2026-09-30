@@ -42,7 +42,7 @@ class HostUsb final : private serial::UsbEnv, private serial::UsbSink {
     HostUsb &operator=(const HostUsb &) = delete;
 
     // Kit file (CBOR [1, identity record payload, fleet_trust record payload, domain16]); see
-    // tools/meshsim `serial-pair`. Ok = configured.
+    // tools/meshsim `serial-pair`. Ok = configured. Once per adapter (Busy after a successful load).
     [[nodiscard]] Status load_kit(ByteView kit);
 
     void open(MonoTime now);
@@ -98,7 +98,7 @@ class HostUsb final : private serial::UsbEnv, private serial::UsbSink {
     sec::HandshakeSlot hs_; // no mesh exchange on the Host: its own slot
     std::array<uint8_t, 32> scalar_{};
     sec::KeyHandle key_;
-    std::array<uint8_t, sec::k_ccs_max_bytes> ccs_{};
+    std::array<uint8_t, sec::k_ccs_max_bytes> ccs_{}; // kit storage the link views (written once, by load_kit)
     std::size_t ccs_len_ = 0;
     std::vector<uint8_t> device_cose_;
     DeviceId self_;

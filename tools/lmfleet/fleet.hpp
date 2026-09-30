@@ -109,7 +109,7 @@ class Network {
 
     // Root node (address 1) or an ordinary member; device index is unique per node.
     NodeKit make_root();
-    // [S18] A new root device for this domain (a handover): delegation of `generation`, its own credential of `term`.
+    // [S18] A new root device for this domain (a handover): delegation of `generation`; its first boot publishes `term`.
     NodeKit make_new_root(uint32_t index, uint64_t generation, uint32_t term, Bytes &delegation_out);
     // A member issued outside a join. It is also remembered as one the root's ledger lists (SEC-D2: the root
     // admits nobody else): provisioning the root writes all members made so far, register_member() a later one.

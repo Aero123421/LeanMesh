@@ -14,6 +14,7 @@
 #include "capi/context.hpp"
 #include "core/channel/score.hpp"
 #include "fleet.hpp"
+#include "cut_matrix.hpp"
 #include "lmtest.hpp"
 #include "port/sim/sim_node.hpp"
 #include "port/sim/sim_provision.hpp"
@@ -455,6 +456,7 @@ LM_TEST("C05 sim: the root loses power right after COMMIT is durable; it comes b
     n.poke();
     LM_CHECK(n.until([&] { return n.view().state == CState::Committed; }, 200'000, 1));
     const uint64_t cut_at = n.at_ms();
+    const RootTerm term_before = n.eng(0).identity().term();
     n.node(0).power_cut();
     n.node(0).store.power_restore();
     n.run_ms(3000);
@@ -473,6 +475,9 @@ LM_TEST("C05 sim: the root loses power right after COMMIT is durable; it comes b
     }, 900'000, 100));
     LM_CHECK(!back_on_6);
     LM_CHECK(n.view().why == Why::Moved);
+    // docs/18 C05 "新term": the restarted root publishes a new root_term (ARCH2-D1) and the members follow it.
+    LM_CHECK(term_before < n.eng(0).identity().term());
+    LM_CHECK(n.eng(1).identity().term() == n.eng(0).identity().term() && n.eng(2).identity().term() == n.eng(0).identity().term());
     std::printf("  C05-sim: root back on 11 immediately, all three converged %llu s after the power cut\n",
                 static_cast<unsigned long long>((n.at_ms() - cut_at) / 1000));
 }
@@ -695,52 +700,48 @@ LM_TEST("C01 sim (automatic): two independent nodes losing frames on the home ch
 // after every record write of one plan. Whatever the Flash kept must be an allowed state: the old channel with or
 // without PREPARED, or the target channel; then the network finishes the plan.
 LM_TEST("POWER-* channel (sim): power cut before/torn/after every channel record write of a member leaves only allowed states") {
-    unsigned fired = 0, converged = 0, total = 0;
-    for (CutMode mode : {CutMode::Before, CutMode::Torn, CutMode::After}) {
-        for (uint64_t k = 1; k <= 8; ++k) {
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "channel commit", {{1, "member"}}, [](unsigned target, uint64_t k, sim::CutMode mode) {
+            lmtest::CutRun out;
             CNet n(3, 81 + k);
             form(n);
-            sim::SimStore &st = n.node(1).store;
+            sim::SimStore &st = n.node(target).store;
             st.arm_cut(st.mutating_ops() + k, mode);
             LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
             n.poke();
-            ++total;
             if (n.until([&] { return st.cut_fired(); }, 400'000, 5)) {
-                ++fired;
-                n.node(1).power_cut();
+                out.fired = true;
+                n.node(target).power_cut();
                 st.power_restore();
                 n.run_ms(2000);
-                n.boot(1);
-                LM_CHECK(n.until([&] { return n.node(1).powered() && n.chan(1).loaded(); }, 20'000, 1));
-                const channel::Mode m = n.chan(1).mode();
+                n.boot(target);
+                LM_CHECK(n.until([&] { return n.node(target).powered() && n.chan(target).loaded(); }, 20'000, 1));
+                const channel::Mode m = n.chan(target).mode();
                 LM_CHECK(m == channel::Mode::Normal || m == channel::Mode::Prepared);
-                LM_CHECK(n.radio(1) == 6 || n.radio(1) == 11);
+                LM_CHECK(n.radio(target) == 6 || n.radio(target) == 11);
                 if (m == channel::Mode::Prepared) {
-                    LM_CHECK_EQ(n.radio(1), 6); // PREPARED only: the old channel
+                    LM_CHECK_EQ(n.radio(target), 6); // PREPARED only: the old channel
                 }
-                if (n.chan(1).epoch().value() == 1) {
-                    LM_CHECK_EQ(n.radio(1), 11); // a COMMITTED record (or an applied epoch): the target, no rollback
-                    LM_CHECK_EQ(n.chan(1).current(), 11);
+                if (n.chan(target).epoch().value() == 1) {
+                    LM_CHECK_EQ(n.radio(target), 11); // a COMMITTED record (or an applied epoch): the target, no rollback
+                    LM_CHECK_EQ(n.chan(target).current(), 11);
                 }
             }
             // Either the plan completes, or it timed out while the member was down and every node is still consistent
             // on the old channel (ABORT): never a mixture.
-            const bool ok = n.until([&] {
+            out.ok = n.until([&] {
                 return n.view().state == CState::Monitor &&
                        (n.everyone_on(11, 1) || (n.everyone_on(6, 0) && n.view().why == Why::PrepareTimeout));
             }, 1'500'000, 100);
-            if (!ok) {
-                std::printf("  POWER-* channel: mode %u k %llu did not converge\n", (unsigned)mode, (unsigned long long)k);
+            if (!out.ok) {
+                out.why = "the plan neither completed on the target channel nor aborted everyone back to the old one";
                 n.dump();
             }
-            LM_CHECK(ok);
-            converged += ok && n.radio(0) == 11 ? 1 : 0;
-        }
-    }
-    std::printf("  [measure] POWER-* channel sweep: %u cut points, %u fired, %u converged on the target channel\n", total, fired, converged);
-    LM_CHECK(fired >= 12);
+            out.converged = out.ok && n.radio(0) == 11;
+            return out;
+        }, 1, 9);
+    LM_CHECK(t.points >= 12);
 }
-
 
 LM_TEST("C-switch sim: a message queued inside the guard of the switch is held, then delivered once under its own MessageId") {
     CNet n(3);

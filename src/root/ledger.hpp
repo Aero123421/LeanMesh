@@ -237,7 +237,9 @@ class Ledger {
         ByteView ticket_cose;
         uint16_t slot = 0;      // ledger slot of this device
         uint8_t role = 0;
-        uint8_t retry_kind_ = 0; // 1: start_prepare, 2: answer_repeat, waiting for the shared memory
+        // Waiting for the shared memory: 1 start_prepare, 2 answer_repeat; [P4] for the record memory alone:
+        // 3 commit PREPARED, 4 commit ACTIVE, 5 commit confirmed.
+        uint8_t retry_kind_ = 0;
         bool windowed = false;   // [S18] admitted by the commissioning window, not by the join mode
         bool resend = false;     // answers a repeated request: no new reservation
         bool confirmed_done = false;
@@ -298,7 +300,9 @@ class Ledger {
     };
 
     // job plumbing (one ledger job at a time)
-    [[nodiscard]] Status submit(Step step, JobClass cls, port::JobFn fn, void *arg);
+    // One ledger job at a time. `owner` (a transaction index, -2 maintenance) becomes job_txn_ only once the job
+    // exists: a refused submit never re-points the completion of the job that is running (ARCH2 fix).
+    [[nodiscard]] Status submit(Step step, JobClass cls, port::JobFn fn, void *arg, int owner);
     [[nodiscard]] Status commit_entry(Step step, std::size_t slot, EntryState state, bool confirmed,
                                       ByteView cose, int txn);
     static Status load_all_job(port::JobEnv &env, void *arg);
@@ -311,6 +315,9 @@ class Ledger {
     [[nodiscard]] bool acquire(int txn);
     void release(int txn);
     void return_memory();
+    [[nodiscard]] bool hold_record(); // [P4] the node's record memory, for the holder's next record job
+    void give_back_record();
+    [[nodiscard]] bool record_or_retry(Txn &t, uint8_t kind, MonoTime now);
     [[nodiscard]] MutByteView scratch() const { return scratch_; }
 
     // transactions
@@ -323,13 +330,16 @@ class Ledger {
     void decide_policy(Txn &t, MonoTime now);
     void start_prepare(Txn &t, MonoTime now);
     void prepare_signed(Txn &t, Status s, MonoTime now);
+    void commit_prepared(Txn &t, MonoTime now);
     void window_reserved(Txn &t, Status s, MonoTime now); // [S18]
     [[nodiscard]] Status commit_window(Step step, uint8_t used, int holder); // [S18] rec::commissioning_window
     void prepare_committed(Txn &t, Status s, MonoTime now);
     void send_prepare(Txn &t, MonoTime now);
     void on_stored(Txn &t, ByteView data, const member::JoinObjectHeader &h, MonoTime now);
+    void commit_active(Txn &t, MonoTime now);
     void active_committed(Txn &t, Status s, MonoTime now);
     void on_active(Txn &t, ByteView data, const member::JoinObjectHeader &h, MonoTime now);
+    void commit_confirmed(Txn &t, MonoTime now);
     void confirmed_committed(Txn &t, Status s, MonoTime now);
     void answer_repeat(Txn &t, const Entry &e, MonoTime now);
     void resend_loaded(Txn &t, Status s, MonoTime now);
@@ -337,7 +347,7 @@ class Ledger {
     void stage_ack(Txn &t, uint8_t type, const member::JoinAckData &a, MonoTime now);
     void stage_commit(Txn &t, MonoTime now);
     void stage_commit_data(Txn &t, const member::JoinCommitData &c, MonoTime now);
-    void end_txn(Txn &t);
+    void end_txn(Txn &t, bool close_session = true); // false: the device's new session is up, only this txn ends
     void retry_txn(Txn &t, MonoTime now);
     [[nodiscard]] Status pick_slot(const DeviceId &device, std::size_t &slot) const;
     void abort_expired(MonoTime now);
@@ -351,6 +361,10 @@ class Ledger {
     // that left), nothing learned about the old owner may route on (review finding 20).
     void set_entry(std::size_t slot, const Entry &e);
     [[nodiscard]] Status commit_manifest(const Manifest &m, Step step);
+    [[nodiscard]] Status commit_floors(Step step);
+    // The common start of a signed object's install (holder -2): refusals, the object in the lent scratch, the trust
+    // the verify job checks it against. `other` = another install of that kind is running.
+    [[nodiscard]] Status begin_install(ByteView cose, std::size_t max_bytes, bool other);
     // SEC-D7: may this verified page be applied? `applied` = it is applied already (the same bytes again).
     [[nodiscard]] Status expected_admit(bool &applied);
     [[nodiscard]] bool expected_room() const;

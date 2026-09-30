@@ -96,8 +96,7 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
         phase_ = JoinPhase::LoadTicket;
         if (start_flash(Step::SwitchPeek, store::RecordJob::Op::Load, k_rec_assignment_ticket, 0, 0, now) !=
             Status::Ok) {
-            engine_.identity().return_record();
-            rec_ = nullptr;
+            engine_.identity().return_record(rec_);
             switch_ = false;
             phase_ = JoinPhase::Idle;
             return Status::Busy;
@@ -162,8 +161,7 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
     const Status st = start_flash(Step::InstallTicket, store::RecordJob::Op::Commit, k_rec_assignment_ticket, 0,
                                   cose.size(), now);
     if (st != Status::Ok) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
+        engine_.identity().return_record(rec_);
         return st;
     }
     install_op_ = k_op_tag | ++op_counter_;
@@ -172,17 +170,21 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
 }
 
 void Membership::install_done(Status s, MonoTime /*now*/) {
-    engine_.identity().return_record();
-    rec_ = nullptr;
+    engine_.identity().return_record(rec_);
     engine_.emit_event(LM_EVENT_OPERATION, static_cast<uint32_t>(s), install_op_, nullptr);
 }
 
 // ---- views ----
 void Membership::get_membership(lm_membership_t &out, MonoTime /*now*/) const {
+    view(engine_.identity(), this, state_since_, out);
+}
+
+// lm_membership_get. `m` is the joiner/member side; the root holds none (ADR-002 P8): it is provisioned and never
+// joins or leaves, so its answer is the identity's alone.
+void Membership::view(const LocalIdentity &id, const Membership *m, MonoTime since, lm_membership_t &out) {
     out = lm_membership_t{};
     out.struct_size = sizeof(out);
     out.abi_version = LM_ABI_VERSION;
-    const LocalIdentity &id = engine_.identity();
     if (id.state() == LocalIdentity::State::Ready) {
         std::memcpy(out.device.bytes, id.self().bytes.data(), 32);
     }
@@ -193,13 +195,13 @@ void Membership::get_membership(lm_membership_t &out, MonoTime /*now*/) const {
         std::memcpy(out.domain.bytes, id.delegation().domain.bytes.data(), 16);
         out.assignment_generation = id.member().assignment.value();
         out.membership_generation = id.member().membership.value();
-        state = leave_ != LeavePhase::Idle ? LM_LEAVING : LM_ACTIVE;
+        state = m != nullptr && m->leave_ != LeavePhase::Idle ? LM_LEAVING : LM_ACTIVE;
     } else if (id.state() == LocalIdentity::State::Ready && id.member_status() == Status::Revoked) {
         state = LM_MEMBER_REVOKED;
-    } else {
-        switch (phase_) {
+    } else if (m != nullptr) {
+        switch (m->phase_) {
         case JoinPhase::Idle:
-            state = have_prepared_ ? LM_PREPARED : LM_UNASSIGNED;
+            state = m->have_prepared_ ? LM_PREPARED : LM_UNASSIGNED;
             break;
         case JoinPhase::Discover:
             state = LM_DISCOVERING;
@@ -220,13 +222,14 @@ void Membership::get_membership(lm_membership_t &out, MonoTime /*now*/) const {
             state = LM_PREPARED;
             break;
         }
-        if (peer_.known) {
-            std::memcpy(out.domain.bytes, peer_.delegation.domain.bytes.data(), 16);
+        if (m->peer_.known) {
+            std::memcpy(out.domain.bytes, m->peer_.delegation.domain.bytes.data(), 16);
         }
     }
     out.state = state;
-    out.reason = state == LM_ACTIVE ? 0 : static_cast<uint32_t>(req_.reason); // the last refusal is history once ACTIVE
-    out.state_since_mono_ms = state_since_.to_ms();
+    // the last refusal is history once ACTIVE
+    out.reason = state == LM_ACTIVE || m == nullptr ? 0 : static_cast<uint32_t>(m->req_.reason);
+    out.state_since_mono_ms = since.to_ms();
 }
 
 Status Membership::get_request(const RequestId &id, lm_operation_t &out, MonoTime now) const {
@@ -354,12 +357,9 @@ void Membership::leave_notify(MonoTime now) {
     if (st == Status::Ok) {
         st = encode_leave(d, MutByteView{obj}.from(plen), dlen);
     }
-    link::SealedFrame f;
     if (st == Status::Ok) {
-        st = engine_.link().seal(root->device, wire::FrameKind::Control, ByteView{obj.data(), plen + dlen}, f, now);
-    }
-    if (st == Status::Ok) {
-        st = engine_.transmit(root->mac, f.view(), k_tag_leave, now);
+        st = engine_.link().send_sealed(root->device, root->mac, wire::FrameKind::Control,
+                                        ByteView{obj.data(), plen + dlen}, k_tag_leave, now);
     }
     if (st == Status::Busy || st == Status::DriverResultUnknown) {
         leave_tx_wait_ = now + Duration::from_ms(20); // radio occupied: local, not an attempt
@@ -433,7 +433,9 @@ void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
         leave_finish(Status::Ok, LM_OUTCOME_APPLIED, now);
         return;
     }
-    // The credential is gone durably, its floor with it: erase it from RAM too and end every session of the domain.
+    // The credential is gone durably, its floor with it: erase it from RAM too and end every session of the domain,
+    // link and end sessions alike (an end session is bound to this membership generation: a peer that still holds
+    // one must find it gone and make a fresh one, which shows it the generation of a later join, docs/04 §7).
     DeviceId peers[link::k_max_neighbors];
     std::size_t n = 0;
     engine_.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
@@ -444,6 +446,8 @@ void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
     for (std::size_t i = 0; i < n; ++i) {
         (void)engine_.link().close(peers[i]);
     }
+    engine_.delivery().sessions().clear();
+    engine_.delivery().invalidate_routes();
     // Fleet identity stays; the floor records what this device consumed (SEC-D8).
     id.drop_member(Floors::Entry{id.self(), leave_assignment_ + 1, leave_membership_ + 1}, revoked_);
     have_prepared_ = false;
@@ -452,10 +456,7 @@ void Membership::leave_flash_done(Step /*step*/, Status s, MonoTime now) {
 
 void Membership::leave_finish(Status why, uint32_t outcome, MonoTime now) {
     (void)now;
-    if (rec_ != nullptr) {
-        engine_.identity().return_record();
-        rec_ = nullptr;
-    }
+    engine_.identity().return_record(rec_);
     const bool left = outcome == LM_OUTCOME_APPLIED;
     if (!left && hooks_.refuse_sends != nullptr) {
         hooks_.refuse_sends(hooks_.ctx, false); // a failed leave: the device keeps working

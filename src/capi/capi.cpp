@@ -8,22 +8,6 @@
 
 namespace lm::capi {
 
-namespace {
-
-bool valid_ctx(const lm_context_t *ctx) {
-    return ctx != nullptr && ctx->magic == lm_context::k_magic;
-}
-
-Status run(lm_context_t *ctx, CommandKind kind, void *response, std::size_t response_size) {
-    Command cmd;
-    cmd.kind = kind;
-    cmd.response = response;
-    cmd.response_size = response_size;
-    return ctx->owner.call(cmd).status;
-}
-
-} // namespace
-
 Status check_abi(uint32_t struct_size, uint32_t abi_version, std::size_t expected) {
     if (abi_version != LM_ABI_VERSION) {
         return Status::Unsupported;
@@ -113,7 +97,7 @@ lm_status_t lm_start(lm_context_t *ctx) {
     if (!lm::capi::valid_ctx(ctx)) {
         return to_abi(Status::InvalidArgument);
     }
-    return to_abi(lm::capi::run(ctx, lm::CommandKind::Start, nullptr, 0));
+    return to_abi(lm::capi::call(ctx, lm::CommandKind::Start).status);
 }
 
 // Decision: without pending operations stop completes inside the call; *operation is then 0,
@@ -122,7 +106,7 @@ lm_status_t lm_stop(lm_context_t *ctx, uint32_t /*drain_ms*/, lm_operation_id_t 
     if (!lm::capi::valid_ctx(ctx)) {
         return to_abi(Status::InvalidArgument);
     }
-    const Status s = lm::capi::run(ctx, lm::CommandKind::Stop, nullptr, 0);
+    const Status s = lm::capi::call(ctx, lm::CommandKind::Stop).status;
     if (s == Status::Ok && operation != nullptr) {
         *operation = 0;
     }
@@ -164,7 +148,18 @@ lm_status_t lm_get_capabilities(lm_context_t *ctx, lm_capabilities_t *out) {
     if (s != Status::Ok) {
         return to_abi(s);
     }
-    return to_abi(lm::capi::run(ctx, lm::CommandKind::GetCapabilities, out, sizeof(*out)));
+    return to_abi(lm::capi::call(ctx, lm::CommandKind::GetCapabilities, nullptr, 0, out, sizeof(*out)).status);
+}
+
+lm_status_t lm_root_time_get(lm_context_t *ctx, lm_root_time_t *out) { // [ARCH2-D7]
+    if (!lm::capi::valid_ctx(ctx) || out == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status s = lm::capi::check_abi(out->struct_size, out->abi_version, sizeof(*out));
+    if (s != Status::Ok) {
+        return to_abi(s);
+    }
+    return to_abi(lm::capi::call(ctx, lm::CommandKind::RootTimeGet, nullptr, 0, out, sizeof(*out)).status);
 }
 
 lm_status_t lm_diagnostics_get(lm_context_t *ctx, lm_diagnostics_t *out) { // [SLICE:S19]
@@ -175,7 +170,7 @@ lm_status_t lm_diagnostics_get(lm_context_t *ctx, lm_diagnostics_t *out) { // [S
     if (s != Status::Ok) {
         return to_abi(s);
     }
-    return to_abi(lm::capi::run(ctx, lm::CommandKind::DiagnosticsGet, out, sizeof(*out)));
+    return to_abi(lm::capi::call(ctx, lm::CommandKind::DiagnosticsGet, nullptr, 0, out, sizeof(*out)).status);
 }
 
 } // extern "C"

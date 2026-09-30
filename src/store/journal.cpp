@@ -148,7 +148,8 @@ Status Journal::scan_segment(port::Store &store, uint32_t seg, bool apply_entrie
     return Status::Ok;
 }
 
-Status Journal::open(port::Store &store) {
+Status Journal::open(port::Store &store, MutByteView scratch) {
+    const Staged staged{*this, scratch};
     if (buf_.size() < k_journal_min_scratch) {
         return Status::InvalidArgument; // the owner lent too little memory for one entry
     }
@@ -264,7 +265,8 @@ Status Journal::make_room(port::Store &store, uint32_t need) {
     return seg_[head_].tail + need <= seg_bytes_ ? Status::Ok : Status::NoCapacity;
 }
 
-Status Journal::apply(port::Store &store, const JournalOp *ops, std::size_t count) {
+Status Journal::apply(port::Store &store, MutByteView scratch, const JournalOp *ops, std::size_t count) {
+    const Staged staged{*this, scratch};
     if (!open_ || count == 0) {
         return Status::InvalidArgument;
     }
@@ -326,7 +328,8 @@ Status Journal::apply(port::Store &store, const JournalOp *ops, std::size_t coun
     return Status::Ok;
 }
 
-Status Journal::read(port::Store &store, uint32_t id, MutByteView out, std::size_t &len) {
+Status Journal::read(port::Store &store, MutByteView scratch, uint32_t id, MutByteView out, std::size_t &len) {
+    const Staged staged{*this, scratch};
     len = 0;
     const JournalLive *e = find(id);
     if (!open_ || e == nullptr) {

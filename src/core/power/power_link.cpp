@@ -67,13 +67,9 @@ void Power::send_poll(MonoTime now) {
     p.window_ms = poll_.window_ms == 0 ? 1 : poll_.window_ms;
     std::array<uint8_t, wire::k_max_frame_bytes> plain{};
     std::size_t len = 0;
-    link::SealedFrame f;
     Status st = engine_.tx().in_flight() ? Status::Busy : wire::encode_power_poll(p, MutByteView{plain}, len);
     if (st == Status::Ok) {
-        st = engine_.link().seal(dev, wire::FrameKind::Power, ByteView{plain.data(), len}, f, now);
-    }
-    if (st == Status::Ok) {
-        st = engine_.transmit(mac, f.view(), k_tag_power, now, sched::Class::Control);
+        st = engine_.link().send_sealed(dev, mac, wire::FrameKind::Power, ByteView{plain.data(), len}, k_tag_power, now);
     }
     if (st == Status::Busy || st == Status::DriverResultUnknown) {
         poll_.retry = now + k_grant_retry; // the radio is occupied: local, neither an attempt nor a loss
@@ -261,14 +257,11 @@ bool Power::send_grant(Child &c, uint32_t ttl_ms, uint32_t reason, MonoTime now)
     g.reason = reason;
     std::array<uint8_t, wire::k_max_frame_bytes> plain{};
     std::size_t len = 0;
-    link::SealedFrame f;
     const link::Neighbor *nb = engine_.link().neighbors().find_mac(c.mac);
     Status st = nb == nullptr ? Status::AuthPending : wire::encode_power_grant(g, MutByteView{plain}, len);
     if (st == Status::Ok) {
-        st = engine_.link().seal(nb->device, wire::FrameKind::Power, ByteView{plain.data(), len}, f, now);
-    }
-    if (st == Status::Ok) {
-        st = engine_.transmit(c.mac, f.view(), k_tag_power, now, sched::Class::Control);
+        st = engine_.link().send_sealed(nb->device, c.mac, wire::FrameKind::Power, ByteView{plain.data(), len},
+                                        k_tag_power, now);
     }
     if (st == Status::Ok) {
         ++stats_.polls_served;

@@ -58,7 +58,7 @@ void collect(Engine &e, MonoTime now, Snapshot &s) {
     }
     if (e.identity().is_member()) {
         s.validity |= valid::root_term;
-        s.root_term = static_cast<uint32_t>(e.identity().member().root_term.value());
+        s.root_term = static_cast<uint32_t>(e.identity().term().value());
     }
     const channel::Channel &ch = e.chan();
     if (ch.enabled()) {

@@ -591,4 +591,52 @@ LM_TEST("S13-D10 sim: the USB handshake waits for the node's exchange slot, take
     }
 }
 
+// ARCH2-P2B: the link views the kit's CCS and credentials instead of copying them. configure() still refuses exactly
+// what the copy refused (a CCS over k_ccs_max_bytes, a root without delegation, a credential object CBOR
+// [device] / [device, delegation] over k_cred_bytes), and the Host adapter takes one kit (the storage the link views).
+LM_TEST("S09-sim configure keeps the kit limits with views; the Host adapter loads one kit") {
+    struct IdleEnv final : serial::UsbEnv {
+        std::size_t write(ByteView b) override { return b.size(); }
+        void random(MutByteView o) override { std::fill(o.begin(), o.end(), uint8_t{1}); }
+        Status submit(Handle, JobClass, port::JobFn, void *) override { return Status::Busy; }
+        sec::HandshakeSlot *slot_acquire() override { return nullptr; }
+        void slot_release() override {}
+    } env;
+    constexpr std::size_t cap = serial::UsbLink::k_cred_bytes;
+    const Bytes ccs(sec::k_ccs_max_bytes + 1, 0xA0);
+    const Bytes dc(300, 0xA1);
+    const Bytes deleg(cap - 1 - 3 - dc.size() - 3, 0xA2); // 1 + (3 + 300) + (3 + 653) = cap
+    const Bytes deleg_over(deleg.size() + 1, 0xA2);
+    serial::UsbKit k;
+    k.ccs = ByteView{ccs.data(), ccs.size()};
+    k.device_cose = ByteView{dc.data(), dc.size()};
+    k.delegation_cose = ByteView{deleg.data(), deleg.size()};
+
+    serial::UsbLink root(serial::UsbRole::Root, env, nullptr, 1, false);
+    LM_CHECK_EQ(root.configure(k), Status::NoCapacity); // CCS one byte over
+    k.ccs = ByteView{ccs.data(), sec::k_ccs_max_bytes};
+    k.delegation_cose = ByteView{};
+    LM_CHECK_EQ(root.configure(k), Status::InvalidArgument);
+    k.delegation_cose = ByteView{deleg_over.data(), deleg_over.size()};
+    LM_CHECK_EQ(root.configure(k), Status::NoCapacity);
+    LM_CHECK(!root.configured());
+    k.delegation_cose = ByteView{deleg.data(), deleg.size()};
+    LM_CHECK_OK(root.configure(k));
+    LM_CHECK(root.configured());
+
+    serial::UsbLink host(serial::UsbRole::Host, env, nullptr, 1, false);
+    const Bytes big(cap - 1 - 3 + 1, 0xA3); // [device] alone, one byte over
+    k.device_cose = ByteView{big.data(), big.size()};
+    LM_CHECK_EQ(host.configure(k), Status::NoCapacity);
+    k.device_cose = ByteView{big.data(), big.size() - 1};
+    LM_CHECK_OK(host.configure(k)); // a Host's object has no delegation (the kit's one is ignored)
+
+    fleet::Network net(42);
+    const Bytes kb = kit_bytes(net, 0);
+    hostnative::HostUsb h(1);
+    LM_CHECK_OK(h.load_kit(ByteView{kb.data(), kb.size()}));
+    LM_CHECK_EQ(h.load_kit(ByteView{kb.data(), kb.size()}), Status::Busy);
+    LM_CHECK(h.link().configured());
+}
+
 LM_TEST_MAIN()

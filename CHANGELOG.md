@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — ソフトウェア実装（feat/sdk-impl）
+
+仕様0.2に沿ったソフトウェア実装を追加した。**実機で認定された製品ではない。** 使い方は [docs/sdk/](docs/sdk/README.md)、判断の履歴は [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)、資源の現状は [ADR-002](decisions/ADR-002-budget-status.md)。
+
+- 追加: 単一ownerのcore（wire、link、member、route、delivery、sched、group、channel、power、diag）、EDHOC suite 3 glue + PSA、2-slot封印Store、ESP-IDF port（4 SoC build）、root用USB serial bridge、FastAPI Host（SQLite、event journal、SSE）、meshsim、C ABI 2の実装（`lm_connectivity_get`、`lm_policy_get/set` を除く）。
+- 検証（ソフトウェア/simulation）: native ctest（ASan+UBSan含む）、Host unit/integration/E2E、meshsim上の21 node / 20 hop全経路、Store切断matrix（sim）、seed付きモデル試験、IDF build（S3/C3/C5/C6 の LEAF と ROOT、C3 の RELAY）。
+- 未検証: RF、HIL、消費電力、実電源断、鍵custody、EDHOCの独立実装との相互接続。ROOTのESP32-C3搭載は未対応（実機heap未測定）。量産用provisioningツールなし。RF承認は既定off。
+- 仕様ファイル（docs/01〜23、protocol、api、db）の意味は変更していない。`api/leanmesh.h` の冒頭コメントは仕様時点のまま。RAM/SLOCは目標超過（ADR-002）。
+
 ## 0.2 — 2026-09-28 / 統合改訂
 
 全54ファイルの0.1を土台にした**全量版**。差分パッチだけではない。SDK firmware/製品FastAPI実装は含まない。

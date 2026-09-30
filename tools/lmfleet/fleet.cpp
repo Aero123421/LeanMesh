@@ -303,10 +303,13 @@ Network::Network(uint64_t seed, const std::string &label, const std::string &dom
     delegation_cose = fleet.delegation(root, domain);
 }
 
+// The root's stored credential names the last term it published (ARCH2-D1): 0 for a new network, so its first boot
+// publishes term 1, the term of the members issued here.
 NodeKit Network::make_root() {
     MemberSpec s;
     s.address = 1;
     s.role = 2;
+    s.root_term = 0;
     return NodeKit{root, issue_member(root, domain, root, s)};
 }
 
@@ -317,7 +320,7 @@ NodeKit Network::make_new_root(uint32_t index, uint64_t generation, uint32_t ter
     MemberSpec s;
     s.address = 1;
     s.role = 2;
-    s.root_term = term;
+    s.root_term = term - 1; // its first boot publishes `term`, the one the handover names
     n.member_cose = issue_member(n.kit, domain, n.kit, s);
     return n;
 }

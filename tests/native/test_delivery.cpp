@@ -10,6 +10,7 @@
 
 #include "capi/context.hpp"
 #include "fleet.hpp"
+#include "cut_matrix.hpp"
 #include "lmtest.hpp"
 #include "port/sim/sim_node.hpp"
 #include "port/sim/sim_world.hpp"
@@ -591,6 +592,47 @@ LM_TEST("D02 sim: final receipt lost -> a repeated round replays the receipt, on
     LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_APPLIED; }, 10000));
 }
 
+LM_TEST("D03 sim: an old APP_APPLIED arriving after a newer message finished adds history to its own operation only") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    const auto s1 = n.send(0, 1, LM_APPLIED, LM_VOLATILE, payload_of(1), 120000);
+    Received m1;
+    LM_CHECK(n.until([&] { return n.pop(1, m1, LM_EVENT_MESSAGE); }, 20000));
+    LM_CHECK(n.until([&] { return (n.op(0, s1.op).evidence_bits & end_received) != 0; }, 20000));
+    const lm_operation_t before = n.op(0, s1.op);
+    // A report that names another assignment of the origin is not this message (FIX2-D1): nothing is applied by it.
+    lm_message_ref_t wrong = n.ref_of_event(m1.ev);
+    wrong.assignment_generation += 1;
+    LM_CHECK_EQ(lm_report_application_result(n.ctx(1), &wrong, LM_OUTCOME_APPLIED, nullptr, 0, nullptr), LM_STATUS_NOT_FOUND);
+    // The application's answer is on its way back slowly (8 s on the air); meanwhile a newer message is finished.
+    LinkParams slow;
+    slow.up = true;
+    slow.delay_us = 8'000'000;
+    n.world.set_link(0, 1, slow);
+    LM_CHECK_EQ(n.report(1, m1.ev, LM_OUTCOME_APPLIED, Bytes{0x11}), LM_STATUS_OK);
+    n.run_ms(100); // the receipt has left the destination
+    set_link(n, 0, 1, true);
+    const auto s2 = n.send(0, 1, LM_APPLIED, LM_VOLATILE, payload_of(2), 120000);
+    Received m2;
+    LM_CHECK(n.until([&] { return n.pop(1, m2, LM_EVENT_MESSAGE); }, 20000));
+    LM_CHECK_EQ(n.report(1, m2.ev, LM_OUTCOME_REJECTED, Bytes{0x22}), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return n.op(0, s2.op).outcome == LM_OUTCOME_REJECTED; }, 20000));
+    const lm_operation_t newer = n.op(0, s2.op);
+    LM_CHECK_EQ(n.op(0, s1.op).outcome, static_cast<uint32_t>(LM_OUTCOME_PENDING)); // the old receipt is still in the air
+    // The old APP_APPLIED lands: its own operation gets it (history only grows), the newer state is untouched.
+    LM_CHECK(n.until([&] { return n.op(0, s1.op).outcome == LM_OUTCOME_APPLIED; }, 30000));
+    const lm_operation_t old_done = n.op(0, s1.op);
+    LM_CHECK((old_done.evidence_bits & before.evidence_bits) == before.evidence_bits);
+    LM_CHECK((old_done.evidence_bits & app_applied) != 0);
+    const lm_operation_t newer_after = n.op(0, s2.op);
+    LM_CHECK_EQ(newer_after.outcome, static_cast<uint32_t>(LM_OUTCOME_REJECTED));
+    LM_CHECK_EQ(newer_after.evidence_bits, newer.evidence_bits);
+    LM_CHECK((newer_after.evidence_bits & app_applied) == 0);
+    LM_CHECK_EQ(n.dv(1).stats().delivered, 3u); // warm-up + two messages: nothing was applied twice
+}
+
 LM_TEST("D02 sim: END_RECEIVED but no application result by the deadline -> INDETERMINATE, not 'not applied'") {
     DNet n(2);
     n.set_time();
@@ -953,7 +995,10 @@ LM_TEST("R01 sim: 20 hops, an APPLIED message with the 96-byte maximum, end sess
 }
 
 // ---- relays refuse what docs/04 §4 refuses ----
-LM_TEST("R04 sim: a relay refuses a stale term and a wrong previous hop, and forwards nothing") {
+// ARCH2-D1: the root_term of the route header is not a forwarding condition (docs/04 §4): a relay carries a frame of
+// another term (a node that has not learnt the root's new term must still reach it); the destination's AEAD binds the
+// term (docs/09 §5 AAD), so a record sealed for another term than its header names opens nowhere.
+LM_TEST("R04 sim: a relay refuses a wrong previous hop and forwards nothing; another term is carried, never accepted") {
     DNet n(3);
     n.set_time();
     n.routes(0, 2);
@@ -968,8 +1013,12 @@ LM_TEST("R04 sim: a relay refuses a stale term and a wrong previous hop, and for
     link::SealedFrame f;
     LM_CHECK_OK(n.eng(0).link().seal(n.id(1), wire::FrameKind::Data, ByteView{plain.data(), rlen + rec.size()}, f,
                                      n.now(0)));
+    const uint64_t fwd_a = n.dv(1).stats().rx_forward;
     inject(n, 0, 1, f);
-    LM_CHECK_EQ(n.dv(1).stats().rx_drop_route, 1u);
+    LM_CHECK_EQ(n.dv(1).stats().rx_drop_route, 0u);
+    LM_CHECK_EQ(n.dv(1).stats().rx_forward, fwd_a + 1); // carried
+    n.run_ms(200);
+    LM_CHECK_EQ(n.dv(2).stats().rx_data, 1u); // ... and refused at the destination: the record's AAD names term 1
     // (b) the frame claims another origin than the neighbour it came from
     ps = n.spec(0, 2);
     ps.origin = ShortAddr{99};
@@ -979,7 +1028,7 @@ LM_TEST("R04 sim: a relay refuses a stale term and a wrong previous hop, and for
     LM_CHECK_OK(n.eng(0).link().seal(n.id(1), wire::FrameKind::Data, ByteView{plain.data(), rlen + rec.size()}, f,
                                      n.now(0)));
     inject(n, 0, 1, f);
-    LM_CHECK_EQ(n.dv(1).stats().rx_drop_route, 2u);
+    LM_CHECK_EQ(n.dv(1).stats().rx_drop_route, 1u);
     LM_CHECK_EQ(n.dv(1).stats().rx_forward, n.dv(1).stats().rx_forward); // (warm-up frames only)
     const uint64_t fwd = n.dv(1).stats().rx_forward;
     n.run_ms(200);
@@ -1057,41 +1106,146 @@ LM_TEST("D08 sim: END_RECEIVED of a DURABLE message only after the destination's
     LM_CHECK(n.pop(1, m, LM_EVENT_MESSAGE));
 }
 
+// ARCH2-D1: the origin of these recovery tests is a member (node 1). A root restart starts a new root term, so a
+// finite deadline of a command the ROOT sent is void after its restart (docs/08 §5; test_term covers that).
 LM_TEST("POWER sim: origin cut during the durable commit (before/after the Flash write)") {
     for (const CutMode mode : {CutMode::Before, CutMode::After}) {
         DNet n(2);
         n.set_time();
         n.routes(0, 1);
-        warm_up(n, 0, 1);
-        const uint64_t inc0 = n.dv(0).durable().incarnation();
-        n.node(0).store.arm_cut(n.node(0).store.mutating_ops(), mode);
-        const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(3, 20), 120000);
+        warm_up(n, 1, 0);
+        const uint64_t inc0 = n.dv(1).durable().incarnation();
+        n.node(1).store.arm_cut(n.node(1).store.mutating_ops(), mode);
+        const auto s = n.send(1, 0, LM_RECEIVED, LM_DURABLE, payload_of(3, 20), 120000);
         LM_CHECK_EQ(s.st, LM_STATUS_OK);
-        LM_CHECK(n.until([&] { return n.node(0).store.cut_fired(); }, 500));
+        LM_CHECK(n.until([&] { return n.node(1).store.cut_fired(); }, 500));
         n.run_ms(50);
-        n.reboot(0);
+        n.reboot(1);
         n.run_ms(100);
-        LM_CHECK(n.dv(0).ready());
-        LM_CHECK(n.dv(0).durable().incarnation() > inc0); // a MessageId is never issued twice
+        LM_CHECK(n.dv(1).ready());
+        LM_CHECK(n.dv(1).durable().incarnation() > inc0); // a MessageId is never issued twice
         n.run_s(2);
-        LM_CHECK_EQ(n.dv(1).stats().delivered, 1u); // nothing left the node before the commit was known
+        LM_CHECK_EQ(n.dv(0).stats().delivered, 1u); // nothing left the node before the commit was known
         if (mode == CutMode::Before) {
-            LM_CHECK_EQ(n.dv(0).durable().live_count(), 0u); // the only allowed state: nothing persisted
+            LM_CHECK_EQ(n.dv(1).durable().live_count(), 0u); // the only allowed state: nothing persisted
             continue;
         }
         // The write had landed: the message is recovered and completes exactly once.
-        LM_CHECK_EQ(n.dv(0).durable().live_count(), 1u);
-        relink(n, 0);
-        n.set_time_at(0, 1);
+        LM_CHECK_EQ(n.dv(1).durable().live_count(), 1u);
+        relink(n, 1);
+        n.set_time_at(1, 1);
         n.routes(0, 1, 2);
-        LM_CHECK(n.until([&] { return n.dv(1).stats().delivered == 2; }, 60000));
+        LM_CHECK(n.until([&] { return n.dv(0).stats().delivered == 2; }, 60000));
         n.run_s(2);
-        LM_CHECK_EQ(n.dv(1).stats().delivered, 2u);
+        LM_CHECK_EQ(n.dv(0).stats().delivered, 2u);
         Received m;
-        LM_CHECK(n.pop(1, m, LM_EVENT_MESSAGE));
+        LM_CHECK(n.pop(0, m, LM_EVENT_MESSAGE));
         LM_CHECK(m.payload == payload_of(3, 20));
-        LM_CHECK(!n.pop(1, m, LM_EVENT_MESSAGE));
+        LM_CHECK(!n.pop(0, m, LM_EVENT_MESSAGE));
     }
+}
+
+// POWER matrix (S20): a DURABLE message crosses a 2-node chain while one store dies at every mutating call. Origin =
+// journal append + retirement; destination = the journal commit that must precede END_RECEIVED. Allowed states:
+// origin: the message is either in its journal (it is sent again, once) or it never left; destination: END_RECEIVED
+// never shows at the origin unless the destination's journal really holds the message; the application gets the
+// message at least once and (without a delivery before the cut) exactly once.
+lmtest::CutRun durable_cut(unsigned target, uint64_t k, CutMode mode) {
+    lmtest::CutRun out;
+    DNet n(2, 700 + k * 3 + target);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    const uint64_t delivered0 = n.dv(1).stats().delivered;
+    SimStore &st = n.node(target).store;
+    st.arm_cut(st.mutating_ops() + k, mode);
+    const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(6, 24), 200000);
+    if (s.st != LM_STATUS_OK) {
+        out.why = "send refused";
+        return out;
+    }
+    lm_message_ref_t ref{};
+    bool have_ref = false;
+    unsigned events_before_cut = 0;
+    Received m;
+    const bool fired = n.until([&] {
+        if (!have_ref) {
+            ref = n.ref_of(0, n.op(0, s.op));
+            have_ref = true;
+        }
+        while (n.pop(1, m, LM_EVENT_MESSAGE)) {
+            ++events_before_cut;
+        }
+        return st.cut_fired();
+    }, 30000);
+    if (!fired) {
+        LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_RECEIVED; }, 30000));
+        out.ok = true; // fewer store calls than k: nothing left to cut
+        return out;
+    }
+    out.fired = true;
+    if (target == 1 && mode != CutMode::After && (n.op(0, s.op).evidence_bits & end_received) != 0) {
+        out.why = "END_RECEIVED at the origin although the destination's journal commit never completed";
+        return out;
+    }
+    const bool retired_before = target == 0 && n.op(0, s.op).outcome == LM_OUTCOME_RECEIVED; // finished and retired already
+    n.reboot(static_cast<uint16_t>(target));
+    n.run_ms(200);
+    relink(n, target);
+    n.set_time_at(target, 1);
+    n.routes(0, 1, 2);
+    const bool origin_has = n.dv(0).durable().live_count() != 0;
+    if (target == 0 && !origin_has && !retired_before && n.dv(1).stats().delivered > delivered0) {
+        out.why = "the destination got a message that the origin's journal does not hold";
+        return out;
+    }
+    unsigned events_after = 0;
+    bool done = false;
+    // The origin's own operation is gone after its restart: judge by the message reference and the destination.
+    for (uint64_t t = 0; t < 120000 && !done; t += 500) {
+        n.run_ms(500);
+        while (n.pop(1, m, LM_EVENT_MESSAGE)) {
+            ++events_after;
+        }
+        if (target == 1) {
+            done = n.op(0, s.op).outcome != LM_OUTCOME_PENDING; // RECEIVED, or an honest INDETERMINATE / EXPIRED
+        } else {
+            done = origin_has ? (events_before_cut + events_after >= 1 && n.dv(0).durable().live_count() == 0) : t >= 20000;
+        }
+    }
+    if (!done) {
+        out.why = "did not settle: the message stayed open";
+        return out;
+    }
+    const unsigned total = events_before_cut + events_after;
+    const uint32_t outcome = target == 1 ? n.op(0, s.op).outcome : static_cast<uint32_t>(LM_OUTCOME_RECEIVED);
+    const bool must_arrive = (target == 1 && outcome == LM_OUTCOME_RECEIVED) || (target == 0 && (origin_has || retired_before));
+    // (A destination whose journal write just failed answers with an honest network-layer refusal before the test
+    // powers it down: REJECTED with `refused` evidence is allowed, a success without a stored message is not.)
+    const bool refused = outcome == LM_OUTCOME_REJECTED && target == 1 && (n.op(0, s.op).evidence_bits & lm::delivery::ev::refused) != 0;
+    if (target == 1 && outcome != LM_OUTCOME_RECEIVED && outcome != LM_OUTCOME_INDETERMINATE && outcome != LM_OUTCOME_EXPIRED &&
+        !refused) {
+        out.why = "outcome " + std::to_string(outcome) + " after a destination restart";
+        return out;
+    }
+    if ((must_arrive && total == 0) || (target == 0 && !must_arrive && total != 0) || total > 2 ||
+        (events_before_cut == 0 && total > 1)) {
+        out.why = "the application saw " + std::to_string(total) + " event(s) (before the cut " + std::to_string(events_before_cut) + ")";
+        return out;
+    }
+    out.ok = true;
+    out.converged = must_arrive && total >= 1 && (target == 0 || outcome == LM_OUTCOME_RECEIVED);
+    (void)have_ref;
+    (void)ref;
+    return out;
+}
+
+LM_TEST("POWER-* journal sim: a store cut at every mutating call of the origin (journal append) and the destination (durable commit)") {
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "delivery durable commit", {{0, "origin"}, {1, "destination"}}, [](unsigned target, uint64_t k, CutMode mode) {
+            return durable_cut(target, k, mode);
+        });
+    LM_CHECK(t.points >= 6);
 }
 
 LM_TEST("POWER sim: origin cut after the commit but before any send: the message resumes, once") {
@@ -1099,50 +1253,50 @@ LM_TEST("POWER sim: origin cut after the commit but before any send: the message
     n.set_time();
     // No route: the message is persisted but cannot leave.
     n.routes(0, 1);
-    warm_up(n, 0, 1);
-    n.dv(0).drop_routes();
-    const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(4, 20), 120000);
-    LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & persisted) != 0; }, 1000));
-    const lm_operation_t before = n.op(0, s.op);
+    warm_up(n, 1, 0);
+    n.dv(1).drop_routes();
+    const auto s = n.send(1, 0, LM_RECEIVED, LM_DURABLE, payload_of(4, 20), 120000);
+    LM_CHECK(n.until([&] { return (n.op(1, s.op).evidence_bits & persisted) != 0; }, 1000));
+    const lm_operation_t before = n.op(1, s.op);
     LM_CHECK((before.evidence_bits & sent) == 0);
-    const lm_message_ref_t ref = n.ref_of(0, before);
-    n.reboot(0);
+    const lm_message_ref_t ref = n.ref_of(1, before);
+    n.reboot(1);
     n.run_ms(100);
-    LM_CHECK_EQ(n.dv(0).durable().live_count(), 1u);
-    relink(n, 0);
-    n.set_time_at(0, 1);
+    LM_CHECK_EQ(n.dv(1).durable().live_count(), 1u);
+    relink(n, 1);
+    n.set_time_at(1, 1);
     // The recovered message keeps its MessageId, hash and ORIGINAL deadline.
-    lm_operation_t rec = op_by_message(n, 0, ref);
+    lm_operation_t rec = op_by_message(n, 1, ref);
     LM_CHECK((rec.evidence_bits & persisted) != 0);
     LM_CHECK((rec.evidence_bits & sent) == 0);
     n.routes(0, 1, 2);
-    LM_CHECK(n.until([&] { return op_by_message(n, 0, ref).outcome == LM_OUTCOME_RECEIVED; }, 60000));
-    LM_CHECK_EQ(n.dv(1).stats().delivered, 2u);
+    LM_CHECK(n.until([&] { return op_by_message(n, 1, ref).outcome == LM_OUTCOME_RECEIVED; }, 60000));
+    LM_CHECK_EQ(n.dv(0).stats().delivered, 2u);
     n.run_ms(200);
-    LM_CHECK_EQ(n.dv(0).durable().live_count(), 0u);
+    LM_CHECK_EQ(n.dv(1).durable().live_count(), 0u);
 }
 
 LM_TEST("POWER sim: origin cut after the destination stored it: dedup at the destination, one event") {
     DNet n(2);
     n.set_time();
     n.routes(0, 1);
-    warm_up(n, 0, 1);
-    const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(5, 20), 300000);
-    const lm_operation_t o = n.op(0, s.op);
-    const lm_message_ref_t ref = n.ref_of(0, o);
-    LM_CHECK(n.until([&] { return n.dv(1).stats().rx_data == 2; }, 5000));
-    n.reboot(0); // the receipt was on its way
+    warm_up(n, 1, 0);
+    const auto s = n.send(1, 0, LM_RECEIVED, LM_DURABLE, payload_of(5, 20), 300000);
+    const lm_operation_t o = n.op(1, s.op);
+    const lm_message_ref_t ref = n.ref_of(1, o);
+    LM_CHECK(n.until([&] { return n.dv(0).stats().rx_data == 2; }, 5000));
+    n.reboot(1); // the receipt was on its way
     n.run_ms(100);
-    LM_CHECK_EQ(n.dv(0).durable().live_count(), 1u);
-    relink(n, 0);
-    n.set_time_at(0, 1);
+    LM_CHECK_EQ(n.dv(1).durable().live_count(), 1u);
+    relink(n, 1);
+    n.set_time_at(1, 1);
     n.routes(0, 1, 2);
-    LM_CHECK(n.until([&] { return op_by_message(n, 0, ref).outcome == LM_OUTCOME_RECEIVED; }, 60000));
-    LM_CHECK_EQ(n.dv(1).stats().delivered, 2u);    // the re-sent record was recognised, not applied twice
-    LM_CHECK(n.dv(1).stats().rx_dup_end >= 1u);
+    LM_CHECK(n.until([&] { return op_by_message(n, 1, ref).outcome == LM_OUTCOME_RECEIVED; }, 60000));
+    LM_CHECK_EQ(n.dv(0).stats().delivered, 2u);    // the re-sent record was recognised, not applied twice
+    LM_CHECK(n.dv(0).stats().rx_dup_end >= 1u);
     Received m;
     int events = 0;
-    while (n.pop(1, m, LM_EVENT_MESSAGE)) {
+    while (n.pop(0, m, LM_EVENT_MESSAGE)) {
         ++events;
     }
     LM_CHECK_EQ(events, 1);
@@ -1167,37 +1321,63 @@ LM_TEST("FIX2-D6 sim: a DURABLE 512 B message is journalled at both ends and sur
     LM_CHECK_EQ(m.ev.reason, 1u); // recovered after a restart: the application may have seen it
 }
 
+// ADR-002 P4 (the journal's job start): a journal write whose job the job table cannot take (four long jobs of
+// another owner fill it) stays queued and is written once there is room. Before, the write was answered BUSY and a
+// received record's commit was enqueued again at once from that answer: a recursion for as long as the table was full.
+LM_TEST("P4 sim: a journal write refused by a full job table stays queued (no BUSY recursion) and completes later") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    const uint32_t lat = n.node(1).jobs.latency_us;
+    n.node(1).jobs.latency_us = 3'000'000; // the next four jobs take 3 s
+    for (int i = 0; i < 4; ++i) {
+        LM_CHECK_OK(n.eng(1).submit_job(JobOwner::Test, Handle{}, JobClass::Flash,
+                                        [](port::JobEnv &, void *) { return Status::Ok; }, nullptr));
+    }
+    n.node(1).jobs.latency_us = lat;
+    const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(7, 20), 60000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    n.run_ms(1000);
+    LM_CHECK((n.op(0, s.op).evidence_bits & end_received) == 0); // not durable at the destination yet: no receipt
+    LM_CHECK(n.until([&] { return n.op(0, s.op).outcome == LM_OUTCOME_RECEIVED; }, 20000));
+    LM_CHECK_EQ(n.dv(1).stats().delivered, 2u); // the warm-up and this one, once
+}
+
 LM_TEST("D06 sim: a recovered message with a deadline waits for a clock bound and never outlives its deadline") {
     for (const bool late : {false, true}) {
         DNet n(2);
         n.set_time();
         n.routes(0, 1);
-        warm_up(n, 0, 1);
-        n.dv(0).drop_routes();
-        const auto s = n.send(0, 1, LM_RECEIVED, LM_DURABLE, payload_of(6, 20), 100000);
-        LM_CHECK(n.until([&] { return (n.op(0, s.op).evidence_bits & persisted) != 0; }, 1000));
-        const lm_message_ref_t ref = n.ref_of(0, n.op(0, s.op));
-        n.reboot(0);
+        warm_up(n, 1, 0);
+        n.dv(1).drop_routes();
+        const auto s = n.send(1, 0, LM_RECEIVED, LM_DURABLE, payload_of(6, 20), 100000);
+        LM_CHECK(n.until([&] { return (n.op(1, s.op).evidence_bits & persisted) != 0; }, 1000));
+        const lm_message_ref_t ref = n.ref_of(1, n.op(1, s.op));
+        n.reboot(1);
         n.run_ms(100);
-        relink(n, 0);
+        relink(n, 1);
         n.routes(0, 1, 2); // route back, but no root clock yet
         n.run_s(5);
-        lm_operation_t rec = op_by_message(n, 0, ref);
+        lm_operation_t rec = op_by_message(n, 1, ref);
         LM_CHECK_EQ(rec.outcome, static_cast<uint32_t>(LM_OUTCOME_PENDING));
         LM_CHECK_EQ(rec.reason, static_cast<uint32_t>(Status::TimeUncertain)); // the reason is explicit
         LM_CHECK((rec.evidence_bits & sent) == 0);               // and nothing is sent blind
         if (late) {
             n.run_s(100); // the deadline (100 s) passes while the clock is unknown
         }
-        n.set_time_at(0, 1);
+        n.set_time_at(1, 1);
         if (late) {
             n.run_s(2);
-            rec = op_by_message(n, 0, ref);
-            LM_CHECK_EQ(rec.outcome, static_cast<uint32_t>(LM_OUTCOME_EXPIRED)); // no new life, never sent
-            LM_CHECK_EQ(n.dv(1).stats().delivered, 1u);
+            rec = op_by_message(n, 1, ref);
+            // No new life and never sent after the restart. Whether it left before the power cut nothing durable says:
+            // INDETERMINATE, never "not delivered" by assumption (ARCH2: a recovered send counts as possibly left).
+            LM_CHECK_EQ(rec.outcome, static_cast<uint32_t>(LM_OUTCOME_INDETERMINATE));
+            LM_CHECK_EQ(rec.reason, static_cast<uint32_t>(Status::Expired));
+            LM_CHECK_EQ(n.dv(0).stats().delivered, 1u);
         } else {
-            LM_CHECK(n.until([&] { return op_by_message(n, 0, ref).outcome == LM_OUTCOME_RECEIVED; }, 60000));
-            LM_CHECK_EQ(n.dv(1).stats().delivered, 2u);
+            LM_CHECK(n.until([&] { return op_by_message(n, 1, ref).outcome == LM_OUTCOME_RECEIVED; }, 60000));
+            LM_CHECK_EQ(n.dv(0).stats().delivered, 2u);
         }
     }
 }

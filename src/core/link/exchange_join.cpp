@@ -76,26 +76,27 @@ Status Exchange::verify_join_body(Exchange &x) {
                                MutByteView{p.ccs}, p.ccs_len));
         return sec::sha256(dc, p.mc_hash);
     }
-    member::JoinBundle b;
-    LM_TRY(member::join_bundle_parse(ByteView{x.rx_.data(), x.rx_len_}, b));
-    LM_TRY(member::check_device_credential(x.vin_.trust, b.device_cose, p.dc));
+    ByteView dc_cose;
+    ByteView del_cose;
+    LM_TRY(member::cred_pair_parse(ByteView{x.rx_.data(), x.rx_len_}, member::k_max_delegation_cose, dc_cose, del_cose));
+    LM_TRY(member::check_device_credential(x.vin_.trust, dc_cose, p.dc));
     member::RootDelegation d;
-    LM_TRY(member::check_root_delegation(x.vin_.trust, b.delegation_cose, d));
+    LM_TRY(member::check_root_delegation(x.vin_.trust, del_cose, d));
     if (d.root != p.dc.device || (d.permissions & member::k_perm_approve) == 0) {
         return Status::AuthRejected;
     }
     LM_TRY(sec::ccs_encode(ByteView{p.dc.serial.data(), p.dc.serial_len}, p.dc.key, MutByteView{p.ccs},
                            p.ccs_len));
-    LM_TRY(sec::sha256(b.device_cose, p.mc_hash));
-    LM_TRY(sec::sha256(b.delegation_cose, x.join_out_->delegation_hash));
+    LM_TRY(sec::sha256(dc_cose, p.mc_hash));
+    LM_TRY(sec::sha256(del_cose, x.join_out_->delegation_hash));
     x.join_out_->delegation = d;
     return Status::Ok;
 }
 
 // Owner. The verify job is done and rx_ no longer holds anything we need: stage CredR there.
 Status Exchange::build_join_response() {
-    return member::join_bundle_encode(s_.identity.device_cose(), s_.identity.delegation_cose(),
-                                      MutByteView{rx_}, own_len_);
+    return member::cred_pair_encode(s_.identity.device_cose(), s_.identity.delegation_cose(),
+                                    member::k_max_delegation_cose, MutByteView{rx_}, own_len_);
 }
 
 Status Exchange::make_join_context(sec::SessionContext &ctx) const {

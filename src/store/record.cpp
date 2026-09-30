@@ -295,13 +295,12 @@ Status record_job(port::JobEnv &env, void *arg) {
     return Status::InvalidArgument;
 }
 
-Status boot_incarnation_advance(port::Store &store, BootJob &job) {
-    job.incarnation = 0;
-    job.rec.id = rec::boot_incarnation;
+Status boot_incarnation_advance(port::Store &store, RecordJob &job, uint64_t &incarnation) {
+    reset_job(job, rec::boot_incarnation); // the lent memory still holds its last borrower's fields
     uint64_t current = 0;
-    const Status st = record_load(store, job.rec);
+    const Status st = record_load(store, job);
     if (st == Status::Ok) {
-        Reader r(ByteView{job.rec.payload.data(), job.rec.payload_len});
+        Reader r(ByteView{job.payload.data(), job.payload_len});
         current = r.u64be();
         if (r.finish() != Status::Ok) {
             return Status::RecoveryRequired; // committed but malformed: do not guess
@@ -310,9 +309,9 @@ Status boot_incarnation_advance(port::Store &store, BootJob &job) {
         // Virgin only if the device was never provisioned. Provisioning commits this record (value
         // 0) before the identity; an identity without a counter means the counter was lost, and
         // starting again at 1 would reuse MessageId space (FIX1-D9).
-        reset_job(job.rec, rec::identity);
-        const Status idst = record_load(store, job.rec);
-        reset_job(job.rec, rec::boot_incarnation);
+        reset_job(job, rec::identity);
+        const Status idst = record_load(store, job);
+        reset_job(job, rec::boot_incarnation);
         if (idst != Status::NotFound) {
             return idst == Status::StorageFailure ? idst : Status::RecoveryRequired;
         }
@@ -322,17 +321,13 @@ Status boot_incarnation_advance(port::Store &store, BootJob &job) {
     if (current == UINT64_MAX) {
         return Status::RecoveryRequired;
     }
-    Writer w(job.rec.payload);
+    Writer w(job.payload);
     w.u64be(current + 1);
-    job.rec.payload_len = static_cast<uint32_t>(w.size());
-    job.rec.state = 0;
-    LM_TRY(record_commit(store, job.rec));
-    job.incarnation = current + 1; // durable: only now may the caller use it
+    job.payload_len = static_cast<uint32_t>(w.size());
+    job.state = 0;
+    LM_TRY(record_commit(store, job));
+    incarnation = current + 1; // durable: only now may the caller use it
     return Status::Ok;
-}
-
-Status boot_job(port::JobEnv &env, void *arg) {
-    return boot_incarnation_advance(env.store, *static_cast<BootJob *>(arg));
 }
 
 } // namespace lm::store

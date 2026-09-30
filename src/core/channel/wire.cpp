@@ -9,28 +9,6 @@ namespace {
 
 bool valid_channel(uint8_t c) { return c >= 1 && c <= 13; }
 
-// The two directions of one layout: io(f, record) lists the fields once, Put writes them, Get reads them.
-struct Put {
-    Writer w;
-    void u8(uint8_t &v) { w.u8(v); }
-    void u16(uint16_t &v) { w.u16be(v); }
-    void u32(uint32_t &v) { w.u32be(v); }
-    void u64(uint64_t &v) { w.u64be(v); }
-    template <std::size_t N> void raw(std::array<uint8_t, N> &v) { w.bytes(ByteView{v}); }
-    template <class T> void tag(T &t) { w.u32be(t.value()); } // RootTerm, ChannelEpoch
-    template <class E> void en(E &e) { w.u8(static_cast<uint8_t>(e)); }
-};
-struct Get {
-    Reader r;
-    void u8(uint8_t &v) { v = r.u8(); }
-    void u16(uint16_t &v) { v = r.u16be(); }
-    void u32(uint32_t &v) { v = r.u32be(); }
-    void u64(uint64_t &v) { v = r.u64be(); }
-    template <std::size_t N> void raw(std::array<uint8_t, N> &v) { r.copy_to(v); }
-    template <class T> void tag(T &t) { t = T{r.u32be()}; }
-    template <class E> void en(E &e) { e = static_cast<E>(r.u8()); }
-};
-
 template <class F> void io(F &f, Plan &p) {
     f.raw(p.id.bytes);
     f.tag(p.term);
@@ -117,14 +95,13 @@ bool valid_plan(const Plan &p) {
 }
 
 void put_plan(Writer &w, const Plan &p) {
-    Put f{w};
-    Plan copy = p;
-    io(f, copy);
+    FieldPut f{w};
+    io(f, const_cast<Plan &>(p)); // read only: every FieldPut parameter is const
     w = f.w;
 }
 
 Plan get_plan(Reader &r) {
-    Get f{r};
+    FieldGet f{r};
     Plan p;
     io(f, p);
     r = f.r;
@@ -152,21 +129,18 @@ Status plan_hash(const Plan &p, Sha256Digest &out) {
 }
 
 template <class M> Status encode(const M &m, MutByteView out, std::size_t &len) {
-    Put f{Writer{out}};
-    f.w.u8(static_cast<uint8_t>(M::op));
-    M copy = m;
-    io(f, copy);
-    len = f.w.size();
-    return f.w.finish();
+    return put_record(m, out, len, [](auto &f, auto &r) {
+        f.is(M::op);
+        io(f, r);
+    });
 }
 
 template <class M> Status decode(ByteView body, M &out) {
-    if (body.empty() || body[0] != static_cast<uint8_t>(M::op)) {
-        return Status::BadFrame;
-    }
-    Get f{Reader{body.from(1)}};
-    io(f, out);
-    return f.r.finish() == Status::Ok && valid(out) ? Status::Ok : Status::BadFrame;
+    const Status st = get_record(body, out, [](auto &f, auto &r) {
+        f.is(M::op);
+        io(f, r);
+    });
+    return st == Status::Ok && valid(out) ? Status::Ok : Status::BadFrame;
 }
 
 #define LM_WIRE_RECORD(T) \

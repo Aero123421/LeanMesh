@@ -6,13 +6,9 @@ namespace {
 Decision drop(DropReason r) { return Decision{Action::Drop, r, ShortAddr{}}; }
 } // namespace
 
-Decision decide_forward(wire::RouteHeader &h, ShortAddr self, ShortAddr previous_sender,
-                        RootTerm local_term) {
+Decision decide_forward(wire::RouteHeader &h, ShortAddr self, ShortAddr previous_sender) {
     if (h.path_len < 1 || h.path_len > wire::k_max_path || h.next_index >= h.path_len) {
         return drop(DropReason::BadIndex);
-    }
-    if (h.root_term != local_term.value()) {
-        return drop(DropReason::StaleTerm);
     }
     if (h.origin == self.value()) {
         return drop(DropReason::OriginIsSelf);
@@ -46,8 +42,8 @@ Status check_candidate_path(ShortAddr self, const uint16_t *path, std::size_t n,
     if (n == 0 || n > wire::k_max_path) {
         return Status::InvalidArgument;
     }
-    if (advertised_term != local_term) {
-        return Status::NetworkMismatch;
+    if (advertised_term < local_term) {
+        return Status::NetworkMismatch; // a tree of a term the root has left
     }
     if (expired) {
         return Status::Expired;

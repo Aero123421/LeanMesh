@@ -77,7 +77,7 @@ void Delivery::on_data(const link::RxInfo &info, ByteView plain, MonoTime now) {
         return;
     }
     wire::RouteHeader next = h;
-    const route::Decision d = route::decide_forward(next, self_addr(), info.address, local_term());
+    const route::Decision d = route::decide_forward(next, self_addr(), info.address);
     switch (d.action) {
     case route::Action::Drop:
         ++stats_.rx_drop_route;
@@ -704,6 +704,7 @@ Reply Delivery::report_result(const ReportRequest &rq, ByteView result, MonoTime
     *op = Op{};
     op->used = true;
     op->report = true;
+    op->assignment = identity_.is_member() ? identity_.member().assignment.value() : 0;
     op->id = next_op_id_++;
     op->seq = ++op_tick_;
     op->dest = origin;

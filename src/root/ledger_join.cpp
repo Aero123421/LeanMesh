@@ -26,12 +26,12 @@ Ledger::Txn *Ledger::txn_by_device(const DeviceId &d) {
     return nullptr;
 }
 
-void Ledger::end_txn(Txn &t) {
+void Ledger::end_txn(Txn &t, bool close_session) {
     if (t.state == TxnState::Free) {
         return;
     }
     const int idx = txn_index(&t);
-    if (t.pipe.bound()) {
+    if (close_session && t.pipe.bound()) {
         (void)engine_.link().close_join(t.pipe.peer());
     }
     t.pipe.reset();
@@ -217,7 +217,15 @@ void Ledger::on_request(Txn &t, ByteView data, const member::JoinObjectHeader &h
         refuse(t, Status::Conflict, now); // another request while one reserved/active: never a 2nd address
         return;
     }
-    // A new join: the ticket is checked on the worker before anything is reserved.
+    // A new join: the ticket is checked on the worker before anything is reserved. While another ledger job runs, its
+    // arguments are the worker's and its completion finds its transaction by job_txn_: refuse before touching either
+    // (the joiner repeats the request).
+    if (job_in_flight_) {
+        t.pipe.rx_forget();
+        ++stats_.busy_drops;
+        refuse(t, Status::Busy, now);
+        return;
+    }
     vargs_.trust = id.trust();
     vargs_.delegation = id.delegation();
     vargs_.device = t.device;
@@ -231,12 +239,12 @@ void Ledger::on_request(Txn &t, ByteView data, const member::JoinObjectHeader &h
         return;
     }
     t.state = TxnState::Verifying;
-    job_txn_ = txn_index(&t);
-    if (submit(Step::VerifyTicket, JobClass::PublicKey, &verify_ticket_job, this) != Status::Ok) {
+    if (submit(Step::VerifyTicket, JobClass::PublicKey, &verify_ticket_job, this, txn_index(&t)) != Status::Ok) {
         t.state = TxnState::Session; // worker busy (one public-key job): the joiner repeats the request
         t.pipe.rx_forget();
         ++stats_.busy_drops;
         refuse(t, Status::Busy, now);
+        return;
     }
 }
 
@@ -414,8 +422,7 @@ void Ledger::start_prepare(Txn &t, MonoTime now) {
     s.out = scratch_.from(k_cose_off);
     t.state = TxnState::Signing;
     t.deadline = now + Duration::from_s(10);
-    job_txn_ = idx;
-    if (submit(Step::SignMember, JobClass::PublicKey, &sign_job, this) != Status::Ok) {
+    if (submit(Step::SignMember, JobClass::PublicKey, &sign_job, this, idx) != Status::Ok) {
         t.state = TxnState::Pending;
         t.retry_at = now + k_busy_retry; // the single public-key slot is busy (a handshake): retry
         t.retry_kind_ = 1;
@@ -434,6 +441,24 @@ void Ledger::prepare_signed(Txn &t, Status s, MonoTime now) {
         return;
     }
     t.state = TxnState::Preparing;
+    commit_prepared(t, now);
+}
+
+// [P4] The transaction's record jobs take the node's record memory when they start; lent to another module for a
+// moment (a journal write, a channel record), the step waits for it on the transaction's retry timer.
+bool Ledger::record_or_retry(Txn &t, uint8_t kind, MonoTime now) {
+    if (hold_record()) {
+        return true;
+    }
+    t.retry_kind_ = kind;
+    t.retry_at = now + k_busy_retry;
+    return false;
+}
+
+void Ledger::commit_prepared(Txn &t, MonoTime now) {
+    if (!record_or_retry(t, 3, now)) {
+        return;
+    }
     if (t.windowed) {
         // [S18] docs/21 §2: the window's budget counts durable reservations. The count is committed first (a cut
         // between the two commits over-counts, never under-counts), and checked again (joins run in parallel).
@@ -468,12 +493,8 @@ void Ledger::window_reserved(Txn &t, Status s, MonoTime now) {
 Status Ledger::commit_window(Step step, uint8_t used, int holder) {
     std::copy(window_.id.begin(), window_.id.end(), rec_->payload.begin());
     rec_->payload[16] = used;
-    rec_->op = store::RecordJob::Op::Commit;
-    rec_->id = store::rec::commissioning_window;
-    rec_->state = 0;
-    rec_->payload_len = 17;
-    job_txn_ = holder;
-    return submit(step, JobClass::Flash, &store::record_job, rec_);
+    rec_->arm(store::RecordJob::Op::Commit, store::rec::commissioning_window, 0, 17);
+    return submit(step, JobClass::Flash, &store::record_job, rec_, holder);
 }
 
 void Ledger::prepare_committed(Txn &t, Status s, MonoTime now) {
@@ -538,10 +559,18 @@ void Ledger::on_stored(Txn &t, ByteView data, const member::JoinObjectHeader &h,
     }
     t.pipe.acked();
     t.device_generation = a.value;
-    job_entry_ = e;
-    job_entry_.consumed = std::max(e.consumed, e.assignment); // durable with the ACTIVE entry (SEC-D4)
     t.state = TxnState::Activating;
     t.deadline = now + Duration::from_s(10);
+    commit_active(t, now);
+}
+
+void Ledger::commit_active(Txn &t, MonoTime now) {
+    if (!record_or_retry(t, 4, now)) {
+        return;
+    }
+    const Entry &e = entries_[t.slot];
+    job_entry_ = e;
+    job_entry_.consumed = std::max(e.consumed, e.assignment); // durable with the ACTIVE entry (SEC-D4)
     if (commit_entry(Step::CommitActive, t.slot, EntryState::Active, false,
                      ByteView{scratch_.data() + k_cose_off, t.cose_len}, txn_index(&t)) != Status::Ok) {
         refuse(t, Status::Busy, now);
@@ -579,9 +608,16 @@ void Ledger::on_active(Txn &t, ByteView data, const member::JoinObjectHeader &h,
     }
     t.pipe.acked();
     t.device_generation = a.value;
-    job_entry_ = e;
     t.state = TxnState::Confirming;
     t.deadline = now + Duration::from_s(10);
+    commit_confirmed(t, now);
+}
+
+void Ledger::commit_confirmed(Txn &t, MonoTime now) {
+    if (!record_or_retry(t, 5, now)) {
+        return;
+    }
+    job_entry_ = entries_[t.slot];
     if (commit_entry(Step::CommitConfirmed, t.slot, EntryState::Active, true,
                      ByteView{scratch_.data() + k_cose_off, t.cose_len}, txn_index(&t)) != Status::Ok) {
         end_txn(t);
@@ -631,7 +667,7 @@ void Ledger::answer_repeat(Txn &t, const Entry &e, MonoTime now) {
         return;
     }
     const int idx = txn_index(&t);
-    if (holder_ != idx && !acquire(idx)) {
+    if ((holder_ != idx && !acquire(idx)) || !hold_record()) {
         t.retry_kind_ = 2;
         t.retry_at = now + k_busy_retry;
         t.deadline = now + k_session_wait;
@@ -640,13 +676,10 @@ void Ledger::answer_repeat(Txn &t, const Entry &e, MonoTime now) {
     }
     t.slot = static_cast<uint16_t>(&e - entries_.data());
     t.membership = e.membership;
-    rec_->op = store::RecordJob::Op::Load;
-    rec_->id = static_cast<uint16_t>(k_rec_ledger_base + t.slot);
-    rec_->payload_len = 0;
+    rec_->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(k_rec_ledger_base + t.slot));
     job_slot_index_ = t.slot;
-    job_txn_ = idx;
     t.state = TxnState::Verifying;
-    if (submit(Step::ResendLoad, JobClass::Flash, &store::record_job, rec_) != Status::Ok) {
+    if (submit(Step::ResendLoad, JobClass::Flash, &store::record_job, rec_, idx) != Status::Ok) {
         refuse(t, Status::Busy, now);
     }
 }

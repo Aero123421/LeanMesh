@@ -260,6 +260,49 @@ def test_external_join_is_approved_through_the_host(bench: Callable[..., Bench])
 
 
 @pytest.mark.e2e
+@pytest.mark.scenario("LC05")
+def test_pending_approval_survives_device_sleep_and_host_restart_without_a_second_reservation(
+        bench: Callable[..., Bench]) -> None:
+    """LC05 (sim): a join waits for the operator; the device goes away completely (deep sleep = it loses RAM and
+    restarts) and the Host is restarted while the request is pending. The same request comes back (same request id,
+    one pending row at the Host, one entry at the root), the operator approves once through the authenticated API and
+    the device becomes ACTIVE with exactly one reservation. Sim: a bench, not the hardware scenario."""
+    b = bench(40, join=False, mode="external")
+    b.start_host()
+    wait_for(lambda: b.status().get("root_connected"), 25, "root_connected")
+    assert b.sim.ok("grant 1 1 1")["status"] == "OK"
+    time.sleep(0.5)
+    node = b.sim.ok("membership 1")["device"]
+    assert b.sim.ok("join 1 96 new 200000")["status"] == "OK"
+    domain = wait_for(lambda: (r := db_rows(b.host.db, "SELECT id FROM domains")) and bytes(r[0][0]).hex(), 20, "domain")
+    b.domain = domain
+    first = wait_for(lambda: (i := b.get("/v1/lifecycle/requests", domain_id=domain)["items"]) and i[0], 40, "pending")
+    assert first["state"] == "PENDING_APPROVAL"
+    # The application sleeps: the device loses its RAM. The Host restarts meanwhile.
+    b.sim.ok("power-cut 1")
+    b.kill_host()
+    time.sleep(33)  # a full handshake with the same peer is allowed once per 30 s (docs/06 §8): a real sleep is longer
+    assert b.sim.ok("ledger")["activated"] == 0
+    b.start_host()
+    wait_for(lambda: b.status().get("root_connected"), 25, "root_connected again")
+    assert b.sim.ok("boot 1")["ok"] and b.sim.ok("start 1")["status"] == "OK"
+    time.sleep(0.5)
+    assert b.sim.ok("join 1 96")["status"] == "OK"  # the same request id after waking
+    wait_for(lambda: b.sim.ok("membership 1")["state"] == 3, 30, "the woken device is APPROVAL_PENDING at the root again")
+    items = b.get("/v1/lifecycle/requests", domain_id=domain)["items"]
+    assert len(items) == 1 and items[0]["device_id"] == node and items[0]["state"] == "PENDING_APPROVAL"
+    entries = [e for e in b.sim.ok("ledger")["entries"] if e["device"] == node]
+    assert len(entries) == 1 and entries[0]["state"] in ("expected", "prepared")
+    assert b.sim.ok("membership 1")["state"] != 5  # nothing was approved by the wake-up
+    ok = _control(b, "JOIN_DECISION", device_id=node, decision="APPROVE", expected_revision=items[0]["revision"])
+    o = wait_for(lambda: (x := b.operation(ok["id"]))["state"] == "FINAL" and x, 30, "decision applied")
+    assert o["outcome"] == "APPLIED"
+    b.await_active(1, timeout_s=40)
+    assert b.sim.ok("ledger")["activated"] == 1
+    assert len([e for e in b.sim.ok("ledger")["entries"] if e["device"] == node]) == 1
+
+
+@pytest.mark.e2e
 @pytest.mark.scenario("J04")
 @pytest.mark.scenario("H04")
 def test_host_crash_after_join_decision_is_reconciled_by_get_request(bench: Callable[..., Bench]) -> None:

@@ -68,6 +68,8 @@ class Mesh {
     // The parent did not answer an authenticated poll twice: it most likely lost the session (a restart). Only
     // that session is made again, at once, instead of waiting for silent hello intervals (docs/20 §7 row 4).
     void parent_session_lost(const MacAddr &mac, MonoTime now);
+    // ARCH2-D1: the node now follows a newer root term (Engine::on_new_term): register again in it.
+    void on_term(MonoTime now);
 
     // Bench switch (sim nodes of slices that drive links by hand). Product builds never call it.
     void set_enabled(bool on) { enabled_ = on; }
@@ -131,6 +133,7 @@ class Mesh {
         uint8_t n = 0;         // its root path entries (root first, itself last)
         std::array<uint16_t, k_max_root_path> path{};
         MonoTime heard{};
+        bool unproven = false; // an end session through this link failed: prove the link before relying on it (ARCH2-D2)
         MonoTime avoid_until{};
         MonoTime probe_wait = MonoTime::never();
         std::array<uint8_t, 8> nonce{};
@@ -196,6 +199,7 @@ class Mesh {
     void trickle_reset(MonoTime now);
     void on_probe(const link::RxInfo &info, const Probe &p, MonoTime now);
     void heard(Cand &c, MonoTime now);
+    void alive(Cand &c, MonoTime now);
     void rf_sample(Cand &c, bool ok, MonoTime now);
     void note(Cand &c, bool ok, MonoTime now); // [S17] one RF attempt: link quality + the channel module's window
 
@@ -225,6 +229,7 @@ class Mesh {
     void query_timer(MonoTime now);
     void connect_spare(MonoTime now);
     [[nodiscard]] uint32_t next_sequence();
+    [[nodiscard]] uint64_t credential_lease(bool attach) const;
 
     Engine &engine_;
     State state_ = State::Off;

@@ -58,6 +58,7 @@ class Bench:
     epoch: str = ""
     keys: int = 0
     procs: list[HostProcess] = field(default_factory=list)
+    formation_s: float = 0.0
 
     # ---- the simulated network ------------------------------------------------------------------
     @staticmethod
@@ -79,6 +80,36 @@ class Bench:
         if join:
             b.join_node(1, 0x60)
         return b
+
+    @staticmethod
+    def build_mesh(meshsim: Callable[..., MeshSim], workdir: Path, *, seed: int, nodes: int, topology: str = "full",
+                   form_timeout_s: float = 120.0) -> Bench:
+        """A mesh of provisioned members that forms by itself (parent search, link/end sessions, REGISTER/LEASE/READY):
+        node 0 is the root with the bridge, 1..n-1 are members (relays, the last one a leaf), no static routes.
+        `chain` puts them on a line (n-1 hops to the last one); `full` lets everyone hear everyone."""
+        sim = meshsim("--nodes", str(nodes), "--topology", topology, "--clock", "realtime", "--serial-pty",
+                      "--serial-bridge", "--mesh", "--leaf-last", "--seed", str(seed))
+        sim.ok("provision 0 1 root")
+        kit = workdir / "kit.cbor"
+        sim.ok(f"serial-kit {kit} 0")
+        sim.ok("serial-pair 0 0")
+        for i in range(1, nodes):
+            sim.ok(f"provision {i} {i + 1} {'leaf' if i == nodes - 1 else 'relay'}")
+        for i in range(nodes):
+            assert sim.ok(f"start {i}")["status"] == "OK"
+        b = Bench(sim, workdir, kit)
+        time.sleep(1.0)
+        sim.ok(f"root-time all 1 {int(sim.ok('status')['now_us']) // 1000}")
+        t0 = time.monotonic()
+        wait_for(lambda: all(sim.ok(f"mesh {i}")["state"] == "ready" for i in range(1, nodes)), form_timeout_s,
+                 "the mesh forms", step=0.5)
+        b.formation_s = time.monotonic() - t0
+        m = sim.ok(f"membership {nodes - 1}")
+        b.domain, b.node = m["domain"], m["device"]
+        return b
+
+    def device(self, index: int) -> str:
+        return str(self.sim.ok(f"membership {index}")["device"])
 
     def join_node(self, index: int, request_seed: int, generation: int = 1, revision: int = 1) -> None:
         sim = self.sim

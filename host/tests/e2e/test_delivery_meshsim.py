@@ -107,28 +107,30 @@ def test_deadline_rules_and_cancel_through_meshsim(meshsim: Callable[..., MeshSi
 def test_durable_send_survives_a_power_cut_through_meshsim(meshsim: Callable[..., MeshSim]) -> None:
     sim = _chain(meshsim, 2)
     t0 = _set_clock(sim)
+    # The origin is the member (node 1). A restarted ROOT starts a new root term and a deadline of its old clock is void
+    # there (docs/08 §5, ARCH2-D1: test_term covers it); the durable recovery of an origin is what this test is about.
     # No route yet: the durable message is persisted, cannot leave, and the origin loses power.
-    sent = sim.ok(f"send 0 1 received durable 100 1 {_root_now(sim, t0) + 300_000} c0ffee")
+    sent = sim.ok(f"send 1 0 received durable 100 1 {_root_now(sim, t0) + 300_000} c0ffee")
     assert sent["status"] == "OK"
     sim.ok("run 200")
-    assert sim.ok("delivery 0")["journal_live"] == 1
-    sim.ok("power-cut 0")
-    sim.ok("boot 0")
-    assert sim.ok("start 0")["status"] == "OK"
+    assert sim.ok("delivery 1")["journal_live"] == 1
+    sim.ok("power-cut 1")
+    sim.ok("boot 1")
+    assert sim.ok("start 1")["status"] == "OK"
     sim.ok("run 100")
-    assert sim.ok("delivery 0")["journal_live"] == 1  # the record came back from Flash
+    assert sim.ok("delivery 1")["journal_live"] == 1  # the record came back from Flash
     sim.ok("run 31000")  # per-peer full-handshake gates (docs/06 §8)
-    assert sim.ok("link-connect 0 1")["status"] == "OK"
+    assert sim.ok("link-connect 1 0")["status"] == "OK"
     sim.ok("run 3000")
     sim.ok(f"root-time all 1 {_root_now(sim, t0)}")
-    sim.ok("route 0 1 1")
     sim.ok("route 1 0 0")
+    sim.ok("route 0 1 1")
     for _ in range(100):
-        if sim.ok("delivery 1")["delivered"] >= 1:
+        if sim.ok("delivery 0")["delivered"] >= 1:
             break
         sim.ok("run 200")
-    ev = sim.ok("msg-next 1")["event"]
+    ev = sim.ok("msg-next 0")["event"]
     assert ev["payload"] == "c0ffee"
-    assert sim.ok("msg-next 1")["event"] is None  # once
+    assert sim.ok("msg-next 0")["event"] is None  # once
     sim.ok("run 3000")
-    assert sim.ok("delivery 0")["journal_live"] == 0  # done: retired
+    assert sim.ok("delivery 1")["journal_live"] == 0  # done: retired

@@ -23,6 +23,23 @@ struct lm_context {
 
 namespace lm::capi {
 
+[[nodiscard]] inline bool valid_ctx(const lm_context_t *ctx) {
+    return ctx != nullptr && ctx->magic == lm_context::k_magic;
+}
+
+// Runs one command on the mesh owner through OwnerCall; the caller's memory stays valid meanwhile.
+inline Reply call(lm_context_t *ctx, CommandKind kind, const void *request = nullptr, std::size_t request_size = 0,
+                  void *response = nullptr, std::size_t response_size = 0, ByteView payload = ByteView{}) {
+    Command cmd;
+    cmd.kind = kind;
+    cmd.request = request;
+    cmd.request_size = request_size;
+    cmd.response = response;
+    cmd.response_size = response_size;
+    cmd.payload = payload;
+    return ctx->owner.call(cmd);
+}
+
 // Validates a caller-initialised ABI struct header: abi_version must be LM_ABI_VERSION
 // (Unsupported otherwise) and struct_size must equal this build's sizeof exactly
 // (InvalidArgument otherwise). v0.2 never guesses a size (docs/10 §1).

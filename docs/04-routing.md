@@ -39,6 +39,7 @@ qualityは対象RF失敗に基づくEWMA（alpha=1/8）、queue遅延EWMA、auth
 
 ## 7. 異常ケース
 address再利用はmembership_generationが変わり、関連link/end sessionとpath cacheを無効化する。root_termはroot bootごとに永続増加。旧termの未確定登録は破棄、新termでsession/pathを再同期。term/generationはwrap前に停止し管理復旧を要求する。rebootで0に戻さない。
+実装（ARCH2-D1）: rootのtermは自MemberCredentialのroot_termで、root bootごとにterm+1で自署名し直しcommitしてから何も公開しない（保存値=最後に公開したterm、新規networkのprovisioningは0）。memberはrootの認証済みLEASE（またはroot署名の更新credential）でのみ新termを知り、登録・path・時計を新termで取り直す。beaconのtermはhintで、より新しいtermの候補は試してよいが古いtermの候補は拒否する。route headerのroot_termは転送条件でない（§4）：期限は各hopでそのtermの時計で判定し、知らないtermは不明として運ぶ。旧termのcredentialはmemberの次のlease更新READYで新termへ再発行される。
 分断時の両側は同じrootを待つ。独自root選挙で鍵や業務状態を二重発行しない。root交換後のDeviceId同一性は署名付き委任で検証する。
 
 ### 整数scoreの固定式

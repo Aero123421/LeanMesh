@@ -17,6 +17,7 @@ scanは無線がhomeを離れる操作。relayの無断scan禁止。rootがroute
 
 ## 5. clock
 rootの単調時計をTIME_REQ/RESP（nonce、t1,t2,t3,t4）で推定。往復遅延全幅を不確かさに含め、非対称経路でも正確だと仮定しない。root_termと共にoffset下限/上限を保持。20hopで上限がpolicy許容誤差を超える場合はREADYを返さずTIME_UNCERTAIN。
+root再起動（新term）後、旧termの値（lease、期限、switch_root_ms）は新termの時計で読まない。旧termの推定で証明済みのlink認可はその時に求めた局所期限まで有効のまま、証明できていないものは不明（アプリDATA停止）。旧termでCOMMITTED済みのplanはrootが再起動時に適用済みなので、memberは新termを知った時点でtargetへ切り替え、旧termのCOMMIT/ABORTはそのplanを保持/完了しているNodeだけが受ける（ARCH2-D1）。
 新channel切替guardは2*最大誤差 + 最大drain時間 + 500ms。UTC/NTPの有無と混ぜない。
 
 ## 6. PREPARE / COMMIT

@@ -267,7 +267,7 @@ Sha256Digest expected_hash(GNet &g, unsigned origin, uint32_t gid, uint64_t revi
 
 } // namespace
 
-LM_TEST("D11 sim (small): a member that is not the root fetches the snapshot from the root and fans out") {
+LM_TEST("D11 D12 sim (small): a member that is not the root fetches the snapshot from the root and fans out") {
     // root 0, relay 1, leaves 2 (origin), 3, 4
     GNet n(tree(1, 3));
     n.form();
@@ -298,6 +298,13 @@ LM_TEST("D11 sim (small): a member that is not the root fetches the snapshot fro
     LM_CHECK_EQ(n.take_messages(4, false), 1u);
     LM_CHECK_EQ(n.take_messages(0, false), 0u); // D12: the root only served the pages, it never saw the body
     LM_CHECK_EQ(n.eng(0).delivery().stats().rx_data, 0ull);
+    // D12: the fan-out uses end sessions origin <-> each target (two parties hold each key, never the root), and
+    // the origin claims no more than the receipts it holds (RECEIVED is not APPLIED).
+    for (const unsigned t_node : {1U, 3U, 4U}) {
+        LM_CHECK(n.eng(2).delivery().has_session(n.id(t_node), n.node(2).clock.now()));
+        LM_CHECK(n.eng(t_node).delivery().has_session(n.id(2), n.node(t_node).clock.now()));
+    }
+    LM_CHECK_EQ(p.applied, 0u);
     // Another member cannot read this snapshot: its token is bound to the origin (docs/22 §2).
     const uint64_t served = n.eng(0).group().stats().pages_served;
     std::array<uint8_t, 64> data{};

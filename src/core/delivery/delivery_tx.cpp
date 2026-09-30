@@ -27,8 +27,11 @@ Duration Delivery::retry_delay(const Active &a) const {
     return d < k_retry_max ? d : k_retry_max;
 }
 
+// A recovered send may have left before the restart: nothing durable says it did not (AGENTS.md: a missing piece of
+// evidence is never filled in by assumption), so its end is INDETERMINATE, not "not delivered".
 bool Delivery::left_node(Handle h, const Op &op) const {
-    return (op.evidence & ev::sent) != 0 || hop_.has_left(OwnerKind::Out, h);
+    const Active *a = actives_.get(h);
+    return (op.evidence & ev::sent) != 0 || hop_.has_left(OwnerKind::Out, h) || (a != nullptr && a->recovered);
 }
 
 // ---- acceptance ----
@@ -114,7 +117,7 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
         if (rq.root_term == 0) {
             return reply(Status::InvalidArgument);
         }
-        switch (deadline_state(rq.expires_root_ms, rq.root_term)) {
+        switch (own_deadline(rq.expires_root_ms, rq.root_term)) {
         case DeadlineCheck::After:
             return reply(Status::Expired);
         case DeadlineCheck::Uncertain:
@@ -210,6 +213,7 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
               : child_mid_ != nullptr ? to_message_id(*child_mid_)
                                       : MessageId{durable_.incarnation(), next_seq_++};
     op->group = child_mid_ != nullptr;
+    op->assignment = identity_.member().assignment.value(); // the membership this message exists in
     op->dest = dest;
     op->port = rq.app_port;
     op->delivery = static_cast<uint8_t>(rq.delivery);
@@ -287,16 +291,25 @@ void Delivery::drive(Handle h, MonoTime now) {
     a->next_at = MonoTime::never();
     const MonoTime dl = local_deadline(op.expires, op.term, now);
 
+    // 0. The membership it was accepted in (docs/21 §6, FIX2-D1): after a transfer the send is history of the old
+    // assignment. It is never re-addressed nor sent under the new one; a recovered record may have left before the
+    // restart, so its outcome is unknown. (While the identity is not loaded, nothing can be sent anyway: it waits.)
+    if (identity_.is_member() && identity_.member().assignment.value() != op.assignment) {
+        ++stats_.old_assignment;
+        finalize_active(h, left_node(h, op) ? LM_OUTCOME_INDETERMINATE : LM_OUTCOME_REJECTED,
+                        static_cast<uint32_t>(Status::NetworkMismatch), now);
+        return;
+    }
     // 1. Deadline first: before the first send and before every retry (never extended).
     if (op.expires != 0) {
-        const DeadlineCheck dc = deadline_state(op.expires, op.term);
+        const DeadlineCheck dc = own_deadline(op.expires, op.term);
         if (dc != DeadlineCheck::Before) {
             const bool left = left_node(h, op);
             if (dc == DeadlineCheck::After) {
                 ++stats_.expired;
                 finalize_active(h, left ? LM_OUTCOME_INDETERMINATE : LM_OUTCOME_EXPIRED,
                                 static_cast<uint32_t>(Status::Expired), now);
-            } else if (bound_.valid && bound_.term.value() != op.term) {
+            } else if ((bound_.valid && bound_.term.value() != op.term) || op.term != local_term().value()) {
                 // The root restarted: the time base of this deadline is gone. Nothing is re-issued
                 // under a new term (docs/08 §5); a sent message is unknown, an unsent one is void.
                 ++stats_.expired;
@@ -849,11 +862,11 @@ Reply Delivery::get_message(const lm_message_ref_t &ref, lm_operation_t &out) {
     Sha256Digest hash{};
     std::memcpy(hash.data(), ref.intent_hash, 32);
     if (origin == identity_.self()) {
-        if (identity_.is_member() && ref.assignment_generation != identity_.member().assignment.value()) {
-            return reply(Status::NotFound);
-        }
+        // The message identity includes the assignment it was sent under: history of an earlier assignment is
+        // found by its own ref, and the same MessageId under another assignment is another message.
         for (const Op &o : ops_) {
-            if (o.used && !o.report && to_bytes(o.mid) == mid && o.hash == hash) {
+            if (o.used && !o.report && o.assignment == ref.assignment_generation && to_bytes(o.mid) == mid &&
+                o.hash == hash) {
                 fill_operation(o, out);
                 return reply(Status::Ok, o.id);
             }

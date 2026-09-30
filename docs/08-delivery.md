@@ -20,6 +20,7 @@ SDKはcallbackの重複抑制と有限receipt cacheを提供する。電源断�
 
 ## 5. 期限
 NORMAL/APPLIEDのdeadlineはroot_termとexpires_root_msで表す。送信前にroot clock boundを取得し、受信側が最遅で期限内と証明できなければTIME_UNCERTAINまたはEXPIRED。期限なしを選べるのは保存event/objectのみ。control commandで期限noneは禁止。
+frameは送信Nodeの現在root_termを載せるので、期限のroot_termはNodeの現在termでなければならない（異なればTIME_UNCERTAIN、既に受付済みなら未送出はEXPIRED・送出済みはINDETERMINATE、ARCH2-D1）。アプリは`lm_root_time_get`で現在termの推定を得る。
 再送round、path変更、Host再起動で元の期限を延長しない。root再起動で時刻termが変わった既送信commandはINDETERMINATE。新termへ自動で同じ有効時間を付け直さない。Hostがtrusted UTCの元deadlineを保持している場合だけ、同一application operationの別transport attemptを明示的に作り、アプリ冪等性で照合する。UTC不明のままdowntimeを0と仮定しない。
 
 ## 6. link/E2E retry

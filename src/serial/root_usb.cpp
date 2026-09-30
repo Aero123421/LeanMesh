@@ -36,7 +36,8 @@ void RootUsb::on_job_done(Handle slot, Status job_status, MonoTime now) {
 }
 
 // Needs a Ready identity: key, credential, trust anchor, the verified RootDelegation and the paired
-// Host, all read by the identity load job (one set of records, one job).
+// Host, all read by the identity load job (one set of records, one job). The link views the identity's CCS and
+// credentials: a root's identity does not change until stop, and on_stop() unconfigures before it is released.
 void RootUsb::try_open(MonoTime now) {
     const member::LocalIdentity &id = engine_.identity();
     if (!started_ || id.state() != member::LocalIdentity::State::Ready || link_.configured()) {
