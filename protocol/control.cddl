@@ -43,12 +43,17 @@ expected-set = [page: 0..15, pages: 1..16, set-hash: id32,
  entries: [* 8 expected-entry]]
 expected-entry = [device: id32, assignment: u63, grant-hash: id32, allowed: bool]
 ; 6-10. ACK includes byte-identical prepare/hash; never silently reallocates ID.
+; join-prepare member = the MemberCredential COSE_Sign1 with its 64 signature bytes withheld (zero), so
+; it is no credential yet; prepare-hash = SHA-256(member) exactly as carried. join-commit carries the 64
+; bytes and is sent only after the root's ACTIVE ledger entry is durable; a refusal (prepare-hash all
+; zero, membership = reason code) carries none.
 join-request = [device-credential: bstr .size (1..1024),
  ticket: bstr .size (1..1024), nonce: id16, capabilities: u64]
 join-prepare = [member: bstr .size (1..1024), prepare-hash: id32,
  address: address, membership: u63, root-term: u32, reservation-ms: 1..120000]
 join-stored = [prepare-hash: id32, record-generation: u63]
-join-commit = [prepare-hash: id32, membership: u63]
+join-commit = [prepare-hash: id32, membership: u63,
+ member-signature: bstr .size 64 / bstr .size 0]
 join-active = [prepare-hash: id32, record-generation: u63]
 ; 11. local_notice and network_refusal are separately observed by receipts.
 revoke-object = [device: id32, assignment-floor: u63,
@@ -69,6 +74,9 @@ time-request = [nonce: id16, root-term: u32, t1-local-us: u64]
 time-response = [nonce: id16, root-term: u32, t1-local-us: u64,
  t2-root-us: u64, t3-root-us: u64]
 ; 19. phase0 prepare/phase1 commit/phase2 abort; immutable committed plan hash.
+; FIX10-D11: this version does NOT sign or send channel-plan / recovery-beacon as COSE objects. The root's plans travel in
+; the node<->root end session (AEAD, issuer = the session's root Identity) as the compact records of src/core/channel/wire.hpp;
+; the plan-hash below is the definition both sides hash. lm_install_control(19|21) is UNSUPPORTED.
 channel-plan = [plan-id: id16, phase: 0..2, root-term: u32,
  channel-epoch: u32, old: channel, new: channel, participant-hash: id32,
  switch-root-ms: u64, max-clock-error-ms: u32, settle-ms: u32,
@@ -113,10 +121,12 @@ root-handover = [handover-id: id16, old-root: id32, new-root: id32,
 ; 32. Root signature. Snapshot binds identity AND assignment/membership generation.
 group-target = [device: id32, assignment: u63, membership: u63]
 group-snapshot-v2 = [group-id: u32, group-revision: u63, token: id16,
- origin: id32, total: 0..64, page: 0..3, snapshot-hash: id32,
+ origin: id32, total: 0..64, page: 0..4, snapshot-hash: id32,
  targets: [* 16 group-target]]
+; A page holds at most 16 rows and at most 700 B of encoded rows, so 64 targets take 4 pages (generations < 2^16)
+; up to 5 (generations near 2^63); the rows of page p follow from the snapshot alone (FIX3-D10).
 
 ; 33. AEAD-only request to the root. Origin is the authenticated session identity.
 ; page0/token=nil starts a snapshot; later pages require the returned token.
 group-snapshot-request = [group-id: u32, group-revision: u63,
- page: 0..3, snapshot-token: id16 / nil]
+ page: 0..4, snapshot-token: id16 / nil]

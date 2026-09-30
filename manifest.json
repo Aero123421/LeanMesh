@@ -3,7 +3,7 @@
   "version": "0.2",
   "date": "2026-09-28",
   "language": "ja",
-  "artifact_type": "full specification bundle; not a working SDK or FastAPI product service",
+  "artifact_type": "specification bundle with a software implementation (native/sim tests and IDF builds run locally; CI green not yet recorded for the fixed tree); no hardware qualification and no production provisioning",
   "full_bundle": true,
   "original_paths_retained": 54,
   "file_count": 79,
@@ -17,7 +17,7 @@
     "KG": "4ed3e1ff0e63eec54c52e89444e18b2a18be2130",
     "RouteLoom": "77b5792669fefee13498ef29a3c2e48119c562a0"
   },
-  "product_runtime_implemented": false,
+  "product_runtime_implemented": true,
   "product_scenarios_executed": 0,
   "measured_energy_traces": 0,
   "specification_checks": {
@@ -106,5 +106,8 @@
     "tests/traceability.csv"
   ],
   "verification": "evidence/VALIDATION.json",
-  "checksum_note": "SHA256SUMS.txt covers all files except itself. Re-running the checker may rewrite VALIDATION.json. BASELINE.json contains the original v0.1 inventory and hashes; current files may be revised."
+  "checksum_note": "SHA256SUMS.txt is the checksum set of the specification bundle listed in 'files' (all except itself); regenerate it (sha256sum over that list) when a listed file changes. Re-running the checker may rewrite VALIDATION.json. BASELINE.json contains the original v0.1 inventory and hashes; current files may be revised.",
+  "hardware_qualified": false,
+  "inventory_scope": "'files' and 'file_count' list the specification bundle only (checked by SHA256SUMS.txt); first-party implementation under src/, host/, tools/, tests/native and examples/ is tracked in git, not in this list",
+  "implementation_note": "product_runtime_implemented=true means the C ABI (api/leanmesh.h), the Host and meshsim exist and pass the native/sim tests. product_scenarios_executed and measured_energy_traces count spec-checker evidence only: tests/scenarios.json stays NOT_RUN and config/capability-manifest.json stays all false for the checker (ADR D11, docs/IMPLEMENTATION.md). Implementation evidence is in the generated reports (scripts/scenario_coverage.py, scripts/budget_report.py) and docs/sdk/testing.md. Nothing is qualified on hardware."
 }

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450" role="img" aria-labelledby="t d">
+  <title id="t">LeanMesh: source-routed mesh, root to a leaf 20 hops away</title>
+  <desc id="d">An application talks to a FastAPI host, which talks over authenticated USB serial to the root. A tree of relays reaches a leaf 20 hops away. One source-routed message path is highlighted, a dashed spare link is used for repair, and a sleepy leaf is dimmed.</desc>
+  <style>
+    :root { --fg:#1f2937; --mute:#6b7280; --box:#f3f4f6; --line:#9ca3af; --root:#2563eb; --relay:#64748b; --leaf:#16a34a; --route:#d97706; --spare:#7c3aed; }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg:#e5e7eb; --mute:#9ca3af; --box:#1f2937; --line:#6b7280; --root:#60a5fa; --relay:#94a3b8; --leaf:#4ade80; --route:#fbbf24; --spare:#a78bfa; }
+    }
+    text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: var(--fg); }
+    .mute { fill: var(--mute); }
+    .box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+    .link { stroke: var(--line); stroke-width: 2; fill: none; }
+    .route { stroke: var(--route); stroke-width: 4.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .spare { stroke: var(--spare); stroke-width: 2.5; fill: none; stroke-dasharray: 6 5; }
+    .root { fill: var(--root); }
+    .relay { fill: var(--relay); }
+    .leaf { fill: var(--leaf); }
+    .sleepy { fill: none; stroke: var(--leaf); stroke-width: 2; stroke-dasharray: 3 3; opacity: .8; }
+    .b { font-weight: 600; }
+    .h { font-size: 14px; font-weight: 600; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerUnits="userSpaceOnUse" markerWidth="14" markerHeight="14" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--route)"/></marker>
+    <marker id="al" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--line)"/></marker>
+  </defs>
+
+  <!-- application / host / root -->
+  <rect class="box" x="20" y="34" width="100" height="52" rx="8"/>
+  <text class="b" x="70" y="65" text-anchor="middle">Application</text>
+  <rect class="box" x="145" y="34" width="140" height="52" rx="8"/>
+  <text class="b" x="215" y="55" text-anchor="middle">Host</text>
+  <text class="mute" x="215" y="74" text-anchor="middle">FastAPI + SQLite</text>
+  <line class="link" x1="120" y1="60" x2="145" y2="60" marker-end="url(#al)"/>
+  <line class="link" x1="285" y1="60" x2="438" y2="60" marker-end="url(#al)"/>
+  <text class="mute" x="361" y="50" text-anchor="middle">USB serial</text>
+  <text class="mute" x="350" y="80" text-anchor="middle">authenticated</text>
+
+  <!-- tree links -->
+  <path class="link" d="M460,60 L300,150 M460,60 L460,150 M460,60 L620,150"/>
+  <path class="link" d="M300,150 L220,230 M300,150 L340,230 M620,150 L620,230"/>
+  <path class="link" d="M620,230 L620,310"/>
+  <text class="mute" x="220" y="266" text-anchor="middle">…</text>
+  <text class="mute" x="340" y="266" text-anchor="middle">…</text>
+
+  <!-- spare link -->
+  <line class="spare" x1="474" y1="230" x2="606" y2="230"/>
+  <text x="540" y="221" text-anchor="middle" style="fill:var(--spare)">spare link</text>
+  <text class="mute" x="540" y="250" text-anchor="middle">(repair)</text>
+
+  <!-- source route -->
+  <path class="route" d="M460,60 L460,150 L460,230 L460,262"/>
+  <circle cx="460" cy="277" r="2.5" fill="var(--route)"/><circle cx="460" cy="287" r="2.5" fill="var(--route)"/><circle cx="460" cy="297" r="2.5" fill="var(--route)"/>
+  <path class="route" d="M460,312 L460,340 L460,374" marker-end="url(#ah)"/>
+
+  <!-- nodes -->
+  <circle class="root" cx="460" cy="60" r="20"/>
+  <text class="b" x="486" y="56">Root</text>
+  <circle class="relay" cx="300" cy="150" r="14"/><circle class="relay" cx="460" cy="150" r="14"/><circle class="relay" cx="620" cy="150" r="14"/>
+  <circle class="relay" cx="220" cy="230" r="14"/><circle class="relay" cx="340" cy="230" r="14"/><circle class="relay" cx="460" cy="230" r="14"/><circle class="relay" cx="620" cy="230" r="14"/>
+  <circle class="relay" cx="460" cy="326" r="14"/>
+  <text x="430" y="331" text-anchor="end">relay 19</text>
+  <circle class="leaf" cx="460" cy="392" r="16"/>
+  <text class="b" x="430" y="397" text-anchor="end">Leaf</text>
+  <text style="fill:var(--route)" class="b" x="484" y="397">source-routed message</text>
+
+  <!-- sleepy leaf -->
+  <circle class="sleepy" cx="620" cy="310" r="16"/>
+  <path d="M626,302 a8,8 0 1 0 0,16 a6.5,6.5 0 1 1 0,-16 z" fill="var(--leaf)" opacity=".8"/>
+  <text class="mute" x="642" y="296">z z</text>
+  <text x="620" y="346" text-anchor="middle">WINDOWED_RX</text>
+  <text x="620" y="363" text-anchor="middle">REPORT_ONLY</text>
+
+  <!-- hop bracket -->
+  <path class="link" d="M722,60 L732,60 L732,392 L722,392"/>
+  <text class="h" transform="translate(760,226) rotate(90)" text-anchor="middle">20 hops</text>
+
+  <!-- legend -->
+  <text class="h" x="20" y="150">Legend</text>
+  <circle class="root" cx="32" cy="176" r="9"/><text x="50" y="181">root</text>
+  <circle class="relay" cx="32" cy="204" r="9"/><text x="50" y="209">relay</text>
+  <circle class="leaf" cx="32" cy="232" r="9"/><text x="50" y="237">leaf (always on)</text>
+  <circle class="sleepy" cx="32" cy="260" r="9"/><text x="50" y="265">sleepy leaf</text>
+  <line class="route" x1="22" y1="288" x2="44" y2="288"/><text x="50" y="293">source route</text>
+  <line class="spare" x1="22" y1="316" x2="44" y2="316"/><text x="50" y="321">spare link</text>
+</svg>

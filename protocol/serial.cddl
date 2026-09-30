@@ -3,11 +3,12 @@ u64 = 0..18446744073709551615
 u32 = 0..4294967295
 id16 = bstr .size 16
 id32 = bstr .size 32
-request = [request-id: id16, method: 1..15, params: request-params]
+request = [request-id: id16, method: 1..16, params: request-params]
 request-params = nil / send / get-message / cancel / join-decide / install /
  node-query / group-query / host-ack / event-ack / channel-action / sleep-window / get-request / group-set / group-targets
+ ; 16 DIAGNOSTICS takes nil (the root's own health, on request only)
 send = [destination: id32, message: id16, intent-hash: id32,
- app-port: 1..65534, flags: 0..31, root-term: u32, expires: u64,
+ app-port: 1..65534, flags: 0..63, root-term: u32, expires: u64,
  object-transfer: bool, payload: bstr .size (0..4096)]
 get-message = [origin: id32, assignment: u64, message: id16, intent-hash: id32]
 cancel = [operation-boot: u64, operation-id: u64]
@@ -15,7 +16,7 @@ join-decide = [pending-request: id16, device: id32, credential-hash: id32,
  decision: 0..1, expected-revision: u64]
 install = [control-type: u32, signed-object: bstr .size (1..4096)]
 node-query = [device: id32 / nil]
-group-query = [group-id: u32, revision: u64, page: 0..3, snapshot-token: id16 / nil]
+group-query = [group-id: u32, revision: u64, page: 0..4, snapshot-token: id16 / nil]
 host-ack = [origin: id32, assignment: u64, message: id16, intent-hash: id32,
  journal-id: id16, committed-sequence: u64]
 event-ack = [gateway-boot: u64, consumed-sequence: u64]

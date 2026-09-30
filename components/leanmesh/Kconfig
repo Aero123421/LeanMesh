@@ -1,0 +1,80 @@
+menu "LeanMesh"
+
+    choice LEANMESH_PROFILE
+        prompt "Capacity profile (config/profiles.json)"
+        default LEANMESH_PROFILE_LEAF
+        help
+            Maximum role this image can run. The profile sizes fixed pools only; security,
+            join and frame interpretation are identical for every profile (docs/16).
+            Root-only code (topology, ledger, serial bridge) is compiled only for ROOT.
+
+        config LEANMESH_PROFILE_LEAF
+            bool "leaf"
+        config LEANMESH_PROFILE_RELAY
+            bool "relay"
+        config LEANMESH_PROFILE_ROOT
+            bool "root"
+    endchoice
+
+    config LEANMESH_OTA
+        bool "Optional OTA: signed manifest check and rollback state (software part)"
+        default n
+        help
+            Compiles the manifest verification, the persistent rollback state and the IDF ota hooks
+            (docs/13 section 6). Off (default): none of that is linked, no buffer exists and the
+            capability report says "not built". On does NOT enable OTA: there is no image transfer or
+            writer in this release, so nothing runs the hooks. Needs the 4 MiB two-slot layout
+            (config/partitions_4m.csv); on a layout without a second app slot the check answers
+            UNSUPPORTED. Real power-cut and rollback evidence (O01, O03) needs hardware.
+
+    config LEANMESH_ALLOW_PLAINTEXT_SECRETS
+        bool "Development only: store the device key without NVS encryption"
+        depends on !NVS_ENCRYPTION
+        default n
+        help
+            The identity record holds the device's P-256 private key and the discovery_scope record the
+            DiscoveryScopeKey (docs/12 section 2: secret payloads need NVS encryption). NVS partitions are not
+            covered by flash encryption, so without CONFIG_NVS_ENCRYPTION anyone who reads the flash reads the key.
+            A build without NVS encryption does not compile unless this acknowledgement is set. Never for a product.
+            With NVS encryption the SDK mounts its `identity` and `state` partitions with the keys of the registered
+            NVS security scheme and never creates those keys (that is provisioning: an eFuse write or the nvs_keys
+            partition, the product's key custody); a missing key fails closed.
+
+    config LEANMESH_OBJECT_TRANSFER
+        bool "Optional 4096 B object transfer (lm_send_object)"
+        default n
+        help
+            Compiles the 4 KiB object buffer (about 4.2 KB of RAM) and its reassembly slot
+            (docs/09 section 6). Off: lm_send_object returns UNSUPPORTED and lm_config_t
+            object_transfer_enabled=1 is refused. On: the application still has to enable it
+            at lm_init.
+
+    menu "RF profile (docs/03 section 3)"
+        config LEANMESH_RF_DEPLOYMENT_APPROVED
+            bool "RF profile has a recorded deployment approval"
+            default n
+            help
+                lm_start refuses to bring the radio up (RF_PROFILE_UNAPPROVED) unless this is set
+                by a product build that holds a compliance record for country, board, antenna
+                and channel set. Setting the country code is not a compliance statement.
+
+        config LEANMESH_RF_COUNTRY
+            string "Country code (2 letters)"
+            default "JP"
+
+        config LEANMESH_RF_CHANNEL
+            int "Initial channel (1..13)"
+            range 1 13
+            default 1
+
+        config LEANMESH_RF_ALLOWED_CHANNELS_MASK
+            hex "Allowed channels, bit c = channel c"
+            default 0x3FFE
+
+        config LEANMESH_RF_TX_POWER_QDBM
+            int "Maximum TX power in quarter dBm (8..84)"
+            range 8 84
+            default 40
+    endmenu
+
+endmenu

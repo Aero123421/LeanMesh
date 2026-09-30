@@ -1,0 +1,3 @@
+[submodule "third_party/libedhoc"]
+	path = third_party/libedhoc
+	url = https://github.com/kamil-kielbasa/libedhoc

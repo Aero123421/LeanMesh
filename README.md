@@ -1,56 +1,101 @@
-# LeanMesh — 小さく、速く、運用できる長距離Wi-Fi SDK
-## 実装仕様書セット v0.2 / 2026-09-28
+# LeanMesh
 
-**LeanMesh は本資料内の仮称。既存RouteLoomの新しい正式名称・公開リリースではありません。**
-本ZIPは、新規・非Wire互換実装のための設計基準、公開契約、試験仕様です。動作するMesh SDK、ESP32 firmware、FastAPI製品サービスは含みません。Cヘッダーはインターフェース契約、Pythonは仕様検査用です。
+**小さく、速く、運用できる長距離Wi-Fi Mesh SDK** — ESP32-S3 / C3 / C5 / C6 を混在させ、ESP-NOW + 2.4GHz Wi-Fi LR で親機から最大20 hopの端末へメッセージを届けます。Hostは Python/FastAPI の1サービスです。
 
-### 何を作るか
-ESP32-S3 / C3 / C5 / C6が混在できる、ESP-NOW + 2.4GHz Wi-Fi LRの汎用メッセージSDK。親機から20無線hopの端末へ到達し、自動経路修復・チャネル最適化・安全なJoin/移設・配送証拠・省電力leafを提供します。HostはPython/FastAPIの1サービス。KGuardは適用例であり、トイレ、校正、安全ルール、Cloud契約をcoreへ入れません。
+![LeanMesh: Application - Host - Root から、relayの木を20 hop下った leaf までsource routeで届く様子](docs/assets/leanmesh-mesh.svg)
 
-### 決定した設計の中心
-- 1 domain = 1 active routing root。各端末のroot深度は最大20辺。端末間は木上の単純経路を使い最大40辺。**20peer、20台、20hopは別の数字**です。
-- source routeを使い、中継端末に全宛先の経路表を持たせません。通常DATAの全網flood、毎周期全ノード再計算をしません。
-- 同一Meshは同時に1チャネル。自動最適化は測定→提案→準備→確定→追随・復旧の1方式。全員の原子的切替や電波妨害下の必達は保証しません。
-- 暗号ハンドシェイクはEDHOCの1プロファイル。Identity/所属/経路/session/アプリ配置を分離します。独自ECDH交換を省コードのために作りません。
-- 送受信coreは単一owner。**公開鍵演算とFlash I/Oは別の有界job実行部**へ出し、中継を止めません。「taskは何があっても1個」は採用しません。
+*App → Host → (認証済みUSB) → Root。メッセージは経路全体を持つsource routeで進み、途中relayに全宛先の経路表は要りません。壊れた区間は予備の近隣linkで修復し、眠る端末は起床窓で受け取ります。*
+
+> **LeanMesh は仮称**です。既存RouteLoomの新しい正式名称・公開リリースではなく、Wire互換もありません。KGuardは適用例であり、業務語彙・Cloud契約・安全ルールはcoreに入れません。
+
+## できること
+
+- **20 hopのsource route Mesh**: 1 domain = 1 root。root深度は最大20辺、通常DATAのfloodも全ノード再計算もしません。
+- **4 SoC混在**: ESP32-S3 / C3 / C5 / C6。radio/OS境界以外の差を作らず、機能の意味は共通です。
+- **EDHOC認証**: 個体認証つきJoin、session、移設、失効。Identity・所属・経路・session・アプリ配置を分離します。
+- **配送証拠**: 受理・永続化・送信・終端受領・アプリ適用・結果不明を別々に返します（exactly-onceの副作用は保証しません）。
+- **自動チャネル**: 測定→提案→準備→確定→追随の1方式。全員の原子的切替や妨害下の必達は保証しません。
+- **3つの電力mode**: ALWAYS_RX / WINDOWED_RX / REPORT_ONLY を1つの通信・認証engineで扱います。
+- **一斉配信**（group send）と、設置・在庫・親機交換などの**ライフサイクル操作**。
+- **Host**: 認証済みUSB serialでRootに接続。OpenAPI、SQLite、idempotency、event/SSE。FastAPI停止中も既存Node間通信は続きます。
+
+## 現在の状態
+
+ソフトウェアとシミュレーションの範囲の実装です。**実機で認定された製品SDK・firmware・FastAPI製品サービスではありません。**
+
+|区分|内容|
+|---|---|
+|実装し、ローカルで検証した|native ctest（ASan/UBSan含む）、Host pytest、meshsim上のE2E（21 node / 20 hop）、4 SoCのESP-IDF build（LEAF/RELAY/ROOT）。CI: `57a2b66` の直近のgreen run は [Actions](https://github.com/Aero123421/LeanMesh/actions/runs/36707722886)（その時点で最新。以降のcommitは別に確認する。CIもsimulation/hostの範囲）|
+|未検証|RF、実機（HIL）、消費電力、実電源断、鍵のcustody、EDHOCの独立実装との相互接続|
+|未対応|ROOTのESP32-C3搭載（実機heap測定まで）、量産用provisioningツール。RF承認は既定off|
+|目標超過|RAM（12/12 build、最大 +13404 B）、flash差分（12/12 buildが256 KiB超、ROOT 4 SoCは320 KiBも超）、SDK SLOC（28k超）。[budget-report](build-records/budget-report.md)、[ADR-002](decisions/ADR-002-budget-status.md)|
+
+仕様検査のPASS、ctest/pytest/meshsimのPASSは、いずれも実機の合格ではありません。一覧は[試験 §5](docs/sdk/testing.md)。
+
+## クイックスタート
+
+前提: ESP-IDF v6.0.3（`~/esp/esp-idf-v6.0.3`）、CMake / Ninja / g++、Python 3.12。詳細は[はじめに](docs/sdk/getting-started.md)。flashは行いません。
+
+```sh
+scripts/third_party.sh setup && scripts/third_party.sh verify     # libedhoc / zcbor を固定commitで取得・検証
+
+cmake -S . -B ~/.cache/leanmesh/native -G Ninja                    # native build + ctest
+cmake --build ~/.cache/leanmesh/native
+ctest --test-dir ~/.cache/leanmesh/native --output-on-failure -j4
+
+scripts/setup_host_venv.sh sync-dev                                # Host: pytest（E2Eはmeshsimを使う）
+~/.cache/leanmesh/host-venv/bin/python -m pytest
+
+scripts/build_targets.sh --app example_node esp32c3                # ESP-IDF build（LEAF、1 SoC）
+```
+
+## ドキュメント
+
+- **SDKの使い方**: [docs/sdk/](docs/sdk/README.md) — [はじめに](docs/sdk/getting-started.md)、[Device API](docs/sdk/device-api.md)、[Host](docs/sdk/host.md)、[構造](docs/sdk/architecture.md)、[試験と未検証の一覧](docs/sdk/testing.md)
+- **仕様（正本）**: [docs/01〜23](START_HERE.md)（[要求](docs/01-requirements.md)、[アーキテクチャ](docs/02-architecture.md)、[routing](docs/04-routing.md)、[省電力](docs/20-low-power.md)ほか）、[protocol/](protocol/registry.json)、[api/](api/leanmesh.h)、[db/](db/schema.sql)。読む順番と目的別の表は[START_HERE](START_HERE.md)
+- **実装の判断**: [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)、[ADR-001](decisions/ADR-001-small-by-single-path.md)、[ADR-002](decisions/ADR-002-budget-status.md)
+- **規約・予算・試験**: [AGENTS.md](AGENTS.md)、[規約](docs/15-coding-standards.md)、[資源予算](docs/16-budgets.md)、[158シナリオ](tests/SCENARIOS.md)
+- **変更履歴**: [CHANGELOG](CHANGELOG.md)
+
+## リポジトリ構成
+
+```
+docs/         仕様 01〜23、sdk/（使い方）、assets/（図）
+protocol/ api/ db/ config/   registry・CDDL、C header・OpenAPI、SQLite schema、設定schema
+src/          core（単一owner）、security、store、serial、root、capi、port（ESP-IDF）、hostnative
+components/ firmware/        ESP-IDF component、example_node など
+host/         Python/FastAPI Host と試験（unit / integration / E2E）
+tools/        meshsim（シミュレータ）、lmtool、lmfleet（TEST-ONLY）
+tests/ scripts/ build-records/ decisions/ evidence/
+```
+
+## 設計の要点
+
+- 各端末のroot深度は最大20辺、木上の端末間は最大40辺。**20peer、20台、20hopは別の数字**です。
+- 送受信coreは単一owner。公開鍵演算とFlash I/Oは別の有界job実行部へ出し、中継を止めません。
+- 暗号ハンドシェイクはEDHOCの1プロファイル。独自ECDH交換は作りません。
 - Root firmwareだけで経路制御とチャネル制御を維持します。FastAPI停止で新しい外部承認は保留しますが、既存Node間通信はHostに依存しません。
-- 各層は受理・永続化・終端受信・アプリ適用・結果不明を区別します。再送は「物理副作用のexactly-once」を保証しません。
 
-### 読む順番
-1. [要求と非目標](docs/01-requirements.md) → [アーキテクチャ](docs/02-architecture.md)
-2. [無線と4チップ](docs/03-radio-targets.md) → [routing](docs/04-routing.md) → [チャネル](docs/05-channel.md)
-3. [Security](docs/06-security.md) → [Join・移設](docs/07-membership.md) → [配送](docs/08-delivery.md)
-4. [Wire](docs/09-wire.md) / [Serialと制御](docs/19-serial-and-control.md) / [CBOR契約](protocol/control.cddl) / [型・定数](protocol/registry.json)
-5. [Device API](docs/10-device-api.md) / [C header](api/leanmesh.h) / [Host API](api/openapi.json)
-6. [Host](docs/11-host.md) → [保存・電源断](docs/12-storage.md) → [Sleep・保守](docs/13-power-maintenance.md)
-7. [KG適用](docs/14-kg-integration.md) → [実装計画](docs/17-implementation-plan.md)
+## 仕様bundleの由来と読み方
 
-実装担当者は併せて[AGENTS.md](AGENTS.md)、[規約](docs/15-coding-standards.md)、[性能・資源予算](docs/16-budgets.md)、[試験仕様](docs/18-verification.md)を読みます。
+**根拠の時点**
 
-### 根拠の時点
 - KG main: `4ed3e1ff0e63eec54c52e89444e18b2a18be2130`
 - RouteLoom main: `77b5792669fefee13498ef29a3c2e48119c562a0`
 - **KG #112の2026-09-28 20:37 JST追記**を含みます。追記のv2計画は、mainの実装済み機能とは区別しています。
 - [調査台帳](evidence/SOURCES.md)、[差分と判断](evidence/REVIEW.md)、[要求追跡](tests/traceability.csv)を参照してください。
 
-### 文書内の強さ
-MUST=実装必須、SHOULD=逸脱時は理由・試験を記録、MAY=任意。数値には「固定契約」「初期設定」「測定目標」の別を付けます。性能・電池寿命・RF距離は未測定です。**仕様検査合格 ≠ 通信実装合格 ≠ 実機認定**。
+**文書内の強さ**: MUST=実装必須、SHOULD=逸脱時は理由・試験を記録、MAY=任意。数値には「固定契約」「初期設定」「測定目標」の別を付けます。性能・電池寿命・RF距離は未測定です。**仕様検査合格 ≠ 通信実装合格 ≠ 実機認定**。
 
-### このZIPの検査
+仕様検査（仕様側のG0のみ。実機・外部ネットワークには書き込みません）:
+
 ```sh
 python -m pip install -r scripts/requirements-check.txt
 python scripts/check_spec.py
 ```
-[検査結果](evidence/VALIDATION.json)に今回実行した検査と未実施項目を記録します。インターネットから製品SDKを取り寄せたり、実機を変更したりするスクリプトではありません。
 
-### 最初の実装着手
-[実装計画](docs/17-implementation-plan.md)のT01から開始します。最初はparser・保存・署名検査・1hopの縦経路を実装し、その後root深度20と自動channelを同じengine上で認定します。初期段階の1hop動作を完成版としてリリースする計画ではありません。
+[検査結果](evidence/VALIDATION.json)は再実行で再生成されます。`SHA256SUMS.txt` で同梱ファイルを照合できます。この版は仕様v0.2（2026-09-28）の全量版で、Low power・設置/移設・一斉配信を統合しています（[変更履歴](CHANGELOG.md)、[capability台帳](config/capability-manifest.json)）。
 
-[158件の受入シナリオ](tests/SCENARIOS.md)と[依存入力](config/dependencies.json)も参照してください。`evidence/VALIDATION.json`はこの文書セットの検査結果、各実機シナリオは未実施です。`SHA256SUMS.txt`で同梱ファイルを照合できます。
+## License / 出典
 
-### 全量版と機能の状態
-前回の54ファイルを保持した全量版です。旧ZIPを別途展開する必要はありません。章番号20〜23が追加の中心ですが、API、Wire、設定、受入条件も同時に更新しています。[capability台帳](config/capability-manifest.json)は全機能を「仕様あり・製品実装なし」と区別しています。
-
-### spec0.2で追加した内容
-[Low power詳細](docs/20-low-power.md)、[設置・在庫・root交換](docs/21-lifecycle-operations.md)、[一斉配信とsleep](docs/22-group-and-sleep.md)、[電力・性能計測](docs/23-energy-and-qualification.md)を統合しています。
-ALWAYS_RX/WINDOWED_RX/REPORT_ONLYを選べる共通SDKで、圏外の探索、起床poll、原本の永続保持、暗号sessionの有効性を同じ状態機械で扱います。C ABI2、Power policy schema、per-target API、追加受入試験と検査ツールも含みます。[変更履歴](CHANGELOG.md)
+[LICENSE-AND-SOURCES.md](LICENSE-AND-SOURCES.md)、[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)。新SDKの配布licenseは権利者が選定してください。検査用鍵は公開のtest-only材料で、本番で使ってはいけません。

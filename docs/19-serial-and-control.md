@@ -1,6 +1,6 @@
 # 19 Serial操作と制御の署名境界
 ## 1. Wire上の二種類のcontrol
-`control-body`の型/CBOR規則は共通。永続的な認可/構成objectだけCOSE_Sign1で署名する。対象typeは1/2/3/4/5/11/12/19/21/26/29/30/31/32。type22は旧group snapshot予約で新規送信しない。root/fleetの権限と世代を検証する。時間同期/neighbor probe/配送receipt/route requestを送るたびにP-256署名しない。
+`control-body`の型/CBOR規則は共通。永続的な認可/構成objectだけCOSE_Sign1で署名する。対象typeは1/2/3/4/5/11/12/19/21/26/29/30/31/32（うち19 channel-planと21 recovery-beaconは署名形式の定義のみで、本版のchannel planは署名せずroot↔memberのend session内のcompact recordで運ぶ。lm_install_controlは19/21をUNSUPPORTEDにする: FIX10-D11、docs/05 §6）。type22は旧group snapshot予約で新規送信しない。root/fleetの権限と世代を検証する。時間同期/neighbor probe/配送receipt/route requestを送るたびにP-256署名しない。
 その他のtypeは検証済みlink/end sessionのAEAD内で運ぶ。issuerはそのsessionの完全Identityと一致しなければ拒否。typeごとのauthority条件（RouteLease/TimeResponseはroot、JoinStoredは対象Device等）も検査する。preauthでは署名済みcredential/hintまたはEDHOC carrier以外を受けない。signed objectを要求する場面にunsigned controlを代入してはならない。
 
 ## 2. hashの自己参照を避ける
@@ -13,7 +13,7 @@ headerは09の18B。kind: HELLO1 / EDHOC2 / REQUEST3 / RESPONSE4 / EVENT5 / CRED
 
 ## 4. Serial method
 1 CAPABILITIES / 2 SEND / 3 GET_MESSAGE / 4 CANCEL / 5 JOIN_DECIDE / 6 INSTALL_CONTROL / 7 NODE_QUERY / 8 GROUP_SNAPSHOT / 9 HOST_STORE_ACK / 10 EVENT_ACK / 11 CHANNEL_ACTION / 12 SLEEP_WINDOW / 13 GET_REQUEST / 14 GROUP_SET。
-未知methodはUNSUPPORTED。SENDは宛先fullIdentity・MessageId・intent_hash・app_port・flags・root_term・expiry・bytesを含む。HostはrootアプリのIdentityとして送信し、勝手な他端末originは指定できない。
+16 DIAGNOSTICS（params=nil。rootの診断snapshotとfeature表を返す。Hostが要求した時だけ実行し、周期pollingは行わない）。未知methodはUNSUPPORTED。SENDは宛先fullIdentity・MessageId・intent_hash・app_port・flags・root_term・expiry・bytesを含む。HostはrootアプリのIdentityとして送信し、勝手な他端末originは指定できない。
 INSTALL_CONTROLは署名bytesの配送であり、API受理でDevice適用済みにはしない。JOIN_DECIDEはrequestの本人/credential hashを再照合。EVENT_ACKは受信通知の進捗でありHOST_STORE_ACKとは別。後者だけHost永続保存を証明する。
 
 ## 5. credits / retry
@@ -23,7 +23,7 @@ CRC破損ではrecordを捨ててdelimiter同期。AEAD/counter不一致ではse
 
 ## 6. Serial content ceiling
 Serial REQUESTは8192B以下のdeterministic CBOR、未認証HELLO/EDHOC objectは1024B以下。RF上の250B上限とは別であり、4096B object+metadataも1 Serial recordに収められる。decoded最大は18+8192+16+4=8230B。root/Hostは1つの固定上限bufferを予約し、さらに無制限な8KiBキューを積まない。
-SEND payloadは通常512B、object_transfer=trueかつcapability有効時4096Bまで。INSTALL_CONTROLのCOSE bytesは4096Bまで、EVENT/RESPONSEのtyped payloadは6144Bまで。全envelopeの8192B上限をさらに検査。USB独自のslab転送/分割STARTは作らず、RF送信時だけ09の共通fragment engineを使う。
+SENDのflagsは0..63：bit0-1 delivery、bit2-3 priority、bit4 durable（09章のflagsと同配置）、bit5 strict_single_frame（rootの局所送信option。RF wireへは載せず、立てば分割せず1 frameに収まらない時PAYLOAD_TOO_LARGE）。SEND payloadは通常512B、object_transfer=trueかつcapability有効時4096Bまで（group宛のobjectはUNSUPPORTED）。INSTALL_CONTROLのCOSE bytesは4096Bまで、EVENT/RESPONSEのtyped payloadは6144Bまで。全envelopeの8192B上限をさらに検査。USB独自のslab転送/分割STARTは作らず、RF送信時だけ09の共通fragment engineを使う。
 
 詳しいshapeは[serial.cddl](../protocol/serial.cddl)。認証・認可・idempotencyは処理前に行う。
 

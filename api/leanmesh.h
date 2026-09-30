@@ -5,7 +5,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* SPEC CONTRACT ONLY: these declarations do not implement a Mesh SDK. */
+/* Public C ABI of the LeanMesh SDK (ABI 2). Every function declared here is defined in the native/sim build and in
+   the ESP-IDF port (scripts/check_api_defined.py fails CI otherwise); semantics: docs/10, api/SEMANTICS.md. */
 #define LM_ABI_VERSION 2u
 #define LM_MAX_ROOT_DEPTH 20u
 #define LM_MAX_PATH_HOPS 40u
@@ -80,6 +81,21 @@ enum { LM_OUTCOME_PENDING=0, LM_OUTCOME_RECEIVED=1, LM_OUTCOME_APPLIED=2,
        LM_OUTCOME_REJECTED=3, LM_OUTCOME_EXPIRED=4,
        LM_OUTCOME_CANCELLED_NOT_SENT=5, LM_OUTCOME_INDETERMINATE=6,
        LM_OUTCOME_SUPERSEDED=7, LM_OUTCOME_PARTIAL=8, LM_OUTCOME_SUBMITTED=9 };
+/* lm_operation_t.phase (and the Host operation state PENDING/SENDING/WAITING_RECEIPT/FINAL). */
+enum { LM_PHASE_PENDING=0, LM_PHASE_SENDING=1, LM_PHASE_WAITING_RECEIPT=2, LM_PHASE_FINAL=3 };
+/* lm_operation_t.evidence_bits: what was actually observed, one bit per fact. Bits are only ever added, never
+   renumbered. A missing bit means "not observed", never "did not happen". The Host names the bits as Evidence.kind
+   (openapi): ROOT_ACCEPTED, ROOT_PERSISTED, ROOT_SENT, HOP_ACCEPTED, END_RECEIVED, APP_PENDING, APP_APPLIED,
+   APP_REJECTED, DESTINATION_REFUSED. */
+#define LM_EVIDENCE_ACCEPTED     (UINT32_C(1) << 0u) /* the API accepted the request (RAM only) */
+#define LM_EVIDENCE_PERSISTED    (UINT32_C(1) << 1u) /* origin journal commit */
+#define LM_EVIDENCE_SENT         (UINT32_C(1) << 2u) /* handed to the radio at least once (may have left) */
+#define LM_EVIDENCE_HOP_ACCEPTED (UINT32_C(1) << 3u) /* the first hop reserved a buffer (HOP_ACK) */
+#define LM_EVIDENCE_END_RECEIVED (UINT32_C(1) << 4u) /* destination receipt: stored as declared */
+#define LM_EVIDENCE_APP_PENDING  (UINT32_C(1) << 5u) /* destination application took it, no result yet */
+#define LM_EVIDENCE_APP_APPLIED  (UINT32_C(1) << 6u) /* APP_APPLIED by the destination application */
+#define LM_EVIDENCE_APP_REJECTED (UINT32_C(1) << 7u) /* the destination application refused it */
+#define LM_EVIDENCE_REFUSED      (UINT32_C(1) << 8u) /* the destination network layer refused it */
 enum { LM_JOIN_NEW=0, LM_JOIN_RESUME=1, LM_JOIN_TRANSFER_CANDIDATE=2 };
 enum { LM_LEAVE_DRAIN=0, LM_LEAVE_IMMEDIATE=1 };
 enum { LM_CHANNEL_AUTO=0, LM_CHANNEL_FREEZE=1, LM_CHANNEL_RECALCULATE=2 };
@@ -136,12 +152,19 @@ typedef struct {
  uint32_t state, reason;
  uint64_t state_since_mono_ms;
 } lm_membership_t;
+/* lm_connectivity_t.validity_bits: a field whose bit is clear is unknown (zero), not "zero". This build sets STATE,
+   and STATE_SINCE / ROOT_DEPTH where it knows them; it does not track the last authenticated RX or root roundtrip. */
+#define LM_CONNECTIVITY_VALID_STATE (1u << 0u)
+#define LM_CONNECTIVITY_VALID_STATE_SINCE (1u << 1u)
+#define LM_CONNECTIVITY_VALID_ROOT_DEPTH (1u << 2u)
+#define LM_CONNECTIVITY_VALID_LAST_AUTH_RX (1u << 3u)
+#define LM_CONNECTIVITY_VALID_LAST_ROOT_ROUNDTRIP (1u << 4u)
 typedef struct {
  uint32_t struct_size, abi_version;
  uint32_t state, reason;
  uint64_t state_since_mono_ms, last_authenticated_rx_mono_ms;
  uint64_t last_root_roundtrip_mono_ms;
- uint32_t validity_bits, root_depth;
+ uint32_t validity_bits, root_depth; /* layout of the 0.2 spec: unchanged (48 bytes) */
 } lm_connectivity_t;
 typedef struct {
  uint32_t struct_size, abi_version;
@@ -149,6 +172,12 @@ typedef struct {
  lm_domain_id_t target_domain;
  uint32_t mode, search_budget_ms, constrain_target, reserved;
 } lm_join_request_t;
+/* The network policy the root holds (lm_policy_get: root only; other roles: UNSUPPORTED). `revision` is output only:
+   the committed channel and join-mode changes. lm_policy_set takes expected_revision and changes one field per call
+   (INVALID_ARGUMENT for two): channel_freeze as lm_channel_request does, join_mode committed durably before its
+   operation ends. relay_allowed and auto transfer have no mechanism in this build (UNSUPPORTED); it fixes
+   auto_transfer_on_isolation to 0 and isolation_before_transfer_ms to 0. No field lowers a docs/06 cryptographic
+   condition. */
 typedef struct {
  uint32_t struct_size, abi_version;
  uint64_t revision;
@@ -177,6 +206,14 @@ typedef struct {
 typedef struct {
  uint64_t id, state_generation, expires_mono_ms;
 } lm_sleep_ticket_t;
+/* The node's root clock estimate (docs/05 §5, docs/10 §4): the root's clock of root_term reads between
+   earliest_root_ms and latest_root_ms now. valid=0: no estimate of the node's current term (a send with a
+   deadline is then TIME_UNCERTAIN). A deadline is root_term + expires_root_ms, e.g. earliest_root_ms + validity. */
+typedef struct {
+ uint32_t struct_size, abi_version;
+ uint32_t root_term, valid;
+ uint64_t earliest_root_ms, latest_root_ms;
+} lm_root_time_t;
 
 lm_status_t lm_config_init(lm_config_t *out, size_t out_size);
 lm_status_t lm_workspace_required(const lm_config_t*, lm_workspace_size_t*);
@@ -205,6 +242,9 @@ lm_status_t lm_leave(lm_context_t*, uint32_t mode, uint32_t deadline_ms,
                      lm_operation_id_t*);
 lm_status_t lm_install_control(lm_context_t*, uint32_t control_type,
  const uint8_t *signed_cbor, size_t, lm_operation_id_t*);
+/* The device's outstanding transfer_nonce16 (docs/07 §8): a mode-0 AssignmentTicket must name it. Made on the first
+   call and kept (RAM only) until a join made ACTIVE with it; a restart voids it (a ticket for it is refused). */
+lm_status_t lm_transfer_nonce_get(lm_context_t*, uint8_t nonce[16]);
 lm_status_t lm_group_set(lm_context_t*, uint32_t group_id, uint64_t expected_revision,
  const lm_device_id_t *members, size_t count, lm_operation_id_t*);
 lm_status_t lm_policy_get(lm_context_t*, lm_policy_t*);
@@ -214,6 +254,7 @@ lm_status_t lm_channel_request(lm_context_t*, uint32_t action,
                                uint64_t expected_revision, lm_operation_id_t*);
 lm_status_t lm_get_capabilities(lm_context_t*, lm_capabilities_t*);
 lm_status_t lm_diagnostics_get(lm_context_t*, lm_diagnostics_t*);
+lm_status_t lm_root_time_get(lm_context_t*, lm_root_time_t*);
 lm_status_t lm_sleep_prepare(lm_context_t*, uint32_t awake_budget_ms,
                              lm_operation_id_t*);
 lm_status_t lm_sleep_ticket_get(lm_context_t*, lm_operation_id_t, lm_sleep_ticket_t*);

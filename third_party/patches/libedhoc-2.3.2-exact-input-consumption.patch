@@ -1,0 +1,42 @@
+diff --git a/library/core/classic/edhoc_classic_message_2.c b/library/core/classic/edhoc_classic_message_2.c
+index 736ac4a..b1ba890 100644
+--- a/library/core/classic/edhoc_classic_message_2.c
++++ b/library/core/classic/edhoc_classic_message_2.c
+@@ -138,7 +138,8 @@ STATIC int parse_g_y_ciphertext_2(struct edhoc_context *ctx,
+ 	const int ret = cbor_decode_message_2_G_Y_CIPHERTEXT_2(msg_2, msg_2_len,
+ 							       &output, &len);
+ 
+-	if (ZCBOR_SUCCESS != ret) {
++	if (ZCBOR_SUCCESS != ret || len != msg_2_len) {
++		/* A message is exactly one CBOR item, without trailing data. */
+ 		return EDHOC_ERROR_CBOR_FAILURE;
+ 	}
+ 
+diff --git a/library/core/classic/edhoc_classic_message_3.c b/library/core/classic/edhoc_classic_message_3.c
+index 61e0cde..f84231d 100644
+--- a/library/core/classic/edhoc_classic_message_3.c
++++ b/library/core/classic/edhoc_classic_message_3.c
+@@ -122,7 +122,8 @@ STATIC int parse_ciphertext_3(const uint8_t *msg_3, size_t msg_3_len,
+ 	const int ret = cbor_decode_message_3_CIPHERTEXT_3(msg_3, msg_3_len,
+ 							   &output, &len);
+ 
+-	if (ZCBOR_SUCCESS != ret) {
++	if (ZCBOR_SUCCESS != ret || len != msg_3_len) {
++		/* A message is exactly one CBOR item, without trailing data. */
+ 		return EDHOC_ERROR_CBOR_FAILURE;
+ 	}
+ 
+diff --git a/library/core/classic/edhoc_classic_message_4.c b/library/core/classic/edhoc_classic_message_4.c
+index 6deb562..48ac46c 100644
+--- a/library/core/classic/edhoc_classic_message_4.c
++++ b/library/core/classic/edhoc_classic_message_4.c
+@@ -117,7 +117,8 @@ STATIC int parse_ciphertext_4(const uint8_t *msg_4, size_t msg_4_len,
+ 	const int ret = cbor_decode_message_4_CIPHERTEXT_4(msg_4, msg_4_len,
+ 							   &output, &len);
+ 
+-	if (ZCBOR_SUCCESS != ret) {
++	if (ZCBOR_SUCCESS != ret || len != msg_4_len) {
++		/* A message is exactly one CBOR item, without trailing data. */
+ 		return EDHOC_ERROR_CBOR_FAILURE;
+ 	}
+ 

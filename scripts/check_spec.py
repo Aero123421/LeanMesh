@@ -30,8 +30,13 @@ def fails(fn,types=(Exception,)):
 
 def load(path):return json.loads((ROOT/path).read_text())
 
+# Vendored upstream trees, build outputs and caches are not part of this bundle's contract.
+EXCLUDED_DIRS={'.git','third_party','build','managed_components','.venv','__pycache__','.pytest_cache'}
+def bundle_files(pattern):
+    return [p for p in ROOT.rglob(pattern) if not EXCLUDED_DIRS & set(p.relative_to(ROOT).parts[:-1])]
+
 def jsons():
-    paths=list(ROOT.rglob('*.json'))
+    paths=bundle_files('*.json')
     for p in paths:json.loads(p.read_text())
     return {'files':len(paths)}
 
@@ -177,9 +182,10 @@ def compilers():
     if not compiler or not cpp:raise RuntimeError('cc/c++ required for ABI declaration syntax check')
     results=[]
     for executable,std,language in [(compiler,'c11','c'),(cpp,'c++17','c++')]:
-        cmd=[executable,'-x',language,'-std='+std,'-Wall','-Wextra','-Werror','-fsyntax-only','-I',str(ROOT/'api'),str(ROOT/'examples/application.c')]
-        p=subprocess.run(cmd,check=False,capture_output=True,text=True,timeout=20)
-        if p.returncode:raise AssertionError(p.stderr)
+        for example in ['examples/application.c','examples/apps/equipment_control.c','examples/apps/battery_measurement.c']:
+            cmd=[executable,'-x',language,'-std='+std,'-Wall','-Wextra','-Werror','-fsyntax-only','-I',str(ROOT/'api'),str(ROOT/example)]
+            p=subprocess.run(cmd,check=False,capture_output=True,text=True,timeout=20)
+            if p.returncode:raise AssertionError(p.stderr)
         results.append(language)
     return {'declarations_and_example':results,'linked_implementation':False,'esp_idf_build':False}
 
@@ -214,7 +220,7 @@ def traceability():
 
 def links():
     total=0
-    for f in ROOT.rglob('*.md'):
+    for f in bundle_files('*.md'):
         for dest in re.findall(r'\[[^\]]*\]\(([^)]+)\)',f.read_text()):
             if '://' in dest or dest.startswith(('#','mailto:')):continue
             target=dest.split('#')[0]

@@ -1,0 +1,7 @@
+# Direct Host runtime dependencies (docs/15, config/dependencies.json "host").
+# Lock with scripts/setup_host_venv.sh lock. Do not edit host/requirements.lock by hand.
+fastapi
+uvicorn
+pydantic
+pyserial
+cryptography

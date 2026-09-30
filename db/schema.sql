@@ -61,6 +61,7 @@ CREATE TABLE events (
  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), created_utc_ms INTEGER
 ) STRICT;
 CREATE INDEX events_domain_seq ON events(domain,sequence);
+CREATE INDEX events_operation ON events(operation) WHERE operation IS NOT NULL;
 CREATE TABLE consumers (
  principal TEXT NOT NULL REFERENCES principals(id), name TEXT NOT NULL,
  domain BLOB NOT NULL REFERENCES domains(id), journal_id BLOB NOT NULL CHECK(length(journal_id)=16),

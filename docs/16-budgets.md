@@ -49,3 +49,6 @@ idle wakeups/s、discovery airtime/join、ECDH/verify CPU ms、Flash commits/hou
 ## spec0.2追加予算
 Power state追加は1Node 1KiBを初期目標、awake mailboxは既存TX poolから借用する。Group progressはpayload1copy+最大64targetのcompact state。専用group operationはleaf1/relay1/root4の上限をconfig/profiles.jsonで持つ。実装のsizeof/mapで総量を再計算し、32/48/96KiB目標を暗黙に増やさない。
 電力合格と比較条件は23章、設定検査はscripts/power_contract.py。追加機能をdisabledにした場合に専用task/bufferが残らないことを確認する。RTC secure resumeは本版のimplemented/enabledを必ずfalseにする。
+
+## 実装時の改訂（ADR-002）
+RAM目標はleaf 48KiB / relay 56KiB / root 160KiB、first-party SLOC上限は28kへ改訂した（仕様容量の実測コストに基づく）。ESP32-C3のroot構成はHILでminimum-ever free heap ≥48KiBを実測するまで非サポート。根拠と測定表は[ADR-002](../decisions/ADR-002-budget-status.md)。

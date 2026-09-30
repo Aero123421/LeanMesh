@@ -1,0 +1,10 @@
+# Same optimisation for every target/baseline so map differences stay comparable (docs/16).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# FIX8-D7: the SDK's identity/state NVS partitions hold the device's private key: NVS encryption (XTS-AES) with the
+# HMAC-based key protection (every supported SoC has the HMAC peripheral). The key is the one in eFuse block KEY2, which
+# the product provisions (it chooses the block). Neither the SDK nor example_node ever creates it (IDF's nvs_flash_init()
+# would, with an irreversible eFuse write): without it the partitions stay unmounted and lm_init fails closed. Without
+# encryption the SDK does not compile unless CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS (development only) is set.
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y
+CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=2

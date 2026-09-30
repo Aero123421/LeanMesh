@@ -1,8 +1,13 @@
 # 最初に読むページ — LeanMesh spec v0.2
 
-**新しい汎用長距離Wi-Fi SDKの実装仕様書・公開契約・検査素材をまとめた全量版です。動作するSDKや製品FastAPIサービスではありません。**
+**新しい汎用長距離Wi-Fi SDKの実装仕様書・公開契約・検査素材をまとめた全量版です。`feat/sdk-impl` にはソフトウェア実装とシミュレーション上の検証がありますが、実機認定済みの製品SDK・製品FastAPIサービスではありません。**
 
 旧v0.1の全54ファイルのパスを保持し、Low power、Join/設置/移設、親機交換、一斉配信を統合改訂しました。このZIPだけを展開すればよく、旧版と上書き混在させる必要はありません。仮称LeanMesh、既存RouteLoomとはWire非互換です。
+
+## 実装を使う
+
+全体像は[README](README.md)（図つき）。
+ビルド、Device API、Host、試験の手順は **[docs/sdk/](docs/sdk/README.md)**。実装し、ローカルで検証したのはソフトウェアとsimulationの範囲で、RF・実機・消費電力・実電源断・鍵custodyは未検証です（[一覧](docs/sdk/testing.md)）。CIは `57a2b66` で直近のgreen run（https://github.com/Aero123421/LeanMesh/actions/runs/36707722886、その時点で最新。以降のcommitは別に確認する）。CIもsimulation/hostの範囲です。RAM・flash・SLOCは目標超過、ROOTのESP32-C3搭載は未対応です。
 
 ## 読む場所
 
@@ -43,6 +48,6 @@ python scripts/energy_report.py examples/power-trace.SYNTHETIC.csv \
 
 3種類のpower modeは実装契約で、4チップの実機認定済み機能ではありません。RAMを安全に保持したsessionは再利用しますが、通常のDeep Sleep/cold bootはfresh EDHOCです。独自RTC高速鍵復帰は未実装・予約扱いです。
 
-仕様検査のPASSは、ファームウェア、FastAPI製品サービス、20hop実RF、実電源断、電池寿命、独立暗号レビューのPASSではありません。機能や速度を保証する成果物ではなく、それらを実装・検証するための仕様です。
+仕様検査のPASSは、ファームウェア、FastAPI製品サービス、20hop実RF、実電源断、電池寿命、独立暗号レビューのPASSではありません。実装側の試験（ctest、pytest、meshsim）も同様に、実機の合格ではありません。
 
 `tests/golden.json`とpower fixtureは公開のtest-only材料です。鍵を本番へ転用せず、通常検査で期待値を自動更新しないでください。現行のAPI契約はC ABI2。Wire拡張やGroupSnapshotV2はCHANGELOGで互換条件を確認してください。

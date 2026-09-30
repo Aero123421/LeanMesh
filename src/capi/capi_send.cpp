@@ -1,0 +1,118 @@
+// C ABI of delivery (api/leanmesh.h, docs/10 §3-§4): send, operation queries, cancel, the
+// application's result report and the payload capacity. Each call validates its arguments, then
+// runs on the mesh owner; nothing here touches core state.
+#include <cstring>
+
+#include "capi/context.hpp"
+#include "core/delivery/delivery.hpp"
+
+namespace {
+
+using lm::Status;
+using lm::to_abi;
+using lm::capi::call;
+using lm::capi::valid_ctx;
+
+lm_status_t send_common(lm_context_t *ctx, lm::CommandKind kind, const lm_send_request_t *rq,
+                        const uint8_t *payload, size_t len, lm_operation_id_t *op) {
+    if (!valid_ctx(ctx) || rq == nullptr || op == nullptr || (payload == nullptr && len != 0)) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status a = lm::capi::check_abi(rq->struct_size, rq->abi_version, sizeof(*rq));
+    if (a != Status::Ok) {
+        return to_abi(a);
+    }
+    const lm::Reply r = call(ctx, kind, rq, sizeof(*rq), nullptr, 0, lm::ByteView{payload, len});
+    if (r.status == Status::Ok) {
+        *op = r.operation_id;
+    }
+    return to_abi(r.status);
+}
+
+} // namespace
+
+extern "C" {
+
+lm_status_t lm_send(lm_context_t *ctx, const lm_send_request_t *rq, const uint8_t *payload, size_t len,
+                    lm_operation_id_t *op) {
+    return send_common(ctx, lm::CommandKind::Send, rq, payload, len, op);
+}
+
+// Objects up to 4096 B: only in builds with the object lane and when the application enabled it
+// (lm_config_t.object_transfer_enabled); otherwise UNSUPPORTED and no work exists.
+lm_status_t lm_send_object(lm_context_t *ctx, const lm_send_request_t *rq, const uint8_t *payload, size_t len,
+                           lm_operation_id_t *op) {
+    return send_common(ctx, lm::CommandKind::SendObject, rq, payload, len, op);
+}
+
+lm_status_t lm_get_operation(lm_context_t *ctx, lm_operation_id_t id, lm_operation_t *out) {
+    if (!valid_ctx(ctx) || out == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status a = lm::capi::check_abi(out->struct_size, out->abi_version, sizeof(*out));
+    if (a != Status::Ok) {
+        return to_abi(a);
+    }
+    lm_operation_t tmp{};
+    const lm::Reply r = call(ctx, lm::CommandKind::GetOperation, &id, sizeof(id), &tmp, sizeof(tmp));
+    if (r.status == Status::Ok) {
+        *out = tmp;
+    }
+    return to_abi(r.status);
+}
+
+lm_status_t lm_get_message(lm_context_t *ctx, const lm_message_ref_t *ref, lm_operation_t *out) {
+    if (!valid_ctx(ctx) || ref == nullptr || out == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    const Status a = lm::capi::check_abi(out->struct_size, out->abi_version, sizeof(*out));
+    if (a != Status::Ok) {
+        return to_abi(a);
+    }
+    lm_operation_t tmp{};
+    const lm::Reply r = call(ctx, lm::CommandKind::GetMessage, ref, sizeof(*ref), &tmp, sizeof(tmp));
+    if (r.status == Status::Ok) {
+        *out = tmp;
+    }
+    return to_abi(r.status);
+}
+
+lm_status_t lm_cancel(lm_context_t *ctx, lm_operation_id_t id) {
+    if (!valid_ctx(ctx)) {
+        return to_abi(Status::InvalidArgument);
+    }
+    return to_abi(call(ctx, lm::CommandKind::Cancel, &id, sizeof(id)).status);
+}
+
+lm_status_t lm_report_application_result(lm_context_t *ctx, const lm_message_ref_t *ref, uint32_t outcome,
+                                         const uint8_t *result, size_t len, lm_operation_id_t *op) {
+    if (!valid_ctx(ctx) || ref == nullptr || (result == nullptr && len != 0) || len > LM_MAX_APP_RESULT_BYTES) {
+        return to_abi(Status::InvalidArgument);
+    }
+    lm::delivery::ReportRequest rq;
+    rq.ref = *ref;
+    rq.outcome = outcome;
+    const lm::Reply r = call(ctx, lm::CommandKind::ReportApplicationResult, &rq, sizeof(rq), nullptr, 0,
+                             lm::ByteView{result, len});
+    if (r.status == Status::Ok && op != nullptr) {
+        *op = r.operation_id;
+    }
+    return to_abi(r.status);
+}
+
+lm_status_t lm_payload_capacity(lm_context_t *ctx, const lm_destination_t *dest, uint32_t *single_frame_bytes,
+                                uint32_t *path_hops) {
+    if (!valid_ctx(ctx) || dest == nullptr || single_frame_bytes == nullptr || path_hops == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    lm::delivery::CapacityRequest rq;
+    rq.dest = *dest;
+    const lm::Reply r = call(ctx, lm::CommandKind::PayloadCapacity, &rq, sizeof(rq));
+    if (r.status == Status::Ok) {
+        *single_frame_bytes = rq.single_frame_bytes;
+        *path_hops = rq.path_hops;
+    }
+    return to_abi(r.status);
+}
+
+} // extern "C"

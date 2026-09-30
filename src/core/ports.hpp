@@ -1,0 +1,215 @@
+// The four fixed port contracts (docs/02 §4): Clock, Radio, Store, Jobs ("CryptoJobs").
+// Implementations: src/port/idf (ESP-IDF) and src/port/sim (meshsim / native tests). They are
+// selected by linking; there is no plugin registry. Rules for every implementation:
+//  - Never block the mesh owner: Radio::transmit, Jobs::submit and poll() return immediately.
+//  - Driver callbacks only copy into a fixed ring and notify the owner (docs/15 §2).
+//  - Local resource failures (BUSY/NO_MEM/peer table full) are reported as Status::Busy /
+//    Status::NoCapacity and are never counted as RF loss (docs/03 §4).
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+#include "core/bytes.hpp"
+#include "core/ids.hpp"
+#include "core/status.hpp"
+#include "core/time.hpp"
+#include "gen/registry.hpp"
+
+namespace lm::port {
+
+// ---- Clock -------------------------------------------------------------------------------------
+class Clock {
+  public:
+    [[nodiscard]] virtual MonoTime now() const = 0;
+
+  protected:
+    ~Clock() = default;
+};
+
+// ---- Radio -------------------------------------------------------------------------------------
+inline constexpr std::size_t k_max_frame_bytes = gen::limits::rf_body_bytes; // 250, self-limited
+
+// RF profile (docs/03 §3): RF start is refused unless deployment_approved.
+struct RfProfile {
+    bool deployment_approved = false;
+    uint8_t channel = 0;                // 1..13, must be in allowed_channels_mask
+    uint16_t allowed_channels_mask = 0; // bit c set = channel c allowed
+    int16_t tx_power_qdbm = 0;          // quarter-dBm upper bound
+    std::array<char, 3> country{};      // e.g. "JP" (not a legal-compliance proof)
+};
+
+// Owner-side identity of a physical transmission. The driver generation changes on every radio
+// re-initialisation so a late callback from an older driver instance is never matched (docs/03 §4).
+struct TxToken {
+    uint32_t driver_generation = 0;
+    uint32_t sequence = 0;
+    friend bool operator==(TxToken a, TxToken b) {
+        return a.driver_generation == b.driver_generation && a.sequence == b.sequence;
+    }
+};
+
+enum class TxResult : uint8_t {
+    MacAcked,  // driver reported MAC-level success (not a LeanMesh HOP_ACK)
+    MacFailed, // RF failure sample
+    Unknown,   // watchdog/driver reset: result unknown (DRIVER_RESULT_UNKNOWN)
+};
+
+struct RadioRx {
+    MacAddr src;
+    bool broadcast = false;  // received on the broadcast address
+    bool rssi_valid = false; // RSSI unknown is not 0 dBm (docs/03 §4)
+    int16_t rssi_dbm = 0;
+    MonoTime at;
+    uint8_t len = 0;
+    std::array<uint8_t, k_max_frame_bytes> bytes{};
+};
+
+struct RadioTxDone {
+    TxToken token;
+    TxResult result = TxResult::Unknown;
+    MonoTime at;
+};
+
+struct RadioEvent {
+    enum class Kind : uint8_t { Rx, TxDone };
+    Kind kind = Kind::Rx;
+    RadioRx rx;       // valid when kind == Rx
+    RadioTxDone done; // valid when kind == TxDone
+};
+
+class Radio {
+  public:
+    // Brings the radio up in the order of docs/03 §3. RfProfileUnapproved when not approved.
+    [[nodiscard]] virtual Status start(const RfProfile &profile) = 0;
+    [[nodiscard]] virtual Status stop() = 0;
+    // Sleep entry (FIX13-D3): from now on the driver callback queues no further RX (a frame it refuses is never
+    // acknowledged, so its sender repeats it); the owner then drains what is queued. release_rx() re-opens the
+    // callback when the sleep is not entered; start() does too.
+    virtual void hold_rx() = 0;
+    virtual void release_rx() = 0;
+    // Includes readback of the channel actually applied.
+    [[nodiscard]] virtual Status set_channel(uint8_t channel) = 0;
+    // NoCapacity when the driver peer table is full (20 = 16 regular + 3 transient + 1 broadcast).
+    [[nodiscard]] virtual Status add_peer(const MacAddr &mac) = 0;
+    [[nodiscard]] virtual Status remove_peer(const MacAddr &mac) = 0;
+    // Queues one frame (<= 250 B). At most one physical TX is in flight: Busy otherwise.
+    [[nodiscard]] virtual Status transmit(const MacAddr &dst, ByteView frame, TxToken token) = 0;
+    // Owner only: next RX / TX-completion event, false when none.
+    [[nodiscard]] virtual bool poll(RadioEvent &out) = 0;
+    [[nodiscard]] virtual uint32_t driver_generation() const = 0;
+
+  protected:
+    ~Radio() = default;
+};
+
+// ---- Store -------------------------------------------------------------------------------------
+// Durable storage, used ONLY from the slow-job worker (docs/02 §2). Record identifiers and the
+// sealed 2-slot record format are defined in src/store; this port is raw keyed slots plus an
+// append-only journal region. Read errors are StorageFailure, never "empty" (docs/12 §2).
+class Store {
+  public:
+    // NotFound when the slot is empty; StorageFailure on I/O or integrity error.
+    [[nodiscard]] virtual Status slot_read(uint16_t record, uint8_t slot, MutByteView out,
+                                           std::size_t &len) = 0;
+    // Durable (committed and read back) when Ok is returned.
+    [[nodiscard]] virtual Status slot_write(uint16_t record, uint8_t slot, ByteView data) = 0;
+    [[nodiscard]] virtual Status slot_erase(uint16_t record, uint8_t slot) = 0;
+
+    [[nodiscard]] virtual uint32_t journal_segment_bytes() const = 0;
+    [[nodiscard]] virtual uint32_t journal_segments() const = 0;
+    [[nodiscard]] virtual Status journal_read(uint32_t offset, MutByteView out) = 0;
+    // Writes into previously erased bytes only; durable when Ok is returned.
+    [[nodiscard]] virtual Status journal_write(uint32_t offset, ByteView data) = 0;
+    [[nodiscard]] virtual Status journal_erase(uint32_t segment) = 0;
+
+  protected:
+    ~Store() = default;
+};
+
+// ---- Jobs ("CryptoJobs") ----------------------------------------------------------------------
+// The bounded slow-job worker: public-key operations and Flash I/O run here, never on the owner.
+// Job bodies are common code (src/security, src/store); the port only queues and runs them.
+struct JobEnv {
+    Store &store;
+};
+
+// A job body. Runs on the worker; must not touch mesh-owner state except through `arg`, whose
+// memory the owner keeps untouched (and unreused) until the completion has been polled.
+using JobFn = Status (*)(JobEnv &env, void *arg);
+
+// Stack of the worker that runs job bodies: at least twice the deepest measured body (an EDHOC
+// message_2/3 step, tests/native/test_link "EDHOC worker stack": 4344 B at -O2, 4488 B at -Og,
+// 5600 B unoptimised, x86-64; SEC-D15). An unoptimised build runs deeper, so it gets its own size
+// instead of a thinner margin. Not yet measured on a SoC (uxTaskGetStackHighWaterMark on hardware).
+#if defined(__OPTIMIZE__)
+inline constexpr std::size_t k_worker_stack_bytes = 10240;
+#else
+inline constexpr std::size_t k_worker_stack_bytes = 12288;
+#endif
+
+struct JobCompletion {
+    uint16_t table_index = 0;
+    uint32_t job_id = 0;
+    Status status = Status::Ok;
+};
+
+class Jobs {
+  public:
+    // Busy when the worker queue is full; the job then does not exist.
+    [[nodiscard]] virtual Status submit(uint16_t table_index, uint32_t job_id, JobFn fn,
+                                        void *arg) = 0;
+    // Owner only.
+    [[nodiscard]] virtual bool poll(JobCompletion &out) = 0;
+    // CSPRNG bytes for SDK-level nonces and jitter. Keys are generated inside PSA, not here.
+    // Sim builds may be seeded deterministically; production builds refuse test seeds (docs/06 §8).
+    virtual void random(MutByteView out) = 0;
+
+  protected:
+    ~Jobs() = default;
+};
+
+// ---- Pm (S16) ----------------------------------------------------------------------------------
+// Power management: PM locks, sleep entry and the facts of a wake. Optional (Ports::pm may be null: the
+// build then cannot sleep and reports the power modes as not enabled). Owner thread only.
+namespace pm_lock {
+// Level-triggered: the owner passes the set of reasons that need the CPU/radio awake right now, the port
+// acquires/releases the difference. There is no edge (acquire/release) API, so no path can leak a lock.
+inline constexpr uint8_t episode = 1; // an awake episode or an always-on radio: no light sleep
+inline constexpr uint8_t crypto = 2;  // a public-key job runs: CPU at full speed
+inline constexpr uint8_t flash = 4;   // a Flash job runs
+inline constexpr uint8_t radio = 8;   // a frame is on the air
+} // namespace pm_lock
+
+enum class ResetCause : uint8_t { Cold, LightWake, ModemWindow, DeepWake, Brownout, Watchdog };
+struct WakeInfo {
+    ResetCause cause = ResetCause::Cold;
+    uint8_t source = 0;             // LM_WAKE_TIMER / LM_WAKE_EXTERNAL that caused it (0 = none/unknown)
+    bool ram_complete = false;      // every byte of security state survived (never true after a reset)
+    bool elapsed_known = false;     // elapsed_upper_ms is a proven bound (RTC continuity), not a guess
+    uint64_t elapsed_upper_ms = 0;  // time asleep, rounded up
+    std::array<uint8_t, 32> retained{}; // what retain() stored before a deep sleep (RTC memory)
+    uint8_t retained_len = 0;           // 0 after a cold boot
+};
+enum class SleepStart : uint8_t { Woke, Pending, Unsupported }; // Woke: the call blocked and the CPU is back
+
+class Pm {
+  public:
+    // Returns the locks actually held afterwards: a bit the port could not take or release is visible to the owner,
+    // which asks again and refuses new work / a sleep it cannot cover (docs/20 §11).
+    [[nodiscard]] virtual uint8_t set_locks(uint8_t mask) = 0;
+    virtual WakeInfo boot_info() = 0;
+    // Survives a deep sleep, not a power-on reset. At most 32 bytes.
+    virtual void retain(ByteView state) = 0;
+    // Starts the sleep the owner prepared (radio already stopped, records committed). LM_SLEEP_LIGHT keeps
+    // the RAM; the port either blocks until the wake and returns Woke (ESP-IDF) or returns Pending and the
+    // wake arrives later (simulation: the owner wakes itself at its deadline or Engine::power_wake()).
+    // LM_SLEEP_DEEP does not return on hardware. duration_ms 0 = no timer wake.
+    [[nodiscard]] virtual SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, WakeInfo &woke) = 0;
+
+  protected:
+    ~Pm() = default;
+};
+
+} // namespace lm::port
