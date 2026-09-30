@@ -625,14 +625,16 @@ Status Delivery::may_send(const TxFrame &f, MonoTime now) {
             return Status::Conflict;
         }
         const Op &op = ops_[a->op];
-        if (op.expires != 0 && deadline_state(op.expires, op.term) != DeadlineCheck::Before) {
-            return Status::Expired; // never re-sent past the original deadline
+        if (op.expires != 0 && own_deadline(op.expires, op.term) != DeadlineCheck::Before) {
+            return Status::Expired; // never (re)sent past the deadline, nor under a term the deadline is not of (FIX6-D1)
         }
         return Status::Ok;
     }
     case OwnerKind::Forward:
         // FIX4-D1: a relay never puts a frame on the air (first time or retry) once it can prove the deadline passed.
-        if (f.expires_root_ms != 0 && deadline_state(f.expires_root_ms, f.term) == DeadlineCheck::After) {
+        // FIX6-D1: once this node lives in a newer term, a finite deadline of the older one can no longer be read.
+        if (f.expires_root_ms != 0 && (deadline_state(f.expires_root_ms, f.term) == DeadlineCheck::After ||
+                                       f.term < local_term().value())) {
             ++stats_.expired;
             return Status::Expired;
         }

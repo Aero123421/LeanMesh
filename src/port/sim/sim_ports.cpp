@@ -47,6 +47,10 @@ Status SimRadio::stop() {
 }
 
 Status SimRadio::set_channel(uint8_t channel) {
+    if (set_channel_fault_count > 0) {
+        --set_channel_fault_count;
+        return Status::RecoveryRequired;
+    }
     if (!on_ || channel < 1 || channel > 13 || (allowed_mask_ & (1U << channel)) == 0) {
         return Status::InvalidArgument;
     }

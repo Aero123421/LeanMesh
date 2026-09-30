@@ -166,6 +166,20 @@ struct TrustAnchor {
 [[nodiscard]] Status decode_revoke(ByteView data, RevokeObject &out);
 [[nodiscard]] Status decode_window(ByteView data, CommissioningWindow &out);
 [[nodiscard]] Status decode_handover(ByteView data, RootHandover &out);
+
+// ---- [FIX5-D4] the semantic rules of a RootHandover (docs/21 §8), one place for every party ----
+// The old root, the device and the new root each apply these; a handover that breaks them would retire a root that no
+// member can follow (the domain strands). Intrinsic: the authority moves to ANOTHER device under a HIGHER delegation
+// generation. InvalidArgument otherwise.
+[[nodiscard]] Status check_handover(const RootHandover &h);
+// The old side: `h` hands over the authority of `root` at delegation `generation`, and its new term is above `term`, the
+// term that root's members live in (the old root's own term bounds them): a member refuses a new term that is not above
+// its own. NetworkMismatch: not that root; Conflict: the new term is not above `term`.
+[[nodiscard]] Status handover_from(const RootHandover &h, const DeviceId &root, uint64_t generation, RootTerm term);
+// The new side: `h` names `root` with this delegation (generation, hash) as the domain's new root. NetworkMismatch
+// otherwise. (Only the new root itself knows which term it has reached; it checks that on its own.)
+[[nodiscard]] Status handover_to(const RootHandover &h, const DeviceId &root, uint64_t generation,
+                                 const Sha256Digest &delegation_hash);
 // The root issues member credentials and revocations, so these encoders are production code.
 [[nodiscard]] Status encode_member_credential(const MemberCredential &m, MutByteView out,
                                               std::size_t &len);

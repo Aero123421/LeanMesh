@@ -101,3 +101,35 @@ def test_series_short_of_its_total_is_not_stored_and_a_full_series_is_stored_who
 def test_pages_of_different_snapshots_are_not_mixed() -> None:
     conn, g, op = _run([_page(20, 0, 16), _page(20, 16, 4, token=b"\x07" * 16)])
     assert conn.execute("SELECT COUNT(*) FROM group_targets").fetchone()[0] == 0 and g.pending
+
+
+# ---- FIX7-D10: a later, different snapshot never mixes with the stored rows -----------------------------------------
+def _decoded(total: int, count: int, token: bytes, outcome: int = 3) -> list[dict]:
+    from leanmesh_host.wire import cbor_decode
+    pages, offset = [], 0
+    while offset < total:
+        n = min(16, count - offset) if count < total else min(16, total - offset)
+        page = cbor_decode(_page(total, offset, n, token))
+        page["targets"] = [{**t, "outcome": outcome} for t in page["targets"]]
+        pages.append(page)
+        offset += n
+    return pages
+
+
+def test_a_different_snapshot_for_a_stored_operation_stores_nothing_and_marks_it_indeterminate() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.isolation_level = None
+    storage._apply_schema(conn, _SCHEMA.read_text())
+    op, root = b"\x09" * 16, b"\xaa" * 32
+    groups.write_pages(conn, op, root, _decoded(20, 20, b"\x01" * 16, outcome=0))  # PENDING everywhere
+    before = conn.execute("SELECT position,device,message_id,snapshot_token FROM group_targets ORDER BY position").fetchall()
+    assert len(before) == 20
+    groups.write_pages(conn, op, root, _decoded(1, 1, b"\x07" * 16))  # 1 target, another token
+    rows = conn.execute("SELECT position,device,message_id,snapshot_token,outcome FROM group_targets ORDER BY position").fetchall()
+    assert [r[:4] for r in rows] == before  # nothing of the new series stored, no mixed rows
+    assert {r[4] for r in rows} == {"INDETERMINATE"}
+    # same token and hash but a moved target identity is a conflict too
+    other = _decoded(20, 20, b"\x01" * 16)
+    other[0]["targets"][0]["device_id"] = b"\x63" * 32
+    groups.write_pages(conn, op, root, other)
+    assert conn.execute("SELECT device FROM group_targets WHERE position=0").fetchone()[0] == bytes([1]) * 32

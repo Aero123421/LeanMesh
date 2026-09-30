@@ -13,7 +13,7 @@ from typing import Any
 
 from ..api.codec import canonical_json
 from ..api.errors import ApiError, invalid, not_found
-from ..events.journal import now_ms
+from ..power_state import now_ms
 from ..power_state import resolve as resolve_power
 
 _NODE_EXTRAS = ("root_depth", "last_authenticated_rx_mono_ms", "parent_rssi_dbm")
@@ -49,10 +49,12 @@ def put_power(conn: sqlite3.Connection, domain: bytes, device: bytes, policy: di
         # that), and the anchor is kept while the same report is seen again. Stale is then detectable, never late-proof.
         prev = conn.execute("SELECT snapshot_json FROM node_power WHERE domain=? AND device=?", (domain, device)).fetchone()
         old = json.loads(prev[0]) if prev is not None else {}
-        if old.get("reported_root_ms") == snapshot.get("reported_root_ms") and "_root_offset_ms" in old:
+        same_root = (old.get("_gateway_boot"), old.get("_root_term")) == (snapshot.get("_gateway_boot"), snapshot.get("_root_term"))
+        if same_root and old.get("reported_root_ms") == snapshot.get("reported_root_ms") and "_root_offset_ms" in old:
             snapshot["_root_offset_ms"] = old["_root_offset_ms"]
         elif "reported_root_ms" in snapshot:
             snapshot["_root_offset_ms"] = int(snapshot["reported_root_ms"]) - now_ms()
+    snapshot["_stored_host_ms"] = now_ms()
     conn.execute(
         "INSERT INTO node_power(domain,device,policy_revision,mode,policy_json,snapshot_json) "
         "VALUES(?,?,?,?,?,?) ON CONFLICT(domain,device) DO UPDATE SET policy_revision="
@@ -60,6 +62,32 @@ def put_power(conn: sqlite3.Connection, domain: bytes, device: bytes, policy: di
         "snapshot_json=excluded.snapshot_json",
         (domain, device, int(snapshot["policy_revision"]), snapshot["mode"], canonical_json(policy),
          canonical_json(snapshot)))
+
+
+def sync_power(conn: sqlite3.Connection, domain: bytes, rows: list[tuple[bytes, dict[str, Any], dict[str, Any]]],
+               boot: int, term: int) -> None:
+    """FIX7-D9: one complete NODE_QUERY's power list replaces the domain's power state atomically. Every report is
+    bound to the gateway boot and root term it was read under; a stored row the root no longer lists (absent, or
+    from another root boot/term) is kept only as stale, which is served UNKNOWN. The last observed root metadata
+    is persisted, so a Host restart sees a root change too."""
+    key = f"powerroot:{domain.hex()}"
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, f"{boot}:{term}".encode()))
+    changed = row is None or bytes(row[0]) != f"{boot}:{term}".encode()
+    listed = {device for device, _, _ in rows}
+    for device, snap_json in conn.execute("SELECT device,snapshot_json FROM node_power WHERE domain=?", (domain,)).fetchall():
+        old = json.loads(snap_json)
+        if bytes(device) not in listed and not old.get("_stale"):
+            old["_stale"] = True
+            conn.execute("UPDATE node_power SET snapshot_json=? WHERE domain=? AND device=?",
+                         (canonical_json(old), domain, device))
+        elif changed and bytes(device) in listed:
+            old["_gateway_boot"] = -1  # never reuse an anchor taken under another root boot/term
+            conn.execute("UPDATE node_power SET snapshot_json=? WHERE domain=? AND device=?",
+                         (canonical_json(old), domain, device))
+    for device, policy, snap in rows:
+        snap["_gateway_boot"], snap["_root_term"] = boot, term
+        put_power(conn, domain, device, policy, snap)
 
 
 def put_channel(conn: sqlite3.Connection, domain: bytes, status: dict[str, Any]) -> None:

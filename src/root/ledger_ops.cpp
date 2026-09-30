@@ -128,7 +128,6 @@ void Ledger::send_echo(MonoTime now) {
 // Left is durable: the entry stops admitting the device, its sessions end and the revocation floors
 // remember which generations it consumed (a left device's old credential cannot come back, R09).
 void Ledger::leave_committed(Status s, MonoTime now) {
-    (void)now;
     if (s != Status::Ok) { // the commit's result is unknown: RAM keeps Active, flash decides at boot
         release(-2);
         return;
@@ -141,8 +140,11 @@ void Ledger::leave_committed(Status s, MonoTime now) {
     forget_member(device, e.address);
     engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
     // A full floor table: the entry stays Left and its slot is not reused (pick_slot).
-    if (engine_.identity().floors().raise(device, e.assignment + 1, e.membership + 1) != Status::Ok ||
-        commit_floors(Step::CommitFloors) != Status::Ok) {
+    if (engine_.identity().floors().raise(device, e.assignment + 1, e.membership + 1) != Status::Ok) {
+        release(-2);
+    } else if (commit_floors(Step::CommitFloors) != Status::Ok) {
+        floors_dirty_ = true; // FIX5-D2: RAM is ahead of the record; maintenance writes it again (bounded)
+        maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
         release(-2);
     }
 }

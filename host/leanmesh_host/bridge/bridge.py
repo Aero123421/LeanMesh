@@ -32,6 +32,7 @@ from ..db import mirror, ops, outbox, startup
 from ..events import journal
 from ..events.hub import Hub
 from ..events.journal import now_ms
+from ..power_state import now_ms as power_now_ms
 from ..serial import SerialLink, SessionChanged, SessionGone
 from ..serial.link import SerialBusy
 from ..settings import Settings
@@ -214,9 +215,13 @@ class Bridge:
             await asyncio.wait_for(self._session.wait(), seconds)
 
     async def _idle(self) -> None:
-        """Waits for a commit (new operation, cancel) or the next poll of open operations; no timer
-        runs while nothing is open."""
+        """Waits for a commit (new operation, cancel), the next poll of open operations or the next attempt of a
+        request the root refused for a moment (FIX5: a transient refusal was retried only at an unrelated wake-up;
+        with nothing else open the loop slept without a timeout). No timer runs while nothing is open or waiting."""
         due = min(self._next_poll, self._next_reconcile if self._need_reconcile else float("inf"))
+        retry_utc_ms = await self.hub.read(_next_attempt)
+        if retry_utc_ms is not None:
+            due = min(due, time.monotonic() + max(0.0, (retry_utc_ms - now_ms()) / 1000))
         timeout = max(0.05, due - time.monotonic()) if due < float("inf") else None
         waits = [asyncio.ensure_future(self.hub.outbox_ready.wait()), asyncio.ensure_future(self._session.wait())]
         try:
@@ -705,10 +710,10 @@ class Bridge:
                                    connectivity="UNKNOWN", confirmed=bool(confirmed),
                                    short_address=address or None)
             hi = info.root_now_hi()
-            offset = hi - now_ms() if hi is not None else None
-            for row in m.get("power", []):  # S16: schedule hints the members reported to the root
-                policy, snap = power_status.snapshot(row, offset)
-                mirror.put_power(conn, info.domain, bytes(row[0]), policy, snap)
+            offset = hi - power_now_ms() if hi is not None else None
+            mirror.sync_power(conn, info.domain, [(bytes(row[0]), *power_status.snapshot(row, offset))
+                                                  for row in m.get("power", [])],  # S16: schedule hints of the members
+                              info.boot, info.term)
             waiting = {bytes(r[0]) for r in conn.execute(
                 "SELECT id FROM lifecycle_requests WHERE domain=? AND state='PENDING_APPROVAL'", (info.domain,))}
             for request, device, credential in m["pending"]:
@@ -878,3 +883,9 @@ def join_verdict(approve: bool, accepted: bool, status: int, state: int | None,
 def _stored_plan(conn: sqlite3.Connection, op: bytes) -> tuple[bytes, int, int, bytes] | None:
     row = conn.execute("SELECT value FROM meta WHERE key=?", (f"send:{op.hex()}",)).fetchone()
     return _load_plan(bytes(row[0])) if row is not None else None
+
+
+def _next_attempt(conn: sqlite3.Connection) -> int | None:
+    """The earliest scheduled attempt (UTC ms) of a request waiting in the outbox after a transient refusal, if any."""
+    row = conn.execute("SELECT MIN(next_attempt_utc_ms) FROM outbox WHERE state='QUEUED'").fetchone()
+    return int(row[0]) if row is not None and row[0] is not None else None

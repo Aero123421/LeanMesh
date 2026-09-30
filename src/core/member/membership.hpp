@@ -345,6 +345,7 @@ class Membership {
     uint64_t install_op_ = 0;
     bool boot_failed_ = false;       // reading the PREPARED record failed: unknown state, refuse to join
     bool renew_adopt_ = false;       // [S18] a renewed credential is durable and waits for an idle exchange
+    RootTerm renew_term_;            // [FIX5-D8] the term of the renewal being verified (checked again before its commit)
     bool boot_load_ = false;         // [P4] the boot load waits for the record memory
     bool switch_ = false;            // [S18] this join moves an ACTIVE member to another root (transfer/handover)
     bool handover_ = false;          // [S18] ... to its own domain's new root (the object is a RootHandover)

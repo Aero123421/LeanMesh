@@ -371,5 +371,59 @@ LM_TEST("ROOT-TERM sim: a commissioning window of the old term is refused after 
     LM_CHECK(n.eng(0).ledger().window_open(n.now(0)));
 }
 
+// FIX6-D1: a frame that is ready in the hop queue when the node learns a newer term must not go on the air (docs/08 §5:
+// nothing is re-issued under a new term). Origin frame: the operation ends EXPIRED (never left). Forwarded frame:
+// aborted at the relay, the destination gets nothing.
+namespace {
+void hold_and_bump(TNet &n, unsigned node) {
+    n.eng(node).sched().hold_until(n.now(node) + Duration::from_s(60));
+}
+void learn_next_term(TNet &n, unsigned node) {
+    LM_CHECK(n.eng(node).identity().note_term(RootTerm{n.eng(node).identity().term().value() + 1}));
+    n.eng(node).on_new_term(n.now(node));
+    n.eng(node).sched().hold_until(MonoTime{});
+    n.node(node).notify();
+}
+} // namespace
+
+LM_TEST("FIX6 sim: an origin frame held in the hop queue when the node learns a newer term is never sent; the send ends EXPIRED") {
+    TNet n(3);
+    n.boot_all();
+    LM_CHECK(n.until([&] { return n.formed(); }, 180'000));
+    n.run_ms(60'000);
+    const lm_operation_id_t warm = n.send(2, 0, LM_VOLATILE, 60'000); // opens the end session
+    LM_CHECK(n.until([&] { return n.op(2, warm).outcome == LM_OUTCOME_RECEIVED; }, 20'000, 5));
+    const uint64_t aborted = n.eng(2).delivery().hop_stats().aborted;
+    const uint64_t delivered = n.eng(0).delivery().stats().delivered;
+    hold_and_bump(n, 2);
+    const lm_operation_id_t o = n.send(2, 0, LM_VOLATILE, 60'000);
+    LM_CHECK(o != 0);
+    n.run_ms(500);
+    LM_CHECK(n.eng(2).delivery().hop().in_use() > 0); // sealed, ready, waiting for the hold
+    learn_next_term(n, 2);
+    n.run_ms(3000);
+    LM_CHECK_EQ(n.op(2, o).outcome, static_cast<uint32_t>(LM_OUTCOME_EXPIRED));
+    LM_CHECK(n.eng(2).delivery().hop_stats().aborted > aborted); // withdrawn at the hop, never handed to the radio
+    LM_CHECK_EQ(n.eng(0).delivery().stats().delivered, delivered);
+}
+
+LM_TEST("FIX6 sim: a forwarded frame of the old term held at a relay that learns the newer term is aborted, not sent") {
+    TNet n(3);
+    n.boot_all();
+    LM_CHECK(n.until([&] { return n.formed(); }, 180'000));
+    n.run_ms(60'000);
+    const lm_operation_id_t warm = n.send(2, 0, LM_VOLATILE, 60'000);
+    LM_CHECK(n.until([&] { return n.op(2, warm).outcome == LM_OUTCOME_RECEIVED; }, 20'000, 5));
+    const uint64_t delivered = n.eng(0).delivery().stats().delivered;
+    const uint64_t aborted = n.eng(1).delivery().hop_stats().aborted;
+    hold_and_bump(n, 1);
+    LM_CHECK(n.send(2, 0, LM_VOLATILE, 60'000) != 0);
+    LM_CHECK(n.until([&] { return n.eng(1).delivery().hop().in_use() > 0; }, 3000, 5)); // the relay holds the forward
+    learn_next_term(n, 1);
+    n.run_ms(3000);
+    LM_CHECK(n.eng(1).delivery().hop_stats().aborted > aborted);
+    LM_CHECK_EQ(n.eng(0).delivery().stats().delivered, delivered);
+}
+
 
 LM_TEST_MAIN()

@@ -133,8 +133,9 @@ std::string cmd_sleep(Sim &sim, const Args &a);
 std::string cmd_wake(Sim &sim, const Args &a);
 // Commands of the diagnostics slice (cmd_diag.cpp).
 std::string cmd_diag(Sim &sim, const Args &a);
-// Commands of the lifecycle slice (cmd_lifecycle.cpp): signed revoke / commissioning-window objects.
+// Commands of the lifecycle slice (cmd_lifecycle.cpp): signed revoke / commissioning-window objects; a slow worker.
 std::string cmd_lc_object(Sim &sim, const Args &a);
+std::string cmd_job_latency(Sim &sim, const Args &a);
 // Commands running the example applications (cmd_apps.cpp).
 std::string cmd_app_equipment(Sim &sim, const Args &a);
 std::string cmd_app_battery(Sim &sim, const Args &a);

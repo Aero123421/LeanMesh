@@ -189,12 +189,15 @@ void put_diag(wire::CborWriter &w, const diag::Snapshot &d, const lm_capabilitie
 // Ledger entry state as the Host's membership vocabulary (lm_membership state numbers); the states
 // that are not a member of the network (free, expected, aborted, blocked) are not reported. [S18] A blocked entry of a
 // former member (it consumed its assignment here) is its revocation: MEMBER_REVOKED.
-bool node_state(const root::Entry &e, uint32_t &out) {
-    if (e.state == root::EntryState::Blocked && e.assignment != 0 && e.consumed >= e.assignment) {
+// FIX5-D2: what the entry means now (the ledger's effective state): an ACTIVE entry below a revocation floor (its own
+// commit failed or is still to come) is never shown ACTIVE.
+bool node_state(const root::LedgerType &led, const root::Entry &e, uint32_t &out) {
+    const root::EntryState state = led.effective(e);
+    if (state == root::EntryState::Blocked && e.assignment != 0 && e.consumed >= e.assignment) {
         out = LM_MEMBER_REVOKED;
         return true;
     }
-    switch (e.state) {
+    switch (state) {
     case root::EntryState::Prepared:
         out = LM_PREPARED;
         return true;
@@ -366,7 +369,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            n += (node_state(e, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
+            n += (node_state(led, e, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
         }
         w.map(5);
         key(w, "nodes");
@@ -374,7 +377,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            if (!node_state(e, st) || (p.has_filter && e.device.bytes != p.filter)) {
+            if (!node_state(led, e, st) || (p.has_filter && e.device.bytes != p.filter)) {
                 continue;
             }
             w.array(6);
@@ -391,7 +394,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            npw += (node_state(e, st) && (!p.has_filter || e.device.bytes == p.filter) &&
+            npw += (node_state(led, e, st) && (!p.has_filter || e.device.bytes == p.filter) &&
                     engine_.power().member_power(e.address, mp))
                        ? 1U
                        : 0U;
@@ -400,7 +403,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
             uint32_t st = 0;
             const root::Entry &e = led.entry(i);
-            if (!node_state(e, st) || (p.has_filter && e.device.bytes != p.filter) ||
+            if (!node_state(led, e, st) || (p.has_filter && e.device.bytes != p.filter) ||
                 !engine_.power().member_power(e.address, mp)) {
                 continue;
             }

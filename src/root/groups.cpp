@@ -39,8 +39,8 @@ Status Groups::set(const group::SetRequest &rq) {
     for (std::size_t i = 0; i < rq.count; ++i) {
         DeviceId d;
         std::copy(rq.members + i * rq.stride, rq.members + i * rq.stride + 32, d.bytes.begin());
-        const Entry *e = led.find(d);
-        if (e == nullptr || e->state != EntryState::Active) {
+        const Entry *e = led.authorized(d); // FIX5-D2: ACTIVE and above every floor
+        if (e == nullptr) {
             return Status::NotFound; // only a member of this domain can be in a group
         }
         slots[i] = static_cast<uint8_t>(e->address.value() - 2);
@@ -90,13 +90,14 @@ Status Groups::snapshot(uint32_t group_id, uint64_t revision, group::Op &out, De
 }
 
 bool Groups::current(const DeviceId &d, uint64_t assignment, uint64_t membership) const {
-    const Entry *e = engine_.ledger().find(d);
-    return e != nullptr && e->state == EntryState::Active && e->assignment == assignment && e->membership == membership;
+    const Entry *e = engine_.ledger().authorized(d); // FIX5-D2
+    return e != nullptr && e->assignment == assignment && e->membership == membership;
 }
 
 bool Groups::allowed(const DeviceId &d) const {
-    const Entry *e = engine_.ledger().find(d);
-    return e == nullptr || e->state == EntryState::Active; // the ledger may only deny (S8-D7: factory members)
+    const Ledger &led = engine_.ledger();
+    const Entry *e = led.find(d);
+    return e == nullptr || led.authorizes(*e); // the ledger may only deny (S8-D7: factory members); FIX5-D2: floors too
 }
 
 } // namespace lm::root

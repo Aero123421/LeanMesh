@@ -590,6 +590,48 @@ LM_TEST("C05 sim: the root loses power right after COMMIT is durable; it comes b
 }
 
 
+// FIX6-D2: the stored COMMITTED channel is applied with a checked set+readback before the mesh (and the root's
+// coordinator) starts; a refusal keeps the mesh held, is retried a bounded number of times and never reports a switch.
+LM_TEST("FIX6 sim: the root's boot cannot set the stored committed channel: the mesh stays held, no switch is reported, the retry succeeds") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.view().state == CState::Committed; }, 200'000, 1));
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.run_ms(3000);
+    n.node(0).radio.set_channel_fault_count = 3; // the first three attempts fail
+    n.boot(0);
+    n.run_ms(1800); // the first attempts have failed by now
+    LM_CHECK(n.chan(0).holds_mesh());
+    LM_CHECK(!n.chan(0).loaded());
+    LM_CHECK(n.mesh(0).state() == route::Mesh::State::Off);
+    LM_CHECK_EQ(n.chan(0).stats().switched, 0u);
+    LM_CHECK(n.until([&] { return n.chan(0).loaded(); }, 5000, 10));
+    LM_CHECK_EQ(n.radio(0), 11);
+    LM_CHECK(!n.chan(0).holds_mesh());
+    LM_CHECK(n.until([&] { return n.mesh(0).state() != route::Mesh::State::Off; }, 5000, 10));
+}
+
+LM_TEST("FIX6 sim: a radio that never takes the stored channel keeps the mesh off after the bounded retries") {
+    CNet n(3);
+    form(n);
+    LM_CHECK_OK(n.coord().plan_to(11, n.now(0)));
+    n.poke();
+    LM_CHECK(n.until([&] { return n.view().state == CState::Committed; }, 200'000, 1));
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.run_ms(3000);
+    n.node(0).radio.set_channel_fault_count = 1000;
+    n.boot(0);
+    n.run_ms(60'000);
+    LM_CHECK(n.chan(0).holds_mesh());
+    LM_CHECK(n.mesh(0).state() == route::Mesh::State::Off);
+    LM_CHECK_EQ(n.chan(0).stats().switched, 0u);
+    LM_CHECK(n.node(0).radio.set_channel_fault_count > 900); // bounded: it was not hammered
+}
+
 LM_TEST("C08 sim: a candidate that is better on average but jammed at one relay is not adopted; the worst link decides") {
     CNet n(4);
     form(n);

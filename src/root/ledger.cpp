@@ -33,6 +33,15 @@ template <class F> void io(F &f, Manifest &m) {
         f.raw(d);
     }
 }
+template <class F> void io(F &f, WindowRecord &r) {
+    f.is(k_window_record_version);
+    f.u64(r.policy_revision);
+    f.raw(r.id);
+    f.u64(r.expected_revision);
+    f.u8(r.max_new_members);
+    f.u8(r.allowed_roles);
+    f.u8(r.used);
+}
 
 } // namespace
 
@@ -67,6 +76,18 @@ Status decode_manifest(ByteView payload, Manifest &out) {
         return Status::BadFrame;
     }
     out = m;
+    return Status::Ok;
+}
+
+Status encode_window_record(const WindowRecord &r, MutByteView out, std::size_t &len) {
+    return put_record(r, out, len, [](auto &f, auto &x) { io(f, x); });
+}
+
+Status decode_window_record(ByteView payload, WindowRecord &out) {
+    WindowRecord r;
+    LM_TRY(get_record(payload, r, [](auto &f, auto &x) { io(f, x); }));
+    r.present = true;
+    out = r;
     return Status::Ok;
 }
 
@@ -236,18 +257,16 @@ Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
         LM_TRY(st);
         l.retired_ = true;
     }
-    // [S18] The budget record of the last commissioning window (docs/21 §2: counted by durable reservations).
+    // [S18] The budget record of the last commissioning window (docs/21 §2: counted by durable reservations); FIX5-D6:
+    // with its replay floor. Unreadable is never "no window yet".
     rec.id = store::rec::commissioning_window;
     st = store::record_load(env.store, rec);
-    l.window_rec_used_ = 0;
-    l.window_rec_id_ = {};
+    l.window_rec_ = WindowRecord{};
     if (st != Status::NotFound) {
         LM_TRY(st);
-        if (rec.payload_len != 17) {
+        if (detail::decode_window_record(ByteView{rec.payload.data(), rec.payload_len}, l.window_rec_) != Status::Ok) {
             return Status::RecoveryRequired;
         }
-        std::copy_n(rec.payload.begin(), 16, l.window_rec_id_.begin());
-        l.window_rec_used_ = rec.payload[16];
     }
     for (std::size_t i = 0; i < k_ledger_slots; ++i) {
         rec.id = static_cast<uint16_t>(k_rec_ledger_base + i);
@@ -288,12 +307,14 @@ Status Ledger::verify_ticket_job(port::JobEnv & /*env*/, void *arg) {
         member::RootHandover h;
         LM_TRY(member::open_signed(v.ticket_cose, v.trust.key, member::k_type_root_handover, env, data));
         LM_TRY(member::decode_handover(data, h));
-        if (env.domain != v.delegation.domain || h.new_root != v.delegation.root ||
-            h.new_delegation_hash != v.delegation_hash || h.new_generation != v.delegation.generation ||
-            v.term < h.new_term) {
+        // FIX5-D4: the rules every party applies (another root, a higher generation), this root named as the new one.
+        const Status to = env.domain == v.delegation.domain
+                              ? member::handover_to(h, v.delegation.root, v.delegation.generation, v.delegation_hash)
+                              : Status::NetworkMismatch;
+        if (to != Status::Ok || v.term < h.new_term) {
             // A handover to another root or delegation, or to a term this root has not reached. The handover names the
             // new root's first term; every boot of the new root is one more (ARCH2-D1), so a later term still is it.
-            return Status::NetworkMismatch;
+            return to == Status::InvalidArgument ? to : Status::NetworkMismatch;
         }
         v.out.kind = 2;
         return sec::sha256(v.ticket_cose, v.out.grant);
@@ -378,6 +399,9 @@ void Ledger::stop() {
     exp_active_ = false;
     renew_mask_ = 0;
     lc_.active = false;
+    lc_.retry_at = MonoTime::never();
+    recon_block_ = recon_left_ = 0; // (found again at the next load: the floors and the entries are durable)
+    floors_dirty_ = false;
     window_set_ = false;
     notice_until_ = MonoTime::never();
     leave_pending_ = abort_pending_ = load_pending_ = confirm_pending_ = false;
@@ -400,9 +424,25 @@ bool Ledger::link_admit(const DeviceId &device, const member::MemberCredential &
     if (!loaded_ || failed_ || retired_) {
         return false;
     }
-    const Entry *e = find(device);
-    return e != nullptr && e->state == EntryState::Active && e->address == mc.address &&
-           e->assignment == mc.assignment.value() && e->membership == mc.membership.value();
+    const Entry *e = authorized(device);
+    return e != nullptr && e->address == mc.address && e->assignment == mc.assignment.value() &&
+           e->membership == mc.membership.value();
+}
+
+// FIX5-D2: the floors are the authorisation as soon as they are raised (before the entry's commit, or after it failed).
+bool Ledger::authorizes(const Entry &e) const {
+    return e.state == EntryState::Active &&
+           engine_.identity().floors().check(e.device, AssignmentGen{e.assignment}, MembershipGen{e.membership}) ==
+               Status::Ok;
+}
+
+const Entry *Ledger::authorized(const DeviceId &d) const {
+    const Entry *e = find(d);
+    return e != nullptr && authorizes(*e) ? e : nullptr;
+}
+
+EntryState Ledger::effective(const Entry &e) const {
+    return e.state == EntryState::Active && !authorizes(e) ? EntryState::Blocked : e.state;
 }
 
 void Ledger::discovery(const MacAddr & /*src*/, const wire::BootstrapCarrier &c, MonoTime now) {
@@ -483,7 +523,12 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
         release(-2);
         if (s == Status::Ok) {
             loaded_ = true;
-            if (man_dirty_) {
+            // FIX5-D2: an ACTIVE entry below its durable floors (a cut between the floors and the entry commit of a
+            // revocation or reconciliation) is refused already (authorizes()); maintenance makes it Blocked durably.
+            recon_block_ = below_floors();
+            recon_left_ = 0;
+            recon_fails_ = 0;
+            if (man_dirty_ || recon_block_ != 0) {
                 maintenance(now); // make the repaired used bits durable
             }
         } else {
@@ -544,6 +589,15 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
         return;
     case Step::CommitFloors:
         release(-2);
+        if (s != Status::Ok) { // FIX5-D2: RAM keeps the raised floors; written again (bounded)
+            floors_dirty_ = true;
+            recon_retry(now);
+        } else {
+            recon_fails_ = 0;
+            if (recon_block_ != 0 || recon_left_ != 0) {
+                maintenance(now);
+            }
+        }
         return;
     case Step::CommitManifest:
         if (s != Status::Ok) {
@@ -565,6 +619,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
     case Step::LcFloors:
     case Step::LcEntry:
     case Step::LcRetire:
+    case Step::LcRetireCheck:
     case Step::LcWindow:
         lc_step(step, s, now);
         return;
@@ -573,6 +628,9 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             window_reserved(*t, s, now);
         }
         return;
+    case Step::CommitFloored: // [FIX5-D2]
+        floored_done(s, now);
+        return;
     case Step::None:
         return;
     }
@@ -580,7 +638,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
 
 // ---- timers ----
 MonoTime Ledger::deadline() const {
-    MonoTime next = earliest(maint_retry_, notice_until_);
+    MonoTime next = earliest(earliest(maint_retry_, notice_until_), lc_.active ? lc_.retry_at : MonoTime::never());
     for (const Txn &t : txns_) {
         if (t.state != TxnState::Free) {
             next = earliest(next, earliest(t.deadline, earliest(t.retry_at, t.pipe.deadline())));
@@ -631,6 +689,10 @@ void Ledger::on_timer(MonoTime now) {
     if (now >= notice_until_) { // [S18] the revoked member's notice had its chance: its sessions end now
         notice_until_ = MonoTime::never();
         forget_member(notice_device_, notice_addr_);
+    }
+    if (lc_.active && now >= lc_.retry_at) { // [FIX5-D1] the retirement record is read again
+        lc_.retry_at = MonoTime::never();
+        retire_check(now);
     }
     if (maint_retry_ != MonoTime::never() && now >= maint_retry_) {
         maint_retry_ = MonoTime::never();
@@ -721,6 +783,19 @@ void Ledger::maintenance(MonoTime now) {
         if (commit_entry(Step::CommitAborted, abort_slot_, EntryState::Aborted, false, ByteView{}, -2) != Status::Ok) {
             release(-2);
         }
+        return;
+    }
+    // FIX5-D2: the durable state catches up with floors that already refuse (the floors first, then each entry).
+    if (recon_fails_ < detail::k_recon_tries && floors_dirty_) {
+        floors_dirty_ = false;
+        if (commit_floors(Step::CommitFloors) != Status::Ok) {
+            floors_dirty_ = true;
+            release(-2);
+            recon_retry(now);
+        }
+        return;
+    }
+    if (recon_fails_ < detail::k_recon_tries && (recon_block_ | recon_left_) != 0 && start_floored(now)) {
         return;
     }
     if (man_dirty_) {

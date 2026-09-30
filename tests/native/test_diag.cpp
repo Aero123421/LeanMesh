@@ -85,9 +85,9 @@ LM_TEST("T19 diagnostics: a value the build cannot know is unknown (bit clear, z
     LM_CHECK(has(b, diag::valid::counters));
     LM_CHECK(has(b, diag::valid::peers));
     LM_CHECK(has(b, diag::valid::interval)); // started: the span of the counters is known
-    // Driver, SDK and application facts live in separate bit ranges.
+    // Driver and SDK facts live in separate bit ranges.
     LM_CHECK((d.validity_bits & 0xFFFF0000ULL) != 0);
-    LM_CHECK((d.validity_bits >> 32) != 0);
+    LM_CHECK((d.validity_bits >> 32) == 0); // FIX7-D12: the app bits have no field in the C struct
 }
 
 LM_TEST("T19 diagnostics: local shortage (BUSY) is not RF loss; a MAC failure is, and only that") {
@@ -137,7 +137,10 @@ LM_TEST("T19 diagnostics: ABI checks of the caller's struct; a query consumes an
     uint8_t buf[600];
     (void)lm_next_event(net.ctx(0), &ev, buf, sizeof buf, &need); // drain the STARTED event
     const lm_diagnostics_t d2 = net.diag(0);
-    LM_CHECK(has(d2, diag::valid::events));
+    // FIX7-D12: the C struct has no event/operation fields, so it claims no such validity bit (the Host map has them)
+    LM_CHECK(!has(d2, diag::valid::events));
+    LM_CHECK(!has(d2, diag::valid::operations));
+    LM_CHECK_EQ(d2.validity_bits & ~diag::valid::abi_bits, 0ULL);
     LM_CHECK_EQ(d2.reserved, 0);
 }
 

@@ -490,4 +490,36 @@ LM_TEST("measure: worker stack peak of the credential-chain job (2 ECDSA verifie
 #endif
 }
 
+// FIX5-D4: the RootHandover rules every party applies (a pure decision; the parties' own paths are in test_lifecycle).
+LM_TEST("FIX5 RootHandover rules: another root, a higher generation, a new term above the old side's, the new side named") {
+    member::RootHandover h;
+    h.old_root.bytes[0] = 1;
+    h.new_root.bytes[0] = 2;
+    h.old_generation = 1;
+    h.new_generation = 2;
+    h.new_delegation_hash[0] = 9;
+    h.new_term = RootTerm{5};
+    LM_CHECK_OK(member::check_handover(h));
+    member::RootHandover same = h;
+    same.new_root = h.old_root;
+    LM_CHECK(member::check_handover(same) == Status::InvalidArgument);
+    member::RootHandover flat = h;
+    flat.new_generation = flat.old_generation;
+    LM_CHECK(member::check_handover(flat) == Status::InvalidArgument);
+    // Old side: this root at this generation, living in a term below the new one.
+    LM_CHECK_OK(member::handover_from(h, h.old_root, 1, RootTerm{4}));
+    LM_CHECK(member::handover_from(h, h.old_root, 1, RootTerm{5}) == Status::Conflict); // not above: members refuse it
+    LM_CHECK(member::handover_from(h, h.new_root, 1, RootTerm{1}) == Status::NetworkMismatch);
+    LM_CHECK(member::handover_from(h, h.old_root, 2, RootTerm{1}) == Status::NetworkMismatch);
+    LM_CHECK(member::handover_from(same, same.old_root, 1, RootTerm{1}) == Status::InvalidArgument);
+    // New side: this root, this delegation (generation and hash).
+    LM_CHECK_OK(member::handover_to(h, h.new_root, 2, h.new_delegation_hash));
+    Sha256Digest other = h.new_delegation_hash;
+    other[0] = 8;
+    LM_CHECK(member::handover_to(h, h.new_root, 2, other) == Status::NetworkMismatch);
+    LM_CHECK(member::handover_to(h, h.new_root, 3, h.new_delegation_hash) == Status::NetworkMismatch);
+    LM_CHECK(member::handover_to(h, h.old_root, 2, h.new_delegation_hash) == Status::NetworkMismatch);
+    LM_CHECK(member::handover_to(flat, flat.new_root, 1, flat.new_delegation_hash) == Status::InvalidArgument);
+}
+
 LM_TEST_MAIN()

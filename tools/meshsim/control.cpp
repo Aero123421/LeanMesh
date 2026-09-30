@@ -187,7 +187,7 @@ const Entry k_commands[] = {
     {"power", cmd_power}, {"power-set", cmd_power_set}, {"sleep", cmd_sleep}, {"wake", cmd_wake},
     {"channel", cmd_channel},
     {"diag", cmd_diag},
-    {"lc-object", cmd_lc_object},
+    {"lc-object", cmd_lc_object}, {"job-latency", cmd_job_latency},
     {"app-equipment", cmd_app_equipment}, {"app-battery", cmd_app_battery},
 };
 

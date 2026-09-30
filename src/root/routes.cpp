@@ -53,13 +53,13 @@ bool Routes::path_to_addr(ShortAddr dest, delivery::PathSpec &out, MonoTime now)
     return true;
 }
 
-// Who is this member? Its ACTIVE ledger entry, and an end session (if any) of exactly that entry's address and
-// generations (SEC-D2: the ledger admitted it). A device the ledger does not list gets nothing (S8-D7 is gone).
-// Never by an address alone.
+// Who is this member? Its ACTIVE ledger entry above every floor (FIX5-D2), and an end session (if any) of exactly that
+// entry's address and generations (SEC-D2: the ledger admitted it). A device the ledger does not list gets nothing
+// (S8-D7 is gone). Never by an address alone.
 bool Routes::identify(const DeviceId &dev, ShortAddr &addr, uint64_t &gen) {
     const delivery::EndSession *s = engine_.delivery().sessions().find_peer(dev);
-    const Entry *e = engine_.ledger().find(dev);
-    if (e == nullptr || e->state != EntryState::Active ||
+    const Entry *e = engine_.ledger().authorized(dev);
+    if (e == nullptr ||
         (s != nullptr && (e->address != s->peer_addr || e->assignment != s->peer_assignment.value() ||
                           e->membership != s->peer_membership.value()))) {
         return false;

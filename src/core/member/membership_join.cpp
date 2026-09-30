@@ -34,14 +34,17 @@ Status Membership::check_request_object(ByteView obj, uint64_t &assignment) {
         RootHandover h;
         LM_TRY(decode_handover(data, h));
         handover_ = true;
-        if (env.domain != id.delegation().domain || h.old_root != id.delegation().root ||
-            h.old_generation != id.delegation().generation) {
-            return Status::AuthRejected; // not a handover of this device's root
+        // FIX5-D4: the rules every party applies (credentials.hpp). The new term must be above the one this device lives
+        // in (docs/21 §8, LC09): otherwise this root is not the new one for it (the search goes on).
+        const Status from = env.domain == id.delegation().domain
+                                ? handover_from(h, id.delegation().root, id.delegation().generation, id.term())
+                                : Status::NetworkMismatch;
+        if (from == Status::InvalidArgument || from == Status::NetworkMismatch) {
+            return from == Status::InvalidArgument ? from : Status::AuthRejected; // not a handover of this device's root
         }
-        if (h.new_root != peer_.delegation.root || h.new_delegation_hash != peer_.delegation_hash ||
-            h.new_generation != peer_.delegation.generation || h.new_generation <= h.old_generation ||
-            !(id.term() < h.new_term)) {
-            return Status::NetworkMismatch; // not the new root (a term above the known one: docs/21 §8, LC09)
+        if (from != Status::Ok ||
+            handover_to(h, peer_.delegation.root, peer_.delegation.generation, peer_.delegation_hash) != Status::Ok) {
+            return Status::NetworkMismatch; // not the new root, or not a term above the known one
         }
         assignment = id.member().assignment.value();
         return Status::Ok;

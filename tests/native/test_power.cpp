@@ -696,8 +696,14 @@ LM_TEST("P03 GS05 sim: a command whose deadline is before the target's next wake
 LM_TEST("GS06 sim: an unknown wake time is never called unreachable; a finite command ends at its deadline") {
     PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
     n.form();
-    n.apply_policy(2, k_report);
+    pw::Policy pol = k_report;
+    pol.extra_wakes_per_day = 1000;
+    n.apply_policy(2, pol);
     LM_CHECK(n.until([&] { return n.eng(2).power().stats().grants >= 1; }, 2000));
+    // FIX6-D3: the external Deep Sleep wake below is charged to the wake quota, which a cold boot starts with used up:
+    // at 1000 wakes/day one is back after 87 s.
+    n.run_ms(100'000);
+    const uint64_t rf0 = n.eng(1).delivery().hop_stats().rf_failed;
     LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_DEEP, LM_WAKE_EXTERNAL, 0, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK); // GPIO only
     n.run_ms(500);
     LM_CHECK(n.node(2).deep_sleeping());
@@ -726,7 +732,7 @@ LM_TEST("GS06 sim: an unknown wake time is never called unreachable; a finite co
     LM_CHECK_EQ(f.phase, 3u);
     LM_CHECK(f.outcome == LM_OUTCOME_EXPIRED || f.outcome == LM_OUTCOME_INDETERMINATE);
     LM_CHECK_EQ(n.op(0, hist).phase == 3, false);
-    LM_CHECK_EQ(n.eng(1).delivery().hop_stats().rf_failed, 0u);
+    LM_CHECK_EQ(n.eng(1).delivery().hop_stats().rf_failed, rf0);
     // The external wake: the node comes back, polls, and the history reaches it exactly once.
     n.node(2).wake_external();
     n.set_time_at(2);
@@ -1429,6 +1435,40 @@ LM_TEST("FIX3-4 sim: a cold boot with stored limits above the defaults starts wi
     n.run_ms(300);
     LM_CHECK(n.asleep(2)); // no wake credit after a power cut: 100 wakes/day would have allowed it against the defaults
     LM_CHECK_EQ(n.snap(2).last_reason, static_cast<uint32_t>(pw::kWakeDenied));
+}
+
+// FIX6-D3: a Deep Sleep wake by an external source is the same unplanned wake as a Light one: it is admitted against the
+// retained quota and charged once; beyond the quota the radio stays off (BudgetBlocked, kWakeDenied), nothing is sent.
+LM_TEST("FIX6 sim: repeated external Deep Sleep wakes are charged against the retained quota; beyond it the radio stays off") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    pw::Policy pol = report_long();
+    pol.extra_wakes_per_day = 2;
+    n.apply_policy(2, pol);
+    n.app_cycle(2, 60'000, n.world.now_us() + 25ULL * 3'600'000'000ULL); // a day of ordinary life: the quota is whole
+    n.set_time();
+    n.wake_up(2);
+    LM_CHECK(n.ready(2));
+    unsigned allowed = 0;
+    unsigned denied = 0;
+    for (unsigned k = 0; k < 6; ++k) {
+        LM_CHECK_EQ(n.sleep_now(2, LM_SLEEP_DEEP, LM_WAKE_EXTERNAL, 0, LM_PENDING_SAVE_AND_SLEEP), LM_STATUS_OK);
+        n.run_ms(300);
+        n.node(2).wake_external();
+        n.run_ms(600);
+        LM_CHECK(n.node(2).powered());
+        if (n.eng(2).radio_state() == RadioState::Running) {
+            ++allowed;
+            continue;
+        }
+        ++denied;
+        LM_CHECK(n.asleep(2));
+        LM_CHECK_EQ(n.snap(2).state, static_cast<uint32_t>(LM_POWER_BUDGET_BLOCKED));
+        LM_CHECK_EQ(n.snap(2).last_reason, static_cast<uint32_t>(pw::kWakeDenied));
+        LM_CHECK_EQ(n.node(2).radio.tx_done_dropped(), 0u); // nothing was sent in this boot
+    }
+    LM_CHECK_EQ(allowed, 2u);
+    LM_CHECK_EQ(denied, 4u);
 }
 
 // FIX3-D3: a driver that cannot be stopped is not asleep.

@@ -20,11 +20,9 @@ constexpr Duration k_retry = Duration::from_ms(200);
 
 // ---- renewal ----
 void Ledger::renew_due(const DeviceId &device, uint32_t term, uint64_t lease_ms, MonoTime now) {
-    const Entry *e = find(device);
-    if (!loaded_ || failed_ || retired_ || e == nullptr || e->state != EntryState::Active ||
-        (!e->reserved_until.is_never() && now < e->reserved_until) || // renewed a moment ago
-        engine_.identity().floors().check(device, AssignmentGen{e->assignment}, MembershipGen{e->membership}) !=
-            Status::Ok) {
+    const Entry *e = authorized(device); // ACTIVE and above every floor (FIX5-D2)
+    if (!loaded_ || failed_ || retired_ || e == nullptr ||
+        (!e->reserved_until.is_never() && now < e->reserved_until)) { // renewed a moment ago
         return;
     }
     const uint64_t root_ms = now.to_ms(); // the root is the time base of its term
@@ -42,8 +40,8 @@ void Ledger::start_renew(MonoTime now) {
     while (renew_mask_ != 0) {
         const auto slot = static_cast<std::size_t>(__builtin_ctzll(renew_mask_));
         renew_mask_ &= renew_mask_ - 1U;
-        if (entries_[slot].state != EntryState::Active) {
-            continue;
+        if (retired_ || !authorizes(entries_[slot])) {
+            continue; // FIX5-D2: revoked (or this root retired) since the renewal was asked for
         }
         rec_->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(k_rec_ledger_base + slot));
         job_slot_index_ = slot;
@@ -102,11 +100,11 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
     // RenewSign: the signed credential goes to the member as one control object over its end session.
     const delivery::ControlSendRequest cr{e.device, engine_.identity().member().root_term.value(), now.to_ms() + 30000};
     const ByteView cose{scratch_.data() + detail::k_cose_off, sargs_.len};
-    if (s == Status::Ok && e.state == EntryState::Active && sargs_.len != 0 &&
-        engine_.delivery().send_control(cr, cose, now).status == Status::Ok) {
+    const bool still = !retired_ && authorizes(e); // FIX5-D2: not revoked (floors) while the worker signed
+    if (s == Status::Ok && still && sargs_.len != 0 && engine_.delivery().send_control(cr, cose, now).status == Status::Ok) {
         ++stats_.renewals;
         e.reserved_until = now + k_renew_gap; // a READY racing the delivery does not sign again
-    } else if (s == Status::Ok && e.state == EntryState::Active) {
+    } else if (s == Status::Ok && still) {
         renew_mask_ |= 1ULL << slot; // the control lane is busy (a snapshot page, another renewal): later
         ++stats_.renew_deferred;
         maint_retry_ = now + k_retry;
@@ -173,9 +171,21 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
     if (!lc_.active) {
         return;
     }
+    if (step == Step::LcRetire || step == Step::LcRetireCheck) {
+        retire_step(step, s, now);
+        return;
+    }
     if (s != Status::Ok) {
         // Before a commit nothing changed (the object was refused); after one the durable state may or may not
         // have moved (floors raised in RAM, an entry commit unknown): RECOVERY_REQUIRED, never "rejected".
+        if (step == Step::LcFloors || step == Step::LcEntry) {
+            lc_fail_closed(step == Step::LcEntry, now); // FIX5-D2: the floors refuse the member from now on
+        } else if (step == Step::LcWindow) {
+            // FIX5-D6: the new window's record may be on the Flash all the same: its replay floor holds from now on, and
+            // no window is open until one is installed again (the same object then goes on with this record's count).
+            window_rec_ = window_stage_;
+            window_set_ = false;
+        }
         lc_finish(step == Step::LcVerify ? s : Status::RecoveryRequired, now);
         return;
     }
@@ -218,15 +228,9 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
         lc_finish(Status::Ok, now);
         return;
     }
-    case Step::LcRetire:
-        retired_ = true;
-        stop_admitting(now);
-        lc_finish(Status::Ok, now);
-        return;
-    case Step::LcWindow:
-        window_rec_id_ = window_.id;
-        window_rec_used_ = 0;
-        window_used_ = 0;
+    case Step::LcWindow: // a new window's record is durable: it is the one counted from now on (FIX5-D6)
+        window_rec_ = window_stage_;
+        window_ = lc_.obj.window;
         window_set_ = true;
         lc_finish(Status::Ok, now);
         return;
@@ -262,39 +266,49 @@ void Ledger::lc_verified(MonoTime now) {
     }
     case member::k_type_commissioning_window: {
         const member::CommissioningWindow &w = lc_.obj.window;
-        const bool ok = w.term == id.member().root_term && w.not_before_ms < w.expires_ms &&
+        const bool ok = w.term == id.term() && w.not_before_ms < w.expires_ms &&
                         w.expires_ms - w.not_before_ms <= 15ULL * 60 * 1000 && now.to_ms() < w.expires_ms;
         if (!ok || w.expected_revision != man_.expected_revision) {
             lc_finish(ok ? Status::Conflict : Status::InvalidArgument, now); // another expected set / term / span
             return;
         }
-        window_ = w;
-        if (w.id == window_rec_id_) { // the same window again (after a restart): its count goes on
+        // FIX5-D6: the counted window's policy revision is the replay floor. The same window again (re-signed, or
+        // re-issued for a new term with new times) goes on with its count; an older window, or another one at the
+        // counted revision, fails closed - alternating two valid windows can no longer start a count from zero.
+        if (window_rec_.present && w.policy_revision <= window_rec_.policy_revision) {
+            if (!window_rec_.same_window(w)) {
+                lc_finish(Status::Conflict, now);
+                return;
+            }
+            window_ = w;
             window_set_ = true;
-            window_used_ = window_rec_used_;
             lc_finish(Status::Ok, now);
             return;
         }
-        if (commit_window(Step::LcWindow, 0, -2) != Status::Ok) {
-            lc_finish(Status::Busy, now);
+        const WindowRecord fresh{w.policy_revision, w.id, w.expected_revision, w.max_new_members, w.allowed_roles, 0,
+                                 true};
+        if (commit_window(Step::LcWindow, fresh, -2) != Status::Ok) {
+            lc_finish(Status::Busy, now); // nothing changed: RAM moves to the new window only once it is durable
         }
         return;
     }
     case member::k_type_root_handover: {
         const member::RootHandover &h = lc_.obj.handover;
-        if (h.old_root == id.self() && h.old_generation == id.delegation().generation &&
-            h.new_generation > h.old_generation) {
-            rec_->arm(store::RecordJob::Op::Commit, store::rec::root_handover, 0, lc_.len); // it retires, durably
-            std::memcpy(rec_->payload.data(), scratch_.data(), lc_.len);
-            if (submit(Step::LcRetire, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
-                lc_finish(Status::Busy, now);
-            }
+        // FIX5-D4: the rules every party applies (credentials.hpp). This root retires only on an object its members can
+        // follow: another root, a higher generation, a new term above the one it lives in.
+        const Status from = member::handover_from(h, id.self(), id.delegation().generation, id.term());
+        if (from == Status::Ok) {
+            retire(now);
+            return;
+        }
+        if (from != Status::NetworkMismatch) {
+            lc_finish(from, now); // not a valid handover (InvalidArgument), or its new term is not above ours (Conflict)
             return;
         }
         Sha256Digest dh{};
-        const bool ours = h.new_root == id.self() && sec::sha256(id.delegation_cose(), dh) == Status::Ok &&
-                          dh == h.new_delegation_hash && h.new_generation == id.delegation().generation &&
-                          !(id.member().root_term < h.new_term); // its first term or a later boot's (ARCH2-D1)
+        const bool ours = sec::sha256(id.delegation_cose(), dh) == Status::Ok &&
+                          member::handover_to(h, id.self(), id.delegation().generation, dh) == Status::Ok &&
+                          !(id.term() < h.new_term); // its first term or a later boot's (ARCH2-D1)
         lc_finish(ours ? Status::Ok : Status::NetworkMismatch, now); // the new root: it knows itself already
         return;
     }
@@ -308,7 +322,8 @@ void Ledger::lc_verified(MonoTime now) {
         return;
     }
     if (commit_floors(Step::LcFloors) != Status::Ok) {
-        lc_finish(Status::RecoveryRequired, now); // RAM refuses already; the commit did not happen
+        lc_fail_closed(false, now); // FIX5-D2: RAM refuses already; the commit did not happen
+        lc_finish(Status::RecoveryRequired, now);
     }
 }
 
@@ -329,15 +344,100 @@ void Ledger::lc_retire_entry(MonoTime now) {
     job_entry_.reserved_until = MonoTime::never();
     ByteView cose; // the credential stays in the record (a repeated join request is answered from it)
     if (commit_entry(Step::LcEntry, lc_.slot, lc_.to, false, cose, -2) != Status::Ok) {
+        lc_fail_closed(true, now); // FIX5-D2
         lc_finish(Status::RecoveryRequired, now);
+    }
+}
+
+// ---- FIX5-D2: the floors are the authorisation (a failed or unknown commit of a revocation / reconciliation) ----
+// The floors are raised in RAM and a commit after them failed: the member is refused already (authorizes()). Nothing of
+// it may keep serving: its link and end sessions end and the routes through its address go, now. Its entry is made
+// Blocked (Left for a member that moved away) by maintenance, the floors written again when their own commit failed.
+void Ledger::lc_fail_closed(bool floors_durable, MonoTime now) {
+    const DeviceId &device = lc_.type == member::k_type_revoke ? lc_.obj.revoke.device : lc_.obj.ticket.device;
+    floors_dirty_ = floors_dirty_ || !floors_durable;
+    recon_fails_ = 0;
+    const Entry *e = find(device);
+    if (e != nullptr && e->state == EntryState::Active && !authorizes(*e)) {
+        const uint64_t bit = 1ULL << static_cast<std::size_t>(e - entries_.data());
+        (lc_.to == EntryState::Left ? recon_left_ : recon_block_) |= bit;
+        forget_member(e->device, e->address);
+        // The member is effectively revoked already (the Host's node view reads effective(), never ACTIVE).
+        engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_MEMBER_REVOKED, 0, &e->device);
+    }
+    maint_retry_ = earliest(maint_retry_, now + detail::k_recon_gap);
+}
+
+uint64_t Ledger::below_floors() const {
+    uint64_t mask = 0;
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        mask |= entries_[i].state == EntryState::Active && !authorizes(entries_[i]) ? 1ULL << i : 0;
+    }
+    return mask;
+}
+
+// Maintenance (holder -2): the lowest slot waiting is made Blocked/Left durably with what it consumed. False: nothing is
+// left to do (the shared memory stays with the caller, which goes on with its other items).
+bool Ledger::start_floored(MonoTime now) {
+    while ((recon_block_ | recon_left_) != 0) {
+        const auto slot = static_cast<std::size_t>(__builtin_ctzll(recon_block_ | recon_left_));
+        const uint64_t bit = 1ULL << slot;
+        const bool left = (recon_left_ & bit) != 0;
+        const Entry &e = entries_[slot];
+        if (e.state != EntryState::Active || authorizes(e)) {
+            recon_block_ &= ~bit; // resolved meanwhile (the install completed, or another entry holds the slot)
+            recon_left_ &= ~bit;
+            continue;
+        }
+        job_entry_ = e;
+        job_entry_.consumed = std::max(e.consumed, e.assignment);
+        job_entry_.reserved_until = MonoTime::never();
+        if (commit_entry(Step::CommitFloored, slot, left ? EntryState::Left : EntryState::Blocked, false, ByteView{},
+                         -2) != Status::Ok) {
+            release(-2);
+            recon_retry(now);
+        }
+        return true;
+    }
+    return false;
+}
+
+void Ledger::floored_done(Status s, MonoTime now) {
+    const std::size_t slot = job_slot_index_;
+    release(-2);
+    if (s != Status::Ok) {
+        ++stats_.floored_failed;
+        recon_retry(now); // unknown durable result: RAM keeps Active (refused by the floors), the next try decides
+        return;
+    }
+    const uint64_t bit = 1ULL << slot;
+    recon_block_ &= ~bit;
+    recon_left_ &= ~bit;
+    recon_fails_ = 0;
+    ++stats_.floored;
+    const Entry e = job_entry_;
+    set_entry(slot, e);
+    forget_member(e.device, e.address); // (at boot there is nothing to end; at run time it ended already)
+    engine_.emit_event(LM_EVENT_MEMBERSHIP, e.state == EntryState::Left ? LM_UNASSIGNED : LM_MEMBER_REVOKED, 0,
+                       &e.device);
+    if ((recon_block_ | recon_left_) != 0) {
+        maintenance(now);
+    }
+}
+
+// Bounded retry of the repairs above: k_recon_tries failures in a row (the gap doubling) end them for this boot.
+void Ledger::recon_retry(MonoTime now) {
+    if (++recon_fails_ < detail::k_recon_tries) {
+        const Duration gap = Duration::from_us(detail::k_recon_gap.us << (recon_fails_ - 1U));
+        maint_retry_ = earliest(maint_retry_, now + gap);
     }
 }
 
 // ---- commissioning window, retirement ----
 bool Ledger::window_open(MonoTime now) const {
     const uint64_t ms = now.to_ms();
-    return window_set_ && window_.term == engine_.identity().member().root_term && ms >= window_.not_before_ms &&
-           ms < window_.expires_ms && window_used_ < window_.max_new_members &&
+    return window_set_ && window_.term == engine_.identity().term() && ms >= window_.not_before_ms &&
+           ms < window_.expires_ms && window_rec_.used < window_.max_new_members &&
            window_.expected_revision == man_.expected_revision;
 }
 
@@ -350,6 +450,54 @@ void Ledger::stop_admitting(MonoTime /*now*/) {
         if (e.state == EntryState::Active) {
             forget_member(e.device, e.address);
         }
+    }
+}
+
+// FIX5-D1: the verified RootHandover names this root the old one. It is retired from this moment - it admits, renews
+// and serves nobody more, whatever the commit's result - because the fleet has handed the domain to another root; the
+// commit only decides whether a restart still knows it. (Before: RAM changed only on an Ok commit, and a commit that
+// reached the Flash but failed its read-back left the old root serving beside the new one until its next boot.)
+void Ledger::retire(MonoTime now) {
+    retired_ = true;
+    renew_mask_ = 0;
+    stop_admitting(now);
+    lc_.checks = 0;
+    rec_->arm(store::RecordJob::Op::Commit, store::rec::root_handover, 0, lc_.len);
+    std::memcpy(rec_->payload.data(), scratch_.data(), lc_.len);
+    if (submit(Step::LcRetire, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
+        lc_finish(Status::RecoveryRequired, now); // retired for this boot only: the object installed again makes it durable
+    }
+}
+
+// The commit's result, and after a failed one what the record says: present = durable (applied), absent = this boot
+// only (RECOVERY_REQUIRED: the object installed again makes it durable), unreadable = read again, a bounded number of
+// times, with the node's record memory given back in between.
+void Ledger::retire_step(Step step, Status s, MonoTime now) {
+    if (s == Status::Ok || (step == Step::LcRetireCheck && s == Status::NotFound)) {
+        lc_finish(s == Status::Ok ? Status::Ok : Status::RecoveryRequired, now);
+        return;
+    }
+    if (step == Step::LcRetire) {
+        retire_check(now); // the commit failed: it may have reached the Flash all the same (a failed read-back)
+        return;
+    }
+    if (++lc_.checks >= detail::k_retire_checks) {
+        lc_finish(Status::RecoveryRequired, now);
+        return;
+    }
+    give_back_record(); // unreadable now: read again later; the record memory is the other modules' meanwhile
+    lc_.retry_at = now + detail::k_retire_check_gap;
+}
+
+void Ledger::retire_check(MonoTime now) {
+    if (!hold_record()) {
+        lc_.retry_at = now + detail::k_busy_retry; // another module's record job: shortly
+        return;
+    }
+    rec_->arm(store::RecordJob::Op::Load, store::rec::root_handover);
+    if (submit(Step::LcRetireCheck, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
+        give_back_record();
+        lc_.retry_at = now + detail::k_busy_retry;
     }
 }
 

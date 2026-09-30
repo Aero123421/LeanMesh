@@ -83,8 +83,8 @@ void to_abi(const Snapshot &s, lm_diagnostics_t &o) {
     o = lm_diagnostics_t{};
     o.struct_size = sizeof(o);
     o.abi_version = LM_ABI_VERSION;
-    o.validity_bits = s.validity;
-    const auto has = [&](uint64_t bit) { return (s.validity & bit) != 0; };
+    o.validity_bits = s.validity & valid::abi_bits; // a bit only where the struct has the field
+    const auto has = [&](uint64_t bit) { return (o.validity_bits & bit) != 0; };
     if (has(valid::root_term)) {
         o.root_term = s.root_term;
     }

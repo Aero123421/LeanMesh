@@ -50,7 +50,8 @@ std::string object_json(uint32_t type, const lm::fleet::Bytes &cose) {
 } // namespace
 
 // lc-object revoke <node|device hex> <assignment floor> <membership floor> [fleet|root]
-// lc-object window <expected revision> <span ms> <max new members> [allowed roles]   (term 1, from the root's now)
+// lc-object window <expected revision> <span ms> <max new members> [allowed roles]   (the root's term, from its now;
+//                                                                                     policy revision = expected revision)
 std::string cmd_lc_object(Sim &sim, const Args &a) {
     lm::fleet::Network &net = fleet_network(sim);
     if (a.size() >= 5 && a.size() <= 6 && a[1] == "revoke") {
@@ -78,7 +79,7 @@ std::string cmd_lc_object(Sim &sim, const Args &a) {
         w.id[0] = static_cast<uint8_t>(revision);
         w.id[1] = static_cast<uint8_t>(max);
         w.id[2] = static_cast<uint8_t>(span >> 8U);
-        w.term = lm::RootTerm{1};
+        w.term = sim.world.node(0).ctx()->engine.identity().term(); // a window is root time of one term (ARCH2-D1)
         w.expected_revision = revision;
         w.not_before_ms = sim.world.node(0).clock.now().to_ms(); // the root is the time base of its term
         w.expires_ms = w.not_before_ms + span;
@@ -88,6 +89,19 @@ std::string cmd_lc_object(Sim &sim, const Args &a) {
         return object_json(lm::member::k_type_commissioning_window, net.fleet.window(net.domain, w));
     }
     return error("usage: lc-object revoke ... | lc-object window ... (see cmd_lifecycle.cpp)");
+}
+
+// job-latency <node> <us>: every job of the node's worker takes this long (virtual execution time) from now on; the
+// default is 2000. A slow worker keeps a root's one signed-object install running long enough for a Host request to
+// meet it (a BUSY refusal on purpose, FIX5 E2E).
+std::string cmd_job_latency(Sim &sim, const Args &a) {
+    uint16_t i = 0;
+    uint64_t us = 0;
+    if (a.size() != 3 || !parse_node(sim, a[1], i) || !parse_u64(a[2], us) || us == 0 || us > 60'000'000) {
+        return error("usage: job-latency <node> <1..60000000 us>");
+    }
+    sim.world.node(i).jobs.latency_us = static_cast<uint32_t>(us);
+    return "{\"ok\":true}";
 }
 
 } // namespace meshsim

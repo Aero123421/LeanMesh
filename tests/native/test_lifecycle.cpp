@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "capi/context.hpp"
+#include "core/member/records.hpp"
 #include "core/wire/cbor.hpp"
 #include "fleet.hpp"
 #include "cut_matrix.hpp"
@@ -19,6 +20,7 @@
 #include "port/sim/sim_provision.hpp"
 #include "port/sim/sim_world.hpp"
 #include "security/crypto.hpp"
+#include "store/record.hpp"
 
 using namespace lm;
 using namespace lm::sim;
@@ -173,6 +175,31 @@ struct LNet {
         env.request.bytes[0] = static_cast<uint8_t>(revision);
         return net.fleet.sign(env, w.written());
     }
+    // Installs `obj` at node i and waits for its operation: the operation's status (0xFFFF: none in time), or the
+    // refusal of lm_install_control itself.
+    uint32_t install_result(unsigned i, uint32_t type, const Bytes &obj, uint64_t wait_ms = 5000) {
+        lm_operation_id_t op = 0;
+        lm_status_t s = LM_STATUS_BUSY;
+        (void)until([&] { return (s = lm_install_control(ctx(i), type, obj.data(), obj.size(), &op)) != LM_STATUS_BUSY; },
+                    2000, 5);
+        if (s != LM_STATUS_OK) {
+            return s;
+        }
+        node(i).notify();
+        uint32_t reason = 0xFFFF;
+        (void)until([&] {
+            lm_event_t ev{};
+            ev.struct_size = sizeof(ev);
+            ev.abi_version = LM_ABI_VERSION;
+            while (lm_next_event(ctx(i), &ev, nullptr, 0, nullptr) == LM_STATUS_OK) {
+                if (ev.kind == LM_EVENT_OPERATION && ev.operation_id == op) {
+                    reason = ev.reason;
+                }
+            }
+            return reason != 0xFFFF;
+        }, wait_ms, 5);
+        return reason;
+    }
     void grant(unsigned i, uint64_t generation, uint64_t revision) {
         const Bytes t = net.fleet.ticket(kits[i].kit, DomainId{}, net.domain, net.delegation_cose, 0, generation);
         LM_CHECK_EQ(install(i, 3, t), LM_STATUS_OK);
@@ -260,7 +287,8 @@ struct DNet {
     std::vector<fleet::NodeKit> kits;
     Bytes deleg2; // Handover: the new root's delegation
 
-    explicit DNet(unsigned devices, uint64_t seed = 81, Kind kind = Kind::TwoDomains)
+    // `new_root_term`: Handover: the first term the new root publishes (its handover names it).
+    explicit DNet(unsigned devices, uint64_t seed = 81, Kind kind = Kind::TwoDomains, uint32_t new_root_term = 2)
         : n(devices + 2), a(seed), b(seed, "fleet", "/B", 1001), world(WorldOptions{seed, 0}) {
         for (unsigned i = 0; i < n; ++i) {
             NodeOptions o;
@@ -269,7 +297,7 @@ struct DNet {
             node(i).jobs.latency_us = 2000;
         }
         kits.push_back(a.make_root());
-        kits.push_back(kind == Kind::Handover ? a.make_new_root(1001, 2, 2, deleg2) : b.make_root());
+        kits.push_back(kind == Kind::Handover ? a.make_new_root(1001, 2, new_root_term, deleg2) : b.make_root());
         for (unsigned i = 2; i < n; ++i) {
             kits.push_back(a.make_node(i, static_cast<uint16_t>(i + 1)));
         }
@@ -1174,20 +1202,23 @@ LM_TEST("LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term mu
 // member the object never reached still follows it and is not counted as moved (its entry at the new root is the
 // backup's, never re-issued); the object installed at the old root retires it, and then that member moves too.
 LM_TEST("LC10 sim: old root reappears - refused by moved members, the unreached one not counted, retires on the object") {
-    DNet n(2, 88, DNet::Kind::Handover);
+    // The fleet names a first term for the new root above any term the failed old root may publish when it comes back:
+    // each of its boots publishes one more (ARCH2-D1), and it retires only on a new term above its own (FIX5-D4). Here it
+    // comes back once (term 2), so the new root starts at term 3.
+    DNet n(2, 88, DNet::Kind::Handover, 3);
     n.provision_new_root(true);
     n.node(0).power_cut();
     n.node(0).store.power_restore();
     n.boot(1);
     n.run_ms(300);
-    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover(3));
     const uint64_t m3 = n.eng(3).identity().member().membership.value();
     LM_CHECK_EQ(n.install(2, 31, ho), 0u);
     LM_CHECK(hand_over(n, 2, 0x54));
     n.boot(0); // the old root is back, unaware
     n.run_ms(300);
     n.set_time();
-    n.set_time(2, 1);
+    n.set_time(3, 1);
     LM_CHECK(!n.eng(0).ledger().retired());
     // The unreached member still has its session with the old root; the moved one refuses the old root.
     LM_CHECK_OK(n.eng(3).link().connect(n.mac(0), n.node(3).clock.now()));
@@ -1277,10 +1308,19 @@ LM_TEST("LC01 sim: commissioning window expiry - only inside it; a late decision
     LM_CHECK_EQ(n.eng(0).ledger().stats().window_admitted, 1u);
     LM_CHECK(n.eng(1).identity().is_member());
     LM_CHECK(n.until([&] { return n.ready(1); }, 60'000));
-    // The same window installed again (e.g. after a root restart) goes on with its durable count; a spent one admits
-    // nobody more. (Here: a window of one, spent by device 1.)
-    const member::CommissioningWindow w1 = make_window(n.root_ms(), 60'000, 1, 3);
-    LM_CHECK_EQ(n.install(0, 30, n.net.fleet.window(n.net.domain, w1)), LM_STATUS_OK);
+    // FIX5-D6: the budget belongs to the window. The same window again (signed anew, re-issued with new times) goes on
+    // with its durable count (1 of 3 used); another window under the counted policy revision is refused (before: it
+    // started a count of its own - an old window replayed reset the budget); a higher revision is a new budget.
+    member::CommissioningWindow again = w;
+    again.not_before_ms = n.root_ms();
+    again.expires_ms = again.not_before_ms + 60'000;
+    LM_CHECK_EQ(n.install_result(0, 30, n.net.fleet.window(n.net.domain, again)), 0u);
+    LM_CHECK(n.eng(0).ledger().window_open(n.node(0).clock.now()));
+    member::CommissioningWindow other = make_window(n.root_ms(), 60'000, 1, 3); // another id and budget, revision 1
+    LM_CHECK_EQ(n.install_result(0, 30, n.net.fleet.window(n.net.domain, other)),
+                static_cast<uint32_t>(LM_STATUS_CONFLICT));
+    other.policy_revision = 2;
+    LM_CHECK_EQ(n.install_result(0, 30, n.net.fleet.window(n.net.domain, other)), 0u);
     LM_CHECK(n.eng(0).ledger().window_open(n.node(0).clock.now()));
 }
 
@@ -1523,7 +1563,8 @@ LM_TEST("LC08 POWER sim: power cut at the old root's retirement commit - retired
     for (const CutMode mode : {CutMode::Before, CutMode::Torn, CutMode::After}) {
         for (uint64_t k = 0; k < 4; ++k) {
             DNet n(1, 500 + k, DNet::Kind::Handover);
-            const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+            // A new term above the old root's own across the restarts below (FIX5-D4; ARCH2-D1: one more per boot).
+            const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover(3));
             SimStore &st = n.node(0).store;
             st.arm_cut(st.mutating_ops() + k, mode);
             (void)n.install(0, 31, ho, 3000);
@@ -1792,6 +1833,317 @@ LM_TEST("LC02 POWER sim: power cut at each commit of a window and a windowed joi
     std::printf("  [measure] window power-cut sweep: %u cut points, %u admitted afterwards (never above the budget of 1)\n",
                 iterations, admitted_total);
     LM_CHECK(iterations >= 6u);
+}
+
+// ---- FIX5: external review of 8d5e5e9 (lifecycle and root authority) ----
+namespace {
+
+// What the node's store holds for record `id` right now: its state byte, -1 when it has no committed record, -2 when
+// it cannot be read. Read directly (the bench's view of the Flash, not the node's RAM).
+int stored_state(SimStore &st, uint16_t id) {
+    auto job = std::make_unique<store::RecordJob>();
+    job->arm(store::RecordJob::Op::Load, id);
+    const Status s = store::record_load(st, *job);
+    return s == Status::Ok ? job->state : (s == Status::NotFound ? -1 : -2);
+}
+
+// The durable revocation floors cover (device, assignment, membership).
+bool stored_floor_covers(SimStore &st, const DeviceId &d, uint64_t assignment, uint64_t membership) {
+    auto job = std::make_unique<store::RecordJob>();
+    job->arm(store::RecordJob::Op::Load, store::rec::revocation_floors);
+    member::Floors f;
+    return store::record_load(st, *job) == Status::Ok &&
+           member::decode_floors(ByteView{job->payload.data(), job->payload_len}, f) == Status::Ok &&
+           f.check(d, AssignmentGen{assignment}, MembershipGen{membership}) == Status::Revoked;
+}
+
+// The status of the next OPERATION event for `op` at node i (0xFFFF: none within `wait_ms`).
+uint32_t op_reason(World &w, SimNode &node, lm_operation_id_t op, uint64_t wait_ms) {
+    for (uint64_t t = 0; t <= wait_ms; t += 5) {
+        lm_event_t ev{};
+        ev.struct_size = sizeof(ev);
+        ev.abi_version = LM_ABI_VERSION;
+        while (lm_next_event(node.ctx(), &ev, nullptr, 0, nullptr) == LM_STATUS_OK) {
+            if (ev.kind == LM_EVENT_OPERATION && ev.operation_id == op) {
+                return ev.reason;
+            }
+        }
+        w.run_until(w.now_us() + 5000);
+    }
+    return 0xFFFF;
+}
+
+// A renewal of `live` (member i of DNet domain A) signed by A's root: the same credential with another term and lease.
+Bytes renewal_of(DNet &n, unsigned i, const member::MemberCredential &live, uint32_t term, uint64_t lease_ms) {
+    fleet::MemberSpec ms;
+    ms.address = live.address.value();
+    ms.assignment = live.assignment.value();
+    ms.membership = live.membership.value();
+    ms.role = live.role;
+    ms.relay_allowed = live.relay_allowed;
+    ms.root_term = term;
+    ms.lease_expires_root_ms = lease_ms;
+    return fleet::issue_member(n.kits[0].kit, n.a.domain, n.kits[i].kit, ms);
+}
+
+} // namespace
+
+// Finding 1: the old root's retirement commit wrote the record durably but its read-back failed (StorageFailure). The
+// old root must not keep admitting and serving while the new one runs: it is retired (fail closed) from the moment the
+// verified object names it, whatever the commit's result, and the operation's result is reconciled from the record.
+LM_TEST("LC08 FIX5 sim: a retirement whose read-back failed leaves the old root retired at once; the reload reconciles") {
+    {
+        DNet n(1, 93, DNet::Kind::Handover);
+        LM_CHECK_OK(n.eng(2).link().connect(n.mac(0), n.node(2).clock.now()));
+        n.node(2).notify();
+        LM_CHECK(n.until([&] { return n.eng(0).link().neighbors().find_device(n.id(2)) != nullptr; }, 6000));
+        const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+        SimStore &st = n.node(0).store;
+        st.arm_cut(st.mutating_ops() + 1, CutMode::After); // the record's commit marker: written, then the call fails
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_install_control(n.ctx(0), 31, ho.data(), ho.size(), &op), LM_STATUS_OK);
+        n.node(0).notify();
+        LM_CHECK(n.until([&] { return st.cut_fired(); }, 3000));
+        n.run_ms(100);
+        // Storage down: the old root admits and serves nobody, now (not only after a restart).
+        LM_CHECK(n.eng(0).ledger().retired());
+        LM_CHECK(n.eng(0).ledger().admission() != Status::Ok);
+        LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(2)) == nullptr);
+        st.power_restore(); // storage answers again; the root was never restarted
+        LM_CHECK(stored_state(st, store::rec::root_handover) >= 0); // precondition: the retirement IS durable
+        LM_CHECK_EQ(op_reason(n.world, n.node(0), op, 6000), 0u);   // reconciled from the record: applied
+        LM_CHECK(n.eng(0).ledger().retired());
+        (void)n.eng(2).link().connect(n.mac(0), n.node(2).clock.now());
+        n.node(2).notify();
+        n.run_ms(3000);
+        LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(2)) == nullptr);
+    }
+    {
+        // Nothing reached the Flash: retired for this boot all the same (the fleet's verified word), the result says
+        // RECOVERY_REQUIRED (not durable), and the object installed again makes it durable.
+        DNet n(1, 94, DNet::Kind::Handover);
+        const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+        SimStore &st = n.node(0).store;
+        st.arm_cut(st.mutating_ops(), CutMode::Before);
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_install_control(n.ctx(0), 31, ho.data(), ho.size(), &op), LM_STATUS_OK);
+        n.node(0).notify();
+        LM_CHECK(n.until([&] { return st.cut_fired(); }, 3000));
+        st.power_restore();
+        LM_CHECK_EQ(op_reason(n.world, n.node(0), op, 6000), static_cast<uint32_t>(LM_STATUS_RECOVERY_REQUIRED));
+        LM_CHECK(stored_state(st, store::rec::root_handover) == -1);
+        LM_CHECK(n.eng(0).ledger().retired());
+        LM_CHECK_EQ(n.install(0, 31, ho), 0u);
+        LM_CHECK(stored_state(st, store::rec::root_handover) >= 0);
+    }
+}
+
+// Finding 4: one semantic check of a RootHandover for every party. A handover to the same device, one whose delegation
+// generation does not rise, or one whose new term is not above the term the old root lives in would retire the old
+// root while no member can follow it (the domain strands): refused by the old root, the device and the new root.
+LM_TEST("LC08 FIX5 sim: a same-root, non-increasing or stale-term handover is refused by old root, device and new root") {
+    DNet n(1, 95, DNet::Kind::Handover);
+    member::RootHandover same = n.handover();
+    same.new_root = n.id(0); // the "new" root is the old one
+    const Bytes same_obj = n.a.fleet.handover(n.a.domain, same);
+    LM_CHECK_EQ(n.install(0, 31, same_obj), static_cast<uint32_t>(LM_STATUS_INVALID_ARGUMENT));
+    LM_CHECK(!n.eng(0).ledger().retired());
+    LM_CHECK_EQ(n.install(2, 31, same_obj), static_cast<uint32_t>(LM_STATUS_INVALID_ARGUMENT)); // never stored
+    const Bytes stale = n.a.fleet.handover(n.a.domain, n.handover(1)); // term 1: the old root's own
+    LM_CHECK_EQ(n.install(0, 31, stale), static_cast<uint32_t>(LM_STATUS_CONFLICT));
+    LM_CHECK(!n.eng(0).ledger().retired());
+    LM_CHECK_EQ(n.eng(0).ledger().admission(), Status::Ok);
+    n.provision_new_root(true);
+    n.boot(1);
+    n.run_ms(300);
+    n.set_time(2, 1);
+    member::RootHandover down = n.handover();
+    down.old_generation = 3; // the new delegation (generation 2) is not above the old one
+    LM_CHECK_EQ(n.install(1, 31, n.a.fleet.handover(n.a.domain, down)), static_cast<uint32_t>(LM_STATUS_INVALID_ARGUMENT));
+    // The valid object still works everywhere.
+    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    LM_CHECK_EQ(n.install(1, 31, ho), 0u);
+    LM_CHECK_EQ(n.install(0, 31, ho), 0u);
+    LM_CHECK(n.eng(0).ledger().retired());
+}
+
+// Finding 6: a commissioning window's budget cannot be reset by replaying an older window (W1, W2, W1 ... each W1 used
+// to start from zero again). The durable record keeps the window replay floor (policy revision) and the digest of the
+// window it counts: the same window again resumes its count, an older revision or another body under the counted
+// revision fails closed.
+LM_TEST("LC01 FIX5 sim: an older or altered commissioning window never resets the budget; the same one resumes it") {
+    LNet n({Spec{}, Spec{Role::Leaf, 0, true}, Spec{Role::Leaf, 0, true}, Spec{Role::Leaf, 0, true}}, 78);
+    star(n);
+    for (unsigned i = 0; i < 4; ++i) {
+        n.boot(i);
+    }
+    n.run_ms(1000);
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Closed);
+    for (unsigned i = 1; i < 4; ++i) {
+        n.grant(i, 1, i);
+    }
+    auto window = [&](uint8_t id, uint64_t policy_revision, uint8_t max, uint64_t from_ms) {
+        member::CommissioningWindow w = make_window(from_ms, 10 * k_min, max, 3);
+        w.id = {};
+        w.id[0] = id;
+        w.policy_revision = policy_revision;
+        return w;
+    };
+    auto install = [&](const member::CommissioningWindow &w) {
+        const Bytes obj = n.net.fleet.window(n.net.domain, w); // a fresh signature every time (ES256 is randomised)
+        lm_operation_id_t op = 0;
+        lm_status_t s = LM_STATUS_BUSY; // (a join transaction may hold the ledger's buffers for a moment)
+        (void)n.until([&] { return (s = lm_install_control(n.ctx(0), 30, obj.data(), obj.size(), &op)) != LM_STATUS_BUSY; },
+                      5000, 5);
+        LM_CHECK_EQ(s, LM_STATUS_OK);
+        n.node(0).notify();
+        return op_reason(n.world, n.node(0), op, 5000);
+    };
+    auto joins = [&](unsigned i, uint8_t req) {
+        LM_CHECK_EQ(n.join(i, req), LM_STATUS_OK);
+        return n.until([&] { return n.eng(i).identity().is_member(); }, 40'000);
+    };
+    const uint64_t t0 = n.root_ms();
+    const member::CommissioningWindow w1 = window(0xA1, 1, 1, t0);
+    const member::CommissioningWindow w2 = window(0xB2, 2, 1, t0);
+    LM_CHECK_EQ(install(w1), 0u);
+    LM_CHECK(joins(1, 0x11));
+    LM_CHECK_EQ(install(w2), 0u);
+    LM_CHECK(joins(2, 0x21));
+    LM_CHECK_EQ(n.eng(0).ledger().stats().window_admitted, 2u);
+    // W1 again: older than the counted window. Before: a new count from zero, device 3 got in.
+    LM_CHECK_EQ(install(w1), static_cast<uint32_t>(LM_STATUS_CONFLICT));
+    LM_CHECK(!n.eng(0).ledger().window_open(n.node(0).clock.now()));
+    LM_CHECK(!joins(3, 0x31));
+    // W2 again (signed anew, the same body): the same window, its count goes on - spent.
+    LM_CHECK_EQ(install(w2), 0u);
+    LM_CHECK(!n.eng(0).ledger().window_open(n.node(0).clock.now()));
+    // Another body under the counted revision (a larger budget): fail closed.
+    member::CommissioningWindow w2x = w2;
+    w2x.max_new_members = 5;
+    LM_CHECK_EQ(install(w2x), static_cast<uint32_t>(LM_STATUS_CONFLICT));
+    LM_CHECK(!joins(3, 0x32));
+    LM_CHECK_EQ(n.eng(0).ledger().stats().window_admitted, 2u);
+    // The floor is durable: after a restart (a new term) the old revision is still refused.
+    n.node(0).power_cut();
+    n.node(0).store.power_restore();
+    n.boot(0);
+    n.run_ms(1000);
+    n.eng(0).ledger().set_join_mode(root::JoinMode::Closed);
+    member::CommissioningWindow w1t = w1;
+    w1t.term = n.eng(0).identity().term();
+    w1t.not_before_ms = n.root_ms();
+    w1t.expires_ms = w1t.not_before_ms + 10 * k_min;
+    LM_CHECK_EQ(install(w1t), static_cast<uint32_t>(LM_STATUS_CONFLICT));
+    // A new window (higher revision) is a new budget.
+    member::CommissioningWindow w3 = window(0xC3, 3, 1, n.root_ms());
+    w3.term = w1t.term;
+    LM_CHECK_EQ(install(w3), 0u);
+    LM_CHECK(n.eng(0).ledger().window_open(n.node(0).clock.now()));
+}
+
+// Finding 2: the floors are raised (RAM) before the entry becomes Blocked. When the entry's commit fails the floors are
+// already the authorisation: the member's link and end sessions and the routes through its address end at once (not
+// only new sessions are refused), the entry is made Blocked durably as soon as the store answers, and a root restarted
+// with a stale ACTIVE entry below its durable floors reconciles it at boot.
+LM_TEST("S06 FIX5 sim: a revocation whose entry commit failed ends sessions and routes at once; the entry is blocked") {
+    LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}}, 79);
+    star(n);
+    for (unsigned i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    SimStore &st = n.node(0).store;
+    const uint16_t rec1 = static_cast<uint16_t>(root::k_rec_ledger_base + 0); // node 1 = address 2 = slot 0
+    const uint16_t rec2 = static_cast<uint16_t>(root::k_rec_ledger_base + 1);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) != nullptr);
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(1)) != nullptr);
+    // Floors record (2 writes), then the entry record: its first write is cut, the store is dead meanwhile.
+    st.arm_cut(st.mutating_ops() + 2, CutMode::Before);
+    const Bytes rv = fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(1), 2, 2);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_install_control(n.ctx(0), 11, rv.data(), rv.size(), &op), LM_STATUS_OK);
+    n.node(0).notify();
+    LM_CHECK_EQ(op_reason(n.world, n.node(0), op, 5000), static_cast<uint32_t>(LM_STATUS_RECOVERY_REQUIRED));
+    LM_CHECK(st.cut_fired());
+    // At once, with the store still dead: nothing of the member serves on.
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr);
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(1)) == nullptr);
+    LM_CHECK(!n.has_route(0, n.id(1)));
+    n.run_ms(3000);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr); // and it gets no new session
+    st.power_restore();
+    LM_CHECK(stored_floor_covers(st, n.id(1), 1, 1)); // precondition: the floors are durable ...
+    // ... and the entry is made Blocked durably once the store answers (bounded retry).
+    LM_CHECK(n.until([&] { return stored_state(st, rec1) == static_cast<int>(root::EntryState::Blocked); }, 10'000));
+    LM_CHECK(n.eng(0).ledger().find(n.id(1))->state == root::EntryState::Blocked);
+    LM_CHECK(n.ready(2)); // the other member is untouched
+    // The same failure, and the root restarts before it could repair the entry: it reconciles at boot.
+    st.arm_cut(st.mutating_ops() + 2, CutMode::Before);
+    const Bytes rv2 = fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(2), 2, 2);
+    LM_CHECK_EQ(lm_install_control(n.ctx(0), 11, rv2.data(), rv2.size(), &op), LM_STATUS_OK);
+    n.node(0).notify();
+    LM_CHECK(n.until([&] { return st.cut_fired(); }, 5000));
+    n.node(0).power_cut();
+    st.power_restore();
+    LM_CHECK(stored_floor_covers(st, n.id(2), 1, 1));
+    LM_CHECK(stored_state(st, rec2) == static_cast<int>(root::EntryState::Active)); // precondition: the stale entry
+    n.boot(0);
+    LM_CHECK(n.until([&] { return stored_state(st, rec2) == static_cast<int>(root::EntryState::Blocked); }, 10'000));
+    LM_CHECK(n.eng(0).ledger().find(n.id(2))->state == root::EntryState::Blocked);
+    n.run_ms(40'000);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(2)) == nullptr);
+    LM_CHECK(n.eng(0).delivery().sessions().find_peer(n.id(2)) == nullptr);
+}
+
+// Finding 8: a member lives in the term the root's authenticated word gave it (a LEASE of a newer term), while its
+// credential is still of the older one until the renewal of the new term arrives. A delayed renewal of the older term
+// has a later lease on a clock that no longer counts: it is never adopted - checked before the verification, before
+// the commit and again at adoption (the term may move while the worker verifies or the exchange is busy).
+LM_TEST("LP12 FIX5 sim: a renewal of a term older than the one the member lives in is never adopted") {
+    DNet n(1, 96);
+    const unsigned d = 2;
+    member::Membership &m = n.eng(d).membership();
+    const member::MemberCredential live = n.eng(d).identity().member();
+    LM_CHECK(live.root_term == RootTerm{1});
+    const uint64_t lease0 = live.lease_expires_root_ms;
+    auto inject = [&](const Bytes &cose) {
+        m.on_lifecycle_object(n.id(0), view(cose), n.node(d).clock.now());
+        n.node(d).notify();
+    };
+    // Control: a renewal of the live term with a later lease is adopted (the path works in this state).
+    inject(renewal_of(n, d, live, 1, lease0 + 1));
+    LM_CHECK(n.until([&] { return n.eng(d).identity().member().lease_expires_root_ms == lease0 + 1; }, 2000));
+    // (b) The term moves while the worker verifies: dropped before the commit.
+    const uint64_t writes = n.node(d).store.slot_writes();
+    inject(renewal_of(n, d, live, 1, lease0 + 2));
+    LM_CHECK(n.eng(d).identity().note_term(RootTerm{2}));
+    n.run_ms(500);
+    LM_CHECK_EQ(n.eng(d).identity().member().lease_expires_root_ms, lease0 + 1);
+    LM_CHECK_EQ(n.node(d).store.slot_writes(), writes);
+    // (a) The member lives in term 2: a renewal of term 1 is dropped before any verification.
+    const uint64_t dropped = m.stats().renew_dropped;
+    inject(renewal_of(n, d, live, 1, lease0 + 3));
+    LM_CHECK_EQ(m.stats().renew_dropped, dropped + 1);
+    n.run_ms(500);
+    LM_CHECK_EQ(n.eng(d).identity().member().lease_expires_root_ms, lease0 + 1);
+    // (c) A renewal of term 2 is verified and committed while the exchange is busy; the member moves to term 3 before it
+    // goes live: never adopted.
+    link::Exchange &x = n.eng(d).link().exchange();
+    MutByteView lent;
+    LM_CHECK(n.until([&] { return !(lent = x.lend_scratch()).empty(); }, 5000, 5));
+    const uint64_t writes2 = n.node(d).store.slot_writes();
+    inject(renewal_of(n, d, live, 2, 5000));
+    LM_CHECK(n.until([&] { return n.node(d).store.slot_writes() > writes2; }, 2000)); // committed, waits for adoption
+    LM_CHECK(n.eng(d).identity().note_term(RootTerm{3}));
+    if (!lent.empty()) {
+        x.return_scratch();
+    }
+    n.node(d).notify();
+    n.run_ms(1000);
+    LM_CHECK(n.eng(d).identity().member().root_term == RootTerm{1});
+    LM_CHECK_EQ(n.eng(d).identity().member().lease_expires_root_ms, lease0 + 1);
+    LM_CHECK(n.eng(d).identity().term() == RootTerm{3});
 }
 
 int main(int argc, char **argv) { return lmtest::run_all(argc, argv); }

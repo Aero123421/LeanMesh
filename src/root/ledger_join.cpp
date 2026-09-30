@@ -462,10 +462,11 @@ void Ledger::commit_prepared(Txn &t, MonoTime now) {
     if (t.windowed) {
         // [S18] docs/21 §2: the window's budget counts durable reservations. The count is committed first (a cut
         // between the two commits over-counts, never under-counts), and checked again (joins run in parallel).
+        WindowRecord counted = window_rec_;
+        ++counted.used;
         if (!window_open(now)) {
             refuse(t, Status::Expired, now);
-        } else if (commit_window(Step::WindowReserve, static_cast<uint8_t>(window_used_ + 1), txn_index(&t)) !=
-                   Status::Ok) {
+        } else if (commit_window(Step::WindowReserve, counted, txn_index(&t)) != Status::Ok) {
             refuse(t, Status::Busy, now);
         }
         return;
@@ -481,8 +482,7 @@ void Ledger::window_reserved(Txn &t, Status s, MonoTime now) {
         refuse(t, Status::RecoveryRequired, now); // counted or not: no reservation, never more than the budget
         return;
     }
-    window_rec_id_ = window_.id;
-    window_rec_used_ = ++window_used_;
+    window_rec_ = window_stage_;
     ++stats_.window_admitted;
     if (commit_entry(Step::CommitPrepared, t.slot, EntryState::Prepared, false,
                      ByteView{scratch_.data() + k_cose_off, t.cose_len}, txn_index(&t)) != Status::Ok) {
@@ -490,11 +490,13 @@ void Ledger::window_reserved(Txn &t, Status s, MonoTime now) {
     }
 }
 
-Status Ledger::commit_window(Step step, uint8_t used, int holder) {
-    std::copy(window_.id.begin(), window_.id.end(), rec_->payload.begin());
-    rec_->payload[16] = used;
-    rec_->arm(store::RecordJob::Op::Commit, store::rec::commissioning_window, 0, 17);
-    return submit(step, JobClass::Flash, &store::record_job, rec_, holder);
+Status Ledger::commit_window(Step step, const WindowRecord &r, int holder) {
+    std::size_t len = 0;
+    LM_TRY(detail::encode_window_record(r, MutByteView{rec_->payload}, len));
+    rec_->arm(store::RecordJob::Op::Commit, store::rec::commissioning_window, 0, len);
+    LM_TRY(submit(step, JobClass::Flash, &store::record_job, rec_, holder));
+    window_stage_ = r; // what RAM counts once the commit is durable
+    return Status::Ok;
 }
 
 void Ledger::prepare_committed(Txn &t, Status s, MonoTime now) {

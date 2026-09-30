@@ -226,7 +226,7 @@ void Mesh::parent_session_lost(const MacAddr &mac, MonoTime now) {
 void Mesh::sync(MonoTime now) {
     // [S17] not before the stored channel is applied (a root does not publish a term on the wrong channel)
     const bool on = enabled_ && engine_.identity().is_member() && engine_.radio_state() == RadioState::Running &&
-                    !engine_.chan().holds_mesh();
+                    !engine_.chan().holds_mesh() && !engine_.power().holds_radio();
     if (on && state_ == State::Off) {
         begin(now);
     } else if (!on && state_ != State::Off) {

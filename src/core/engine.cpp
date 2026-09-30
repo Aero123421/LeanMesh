@@ -375,6 +375,7 @@ Status Engine::transmit(const MacAddr &dst, ByteView frame, uint32_t tag, MonoTi
 
 void Engine::on_new_term(MonoTime now) {
     delivery_.invalidate_routes(); // routes of the old term (a lookup would refuse them anyway)
+    delivery_.hop().pump(now);     // FIX6-D1: ready frames are checked against the new term now (Aborted -> EXPIRED / INDETERMINATE)
     mesh_.on_term(now);
     chan_.on_term(now);
 }

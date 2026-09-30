@@ -41,6 +41,7 @@ inline constexpr Duration k_scan_after = Duration::from_s(12); // no parent this
 inline constexpr Duration k_dwell = Duration::from_ms(200);    // docs/05 §7 / docs/20 §8
 inline constexpr unsigned k_scan_laps = 2;
 inline constexpr Duration k_backoff_min = Duration::from_s(1);
+inline constexpr uint8_t k_boot_tries = 5; // FIX6-D2: attempts to carry the stored channel before the mesh stays held
 inline constexpr Duration k_backoff_max = Duration::from_s(60);
 inline constexpr uint32_t k_drain_ms = 1000;      // guard = 2 * max error + drain + 500 ms (docs/05 §5)
 inline constexpr uint32_t k_store_margin_ms = 2000; // a PREPARE whose switch is nearer than guard + this is refused
@@ -151,7 +152,8 @@ class Channel {
     void reply(const Plan &p, Evidence ev, Status why, bool local, MonoTime now);
     void arm_switch(MonoTime now);
     void switch_step(MonoTime now);
-    void apply_target(MonoTime now);
+    [[nodiscard]] Status apply_target(MonoTime now);
+    void boot_apply(MonoTime now);
     [[nodiscard]] Status set_radio(uint8_t channel);
 
     // time
@@ -180,6 +182,8 @@ class Channel {
     Engine &engine_;
     bool enabled_ = true;
     bool loaded_ = false;
+    bool pend_apply_ = false; // the record is adopted, its channel is not carried by the radio yet (FIX6-D2)
+    uint8_t boot_tries_ = 0;
     bool faulted_ = false; // the record could not be read: no plan is accepted (fail closed)
     bool dirty_ = false;
     Stats stats_;

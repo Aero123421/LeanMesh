@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from bridge_bench import PERMS, Bench, wait_for
+from bridge_bench import PERMS, Bench, db_rows, wait_for
 from harness import MeshSim
 
 
@@ -41,8 +41,19 @@ def _control(b: Bench, kind: str, **fields: object) -> dict:  # type: ignore[typ
                                   **fields})
 
 
-def _final(b: Bench, op: str, what: str) -> dict:  # type: ignore[type-arg]
-    return wait_for(lambda: (x := b.operation(op))["state"] == "FINAL" and x, 30, what)
+def _final(b: Bench, op: str, what: str, timeout_s: float = 30) -> dict:  # type: ignore[type-arg]
+    return wait_for(lambda: (x := b.operation(op))["state"] == "FINAL" and x, timeout_s, what)
+
+
+def _mirror(b: Bench, device: str) -> str | None:
+    """The membership the Host's node mirror shows for `device` (None: not listed)."""
+    return next((n["membership"] for n in b.get("/v1/nodes", domain_id=b.domain)["items"] if n["device_id"] == device),
+                None)
+
+
+def _entry(b: Bench, device: str) -> str:
+    """The root ledger's entry state of `device` as meshsim reads it (the RAM entry, not the effective view)."""
+    return str(next(e for e in b.sim.ok("ledger")["entries"] if e["device"] == device)["state"])
 
 
 @pytest.mark.e2e
@@ -78,3 +89,54 @@ def test_revoke_window_and_indeterminate_through_the_host(bench: Callable[..., B
     assert o["outcome"] == "APPLIED"
     assert b.sim.ok("join 2 112")["status"] == "OK"
     b.await_active(2, timeout_s=40)
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("S06")
+def test_a_revocation_whose_entry_commit_failed_is_never_shown_active(bench: Callable[..., Bench]) -> None:
+    """FIX5-D2: the root raised the member's floors and committed them; the commit of its entry then fails (the store is
+    cut). The floors are the authorisation already: the Host's node mirror shows the member REVOKED at once (never ACTIVE
+    while the ledger's entry still reads Active), and once the store answers the entry is made Blocked durably."""
+    b = bench(0x5C, nodes=2)
+    b.start_host(perms=[*PERMS, "REVOKE"])
+    b.await_root()
+    assert _mirror(b, b.node) == "ACTIVE"
+    b.sim.ok("store-cut 0 2 before")  # the floors record (2 writes) lands; the entry record's first write is cut
+    op = _control(b, "REVOKE", device_id=b.node, signed_cbor_b64=_signed(b, "revoke 1 2 2"))["id"]
+    o = _final(b, op, "revoke with its entry commit cut")
+    assert b.sim.ok("store-fired 0")["cut_fired"] is True
+    assert o["outcome"] == "INDETERMINATE" and o["reason"] == "RECOVERY_REQUIRED"
+    wait_for(lambda: _mirror(b, b.node) == "REVOKED", 30, "REVOKED in the node mirror while the store is down")
+    assert _entry(b, b.node) == "active"  # the durable state has not caught up yet: the floors refuse it meanwhile
+    b.sim.ok("store-restore 0")
+    wait_for(lambda: _entry(b, b.node) == "blocked", 20, "the entry made Blocked once the store answers")
+    assert _mirror(b, b.node) == "REVOKED"
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("LC01")
+def test_a_control_the_root_refused_busy_is_retried_without_other_traffic(bench: Callable[..., Bench]) -> None:
+    """Root cause of the CI failure of the test above ("timeout waiting for window applied"): the root installs one
+    signed object at a time, so a window arriving while `grant` still installs its ExpectedSet page is refused BUSY
+    (transient). The Host scheduled the retry (next_attempt = +RETRY_S) but slept until an unrelated wake-up: when
+    nothing else was open its loop waited without a timeout. Here the root's worker is slowed so that the BUSY happens on
+    purpose; the page's own completion event arrives before the retry is due, then nothing else happens."""
+    b = bench(0x5D, nodes=3)
+    b.start_host(perms=[*PERMS, "REVOKE"])
+    b.await_root()
+    signed = _signed(b, "window 2 300000 1")
+    # Every root job 200 ms: the page install takes ~0.8 s - long enough for the window to meet it (BUSY), short enough to
+    # end before the Host's retry is due (RETRY_S = 1 s), so that its completion event is the last wake-up there is.
+    b.sim.ok("job-latency 0 200000")
+    assert b.sim.ok("grant 2 1 2")["status"] == "OK"
+    op = _control(b, "COMMISSIONING_WINDOW_SET", signed_cbor_b64=signed)["id"]
+
+    def refused() -> bool:
+        rows = db_rows(b.workdir / "host.db", "SELECT state,attempts FROM outbox WHERE operation=?", bytes.fromhex(op))
+        return bool(rows) and rows[0][0] == "QUEUED" and int(rows[0][1]) >= 1
+
+    wait_for(refused, 10, "the root's BUSY refusal of the window (precondition)", step=0.02)
+    b.sim.ok("job-latency 0 2000")
+    # Bounded by the Host's retry pause (RETRY_S = 1 s) and the root's own work, not by an unrelated event.
+    o = _final(b, op, "window applied after the Host's own retry", timeout_s=8)
+    assert o["outcome"] == "APPLIED", o

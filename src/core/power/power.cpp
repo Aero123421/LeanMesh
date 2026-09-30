@@ -64,6 +64,8 @@ void Power::stop() {
     lock_want_ = 0;
     lock_retry_ = MonoTime::never();
     st_ = State::Running;
+    deny_pending_ = false;
+    deny_retry_ = MonoTime::never();
     loaded_ = prep_active_ = ep_extra_ = false; // policy_job_ stays: a running job still owns rec_ (zombie rule)
     ticket_ = Ticket{};
     poll_ = Poll{};
@@ -93,6 +95,21 @@ void Power::on_identity_ready(MonoTime now) {
     }
     settle_boot_budgets();
     advance_budgets(now);
+    if (ep_extra_ && sleepy_mode() && !boot_grant_) {
+        // FIX6-D3: a retained external Deep Sleep wake is an unplanned wake like wake() admits: the same quota, charged
+        // once. (A boot without proven continuity has every bucket used up and is granted its one boot episode.)
+        if (bud_.extra_wakes_micro + 1000000U > wake_limit() || bud_.extra_us >= ext_limit()) {
+            ++stats_.wake_denied;
+            st_ = State::BudgetBlocked;
+            ep_over_ = true;
+            ep_extra_ = false;
+            last_reason_ = kWakeDenied;
+            emit(last_reason_);
+            deny_pending_ = true; // the driver came up before the policy was known: it goes off again, unused, once (after_step)
+            return;
+        }
+        bud_.extra_wakes_micro += 1000000U;
+    }
     if (sleepy_mode()) {
         begin_episode(wake_reason_, now);
     }
@@ -828,6 +845,7 @@ MonoTime Power::deadline() const {
     }
     MonoTime d = MonoTime::never();
     d = earliest(d, lock_retry_);
+    d = earliest(d, deny_retry_);
     if (prep_active_) {
         d = earliest(d, prep_limit_);
     }
@@ -852,7 +870,22 @@ MonoTime Power::deadline() const {
     return d;
 }
 
+// Stops the driver of a denied boot wake once nothing of the boot is in flight (a sleeping owner completes no job);
+// until then the mesh is held (Power::holds_radio), so nothing is transmitted. A driver that will not stop is asked again.
+void Power::stop_denied_radio(MonoTime now) {
+    if (!deny_pending_ || (!deny_retry_.is_never() && now < deny_retry_) || !quiet_now()) {
+        return;
+    }
+    deny_retry_ = MonoTime::never();
+    if (engine_.radio_sleep() == Status::Ok) {
+        deny_pending_ = false;
+    } else {
+        deny_retry_ = now + k_lock_retry;
+    }
+}
+
 void Power::after_step(MonoTime now) {
+    stop_denied_radio(now);
     account_radio(now);
     progress_prepare(now);
     set_locks(now);

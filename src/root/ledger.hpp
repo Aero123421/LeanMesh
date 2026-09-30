@@ -79,6 +79,26 @@ struct Manifest {
 };
 inline constexpr uint8_t k_manifest_version = 1;
 inline constexpr std::size_t k_manifest_bytes = 1 + 16 + 8 + 8 + 32 + 1 + 2 + 2 + 16 * 8;
+
+// store::rec::commissioning_window (FIX5-D6): version u8 (1) | policy revision u64 | window id 16 | expected revision u64
+// | max new members u8 | allowed roles u8 | reservations u8. The policy revision is the window replay floor: a window of
+// a lower revision, or another window (id or budget) at the counted revision, is refused; the same window again - also
+// re-issued for a new term with new times (docs/21 §2) - goes on with its count. Nothing a replay can present resets it.
+// The record holds the counted window's fields themselves (no digest of them is needed to compare).
+struct WindowRecord {
+    uint64_t policy_revision = 0;
+    std::array<uint8_t, 16> id{};
+    uint64_t expected_revision = 0;
+    uint8_t max_new_members = 0;
+    uint8_t allowed_roles = 0;
+    uint8_t used = 0;     // reservations counted, each before its PREPARED entry (a cut over-counts, never under)
+    bool present = false; // RAM: a record exists (loaded or committed)
+    [[nodiscard]] bool same_window(const member::CommissioningWindow &w) const {
+        return present && w.policy_revision == policy_revision && w.id == id && w.expected_revision == expected_revision &&
+               w.max_new_members == max_new_members && w.allowed_roles == allowed_roles;
+    }
+};
+inline constexpr uint8_t k_window_record_version = 1; // 36 B
 [[nodiscard]] Status encode_manifest(const Manifest &m, MutByteView out, std::size_t &len);
 // Bench provisioning only (tools/lmfleet): the ACTIVE entry record of a member whose credential was issued
 // outside a join (address 2..65 is its slot). Out: the record id and its payload; the record state is Active.
@@ -137,6 +157,13 @@ class Ledger {
     [[nodiscard]] bool responder_open() const;
     // SEC-D2: may a Link or End session (either direction) with this verified member be installed?
     [[nodiscard]] bool link_admit(const DeviceId &device, const member::MemberCredential &mc) const;
+    // FIX5-D2: an entry authorises its device only while it is ACTIVE and above every revocation floor. A lifecycle
+    // install raises the floors (RAM, at once) before the entry changes; until then, and when the entry's commit failed,
+    // the floors alone refuse the device - for sessions, routes, groups, renewals and what the Host is shown.
+    [[nodiscard]] bool authorizes(const Entry &e) const;
+    [[nodiscard]] const Entry *authorized(const DeviceId &d) const; // the entry of `d` if it authorises it, else null
+    // What the entry means now (the Host's node view): an ACTIVE entry below a floor reads as Blocked.
+    [[nodiscard]] EntryState effective(const Entry &e) const;
     // SEC-D2: can any admission be decided? Busy until the ledger is loaded, RecoveryRequired once it is lost.
     [[nodiscard]] Status admission() const {
         return failed_ || retired_ ? Status::RecoveryRequired : (loaded_ ? Status::Ok : Status::Busy);
@@ -194,7 +221,8 @@ class Ledger {
     [[nodiscard]] Status install_lifecycle(uint8_t type, ByteView signed_cose, MonoTime now, uint64_t &operation);
     // A commissioning window admits new devices now (docs/21 §2): of this term, begun, not expired, not full.
     [[nodiscard]] bool window_open(MonoTime now) const;
-    // RootHandover (31) named this root the old one: it acts as root no more (admits and renews nobody).
+    // RootHandover (31) named this root the old one: it acts as root no more (admits and renews nobody). FIX5-D1: from
+    // the moment the verified object names it, before (and whatever) the commit that makes it survive a restart.
     [[nodiscard]] bool retired() const { return retired_; }
     struct Stats {
         uint64_t requests = 0;
@@ -211,6 +239,8 @@ class Ledger {
         uint64_t revoked = 0;        // [S18] entries blocked by a RevokeObject
         uint64_t reconciled = 0;     // [S18] members that moved away (a transfer ticket installed here)
         uint64_t window_admitted = 0; // [S18] reservations made under a commissioning window
+        uint64_t floored = 0;         // [FIX5] ACTIVE entries below their floors made Blocked/Left by maintenance
+        uint64_t floored_failed = 0;  // [FIX5] ... commits of those that failed (bounded retry)
     };
     [[nodiscard]] const Stats &stats() const { return stats_; }
 
@@ -276,8 +306,10 @@ class Ledger {
         LcFloors,  // [S18] revocation floors committed
         LcEntry,   // [S18] the entry blocked / left
         LcRetire,  // [S18] the RootHandover that retires this root, committed
+        LcRetireCheck, // [FIX5-D1] ... read again after a failed commit (it may have reached the Flash)
         LcWindow,  // [S18] a new commissioning window's budget record, committed
         WindowReserve, // [S18] a windowed join's reservation counted durably before its entry commit
+        CommitFloored, // [FIX5-D2] maintenance: an ACTIVE entry below its floors made Blocked/Left durably
     };
 
     struct VerifyArgs { // copied at submit: the worker never reads owner-mutable state
@@ -332,7 +364,8 @@ class Ledger {
     void prepare_signed(Txn &t, Status s, MonoTime now);
     void commit_prepared(Txn &t, MonoTime now);
     void window_reserved(Txn &t, Status s, MonoTime now); // [S18]
-    [[nodiscard]] Status commit_window(Step step, uint8_t used, int holder); // [S18] rec::commissioning_window
+    // [S18] rec::commissioning_window := `r` (window_stage_ until the commit is durable).
+    [[nodiscard]] Status commit_window(Step step, const WindowRecord &r, int holder);
     void prepare_committed(Txn &t, Status s, MonoTime now);
     void send_prepare(Txn &t, MonoTime now);
     void on_stored(Txn &t, ByteView data, const member::JoinObjectHeader &h, MonoTime now);
@@ -382,6 +415,14 @@ class Ledger {
     void lc_retire_entry(MonoTime now);
     void lc_finish(Status s, MonoTime now);
     void stop_admitting(MonoTime now);
+    void retire(MonoTime now);                              // [FIX5-D1]
+    void retire_step(Step step, Status s, MonoTime now);
+    void retire_check(MonoTime now);
+    void lc_fail_closed(bool floors_durable, MonoTime now); // [FIX5-D2]
+    [[nodiscard]] uint64_t below_floors() const;
+    [[nodiscard]] bool start_floored(MonoTime now);
+    void floored_done(Status s, MonoTime now);
+    void recon_retry(MonoTime now);
     void send_echo(MonoTime now);
     static Status verify_expected_job(port::JobEnv &env, void *arg);
     [[nodiscard]] uint32_t hint() const;
@@ -454,13 +495,22 @@ class Ledger {
         LcObject obj;
         std::size_t slot = 0;
         EntryState to = EntryState::Free; // the entry state the install commits (Blocked / Left)
+        uint8_t checks = 0;                        // [FIX5-D1] reads of the retirement record after a failed commit
+        MonoTime retry_at = MonoTime::never();     // ... the next one (the record memory is given back meanwhile)
     };
     Lifecycle lc_;
     member::CommissioningWindow window_; // RAM only: a root restart ends it (its times are of this boot's clock)
     bool window_set_ = false;
-    uint8_t window_used_ = 0;              // durable: rec::commissioning_window counts the window's reservations
-    std::array<uint8_t, 16> window_rec_id_{}; // ... of the window this record holds (loaded at boot)
-    uint8_t window_rec_used_ = 0;
+    WindowRecord window_rec_;   // [FIX5-D6] rec::commissioning_window as committed (loaded at boot)
+    WindowRecord window_stage_; // ... what the window commit in flight writes (window_rec_ once it is durable)
+    // [FIX5-D2] ACTIVE entries below their floors whose durable state is to catch up (bit = slot): made Blocked, or Left
+    // for a member that moved away (a transfer ticket's install whose entry commit failed). Bounded: after
+    // k_recon_tries failures in a row this boot stops trying (the floors refuse the device meanwhile, the next boot or
+    // lifecycle install tries again).
+    uint64_t recon_block_ = 0;
+    uint64_t recon_left_ = 0;
+    bool floors_dirty_ = false; // the RAM floors may be ahead of the revocation_floors record (a failed floors commit)
+    uint8_t recon_fails_ = 0;
     bool retired_ = false;
     DeviceId notice_device_; // a revoked member whose sessions end once its notice had its chance
     ShortAddr notice_addr_;

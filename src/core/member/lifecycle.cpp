@@ -14,13 +14,17 @@ constexpr Duration k_busy_retry = Duration::from_ms(50);
 // A renewal repeats the live credential with a later lease: same device, address, generations, role, relay
 // permission and DeviceCredential; the lease is later on the same term's clock, or it is a lease of a newer term (the
 // root restarted, ARCH2-D1: a lease of the old clock cannot be compared with one of the new). Anything else is not a
-// renewal (a new membership comes by a join). An older term is never taken back.
-bool renews(const MemberCredential &live, const MemberCredential &mc) {
+// renewal (a new membership comes by a join). An older term is never taken back - FIX5-D8: nor one older than `term`,
+// the term this node lives in. A LEASE of a newer term raises it before the renewal of that term arrives; a delayed
+// renewal of the old term then carries a later lease on a clock that no longer counts (it is compared with the live
+// term, not with the stored credential's).
+bool renews(const MemberCredential &live, RootTerm term, const MemberCredential &mc) {
     const bool later = mc.root_term == live.root_term ? mc.lease_expires_root_ms > live.lease_expires_root_ms
                                                       : live.root_term < mc.root_term;
     return mc.device == live.device && mc.address == live.address && mc.assignment == live.assignment &&
            mc.membership == live.membership && mc.role == live.role && mc.relay_allowed == live.relay_allowed &&
-           mc.credential_hash == live.credential_hash && mc.policy_hash == live.policy_hash && later;
+           mc.credential_hash == live.credential_hash && mc.policy_hash == live.policy_hash && later &&
+           !(mc.root_term < term);
 }
 
 } // namespace
@@ -41,13 +45,14 @@ void Membership::on_lifecycle_object(const DeviceId &origin, ByteView cose, Mono
     }
     if (peek_signed(cose, k_type_member_credential, env, data) != Status::Ok || env.issuer != origin ||
         env.domain != id.delegation().domain || decode_member_credential(data, mc) != Status::Ok ||
-        !renews(id.member(), mc) || !lend_record_only()) {
+        !renews(id.member(), id.term(), mc) || !lend_record_only()) {
         ++stats_.renew_dropped; // the root offers it again at the next READY that shows the old lease
         return;
     }
     std::memcpy(rec_->payload.data(), cose.data(), cose.size());
     rec_->payload_len = static_cast<uint32_t>(cose.size());
     verify_input_ = ByteView{rec_->payload.data(), cose.size()};
+    renew_term_ = mc.root_term;
     peer_.delegation = id.delegation(); // the worker reads this copy only
     if (start_verify(Step::RenewVerify) != Status::Ok) {
         ++stats_.renew_dropped;
@@ -58,6 +63,9 @@ void Membership::on_lifecycle_object(const DeviceId &origin, ByteView cose, Mono
 }
 
 void Membership::renew_step(Step step, Status s, MonoTime now) {
+    if (s == Status::Ok && step == Step::RenewVerify && renew_term_ < engine_.identity().term()) {
+        s = Status::Conflict; // FIX5-D8: the node moved to a newer term while the worker verified: never committed
+    }
     if (s == Status::Ok && step == Step::RenewVerify) {
         s = start_flash(Step::RenewCommit, store::RecordJob::Op::Commit, store::rec::membership, k_membership_active,
                         rec_->payload_len, now);
@@ -105,7 +113,7 @@ void Membership::renew_adopt(MonoTime now) {
     const RootTerm before = id.term();
     const RootTerm old_cred = id.member().root_term;
     if (rec_->state == k_membership_active && peek_signed(cose, k_type_member_credential, env, data) == Status::Ok &&
-        decode_member_credential(data, mc) == Status::Ok && renews(id.member(), mc) &&
+        decode_member_credential(data, mc) == Status::Ok && renews(id.member(), id.term(), mc) && // FIX5-D8 (again)
         id.adopt_member(id.delegation(), mc, cose) == Status::Ok) {
         ++stats_.renewals;
         if (before < id.term()) {

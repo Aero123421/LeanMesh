@@ -214,6 +214,27 @@ Status decode_handover(ByteView data, RootHandover &out) {
     return Status::Ok;
 }
 
+// ---- [FIX5-D4] RootHandover semantics ----
+Status check_handover(const RootHandover &h) {
+    return h.old_root != h.new_root && h.old_generation < h.new_generation ? Status::Ok : Status::InvalidArgument;
+}
+
+Status handover_from(const RootHandover &h, const DeviceId &root, uint64_t generation, RootTerm term) {
+    LM_TRY(check_handover(h));
+    if (h.old_root != root || h.old_generation != generation) {
+        return Status::NetworkMismatch;
+    }
+    return term < h.new_term ? Status::Ok : Status::Conflict;
+}
+
+Status handover_to(const RootHandover &h, const DeviceId &root, uint64_t generation,
+                   const Sha256Digest &delegation_hash) {
+    LM_TRY(check_handover(h));
+    return h.new_root == root && h.new_generation == generation && h.new_delegation_hash == delegation_hash
+               ? Status::Ok
+               : Status::NetworkMismatch;
+}
+
 // ---- encoders ----
 Status encode_member_credential(const MemberCredential &m, MutByteView out, std::size_t &len) {
     if (!is_valid_short_addr(m.address) || m.role > 2 || m.assignment.value() > k_u63_max ||

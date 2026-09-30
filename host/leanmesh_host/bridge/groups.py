@@ -114,7 +114,40 @@ class Groups:
         return pages, False
 
 
+def _same_snapshot(conn: sqlite3.Connection, op: bytes, pages: list[dict[str, Any]]) -> bool:
+    """FIX7-D10: a stored operation keeps its snapshot: token, hash, total and every target's identity (device and
+    generations) must match before any outcome is updated. Nothing stored yet: any series is the first."""
+    stored = conn.execute("SELECT position,device,assignment_generation,membership_generation,snapshot_token,"
+                          "snapshot_hash FROM group_targets WHERE operation=?", (op,)).fetchall()
+    if not stored:
+        return True
+    first = pages[0]
+    if len(stored) != first["total"]:
+        return False
+    fresh = {page["offset"] + k: t for page in pages for k, t in enumerate(page["targets"])}
+    return all(bytes(tok) == bytes(first["snapshot_token"]) and bytes(h) == bytes(first["snapshot_hash"])
+               and (t := fresh.get(pos)) is not None and bytes(t["device_id"]) == bytes(dev)
+               and (t["assignment_generation"], t["membership_generation"]) == (ag, mg)
+               for pos, dev, ag, mg, tok, h in stored)
+
+
+def _mark_conflict(conn: sqlite3.Connection, op: bytes, root: bytes) -> None:
+    """The root says something else about the same operation: rows without a settled outcome become INDETERMINATE."""
+    entry = {"kind": "GROUP_SNAPSHOT_CONFLICT", "assurance": "SELF_REPORTED", "observer": root.hex(), "details": {}}
+    for position, outcome, evidence in conn.execute(
+            "SELECT position,outcome,evidence_json FROM group_targets WHERE operation=?", (op,)).fetchall():
+        if outcome in ("PENDING", "SUBMITTED"):
+            history = (json.loads(evidence) + [entry])[-MAX_TARGET_EVIDENCE:]
+            conn.execute("UPDATE group_targets SET outcome='INDETERMINATE', evidence_json=? WHERE operation=? "
+                         "AND position=?", (json.dumps(history, separators=(",", ":"), sort_keys=True), op, position))
+
+
 def write_pages(conn: sqlite3.Connection, op: bytes, root: bytes, pages: list[dict[str, Any]]) -> None:
+    if not pages:
+        return
+    if not _same_snapshot(conn, op, pages):
+        _mark_conflict(conn, op, root)
+        return
     for page in pages:
         write_page(conn, op, root, page)
 

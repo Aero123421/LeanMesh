@@ -117,6 +117,8 @@ class Power {
     void after_step(MonoTime now);          // end of every step: prepare progress, accounting, locks
     void on_timer(MonoTime now);
     [[nodiscard]] MonoTime deadline() const;
+    // FIX6-D3: a boot whose external Deep Sleep wake was denied keeps the mesh off until the radio is stopped again.
+    [[nodiscard]] bool holds_radio() const { return deny_pending_; }
     [[nodiscard]] Reply execute(const Command &cmd, MonoTime now);
     void on_frame(const link::RxInfo &info, ByteView plain, MonoTime now); // frame kind POWER
     // An authenticated DATA frame arrived: a sleep ticket in hand is stale, and the receive window is not over.
@@ -252,6 +254,7 @@ class Power {
     void save_retained();
     void load_retained(const port::WakeInfo &w);
     void set_locks(MonoTime now);
+    void stop_denied_radio(MonoTime now);
     [[nodiscard]] bool locks_ok() const { return (lock_have_ & lock_want_) == lock_want_; }
     void send_report(MonoTime now);
     [[nodiscard]] Status root_check_target(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) const;
@@ -276,6 +279,8 @@ class Power {
     bool auto_ = false; // WINDOWED cycle: the app tasks keep running, only the radio sleeps
     uint8_t lock_want_ = 0, lock_have_ = 0; // PM locks wanted / confirmed held by the port
     MonoTime lock_retry_ = MonoTime::never();
+    bool deny_pending_ = false;                // denied boot wake: the radio is stopped as soon as the boot jobs are done
+    MonoTime deny_retry_ = MonoTime::never(); // ... and again later when the driver refused to stop
     int64_t sl_auth_ms_ = 0, sl_key_ms_ = 0, sl_life_ms_ = 0;
     SessionPath last_path_ = SessionPath::FreshEdhoc;
     // the ticket race

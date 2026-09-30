@@ -132,6 +132,7 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
     if (peek_signed(cose, k_type_root_handover, env, data) == Status::Ok) {
         RootHandover h; // [S18] kept like a ticket: what authorises this member's next membership (docs/21 §8)
         LM_TRY(decode_handover(data, h));
+        LM_TRY(check_handover(h)); // FIX5-D4: never stored when no member could follow it
         if (!id.is_member() || env.domain != id.delegation().domain || h.old_root != id.delegation().root ||
             h.old_generation != id.delegation().generation) {
             return Status::AuthRejected; // not a handover of this device's root

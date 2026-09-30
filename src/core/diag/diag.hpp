@@ -43,6 +43,10 @@ inline constexpr uint64_t interval = 1ULL << 21;
 // app
 inline constexpr uint64_t events = 1ULL << 32;   // application event queue: pending, lost
 inline constexpr uint64_t operations = 1ULL << 33;
+// The bits whose values the C struct lm_diagnostics_t carries. events/operations exist only in the serial/Host
+// maps (the struct has no field for them), so lm_diagnostics_get never sets them (FIX7-D12).
+inline constexpr uint64_t abi_bits = reset_reason | heap | stack | owner_cpu | rx_ring | counters | peers | tx_depth |
+                                     channel | root_term | interval;
 // Not measurable by this build, so they are never set: parent RSSI (not tracked), energy (no meter).
 } // namespace valid
 

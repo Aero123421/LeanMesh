@@ -170,12 +170,26 @@ void Channel::loaded_ok(Status s, MonoTime now) {
         engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(s == Status::Ok ? Status::RecoveryRequired : s), 0, nullptr);
     }
     engine_.identity().return_record(rec_);
-    loaded_ = true;
-    if (phase_ == Ph::Committed) {
-        apply_target(now); // a committed plan is followed even when nobody knows the schedule any more
-    } else {
-        (void)set_radio(cur_); // PREPARED, or nothing: the old channel
+    pend_apply_ = true;
+    boot_tries_ = 0;
+    boot_apply(now);
+}
+
+// FIX6-D2: the mesh (and the root's coordinator) start only after the channel the record names is set and read back.
+// A refusal keeps `loaded_` false (holds_mesh), is tried again every second up to k_boot_tries times and then stays
+// held: no switch is counted or announced for a channel the radio does not carry.
+void Channel::boot_apply(MonoTime now) {
+    loaded_ = true; // apply_target() tells the root's coordinator, which needs a loaded module
+    const Status st = phase_ == Ph::Committed ? apply_target(now) : set_radio(cur_);
+    if (st != Status::Ok) {
+        loaded_ = false;
+        if (phase_ != Ph::Committed) {
+            engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(st), 0, nullptr);
+        }
+        retry_at_ = ++boot_tries_ < k_boot_tries ? now + Duration::from_s(1) : MonoTime::never();
+        return;
     }
+    pend_apply_ = false;
     time_at_ = now; // the root anchors its own clock, a member waits for a path (the mesh arms the search)
     if (is_root()) {
         engine_.coordinator().on_loaded(now);
@@ -394,11 +408,11 @@ void Channel::switch_step(MonoTime now) {
 }
 
 // A committed plan found at boot, or a caught-up node: the target is the channel (no rollback by the node).
-void Channel::apply_target(MonoTime now) {
-    if (set_radio(plan_.new_ch) != Status::Ok) {
-        faulted_ = true; // the radio refused the stored channel: say so, do not go back to the old one
+Status Channel::apply_target(MonoTime now) {
+    const Status st = set_radio(plan_.new_ch);
+    if (st != Status::Ok) { // the radio refused / did not read back the stored channel: no rollback, nothing switched
         engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(Status::RfProfileUnapproved), 0, nullptr);
-        return;
+        return st;
     }
     cur_ = plan_.new_ch;
     epoch_ = plan_.epoch;
@@ -407,6 +421,7 @@ void Channel::apply_target(MonoTime now) {
     if (is_root()) {
         engine_.coordinator().on_local_switch(now);
     }
+    return Status::Ok;
 }
 
 // ARCH2-D1 (docs/05 §7 "root再起動は保存済みcommitted channelを先に適用してから新root_termを公開する"): the root applies a
@@ -418,7 +433,13 @@ void Channel::on_term(MonoTime now) {
     }
     sw_ = Sw::None;
     sw_at_ = MonoTime::never();
-    apply_target(now);
+    if (apply_target(now) != Status::Ok) { // fail closed: the mesh is held again until the channel is carried
+        loaded_ = false;
+        pend_apply_ = true;
+        boot_tries_ = 0;
+        retry_at_ = now + Duration::from_s(1);
+        return;
+    }
     engine_.power().note_state_change();
     ++stats_.switched;
     notify(0);
@@ -850,7 +871,9 @@ void Channel::on_timer(MonoTime now) {
     }
     if (now >= retry_at_) {
         retry_at_ = MonoTime::never();
-        if (!loaded_) {
+        if (pend_apply_) {
+            boot_apply(now);
+        } else if (!loaded_) {
             on_identity_ready(now);
         }
         kick(now);
@@ -894,6 +917,7 @@ void Channel::stop() {
     epoch_ = ChannelEpoch{};
     faulted_ = false;
     loaded_ = !enabled_;
+    pend_apply_ = false;
     dwell_open_ = false;
     if (job_ != Job::None) {
         cancelled_ = true; // the worker may still write into the borrowed record memory (zombie rule)
