@@ -65,7 +65,7 @@
     "verdict": "OK",
     "worker_stack": 8792
   },
-  "dirty": true,
+  "dirty": false,
   "fixed_ram": {
     "esp32c3": {
       "leaf": {
@@ -236,21 +236,21 @@
       }
     }
   },
-  "head": "8668c69",
+  "head": "6f94f45",
   "idf": {
     "builds": [
       {
         "baseline_image_bytes": 707608,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32c3",
         "flash_verdict": "OVER",
-        "image_bytes": 1008550,
-        "image_diff": 300942,
+        "image_bytes": 1009512,
+        "image_diff": 301904,
         "profile": "leaf",
         "static": {
           "dram_bss": 17896,
           "dram_data": 0,
-          "flash_code": 249070,
-          "flash_data": 5206
+          "flash_code": 249928,
+          "flash_data": 5214
         },
         "target": "esp32c3"
       },
@@ -258,14 +258,14 @@
         "baseline_image_bytes": 707608,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32c3",
         "flash_verdict": "OVER",
-        "image_bytes": 1013992,
-        "image_diff": 306384,
+        "image_bytes": 1014954,
+        "image_diff": 307346,
         "profile": "relay",
         "static": {
           "dram_bss": 19016,
           "dram_data": 0,
-          "flash_code": 254480,
-          "flash_data": 5238
+          "flash_code": 255338,
+          "flash_data": 5246
         },
         "target": "esp32c3"
       },
@@ -273,14 +273,14 @@
         "baseline_image_bytes": 707608,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32c3",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1121340,
-        "image_diff": 413732,
+        "image_bytes": 1122470,
+        "image_diff": 414862,
         "profile": "root",
         "static": {
           "dram_bss": 50812,
           "dram_data": 0,
-          "flash_code": 349482,
-          "flash_data": 5878
+          "flash_code": 350508,
+          "flash_data": 5886
         },
         "target": "esp32c3"
       },
@@ -288,14 +288,14 @@
         "baseline_image_bytes": 803417,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32c5",
         "flash_verdict": "OVER",
-        "image_bytes": 1110649,
-        "image_diff": 307232,
+        "image_bytes": 1111601,
+        "image_diff": 308184,
         "profile": "leaf",
         "static": {
           "dram_bss": 17896,
           "dram_data": 0,
-          "flash_code": 249026,
-          "flash_data": 5230
+          "flash_code": 249970,
+          "flash_data": 5238
         },
         "target": "esp32c5"
       },
@@ -303,14 +303,14 @@
         "baseline_image_bytes": 803417,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32c5",
         "flash_verdict": "OVER",
-        "image_bytes": 1116091,
-        "image_diff": 312674,
+        "image_bytes": 1117043,
+        "image_diff": 313626,
         "profile": "relay",
         "static": {
           "dram_bss": 19016,
           "dram_data": 0,
-          "flash_code": 254436,
-          "flash_data": 5262
+          "flash_code": 255380,
+          "flash_data": 5270
         },
         "target": "esp32c5"
       },
@@ -318,14 +318,14 @@
         "baseline_image_bytes": 803417,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32c5",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1223407,
-        "image_diff": 419990,
+        "image_bytes": 1224525,
+        "image_diff": 421108,
         "profile": "root",
         "static": {
           "dram_bss": 50812,
           "dram_data": 0,
-          "flash_code": 349438,
-          "flash_data": 5902
+          "flash_code": 350548,
+          "flash_data": 5910
         },
         "target": "esp32c5"
       },
@@ -333,14 +333,14 @@
         "baseline_image_bytes": 801401,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32c6",
         "flash_verdict": "OVER",
-        "image_bytes": 1108261,
-        "image_diff": 306860,
+        "image_bytes": 1109215,
+        "image_diff": 307814,
         "profile": "leaf",
         "static": {
           "dram_bss": 17896,
           "dram_data": 0,
-          "flash_code": 251904,
-          "flash_data": 5068
+          "flash_code": 252850,
+          "flash_data": 5076
         },
         "target": "esp32c6"
       },
@@ -348,14 +348,14 @@
         "baseline_image_bytes": 801401,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32c6",
         "flash_verdict": "OVER",
-        "image_bytes": 1113783,
-        "image_diff": 312382,
+        "image_bytes": 1114737,
+        "image_diff": 313336,
         "profile": "relay",
         "static": {
           "dram_bss": 19016,
           "dram_data": 0,
-          "flash_code": 257394,
-          "flash_data": 5100
+          "flash_code": 258340,
+          "flash_data": 5108
         },
         "target": "esp32c6"
       },
@@ -363,14 +363,14 @@
         "baseline_image_bytes": 801401,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32c6",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1222181,
-        "image_diff": 420780,
+        "image_bytes": 1223281,
+        "image_diff": 421880,
         "profile": "root",
         "static": {
           "dram_bss": 50812,
           "dram_data": 0,
-          "flash_code": 353468,
-          "flash_data": 5740
+          "flash_code": 354560,
+          "flash_data": 5748
         },
         "target": "esp32c6"
       },
@@ -378,14 +378,14 @@
         "baseline_image_bytes": 675460,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node/esp32s3",
         "flash_verdict": "OVER",
-        "image_bytes": 946397,
-        "image_diff": 270937,
+        "image_bytes": 947189,
+        "image_diff": 271729,
         "profile": "leaf",
         "static": {
           "dram_bss": 17904,
           "dram_data": 0,
-          "flash_code": 218666,
-          "flash_data": 5070
+          "flash_code": 219435,
+          "flash_data": 5078
         },
         "target": "esp32s3"
       },
@@ -393,14 +393,14 @@
         "baseline_image_bytes": 675460,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-RELAY/esp32s3",
         "flash_verdict": "OVER",
-        "image_bytes": 950593,
-        "image_diff": 275133,
+        "image_bytes": 951369,
+        "image_diff": 275909,
         "profile": "relay",
         "static": {
           "dram_bss": 19024,
           "dram_data": 0,
-          "flash_code": 222856,
-          "flash_data": 5102
+          "flash_code": 223616,
+          "flash_data": 5110
         },
         "target": "esp32s3"
       },
@@ -408,14 +408,14 @@
         "baseline_image_bytes": 675460,
         "build": "/home/admister/.cache/leanmesh/build-final/example_node-ROOT/esp32s3",
         "flash_verdict": "OVER-REVIEW-LINE",
-        "image_bytes": 1045709,
-        "image_diff": 370249,
+        "image_bytes": 1046749,
+        "image_diff": 371289,
         "profile": "root",
         "static": {
           "dram_bss": 50828,
           "dram_data": 0,
-          "flash_code": 306482,
-          "flash_data": 5742
+          "flash_code": 307510,
+          "flash_data": 5750
         },
         "target": "esp32s3"
       }
@@ -1280,13 +1280,13 @@
       "sdk_c_cpp": 28000
     },
     "groups": {
-      "core": 27787,
-      "idf": 1226,
-      "native-only": 1731,
-      "root": 5038,
-      "sdk (core+idf+root+serial)": 37232,
-      "serial": 3181,
-      "tests": 20173,
+      "core": 27868,
+      "idf": 1244,
+      "native-only": 1748,
+      "root": 5048,
+      "sdk (core+idf+root+serial)": 37347,
+      "serial": 3187,
+      "tests": 20332,
       "tools": 3409,
       "vendor": 61493
     },
@@ -1297,15 +1297,15 @@
       },
       "src/core": {
         "group": "core",
-        "sloc": 2093
+        "sloc": 2105
       },
       "src/core/channel": {
         "group": "core",
-        "sloc": 1502
+        "sloc": 1510
       },
       "src/core/delivery": {
         "group": "core",
-        "sloc": 5154
+        "sloc": 5156
       },
       "src/core/diag": {
         "group": "core",
@@ -1313,7 +1313,7 @@
       },
       "src/core/group": {
         "group": "core",
-        "sloc": 1294
+        "sloc": 1342
       },
       "src/core/link": {
         "group": "core",
@@ -1321,7 +1321,7 @@
       },
       "src/core/member": {
         "group": "core",
-        "sloc": 4817
+        "sloc": 4819
       },
       "src/core/ota": {
         "group": "core",
@@ -1329,7 +1329,7 @@
       },
       "src/core/power": {
         "group": "core",
-        "sloc": 1974
+        "sloc": 1983
       },
       "src/core/radio": {
         "group": "core",
@@ -1353,15 +1353,15 @@
       },
       "src/port/idf": {
         "group": "idf",
-        "sloc": 1226
+        "sloc": 1244
       },
       "src/port/sim": {
         "group": "native-only",
-        "sloc": 1288
+        "sloc": 1305
       },
       "src/root": {
         "group": "root",
-        "sloc": 5038
+        "sloc": 5048
       },
       "src/security": {
         "group": "core",
@@ -1369,7 +1369,7 @@
       },
       "src/serial": {
         "group": "serial",
-        "sloc": 3181
+        "sloc": 3187
       },
       "src/store": {
         "group": "core",
@@ -1377,7 +1377,7 @@
       },
       "tests/native": {
         "group": "tests",
-        "sloc": 20173
+        "sloc": 20332
       },
       "third_party": {
         "group": "vendor",
@@ -1389,8 +1389,8 @@
       }
     },
     "python": {
-      "host (excl. tests)": 4408,
-      "host/tests": 5257
+      "host (excl. tests)": 4409,
+      "host/tests": 5259
     },
     "verdict": "OVER"
   },

@@ -3,16 +3,16 @@
   "date": "2026-09-28",
   "status": "PASS",
   "environment": {
-    "python": "3.13.5",
-    "sqlite": "3.46.1",
-    "cryptography": "46.0.4"
+    "python": "3.12.3",
+    "sqlite": "3.45.1",
+    "cryptography": "41.0.7"
   },
   "checks": [
     {
       "name": "json_parse",
       "status": "PASS",
       "detail": {
-        "files": 23
+        "files": 26
       }
     },
     {
@@ -77,7 +77,7 @@
       "name": "sqlite_schema",
       "status": "PASS",
       "detail": {
-        "sqlite_version": "3.46.1",
+        "sqlite_version": "3.45.1",
         "tables": 14,
         "wal_full": true,
         "power_cut_test": false
@@ -88,9 +88,9 @@
       "status": "PASS",
       "detail": {
         "openapi": "3.1 shapes/refs/path params plus positive/negative request constraints",
-        "paths": 16,
-        "schemas": 24,
-        "resolved_references": 257,
+        "paths": 18,
+        "schemas": 26,
+        "resolved_references": 292,
         "formal_openapi_meta_schema_validation": false
       }
     },
@@ -130,7 +130,7 @@
       "name": "markdown_links",
       "status": "PASS",
       "detail": {
-        "local_markdown_links": 76,
+        "local_markdown_links": 144,
         "external_urls_fetched_by_checker": false
       }
     },
@@ -212,7 +212,7 @@
       "status": "PASS",
       "detail": {
         "original_paths_retained": 54,
-        "python_syntax_files": 6,
+        "python_syntax_files": 9,
         "new_product_tests_run": 0
       }
     }

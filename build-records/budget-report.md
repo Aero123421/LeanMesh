@@ -1,6 +1,6 @@
 # LeanMesh budget report (docs/16 + ADR-002 revised targets; a report, not a gate)
 
-Commit `8668c69` (working tree dirty); python 3.12.3, c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0.
+Commit `6f94f45`; python 3.12.3, c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0.
 Command: `scripts/budget_report.py --native-build /home/admister/.cache/leanmesh/native --idf-root /home/admister/.cache/leanmesh/build-final --out-dir build-records`
 
 Software measurements only: sizeof from the compiler, static DRAM from the link map, image diff against
@@ -10,7 +10,7 @@ Software measurements only: sizeof from the compiler, static DRAM from the link 
 
 - Fixed RAM over target: 12 of 12 SoC/profile builds (worst +13404 B, esp32s3 ROOT).
 - Native estimate (sizeof + constants, not SoC evidence): 3 of 3 profiles over target (LEAF, RELAY, ROOT).
-- Flash over the 256 KiB target: 12 of 12 builds, of which 4 are also over the 320 KiB review line (worst +158636 B over 256 KiB, esp32c6 ROOT).
+- Flash over the 256 KiB target: 12 of 12 builds, of which 4 are also over the 320 KiB review line (worst +159736 B over 256 KiB, esp32c6 ROOT).
 - Crypto peak: OK; SDK SLOC: OVER.
 
 ## Fixed RAM (workspace + static DRAM of libleanmesh.a) vs revised targets
@@ -37,18 +37,18 @@ Software measurements only: sizeof from the compiler, static DRAM from the link 
 
 | SoC | profile | image B | baseline B | diff B | verdict | libleanmesh.a DRAM bss+data B | flash code+data B |
 |---|---|---:|---:|---:|---|---:|---:|
-| esp32c3 | LEAF | 1008550 | 707608 | 300942 | OVER | 17896 | 254276 |
-| esp32c3 | RELAY | 1013992 | 707608 | 306384 | OVER | 19016 | 259718 |
-| esp32c3 | ROOT | 1121340 | 707608 | 413732 | OVER-REVIEW-LINE | 50812 | 355360 |
-| esp32c5 | LEAF | 1110649 | 803417 | 307232 | OVER | 17896 | 254256 |
-| esp32c5 | RELAY | 1116091 | 803417 | 312674 | OVER | 19016 | 259698 |
-| esp32c5 | ROOT | 1223407 | 803417 | 419990 | OVER-REVIEW-LINE | 50812 | 355340 |
-| esp32c6 | LEAF | 1108261 | 801401 | 306860 | OVER | 17896 | 256972 |
-| esp32c6 | RELAY | 1113783 | 801401 | 312382 | OVER | 19016 | 262494 |
-| esp32c6 | ROOT | 1222181 | 801401 | 420780 | OVER-REVIEW-LINE | 50812 | 359208 |
-| esp32s3 | LEAF | 946397 | 675460 | 270937 | OVER | 17904 | 223736 |
-| esp32s3 | RELAY | 950593 | 675460 | 275133 | OVER | 19024 | 227958 |
-| esp32s3 | ROOT | 1045709 | 675460 | 370249 | OVER-REVIEW-LINE | 50828 | 312224 |
+| esp32c3 | LEAF | 1009512 | 707608 | 301904 | OVER | 17896 | 255142 |
+| esp32c3 | RELAY | 1014954 | 707608 | 307346 | OVER | 19016 | 260584 |
+| esp32c3 | ROOT | 1122470 | 707608 | 414862 | OVER-REVIEW-LINE | 50812 | 356394 |
+| esp32c5 | LEAF | 1111601 | 803417 | 308184 | OVER | 17896 | 255208 |
+| esp32c5 | RELAY | 1117043 | 803417 | 313626 | OVER | 19016 | 260650 |
+| esp32c5 | ROOT | 1224525 | 803417 | 421108 | OVER-REVIEW-LINE | 50812 | 356458 |
+| esp32c6 | LEAF | 1109215 | 801401 | 307814 | OVER | 17896 | 257926 |
+| esp32c6 | RELAY | 1114737 | 801401 | 313336 | OVER | 19016 | 263448 |
+| esp32c6 | ROOT | 1223281 | 801401 | 421880 | OVER-REVIEW-LINE | 50812 | 360308 |
+| esp32s3 | LEAF | 947189 | 675460 | 271729 | OVER | 17904 | 224513 |
+| esp32s3 | RELAY | 951369 | 675460 | 275909 | OVER | 19024 | 228726 |
+| esp32s3 | ROOT | 1046749 | 675460 | 371289 | OVER-REVIEW-LINE | 50828 | 313260 |
 
 ## Crypto peak (target <= 24 KiB, separate from fixed RAM)
 
@@ -58,43 +58,43 @@ worker stack 8792 B + PSA heap 4368 B = 13160 B (OK); measured natively (x86-64 
 
 | group | SLOC | budget |
 |---|---:|---|
-| core | 27787 |  |
-| idf | 1226 |  |
-| root | 5038 |  |
-| serial | 3181 |  |
-| native-only | 1731 |  |
+| core | 27868 |  |
+| idf | 1244 |  |
+| root | 5048 |  |
+| serial | 3187 |  |
+| native-only | 1748 |  |
 | tools | 3409 |  |
-| tests | 20173 |  |
+| tests | 20332 |  |
 | vendor | 61493 |  |
-| sdk (core+idf+root+serial) | 37232 | 28000 (OVER) |
-| python host (excl. tests) | 4408 | 6000 |
-| python host/tests | 5257 |  |
+| sdk (core+idf+root+serial) | 37347 | 28000 (OVER) |
+| python host (excl. tests) | 4409 | 6000 |
+| python host/tests | 5259 |  |
 
 | module | group | SLOC |
 |---|---|---:|
-| src/core | core | 2093 |
+| src/core | core | 2105 |
 | src/core/wire | core | 1417 |
 | src/core/radio | core | 381 |
 | src/core/link | core | 2586 |
-| src/core/member | core | 4817 |
+| src/core/member | core | 4819 |
 | src/core/route | core | 2134 |
-| src/core/delivery | core | 5154 |
+| src/core/delivery | core | 5156 |
 | src/core/sched | core | 227 |
-| src/core/group | core | 1294 |
-| src/core/channel | core | 1502 |
-| src/core/power | core | 1974 |
+| src/core/group | core | 1342 |
+| src/core/channel | core | 1510 |
+| src/core/power | core | 1983 |
 | src/core/diag | core | 233 |
 | src/core/ota | core | 320 |
 | src/security | core | 2228 |
 | src/store | core | 781 |
 | src/capi | core | 646 |
-| src/port/idf | idf | 1226 |
-| src/root | root | 5038 |
-| src/serial | serial | 3181 |
-| src/port/sim | native-only | 1288 |
+| src/port/idf | idf | 1244 |
+| src/root | root | 5048 |
+| src/serial | serial | 3187 |
+| src/port/sim | native-only | 1305 |
 | src/hostnative | native-only | 443 |
 | tools | tools | 3409 |
-| tests/native | tests | 20173 |
+| tests/native | tests | 20332 |
 | third_party | vendor | 61493 |
 
 ## B01 build evidence (4 targets, one pin)
