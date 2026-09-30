@@ -3,6 +3,8 @@
 #include <cstring>
 
 #include "esp_event.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_now.h"
 #include "esp_netif.h"
 #include "esp_system.h"
@@ -269,8 +271,23 @@ bool IdfRadio::poll(port::RadioEvent &out) {
     return false;
 }
 
+void IdfRadio::hold_rx() {
+    rx_held_.store(true);
+    // The callback increments rx_in_cb_ before it reads rx_held_ (both seq_cst): once the count is 0
+    // here, every later callback sees the hold and every earlier one has finished its push. The
+    // callback body is a bounded copy, so this wait is short; the tick bound only guards a stuck driver.
+    for (int ticks = 0; rx_in_cb_.load() != 0 && ticks < 100; ++ticks) {
+        vTaskDelay(1);
+    }
+}
+
 void IdfRadio::on_recv(const uint8_t *src, const uint8_t *dst, int8_t rssi, const uint8_t *data,
                        int len) {
+    rx_in_cb_.fetch_add(1);
+    struct Leave {
+        std::atomic<uint8_t> &n;
+        ~Leave() { n.fetch_sub(1); }
+    } leave{rx_in_cb_};
     if (rx_held_.load() || len <= 0 || static_cast<std::size_t>(len) > port::k_max_frame_bytes) {
         return; // held for the sleep entry (never acknowledged: the sender repeats it), or not a frame this SDK can have produced (250 B self-limit)
     }
