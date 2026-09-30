@@ -233,7 +233,10 @@ void Delivery::end_pending_for_stop(MonoTime now) {
         }
         const bool may_be_out = !o.active.is_none() ? left_node(o.active, o)
                                                      : (o.evidence & (ev::sent | ev::persisted)) != 0;
-        const bool journaled = (o.evidence & ev::persisted) != 0;
+        // FIX13-D1: a durable send whose journal Put is queued or submitted may finish after the stop (the persisted
+        // bit comes only with its completion) and is then recovered and sent: it is treated as persisted.
+        const Active *a = actives_.get(o.active);
+        const bool journaled = (o.evidence & ev::persisted) != 0 || (a != nullptr && a->durable);
         if (may_be_out || journaled) {
             finalize(o, LM_OUTCOME_INDETERMINATE, static_cast<uint32_t>(Status::CancelTooLate), now);
         } else {

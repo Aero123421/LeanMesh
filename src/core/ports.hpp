@@ -84,6 +84,11 @@ class Radio {
     // Brings the radio up in the order of docs/03 §3. RfProfileUnapproved when not approved.
     [[nodiscard]] virtual Status start(const RfProfile &profile) = 0;
     [[nodiscard]] virtual Status stop() = 0;
+    // Sleep entry (FIX13-D3): from now on the driver callback queues no further RX (a frame it refuses is never
+    // acknowledged, so its sender repeats it); the owner then drains what is queued. release_rx() re-opens the
+    // callback when the sleep is not entered; start() does too.
+    virtual void hold_rx() = 0;
+    virtual void release_rx() = 0;
     // Includes readback of the channel actually applied.
     [[nodiscard]] virtual Status set_channel(uint8_t channel) = 0;
     // NoCapacity when the driver peer table is full (20 = 16 regular + 3 transient + 1 broadcast).

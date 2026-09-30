@@ -129,18 +129,17 @@ meshsimはプロトコル試験台で、RSSI・RF・電力を持ちません。*
 
 仕様検査は `python scripts/check_spec.py` のあと `git checkout evidence/VALIDATION.json`（検査が再生成するため）。
 
-## 確認した内容（2026-09-30、FIX11の作業中のtree〈`8668c69` + 未commitの変更〉、Linux x86-64、IDF v6.0.3）
+## 確認した内容（2026-09-30、FIX13の作業中のtree〈`57a2b66` + 未commitの変更〉、Linux x86-64、IDF v6.0.3）
 
-ローカルの実行結果であり、**CIの結果ではありません**（CIは直近pushで赤。修正後のtreeのgreen runは未記録）。並行して直されていたcore側の変更が入ったtreeでの実行で、失敗はそのまま書きます。
+ローカルの実行結果です。CIの結果は [testing.md](testing.md) §5 の行（`57a2b66` のgreen run）を見てください。数と日付はこの実行のもので、以降のtreeでは変わります。
 
 | コマンド | 結果 |
 |---|---|
-| `third_party.sh setup` / `verify` | patch適用済み、pin一致 |
-| native `cmake` + build、`ctest -j3` | 25/27 passed。**失敗2件**: `test_power`（LP03/GS12: durable reportのgroup送信）、`test_lifecycle`（SEGFAULT）。どちらもcore側の並行変更の途中のtreeで、この作業の範囲外 |
-| ASan+UBSan build の `ctest -R "serial|runtime|api_defined"` | passed。ASan meshsimでの E2E（`test_fullstack` `test_bridge` `test_usb_serial`）は 21 passed（GROUP_SETのBUSY待ちの競合を直した後） |
-| `pytest host/tests`（unit + integration + E2E、約9分） | 235 passed, **1 failed**: `test_a_revocation_whose_entry_commit_failed_is_never_shown_active`（rootのledger commitの書込み回数が変わり `store-cut 0 2` が発火しなくなった）。cutの位置を `1` に直し、entryの期待を緩めた後は `test_lifecycle_meshsim.py` が 3 passed。**全体の再実行はその後していません** |
-| `build_targets.sh --app example_node`（LEAF）/ `--profile RELAY` / `--profile ROOT` | esp32s3 / c3 / c5 / c6 の全12 build成功（build-records/budget-report.md が同じ12 buildを測る） |
-| `ruff check`（host + 保守するscript） | passed |
-| `check_spec.py`（依存はexact version） | PASS |
+| native `cmake` + build、`ctest -j3` | 27/27 passed |
+| ASan+UBSan build の `ctest -j3` | 26/27 passed、`test_power` がtimeout（3並列 + 他の作業と同時のため）。単独の `ctest -R test_power` は passed（約77 s） |
+| `test_model`（`LM_MODEL_SEEDS=1600` = 1600 seed + 回帰5） | 1605 seeds、0 invariant failures |
+| `pytest host/tests`（unit + integration + E2E、約9分） | 236 passed。初回の1回だけ `test_fix11_root_binding_follows_a_completed_handover_and_nothing_else` が失敗し（並行して編集中のHost側と重なった疑い、原因は未特定）、単独と全体の再実行では passed |
+| `build_targets.sh --app example_node`（esp32c3 の LEAF と ROOT） | 2 build成功。他のSoC・RELAYはこの作業では再buildしていない |
+| `check_spec.py`（後に `git checkout evidence/VALIDATION.json`） | PASS |
 
 **実行していないもの**: flash、実機での起動、RF。`baseline_espnow` と `crypto_link_check` のbuildは今回の実行に含めていません（CIの対象）。

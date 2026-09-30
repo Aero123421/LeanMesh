@@ -136,7 +136,7 @@ class Bridge:
         self._open_events: set[tuple[int, int]] = set()   # (root boot, seq)
         self._ack_top: dict[int, int] = {}                # boot -> highest finished seq
         self._ack_sent: dict[int, int] = {}               # boot -> highest EVENT_ACK the root accepted
-        self._ctl_ops: OrderedDict[int, bytes] = OrderedDict()   # root control-operation number -> Host operation (this boot)
+        self._ctl_ops: OrderedDict[int, tuple[bytes, ...]] = OrderedDict()  # root control-operation number -> Host operations (this boot; a repeated freeze shares its number)
         self._opnum: OrderedDict[bytes, int] = OrderedDict()     # Host operation -> root operation number (this boot)
         self.groups = groups.Groups()          # group operations of this boot and their per-target mirror
         self._cancel_taken: OrderedDict[bytes, None] = OrderedDict()  # operations whose CANCEL the root accepted (idempotent: not repeated)
@@ -298,7 +298,7 @@ class Bridge:
 
     def _forget_boot(self) -> None:
         """Operations known only by a root boot's numbers end as INDETERMINATE (docs/19 §3)."""
-        lost = list(self._ctl_ops.values())
+        lost = [o for ops_ in self._ctl_ops.values() for o in ops_]
         self._ctl_ops.clear()
         self._opnum.clear()
         self._cancel_taken.clear()
@@ -494,7 +494,7 @@ class Bridge:
                 if plan.group:
                     self.groups.track(plan.op, op_number)
             else:
-                _remember(self._ctl_ops, op_number, plan.op) # INSTALL_CONTROL: its end arrives as an OPERATION event
+                _remember(self._ctl_ops, op_number, (*self._ctl_ops.get(op_number, ()), plan.op))  # its end arrives as an OPERATION event
 
         def apply_send(conn: sqlite3.Connection) -> None:
             if status == mapping.OK:
@@ -527,9 +527,13 @@ class Bridge:
             # GET_REQUEST shows the ledger state (_query_join).
             outbox.record(conn, self.cfg, plan.op, state="WAITING_RECEIPT", evidence=ev)
             return
+        # FIX12-D6: a RECALCULATE that was accepted has started the root's survey - that is all it says; the channel it
+        # may choose is reported as channel state, so its evidence is the acceptance, never "applied".
+        kind = "ROOT_ACCEPTED" if plan.typ == "CHANNEL_RECALCULATE" else "ROOT_APPLIED"
         outbox.record(conn, self.cfg, plan.op, state="FINAL", outcome="APPLIED", outbox_state="DONE",
-                      evidence={"kind": "ROOT_APPLIED", "assurance": "SELF_REPORTED",
-                                "observer": info.root.hex()})
+                      evidence={"kind": kind, "assurance": "SELF_REPORTED", "observer": info.root.hex(),
+                                **({"details": {"reason": "survey started; the result is channel state"}}
+                                   if kind == "ROOT_ACCEPTED" else {})})
 
     def _apply_snapshot(self, conn: sqlite3.Connection, op: bytes, snap: dict[str, Any],
                         mid: bytes | None) -> None:
@@ -865,8 +869,8 @@ class Bridge:
                 # evidence is added and the outcome advances by rank (outbox.record); a definite negative stays.
                 self._apply_snapshot(conn, bytes(row[0]), m, mid)
                 return
-            host_op = self._ctl_ops.pop(int(m["operation"]), None) if "operation" in m else None
-            if host_op is not None:  # the end of an accepted control operation (root-local, SELF_REPORTED)
+            for host_op in self._ctl_ops.pop(int(m["operation"]), ()) if "operation" in m else ():
+                # the end of an accepted control operation (root-local, SELF_REPORTED)
                 outcome, kind = mapping.control_outcome(int(m["outcome"]), int(m["reason"]))
                 self._finish(conn, host_op, outcome, "SELF_REPORTED" if outcome != "INDETERMINATE" else "UNKNOWN",
                              kind, status_name(int(m["reason"])), observer=info.root)

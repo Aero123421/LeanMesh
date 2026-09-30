@@ -33,8 +33,11 @@ using Bytes = std::vector<uint8_t>;
 struct GNet {
     // parent[i] < i is the node i hangs under (node 0 is the root). Every non-root node is a provisioned
     // member and is listed ACTIVE by the root's provisioning (SEC-D2; generation 1/1, address = slot + 2).
-    explicit GNet(const std::vector<int> &parents, uint64_t seed = 61)
+    explicit GNet(const std::vector<int> &parents, uint64_t seed = 61, uint8_t delegation_permissions = 15)
         : n(static_cast<unsigned>(parents.size())), net(seed), world(WorldOptions{seed, 0}) {
+        if (delegation_permissions != 15) {
+            net.delegation_cose = net.fleet.delegation(net.root, net.domain, 1, delegation_permissions);
+        }
         std::set<int> has_child;
         for (int p : parents) {
             has_child.insert(p);
@@ -357,6 +360,14 @@ LM_TEST("FIX9-M8 sim: a group set draws its operation id from the root's one con
     LM_CHECK(next == a + 1);
     const uint64_t b = n.group_set(2, 0, {1});
     LM_CHECK(b == next + 1);
+}
+
+// FIX12-D2 (final review N3): group definitions need the groups permission (bit 8) of the root's delegation.
+LM_TEST("FIX12 sim: a delegation without the groups permission defines no group") {
+    GNet n({-1, 0, 0}, 61, 7); // approve | revoke | channel
+    n.boot_all();
+    n.until([&] { return n.eng(0).ledger().ready(); }, 20'000);
+    n.group_set(1, 0, {1, 2}, LM_STATUS_AUTH_REJECTED);
 }
 
 LM_TEST("D11 GS03 sim: registry rules and a snapshot the root does not know") {
@@ -783,6 +794,47 @@ LM_TEST("D11 FIX8 sim: a group set cut by lm_stop ends INDETERMINATE; a pending 
     DeviceId ids[group::k_max_targets];
     const Status sn = n.eng(0).groups().snapshot(9, 1, snap, ids);
     LM_CHECK(sn == Status::Ok || sn == Status::NotFound);
+}
+
+// FIX13-D2 (final review N6): a group operation is an open send. lm_stop(drain) waits for it, a new group send meets
+// the same BUSY barrier as a unicast, and the operation with its per-target outcomes stays queryable after the stop.
+LM_TEST("FIX13-D2 sim: lm_stop(drain) settles a group send, refuses a new one meanwhile, keeps parent and targets") {
+    GNet n({-1, 0});
+    n.form();
+    n.group_set(7, 0, {1});
+    const auto s = n.send(0, 7, 1, LM_APPLIED, Bytes{1});
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    lm_operation_id_t stop = 999;
+    LM_CHECK_EQ(lm_stop(n.ctx(0), 2000, &stop), LM_STATUS_OK);
+    LM_CHECK(stop != 0); // a drain: the group send counts as open
+    LM_CHECK_EQ(n.send(0, 7, 1, LM_APPLIED, Bytes{2}).st, LM_STATUS_BUSY);
+    n.run_ms(2100);
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(0), s.op, &o), LM_STATUS_OK);
+    LM_CHECK_EQ(o.phase, static_cast<uint32_t>(LM_PHASE_FINAL));
+    LM_CHECK(o.outcome != LM_OUTCOME_PENDING);
+    const lm_group_progress_t p = n.progress(0, s.op);
+    LM_CHECK_EQ(p.total, 1u);
+    LM_CHECK_EQ(p.pending, 0u);
+}
+
+LM_TEST("FIX13-D2 sim: lm_stop without drain ends an open group send honestly; the result stays queryable") {
+    GNet n({-1, 0});
+    n.form();
+    n.group_set(7, 0, {1});
+    const auto s = n.send(0, 7, 1, LM_APPLIED, Bytes{1});
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    lm_operation_id_t stop = 0;
+    LM_CHECK_EQ(lm_stop(n.ctx(0), 0, &stop), LM_STATUS_OK);
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(0), s.op, &o), LM_STATUS_OK);
+    LM_CHECK_EQ(o.phase, static_cast<uint32_t>(LM_PHASE_FINAL));
+    // nothing had left the node: an exact cancel; anything that had is INDETERMINATE, never a silent drop
+    LM_CHECK(o.outcome == LM_OUTCOME_CANCELLED_NOT_SENT || o.outcome == LM_OUTCOME_INDETERMINATE);
 }
 
 LM_TEST("serial SEND names a group by a marker value; only that shape is one") {

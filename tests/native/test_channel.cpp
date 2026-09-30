@@ -42,8 +42,11 @@ struct CNet {
     std::vector<fleet::NodeKit> kits;
 
     explicit CNet(unsigned n_nodes, uint64_t seed = 61, bool chain = true, unsigned drift_node = 0, int32_t drift_ppm = 0,
-                  bool channel_module = true)
+                  bool channel_module = true, uint8_t delegation_permissions = 15)
         : n(n_nodes), net(seed), world(WorldOptions{seed + seed_shift(), 0}) {
+        if (delegation_permissions != 15) {
+            net.delegation_cose = net.fleet.delegation(net.root, net.domain, 1, delegation_permissions);
+        }
         for (unsigned i = 0; i < n; ++i) {
             NodeOptions o;
             o.role = i == 0 ? Role::Root : Role::Relay;
@@ -269,6 +272,74 @@ void form(CNet &n, uint64_t limit_ms = 300'000) {
     n.run_ms(5000);
 }
 } // namespace
+
+// FIX12-D2 (final review N3): a plan needs the channel permission (bit 4) of the root's delegation.
+LM_TEST("S17 FIX12 sim: a delegation without the channel permission originates no plan and moves nobody") {
+    CNet n(3, 61, true, 0, 0, true, 3); // approve | revoke only
+    form(n);
+    LM_CHECK_EQ(n.eng(1).identity().delegation().permissions, 3U);
+    LM_CHECK(n.coord().plan_to(11, n.now(0)) == Status::AuthRejected);
+    n.poke();
+    LM_CHECK(!n.until([&] { return n.everyone_on(11, 1); }, 60'000, 50));
+    LM_CHECK_EQ(n.radio(0), 6U);
+    LM_CHECK_EQ(n.radio(1), 6U);
+    LM_CHECK_EQ(n.radio(2), 6U);
+}
+
+// FIX12-D3 (final review N5): a fresh root whose first channel-record write fails before storing anything is not a damaged
+// store: the read-back finds a clean absence and the intended state is written again.
+LM_TEST("S17 FIX12 sim: the first channel record write failing on a fresh root is retried, not stuck") {
+    CNet n(2);
+    form(n);
+    store::RecordJob rec;
+    rec.arm(store::RecordJob::Op::Load, store::rec::channel_plan);
+    LM_CHECK_EQ(store::record_load(n.node(0).store, rec), Status::NotFound);
+    n.node(0).store.arm_cut(n.node(0).store.mutating_ops(), CutMode::Before);
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_channel_request(n.ctx(0), LM_CHANNEL_FREEZE, n.view().policy_revision, &op), LM_STATUS_OK);
+    n.poke();
+    LM_CHECK(n.until([&] { return n.node(0).store.cut_fired(); }, 1000));
+    n.node(0).store.power_restore();
+    LM_CHECK(n.until([&] { return !n.chan(0).unsettled(); }, 30'000));
+    rec.arm(store::RecordJob::Op::Load, store::rec::channel_plan);
+    LM_CHECK_OK(store::record_load(n.node(0).store, rec));
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(0), op, &o), LM_STATUS_OK);
+    LM_CHECK_EQ(o.phase, static_cast<uint32_t>(LM_PHASE_FINAL)); // durable now: the operation ends APPLIED
+    LM_CHECK_EQ(o.outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+}
+
+// FIX12-D5 (final review N7): the operation a freeze returns is queryable while its record is written, ends APPLIED when
+// it is durable, and INDETERMINATE when the node stops before that is known.
+LM_TEST("S17 FIX12 sim: a freeze operation is registered, pending until durable, and settled by a stop") {
+    for (const bool stop_first : {false, true}) {
+        CNet n(2);
+        form(n);
+        n.node(0).jobs.latency_us = 300'000;
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_channel_request(n.ctx(0), LM_CHANNEL_FREEZE, n.view().policy_revision, &op), LM_STATUS_OK);
+        LM_CHECK(op != 0);
+        lm_operation_t o{};
+        o.struct_size = sizeof(o);
+        o.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_get_operation(n.ctx(0), op, &o), LM_STATUS_OK);
+        LM_CHECK(o.phase != static_cast<uint32_t>(LM_PHASE_FINAL));
+        if (stop_first) {
+            lm_operation_id_t stop = 0;
+            LM_CHECK_EQ(lm_stop(n.ctx(0), 0, &stop), LM_STATUS_OK);
+        }
+        n.poke();
+        LM_CHECK(n.until([&] {
+            o = lm_operation_t{};
+            o.struct_size = sizeof(o);
+            o.abi_version = LM_ABI_VERSION;
+            return lm_get_operation(n.ctx(0), op, &o) == LM_STATUS_OK && o.phase == LM_PHASE_FINAL;
+        }, 5000));
+        LM_CHECK_EQ(o.outcome, static_cast<uint32_t>(stop_first ? LM_OUTCOME_INDETERMINATE : LM_OUTCOME_APPLIED));
+    }
+}
 
 LM_TEST("S17 smoke: a three-node chain learns the root clock and moves from channel 6 to 11") {
     CNet n(3);

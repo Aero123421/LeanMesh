@@ -291,6 +291,7 @@ class Delivery {
     // Queue space appeared: re-queue MESSAGE events that did not fit.
     // lm_stop's drain: no new send is accepted while set, and has_open_sends() says when the drain is over.
     void set_draining(bool on) { draining_ = on; }
+    [[nodiscard]] bool draining() const { return draining_; }
     [[nodiscard]] bool has_open_sends() const {
         for (const Op &o : ops_) {
             if (o.used && !o.report && o.phase != Phase::Final) {

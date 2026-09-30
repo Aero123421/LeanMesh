@@ -359,7 +359,7 @@ void Bridge::m_unsupported(Pending &p, uint64_t method, ByteView params) {
         (void)r.array(4, 4);
         (void)r.uint_in(0, k_u32_max);
         (void)r.uint_in(0, ~uint64_t{0});
-        (void)r.uint_in(0, 3);
+        (void)r.uint_in(0, 4); // control.cddl: up to 5 pages (FIX12-D7)
         if (!r.try_null()) {
             (void)r.bstr(16, 16);
         }
@@ -453,7 +453,13 @@ void Bridge::m_channel(Pending &p, ByteView params) {
         return;
     }
     const std::array<uint64_t, 2> rq{action, revision};
-    p.status = run(CommandKind::ChannelRequest, &rq, sizeof(rq)).status;
+    const Reply rep = run(CommandKind::ChannelRequest, &rq, sizeof(rq));
+    p.status = rep.status;
+    if (rep.status == Status::Ok && rep.operation_id != 0) {
+        p.has_op = true; // FIX12-D5: a freeze / unfreeze not yet durable: the OPERATION event ends it
+        p.op = rep.operation_id;
+        p.result = Result::Ack;
+    }
 }
 
 } // namespace lm::serial

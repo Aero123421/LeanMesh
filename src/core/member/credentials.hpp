@@ -35,6 +35,8 @@ inline constexpr uint8_t k_type_root_handover = 31;        // [S18]
 // RootDelegation permission bits (control.cddl note 2).
 inline constexpr uint8_t k_perm_approve = 1;
 inline constexpr uint8_t k_perm_revoke = 2;
+inline constexpr uint8_t k_perm_channel = 4; // FIX12-D2: channel plans (originated by the root, accepted by members)
+inline constexpr uint8_t k_perm_groups = 8;  // FIX12-D2: group definitions and their signed snapshots
 
 inline constexpr std::size_t k_max_device_cose = 448;
 inline constexpr std::size_t k_max_member_cose = 384;

@@ -156,8 +156,9 @@ void Fanout::on_page(ByteView cose, MonoTime now) {
     member::Envelope env;
     ByteView data;
     const member::LocalIdentity &id = engine_.identity();
-    if (member::peek_signed(cose, k_type_snapshot, env, data) != Status::Ok || env.issuer != id.delegation().root) {
-        return; // only the root serves snapshots
+    if (member::peek_signed(cose, k_type_snapshot, env, data) != Status::Ok || env.issuer != id.delegation().root ||
+        (id.delegation().permissions & member::k_perm_groups) == 0) {
+        return; // only the root serves snapshots, and only one whose delegation carries the groups permission (FIX12-D2)
     }
     Op *g = nullptr;
     for (Op &x : ops_) {
@@ -312,7 +313,7 @@ void Fanout::serve(const DeviceId &origin, const wire::ControlBody &b, MonoTime 
 }
 
 void Fanout::sign_page(Op &s, unsigned page, const std::array<uint8_t, 16> &req, MonoTime now) {
-    if (job_ != Job::None) {
+    if (job_ != Job::None || (engine_.identity().delegation().permissions & member::k_perm_groups) == 0) {
         return; // the origin repeats its request
     }
     scratch_ = engine_.link().exchange().lend_scratch();

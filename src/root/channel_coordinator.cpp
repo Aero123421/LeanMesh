@@ -220,7 +220,7 @@ Reply Coordinator::request(uint32_t action, uint64_t expected_revision, MonoTime
         changed(now);
         return Reply{Status::Ok, freeze_op_, 0}; // applied now; durable when LM_EVENT_OPERATION(freeze_op_) arrives (FIX10-D9)
     }
-    return Reply{Status::Ok, 0, 0};
+    return Reply{Status::Ok, freeze_op_, 0}; // no change: still the pending operation of the state asked for, if any
 }
 
 // A record write finished (owner thread). The freeze is durable when a write that began after it was set succeeded.
@@ -233,6 +233,9 @@ void Coordinator::on_written(uint32_t seq, bool ok, MonoTime) {
 
 // ---- plans ---------------------------------------------------------------------------------------------
 Status Coordinator::begin_plan(uint8_t new_ch, MonoTime now) {
+    if ((engine_.identity().delegation().permissions & member::k_perm_channel) == 0) {
+        return Status::AuthRejected; // FIX12-D2: the delegation carries no channel permission: no plan is originated
+    }
     channel::Channel &ch = engine_.chan();
     if (!ch.loaded() || ch.committed() || ch.have_plan()) {
         return Status::Busy;
@@ -945,7 +948,10 @@ void Coordinator::stop() {
     plan_ = channel::Plan{};
     deg_ = {};
     aborted_local_ = false;
-    freeze_op_ = 0;
+    if (freeze_op_ != 0) { // FIX12-D5: its record write is not known to have landed: INDETERMINATE (the next start reads the record)
+        engine_.emit_event(LM_EVENT_OPERATION, static_cast<uint32_t>(Status::RecoveryRequired), freeze_op_, nullptr);
+        freeze_op_ = 0;
+    }
     rec_since_ = abort_since_ = MonoTime::never();
 }
 

@@ -176,7 +176,9 @@ class Fanout {
     Fanout &operator=(const Fanout &) = delete;
 
     void install();  // hooks into Delivery (once, from the Engine constructor)
-    void stop();     // operations, payload buffers and the snapshots served
+    void stop();     // payload buffers and the snapshots served; finished operations stay queryable
+    void end_for_stop(MonoTime now);                // lm_stop: every open operation ends with per-target outcomes
+    [[nodiscard]] bool has_open() const;            // an operation that is not final (lm_stop's drain waits for it)
     void on_timer(MonoTime now);
     [[nodiscard]] MonoTime deadline() const;
     void on_job_done(Handle slot, Status s, MonoTime now);

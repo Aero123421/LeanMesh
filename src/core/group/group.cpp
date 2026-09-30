@@ -52,10 +52,61 @@ void Fanout::install() {
         this);
 }
 
+// A finished operation and its per-target outcomes stay queryable across the stop (like Delivery's finished operations);
+// what is not final has been ended by end_for_stop() before, so nothing here is open.
 void Fanout::stop() {
     for (Op &g : ops_) {
         free_payload(g);
-        reset_op(g);
+        if (g.kind == Op::Kind::Own && g.st == Op::St::Final) {
+            g.live = 0;
+        } else {
+            reset_op(g);
+        }
+    }
+}
+
+bool Fanout::has_open() const {
+    for (const Op &g : ops_) {
+        if (g.kind == Op::Kind::Own && g.st != Op::St::Final) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// lm_stop does not wait: a target whose child never left is cancelled exactly; one that may have left ends
+// INDETERMINATE; none is dropped silently (docs/10, FIX9-D4 for groups).
+void Fanout::end_for_stop(MonoTime now) {
+    for (Op &g : ops_) {
+        if (g.kind != Op::Kind::Own || g.st == Op::St::Final) {
+            continue;
+        }
+        g.cancelled = true;
+        if (g.st == Op::St::Fetching) {
+            g.outcome = LM_OUTCOME_CANCELLED_NOT_SENT;
+            end(g);
+            continue;
+        }
+        for (std::size_t i = 0; i < g.total; ++i) {
+            DeviceId dev;
+            if (g.t[i].phase == LM_TARGET_FINAL) {
+                continue;
+            }
+            if (g.t[i].live == 0) {
+                settle(g, i, LM_OUTCOME_CANCELLED_NOT_SENT, 0);
+            } else if (device_at(g, i, dev)) {
+                (void)engine_.delivery().cancel_child(dev, mid_of(g, i, g.t[i].attempt), now); // exact only if it never left
+            }
+        }
+        for (std::size_t i = 0; i < g.total; ++i) {
+            if (g.t[i].phase != LM_TARGET_FINAL) {
+                g.t[i].live = 0;
+                settle(g, i, LM_OUTCOME_INDETERMINATE, static_cast<uint32_t>(Status::CancelTooLate));
+            }
+        }
+        g.live = 0;
+        aggregate(g);
+        end(g);
     }
 }
 
@@ -176,8 +227,8 @@ Reply Fanout::send(const lm_send_request_t &rq, ByteView payload, const delivery
     if (!engine_.identity().is_member()) {
         return reply(Status::AuthPending);
     }
-    if (!dv.ready()) {
-        return reply(Status::Busy);
+    if (!dv.ready() || dv.draining()) {
+        return reply(Status::Busy); // FIX13-D2: the drain barrier of unicast sends holds for groups too
     }
     if (rq.reserved != 0 || rq.reserved2 != 0 || rq.delivery > LM_APPLIED || rq.priority >= LM_PRIORITY_CONTROL ||
         rq.strict_single_frame > 1 || rq.app_port == 0 || rq.app_port > 65534 || rq.destination.group_id == 0 ||

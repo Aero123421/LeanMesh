@@ -38,6 +38,14 @@ class SimRadio final : public port::Radio {
 
     [[nodiscard]] Status start(const port::RfProfile &profile) override;
     [[nodiscard]] Status stop() override;
+    // The IDF model: held = the "callback" queues nothing. `stage_late_rx` is a test hook for the race window between
+    // the owner's last drain and the hold: that frame is queued at the instant hold_rx() is called (FIX13-D3).
+    void hold_rx() override;
+    void release_rx() override { held_ = false; }
+    void stage_late_rx(const port::RadioEvent &ev) {
+        late_ = ev;
+        late_pending_ = true;
+    }
     [[nodiscard]] Status set_channel(uint8_t channel) override;
     [[nodiscard]] Status add_peer(const MacAddr &mac) override;
     [[nodiscard]] Status remove_peer(const MacAddr &mac) override;
@@ -79,6 +87,9 @@ class SimRadio final : public port::Radio {
     uint16_t node_;
     MacAddr mac_;
     bool on_ = false;
+    bool held_ = false;
+    bool late_pending_ = false;
+    port::RadioEvent late_{};
     bool tx_in_flight_ = false;
     uint8_t channel_ = 0;
     uint16_t allowed_mask_ = 0;

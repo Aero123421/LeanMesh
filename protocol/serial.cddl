@@ -16,7 +16,7 @@ join-decide = [pending-request: id16, device: id32, credential-hash: id32,
  decision: 0..1, expected-revision: u64]
 install = [control-type: u32, signed-object: bstr .size (1..4096)]
 node-query = [device: id32 / nil]
-group-query = [group-id: u32, revision: u64, page: 0..3, snapshot-token: id16 / nil]
+group-query = [group-id: u32, revision: u64, page: 0..4, snapshot-token: id16 / nil]
 host-ack = [origin: id32, assignment: u64, message: id16, intent-hash: id32,
  journal-id: id16, committed-sequence: u64]
 event-ack = [gateway-boot: u64, consumed-sequence: u64]

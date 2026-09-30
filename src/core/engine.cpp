@@ -92,7 +92,7 @@ void Engine::wire_join_hooks() {
         // nothing installed them: DRAIN acted as IMMEDIATE and open sends stayed PENDING for ever.
         member::MembershipHooks m;
         m.ctx = this;
-        m.drained = [](void *c) { return !static_cast<Engine *>(c)->delivery_.has_open_sends(); };
+        m.drained = [](void *c) { return !static_cast<Engine *>(c)->sends_open(); };
         m.refuse_sends = [](void *c, bool on) {
             Engine &e = *static_cast<Engine *>(c);
             e.delivery_.set_draining(on || e.draining_);
@@ -554,7 +554,7 @@ Reply Engine::begin_stop(uint32_t drain_ms, MonoTime now) {
     if (draining_) {
         return Reply{Status::Ok, stop_op_, 0}; // repeated: the same drain, its deadline unchanged
     }
-    if (radio_state_ == RadioState::Stopped || drain_ms == 0 || !delivery_.has_open_sends()) {
+    if (radio_state_ == RadioState::Stopped || drain_ms == 0 || !sends_open()) {
         return stop_radio();
     }
     draining_ = true;
@@ -565,8 +565,10 @@ Reply Engine::begin_stop(uint32_t drain_ms, MonoTime now) {
     return Reply{Status::Ok, stop_op_, 0};
 }
 
+bool Engine::sends_open() const { return delivery_.has_open_sends() || group_.has_open(); }
+
 void Engine::drain_step(MonoTime now) {
-    if (draining_ && (!delivery_.has_open_sends() || now >= drain_until_)) {
+    if (draining_ && (!sends_open() || now >= drain_until_)) {
         (void)stop_radio(); // what is still open at the deadline is ended INDETERMINATE there
     }
 }
@@ -575,11 +577,12 @@ Reply Engine::stop_radio() {
     if (radio_state_ == RadioState::Stopped) {
         return Reply{Status::Ok, 0, 0};
     }
-    const bool drained = draining_ && !delivery_.has_open_sends();
+    const bool drained = draining_ && !sends_open();
     // Open sends are ended honestly below (a drain has already given them its time).
     if (serial_ != nullptr) {
         serial_->on_stop(); // [SLICE:S10] the USB session and its secrets go before the identity key
     }
+    group_.end_for_stop(step_now_); // FIX13-D2: group operations and their targets end with a result before the pools go
     delivery_.end_pending_for_stop(step_now_); // FIX9-D4: no open send disappears without its final event
     coord_.stop(); // [SLICE:S17]
     chan_.stop();
@@ -760,7 +763,14 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
             return Reply{Status::InvalidArgument, 0, 0};
         }
         // Only the root plans: another role answers as an image without the coordinator does (P8: it has no ledger).
-        return is_root() ? coord_.request(static_cast<uint32_t>((*rq)[0]), (*rq)[1], now) : Reply{Status::Unsupported, 0, 0};
+        if (!is_root()) {
+            return Reply{Status::Unsupported, 0, 0};
+        }
+        const Reply r = coord_.request(static_cast<uint32_t>((*rq)[0]), (*rq)[1], now);
+        if (r.status == Status::Ok && (r.operation_id & member::k_op_tag) != 0) {
+            note_ctl_op(r.operation_id, false, LM_OUTCOME_PENDING, 0); // FIX12-D5: queryable until the record is durable
+        }
+        return r;
     }
     case CommandKind::GetMessage: { // [SLICE:S15] the Host's group send is found by its MessageId, too
         const Reply r = delivery_.execute(cmd, now);

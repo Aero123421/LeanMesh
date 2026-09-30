@@ -543,6 +543,8 @@ def test_serial_methods_1_to_15_answer_typed_results_or_unsupported(
         assert raw.call(13, [req_id])[0] == NOT_FOUND
         # Methods of modules that have not landed: well-formed = UNSUPPORTED, malformed = INVALID_ARGUMENT.
         assert raw.call(8, [1, 0, 0, None])[0] == UNSUP and raw.call(8, [1])[0] == INVALID
+        # FIX12-D7: the page bound is control.cddl's 0..4 (five pages), not 0..3
+        assert raw.call(8, [1, 0, 4, None])[0] == UNSUP and raw.call(8, [1, 0, 5, None])[0] == INVALID
         # CHANNEL_ACTION (S17) is a compare-and-set on the root's policy revision: freeze at revision 0 is accepted, the
         # same revision again is stale, an action above 2 is malformed.
         assert raw.call(11, [1, 0])[0] == 0 and raw.call(11, [1, 0])[0] == CONFLICT and raw.call(11, [3, 0])[0] == INVALID

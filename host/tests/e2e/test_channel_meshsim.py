@@ -126,7 +126,8 @@ def test_host_channel_endpoint_mirrors_the_root_and_controls_reach_the_coordinat
     # RECALCULATE: the root starts its evaluation; the Host learns it from the root's CHANNEL event.
     op = _control(b, "CHANNEL_RECALCULATE", "0")
     done = _final(b, op)
-    assert done["outcome"] == "APPLIED" and "ROOT_APPLIED" in {e["kind"] for e in done["evidence"]}
+    kinds = {e["kind"] for e in done["evidence"]}  # FIX12-D6: the survey started; nothing was applied
+    assert done["outcome"] == "APPLIED" and "ROOT_ACCEPTED" in kinds and "ROOT_APPLIED" not in kinds
     wait_for(lambda: b.get("/v1/channel", domain_id=b.domain)["state"] == "SURVEY", 20, "SURVEY reported")
     # FREEZE while surveying: the measurement is dropped, no plan follows.
     done = _final(b, _control(b, "CHANNEL_FREEZE", "0", freeze=True))

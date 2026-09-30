@@ -2686,3 +2686,30 @@ LM_TEST("R09 FIX8 sim: a slot whose commit result is unknown keeps the floor of 
 }
 
 int main(int argc, char **argv) { return lmtest::run_all(argc, argv); }
+
+// FIX12-D1 (final review N1): the same revocation object installed again after its commit failed must not answer OK
+// from the fail-closed RAM alone; only a durable entry is an idempotent success (a restart would authorize it again).
+LM_TEST("S06 FIX12 sim: a revocation whose commit failed is not reported applied by a retry until it is durable") {
+    LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}, Spec{Role::Leaf}}, 79);
+    star(n);
+    for (unsigned i = 0; i < 4; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    SimStore &st = n.node(0).store;
+    const uint16_t rec1 = static_cast<uint16_t>(root::k_rec_ledger_base + 0);
+    const Bytes rv = fleet::issue_root_revoke(n.kits[0].kit, n.net.domain, n.id(1), 2, 2);
+    st.arm_cut(st.mutating_ops(), CutMode::Before);
+    LM_CHECK_EQ(n.install_result(0, 11, rv), static_cast<uint32_t>(LM_STATUS_RECOVERY_REQUIRED));
+    LM_CHECK(st.cut_fired());
+    LM_CHECK_EQ(n.install_result(0, 11, rv), static_cast<uint32_t>(LM_STATUS_RECOVERY_REQUIRED)); // store still dead
+    n.node(0).power_cut();
+    st.power_restore();
+    LM_CHECK(stored_state(st, rec1) == static_cast<int>(root::EntryState::Active)); // what a restart would see
+    n.boot(0);
+    LM_CHECK(n.until([&] { return n.eng(0).ledger().ready(); }, 5000));
+    LM_CHECK(n.eng(0).ledger().find(n.id(1))->state == root::EntryState::Active);
+    LM_CHECK_EQ(n.install_result(0, 11, rv), 0u); // now durable: OK, and it stays blocked after a restart
+    LM_CHECK(stored_state(st, rec1) == static_cast<int>(root::EntryState::Blocked));
+    LM_CHECK_EQ(n.install_result(0, 11, rv), 0u); // idempotent once durable
+}

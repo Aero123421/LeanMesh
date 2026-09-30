@@ -27,6 +27,9 @@ Status Groups::set(const group::SetRequest &rq, uint64_t &operation, MonoTime no
     if (engine_.config().role != Role::Root) {
         return Status::RoleNotAllowed; // (and a node of another role holds no ledger: P8)
     }
+    if ((engine_.identity().delegation().permissions & member::k_perm_groups) == 0) {
+        return Status::AuthRejected; // FIX12-D2: this root's delegation carries no groups permission
+    }
     LM_TRY(usable());
     if (pending_) {
         return Status::Busy; // one definition is committed at a time (FIX8-D10)

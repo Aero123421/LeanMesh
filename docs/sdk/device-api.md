@@ -28,7 +28,7 @@ lm_status_t app_init(lm_context_t **out) {
 
 lm_status_t app_shutdown(lm_context_t *ctx) {
   lm_operation_id_t drain = 0;
-  lm_status_t st = lm_stop(ctx, 2000, &drain);        /* drain==0: stopは呼出し内で完了（drain_msは待たない）。未完了の送信は各々最終OPERATION eventで終わる */
+  lm_status_t st = lm_stop(ctx, 2000, &drain);        /* drain==0: stopは呼出し内で完了（drain_msは待たない）。未完了の送信は各々最終OPERATION eventで終わる。group送信も同じ（対象ごとの結果を保持し、停止後もlm_get_operation/lm_group_progressで読める）。永続化中の永続送信はINDETERMINATE（再起動後に復元されて送られうる） */
   if (st != LM_STATUS_OK) return st;
   return lm_destroy(ctx);                             /* stop後のみ。ctxとworkspaceはここまで有効 */
 }

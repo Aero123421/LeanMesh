@@ -273,6 +273,15 @@ void Channel::persisted(Status s, MonoTime now) {
 // and is followed as if the write had been reported Ok (receipt included); anything else leaves memory as it was and
 // the state is written again.
 void Channel::reloaded(Status s, MonoTime now) {
+    if (s == Status::NotFound) {
+        // FIX12-D3: a clean absence (a fresh root's first write failed before it stored anything) is not a damaged
+        // store: nothing durable is ahead of memory, so memory is written again as it is.
+        engine_.identity().return_record(rec_);
+        uncertain_ = false;
+        dirty_ = true;
+        kick(now);
+        return;
+    }
     if (s != Status::Ok) {
         engine_.identity().return_record(rec_); // still unreadable: nothing is written meanwhile, ask again later
         retry_at_ = now + Duration::from_s(1);
@@ -1014,13 +1023,15 @@ void Channel::on_record(const DeviceId &peer, const delivery::PathSpec &reply_pa
     if (peer != engine_.identity().delegation().root) {
         return; // only the root plans, measures and answers the time
     }
+    // FIX12-D2: a plan moves this node; it follows only a root whose delegation carries the channel permission.
+    const bool may_plan = (engine_.identity().delegation().permissions & member::k_perm_channel) != 0;
     PlanRec plan;
     TimeResp tr;
     Survey sv;
     switch (op_of(body)) {
     case Op::Plan:
         // busy: the root asks again - except for an ABORT, which it sends once (the module repeats it itself, FIX10-D1)
-        if (decode(body, plan) == Status::Ok && (job_ == Job::None || plan.phase == Phase::Abort)) {
+        if (may_plan && decode(body, plan) == Status::Ok && (job_ == Job::None || plan.phase == Phase::Abort)) {
             on_plan(plan, false, now);
         }
         break;

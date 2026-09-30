@@ -222,6 +222,7 @@ class Engine {
     // stop_radio() ends what is left INDETERMINATE. The stop itself is a retained control operation.
     Reply begin_stop(uint32_t drain_ms, MonoTime now);
     void drain_step(MonoTime now);
+    [[nodiscard]] bool sends_open() const; // unicast sends and group operations (FIX13-D2)
     // Retained status of control operations (lifecycle installs, leave, group sets, stop): lm_get_operation answers
     // them after their event was taken (FIX9-D9). Bounded; the oldest finished record makes room.
     struct CtlOp {

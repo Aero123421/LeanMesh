@@ -29,6 +29,8 @@ class IdfOwner;
 
 class IdfRadio final : public port::Radio {
   public:
+    void hold_rx() override { rx_held_.store(true); }
+    void release_rx() override { rx_held_.store(false); }
     // RX ring: profile rx_frames plus two (leaf 10, relay 14, root 26 frames).
     static constexpr std::size_t k_rx_ring = k_build_limits.rx_frames + 2;
 
@@ -63,6 +65,7 @@ class IdfRadio final : public port::Radio {
     int16_t tx_power_qdbm_ = 0;
     uint32_t generation_ = 0;
     std::atomic<bool> in_flight_{false};
+    std::atomic<bool> rx_held_{false}; // sleep entry: the recv callback queues nothing more (FIX13-D3)
     port::TxToken pending_token_;
     uint64_t tx_started_us_ = 0;
     SpscRing<port::RadioRx, k_rx_ring> rx_ring_;

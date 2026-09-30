@@ -50,7 +50,7 @@ class Fleet {
 
     Kit device(uint32_t index, const std::string &serial, uint64_t generation = 1);
     Bytes delegation(const Kit &root, const DomainId &domain, uint64_t generation = 1,
-                     uint8_t permissions = 3);
+                     uint8_t permissions = 15); // approve | revoke | channel | groups (FIX12-D2)
     Bytes revoke(const DeviceId &device, uint64_t assignment_floor, uint64_t membership_floor,
                  uint64_t revision = 1);
     // mode 1: a preissued one-time grant (the nonce field is filler); mode 0: bound to the device's fresh nonce.

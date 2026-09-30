@@ -158,6 +158,7 @@ Status IdfRadio::start(const port::RfProfile &profile) {
         now_ready_ = esp_now_deinit() != ESP_OK;
         return Status::RecoveryRequired;
     }
+    rx_held_.store(false);
     now_ready_ = true;
     return Status::Ok;
 }
@@ -270,8 +271,8 @@ bool IdfRadio::poll(port::RadioEvent &out) {
 
 void IdfRadio::on_recv(const uint8_t *src, const uint8_t *dst, int8_t rssi, const uint8_t *data,
                        int len) {
-    if (len <= 0 || static_cast<std::size_t>(len) > port::k_max_frame_bytes) {
-        return; // not a frame this SDK can have produced (250 B self-limit)
+    if (rx_held_.load() || len <= 0 || static_cast<std::size_t>(len) > port::k_max_frame_bytes) {
+        return; // held for the sleep entry (never acknowledged: the sender repeats it), or not a frame this SDK can have produced (250 B self-limit)
     }
     port::RadioRx rx;
     rx.src = to_mac(src);

@@ -350,7 +350,10 @@ void Ledger::lc_listed(std::size_t slot, uint64_t af, uint64_t mf, MonoTime now)
     if (e.state != EntryState::Blocked && (cut || (holds_credential && folded))) {
         x.state = e.state == EntryState::Left && lc_.to == EntryState::Left ? EntryState::Left : lc_.to;
     }
-    if (x.state == e.state && !folded) {
+    // FIX12-D1: an unchanged entry is an idempotent success only when its record is durable; one in doubt (an earlier
+    // commit of this revocation failed, RAM alone refuses it) is committed again and answers by that commit.
+    const bool in_doubt = (doubt_ >> slot & 1U) != 0 && !holds_credential;
+    if (x.state == e.state && !folded && !in_doubt) {
         lc_finish(Status::Ok, now); // generations it no longer holds (or the same object again): nothing more
         return;
     }

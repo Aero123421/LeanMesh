@@ -1999,4 +1999,31 @@ LM_TEST("FIX9-M9 sim: a DURABLE APPLIED message to the Host is END_RECEIVED only
     host_gated_end_received(LM_APPLIED, LM_DURABLE);
 }
 
+LM_TEST("FIX13-D1 sim: lm_stop during a submitted durable Put is INDETERMINATE (the record survives and is sent after the restart)") {
+    DNet n(2);
+    n.set_time();
+    n.node(1).jobs.latency_us = 300000;
+    const auto s = n.send(1, 0, LM_RECEIVED, LM_DURABLE, Bytes{0xAB}, 0);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    LM_CHECK(n.dv(1).job_pending());
+    LM_CHECK((n.op(1, s.op).evidence_bits & persisted) == 0);
+    lm_operation_id_t stop = 0;
+    LM_CHECK_EQ(lm_stop(n.ctx(1), 0, &stop), LM_STATUS_OK);
+    const auto told = n.op(1, s.op).outcome;
+    n.run_ms(1000); // the already submitted Put completes after the stop
+    n.node(1).jobs.latency_us = 2000;
+    LM_CHECK_EQ(lm_start(n.ctx(1)), LM_STATUS_OK);
+    n.node(1).notify();
+    n.run_ms(200);
+    const auto live = n.dv(1).durable().live_count();
+    relink(n, 1);
+    n.routes(1, 0);
+    n.set_time_at(1, 1);
+    Received m;
+    const bool got = n.until([&] { return n.pop(0, m, LM_EVENT_MESSAGE); }, 15000);
+    LM_CHECK(got); // the record was written and delivered ...
+    LM_CHECK_EQ(live, 1u);
+    LM_CHECK_EQ(told, LM_OUTCOME_INDETERMINATE); // ... so the stop must not have promised "cancelled, not sent"
+}
+
 LM_TEST_MAIN()

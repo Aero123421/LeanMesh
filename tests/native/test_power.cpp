@@ -1733,7 +1733,9 @@ LM_TEST("H9b sim: REPORT_ONLY deep sleeper, 12 s search policy (report_long), mi
 
 
 // FIX10-A6 (astra on 8668c69)
-LM_TEST("FIX10-A6 sim: authenticated DATA queued in the radio after the ticket makes lm_sleep_enter STALE; the frame is delivered, not dropped") {
+// late = false: queued before the command (FIX10-D8). late = true (FIX13-D3, astra N4): the "callback" enqueues after the
+// drain and the ticket check, at the instant the radio is held for the sleep - the ticket must go stale, not the frame.
+static void a6_case(bool late) {
     PNet n({Spec{},Spec{Role::Relay},Spec{Role::Leaf}}); n.form();
     auto s=n.send(1,2,LM_RECEIVED,payload_of(3),30000);
     LM_CHECK_EQ(s.st,LM_STATUS_OK);
@@ -1756,13 +1758,14 @@ LM_TEST("FIX10-A6 sim: authenticated DATA queued in the radio after the ticket m
     std::memcpy(plain.data()+plen,rec.data(),rlen);
     link::SealedFrame f;LM_CHECK_OK(n.eng(1).link().seal(n.id(2),wire::FrameKind::Data,ByteView{plain.data(),plen+rlen},f,n.node(1).clock.now()));
     port::RadioEvent ev{};ev.rx.src=n.node(1).radio.mac();ev.rx.at=n.node(2).clock.now();ev.rx.len=static_cast<uint8_t>(f.view().size());
-    std::memcpy(ev.rx.bytes.data(),f.view().data(),f.view().size());n.node(2).radio.deliver(ev);
-    LM_CHECK_EQ(n.node(2).radio.rx_depth(),1u);
+    std::memcpy(ev.rx.bytes.data(),f.view().data(),f.view().size());if(late){n.node(2).radio.stage_late_rx(ev);}else{n.node(2).radio.deliver(ev);LM_CHECK_EQ(n.node(2).radio.rx_depth(),1u);}
     const auto status=lm_sleep_enter(n.ctx(2),&t);
     LM_CHECK_EQ(status,LM_STATUS_SLEEP_TICKET_STALE);LM_CHECK(!n.asleep(2));
-    LM_CHECK_EQ(n.node(2).radio.rx_depth(),0u); // handled by the ordinary receive path before the ticket was judged
-    Bytes late; LM_CHECK(n.until([&]{return n.pop_message(2,late);},2000)); // the frame reached the application
+    LM_CHECK_EQ(n.node(2).radio.rx_depth(),0u); // handled by the ordinary receive path before the ticket was judged / the sleep
+    Bytes got; LM_CHECK(n.until([&]{return n.pop_message(2,got);},2000)); // the frame reached the application
 }
+LM_TEST("FIX10-A6 sim: authenticated DATA queued in the radio after the ticket makes lm_sleep_enter STALE; the frame is delivered, not dropped") { a6_case(false); }
+LM_TEST("FIX13-D3 sim: authenticated DATA queued between the sleep validation and the radio stop makes the ticket stale; the radio keeps running and the frame is delivered") { a6_case(true); }
 
 // ---- FIX10-M12: tests that must fail when the property they name is broken (mutation-checked) --------------------
 

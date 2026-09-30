@@ -84,7 +84,7 @@ heap最小値・stack余裕・CPU・airtime・energyは実機測定が必要で�
 
 | 項目 | 状態 |
 |---|---|
-| CI（GitHub Actions）でのgreen | **未記録**。`8668c69` までの直近pushは赤（ASan E2Eの待ち条件の競合ほか）。FIX11で修正したが、修正後のtreeで走ったrunはまだ無い。green runのidをここへ記録するまで、CIでの検証済みを主張しない |
+| CI（GitHub Actions）でのgreen | commit `57a2b66` の直近のgreen run: https://github.com/Aero123421/LeanMesh/actions/runs/36707722886（その時点で最新。以降のcommitのCIは別に確認する。CIはsim/hostの範囲で、実機の合格ではない）。`8668c69` までのpushは赤だった |
 | C++の整形・静的解析（clang-format / clang-tidy） | **gateにしていない**。設定はあるがtreeが従っておらず（指摘が数千件）、CIは走らせない |
 | RF（距離、20 hop実機、channel切替の実網、共存、RSSI） | **未実施**。simはRFモデルを持たない |
 | HIL（4 SoCでの実動作、USB実機、Wi-Fi LR250、ESP-NOWのpeer/ACK挙動） | **未実施**。firmwareは4 SoCで**buildだけ**確認 |

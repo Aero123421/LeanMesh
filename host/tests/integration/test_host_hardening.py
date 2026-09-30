@@ -595,7 +595,7 @@ def test_fix11_root_binding_follows_a_completed_handover_and_nothing_else(tmp_pa
                                     "request_id": os.urandom(16).hex(), "signed_cbor_b64": handover}, "ho").json()["id"]
         raw = bytes.fromhex(op)
         h.db(lambda c: outbox.claim(c, h.hub.cfg, b"i" * 16))
-        b._ctl_ops[9] = raw
+        b._ctl_ops[9] = (raw,)
         asyncio.run(b._on_operation_event({"operation": 9, "phase": 3, "outcome": 2, "reason": 0, "evidence_bits": 0}))
         assert view(h, op)["outcome"] == "APPLIED"
         assert bind(stranger) is False  # only the named new root

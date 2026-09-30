@@ -135,7 +135,7 @@ LM_TEST("S07 chain: DeviceCredential, RootDelegation and MemberCredential verify
     LM_CHECK(dc.device == e.node.kit.id && dc.fleet == e.trust().fleet && dc.generation == 1);
     LM_CHECK_EQ(dc.serial_len, e.node.kit.serial.size());
     const RootDelegation d = e.delegation();
-    LM_CHECK(d.root == e.net.root.id && d.domain == e.net.domain && d.permissions == 3);
+    LM_CHECK(d.root == e.net.root.id && d.domain == e.net.domain && d.permissions == 15);
     MemberCredential mc;
     LM_CHECK_OK(check_member_credential(d, view(e.node.member_cose), mc));
     LM_CHECK_OK(check_binding(dc, view(e.node.kit.device_cose), mc));

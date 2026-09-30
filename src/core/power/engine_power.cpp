@@ -13,7 +13,19 @@ Status Engine::radio_sleep() {
     if (radio_state_ != RadioState::Running) {
         return Status::Busy; // starting, recovering or failed: there is no driver state to put to sleep
     }
+    // FIX13-D3: quiesce the RX producer, then take what the callback queued up to now through the ordinary receive path.
+    // Anything there changes the node's state (a frame after the ticket was validated): the sleep is refused and the
+    // radio goes on; the caller's ticket is spent (Power::enter/begin_sleep report SLEEP_TICKET_STALE).
+    ports_.radio.hold_rx();
+    port::RadioEvent late;
+    if (ports_.radio.poll(late)) {
+        on_radio_event(late, step_now_);
+        (void)drain_radio(step_now_);
+        ports_.radio.release_rx();
+        return Status::SleepTicketStale;
+    }
     if (const Status s = ports_.radio.stop(); s != Status::Ok) {
+        ports_.radio.release_rx();
         enter_fault(); // a driver that cannot be stopped may still call back: like a failed lm_stop
         return s;
     }

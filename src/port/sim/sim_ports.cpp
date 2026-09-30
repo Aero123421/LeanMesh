@@ -32,7 +32,16 @@ Status SimRadio::start(const port::RfProfile &profile) {
     tx_in_flight_ = false;
     peer_count_ = 0; // a driver (re)initialisation starts with an empty peer table
     on_ = true;
+    held_ = false;
     return Status::Ok;
+}
+
+void SimRadio::hold_rx() {
+    if (late_pending_ && on_) { // a callback that ran just before the flag
+        (void)ring_.push(late_.rx);
+    }
+    late_pending_ = false;
+    held_ = true;
 }
 
 Status SimRadio::stop() {
@@ -135,7 +144,7 @@ void SimRadio::deliver(const port::RadioEvent &ev) {
             tx_in_flight_ = false;
         }
         (void)done_ring_.push(ev.done);
-    } else if (on_) {
+    } else if (on_ && !held_) {
         (void)ring_.push(ev.rx); // overflow is counted by the ring (rx_dropped)
     }
 }
