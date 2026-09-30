@@ -2,6 +2,8 @@
 
 ESP32-S3 / C3 / C5 / C6 向けの汎用長距離Mesh（ESP-NOW + Wi-Fi LR）SDKの**使い方**です。仕様そのものは [docs/01〜23](../../README.md)（正本）で、このディレクトリは仕様を書き換えません。
 
+![LeanMesh mesh](../assets/leanmesh-mesh.svg)
+
 ## SDKとは / でないもの
 
 - C11 の公開API（[api/leanmesh.h](../../api/leanmesh.h)、ABI 2）と、その下の単一ownerのcore、ESP-IDF port、root用USB bridge。
