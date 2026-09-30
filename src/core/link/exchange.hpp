@@ -500,7 +500,6 @@ class Exchange {
     sec::HsStep hs_step_ = sec::HsStep::None;
     Handle handle_; // identity of this exchange for jobs and routed frames
     uint32_t handle_gen_ = 0;
-    bool cancelled_ = false;
 
     // peer object reassembly (in order) and the verified credentials
     std::array<uint8_t, member::k_max_bundle> rx_{};

@@ -21,6 +21,38 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
         std::memcpy(cmd.response, &out, sizeof(out));
         return Reply{Status::Ok, 0, 0};
     }
+    case CommandKind::ConnectivityGet: { // docs/07: independent of the membership state (ACTIVE+ISOLATED is normal)
+        if (cmd.response == nullptr || cmd.response_size != sizeof(lm_connectivity_t)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        lm_connectivity_t out{};
+        out.struct_size = sizeof(out);
+        out.abi_version = LM_ABI_VERSION;
+        if (ident_.is_member()) {
+            if (power_.state() == power::Power::State::Sleeping) {
+                out.state = LM_SLEEPING;
+            } else {
+                out.state = mesh_.connectivity(now);
+            }
+            out.validity_bits = LM_CONNECTIVITY_VALID_STATE;
+            if (out.state == LM_ISOLATED || out.state == LM_DEGRADED) {
+                out.reason = static_cast<uint32_t>(Status::NoRoute);
+            }
+            if (mesh_.state() == route::Mesh::State::Ready) {
+                out.state_since_mono_ms = mesh_.ready_since().to_ms();
+                out.root_depth = mesh_.depth();
+                out.validity_bits |= LM_CONNECTIVITY_VALID_STATE_SINCE | LM_CONNECTIVITY_VALID_ROOT_DEPTH;
+            } else if (mesh_.state() == route::Mesh::State::Root) {
+                out.root_depth = 0;
+                out.validity_bits |= LM_CONNECTIVITY_VALID_ROOT_DEPTH;
+            }
+        } // not a member: UNKNOWN, no validity bit (the membership state says why)
+        std::memcpy(cmd.response, &out, sizeof(out));
+        return Reply{Status::Ok, 0, 0};
+    }
+    case CommandKind::PolicyGet:
+    case CommandKind::PolicySet:
+        return execute_policy(cmd, now);
     case CommandKind::Join: {
         if (is_root()) {
             return Reply{Status::RoleNotAllowed, 0, 0}; // a root is provisioned, it does not join
@@ -112,6 +144,47 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
     default:
         return Reply{Status::Unsupported, 0, 0};
     }
+}
+
+// lm_policy_get/set (docs/10 §5). The policy lives on the root; other roles have none (UNSUPPORTED, as
+// lm_channel_request). Set changes the channel freeze through the coordinator and refuses every other change: those
+// need a signed policy object (lm_install_control), and an unsigned struct never stands in for it (docs/06).
+Reply Engine::execute_policy(const Command &cmd, MonoTime now) {
+    if (!is_root()) {
+        return Reply{Status::Unsupported, 0, 0};
+    }
+    const auto v = coord_.view();
+    lm_policy_t cur{};
+    cur.struct_size = sizeof(cur);
+    cur.abi_version = LM_ABI_VERSION;
+    cur.revision = v.policy_revision;
+    cur.join_mode = static_cast<uint32_t>(ledger().join_mode());
+    cur.relay_allowed = 1; // the root is the tree's origin
+    cur.channel_automatic = v.frozen ? 0U : 1U;
+    cur.channel_freeze = v.frozen ? 1U : 0U;
+    if (cmd.kind == CommandKind::PolicyGet) {
+        if (cmd.response == nullptr || cmd.response_size != sizeof(cur)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        std::memcpy(cmd.response, &cur, sizeof(cur));
+        return Reply{Status::Ok, 0, 0};
+    }
+    if (cmd.request == nullptr || cmd.request_size != sizeof(PolicySetRequest)) {
+        return Reply{Status::InvalidArgument, 0, 0};
+    }
+    const auto &rq = *static_cast<const PolicySetRequest *>(cmd.request);
+    if (rq.expected_revision != cur.revision) {
+        return Reply{Status::Conflict, 0, 0}; // compare-and-set on the policy revision
+    }
+    const lm_policy_t &want = rq.policy;
+    if (want.join_mode != cur.join_mode || want.relay_allowed != cur.relay_allowed ||
+        want.auto_transfer_on_isolation != 0 || want.isolation_before_transfer_ms != 0) {
+        return Reply{Status::Unsupported, 0, 0};
+    }
+    if (want.channel_freeze == cur.channel_freeze) {
+        return Reply{Status::Ok, 0, 0}; // nothing changes: applied, no operation
+    }
+    return coord_.request(want.channel_freeze != 0 ? LM_CHANNEL_FREEZE : LM_CHANNEL_AUTO, rq.expected_revision, now);
 }
 
 } // namespace lm

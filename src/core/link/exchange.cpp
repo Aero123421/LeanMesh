@@ -128,7 +128,6 @@ void Exchange::abort(Status why) {
     finish_idle();
     (void)hs_.cancel(); // Busy when a job is in flight: wiped by its completion (zombie rule)
     if (job_ != Job::None) {
-        cancelled_ = true;
         phase_ = Phase::Zombie;
     }
     if (notify_end) {
@@ -221,7 +220,6 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
             (void)hs_.complete(job_status); // wipes the cancelled slot
         }
         job_ = Job::None;
-        cancelled_ = false;
         phase_ = Phase::Idle;
         return;
     }

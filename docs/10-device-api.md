@@ -1,7 +1,7 @@
 # 10 Device API（C ABIを唯一の正本にする）
 
 ## 1. 契約
-`api/leanmesh.h` はcompile可能な宣言ファイル。実装は含まない。C++ wrapperはこのC APIを呼ぶ薄いinlineで十分で、CだけJoin/APPLIEDが使えない状態を作らない。拡張されるrequest/snapshot structにstruct_size/abi_version。固定幅ID・sleep ticket・workspace寸法のvalue structはその例外としてheaderの定義に固定。integer widthを固定しreserved=0を必須とする。ABI_VERSION=2。v0.2はheaderの既知サイズと完全一致だけを受理する。将来のtail拡張受理は次ABIの互換表で追加するまで行わない。不明な必須flagはUNSUPPORTED。
+`api/leanmesh.h` はcompile可能な公開C ABI。宣言された全関数はnative/sim buildとIDF portで定義され、`scripts/check_api_defined.py`（ctest `api_defined`、CI）が未定義を検出する。C++ wrapperはこのC APIを呼ぶ薄いinlineで十分で、CだけJoin/APPLIEDが使えない状態を作らない。拡張されるrequest/snapshot structにstruct_size/abi_version。固定幅ID・sleep ticket・workspace寸法のvalue structはその例外としてheaderの定義に固定。integer widthを固定しreserved=0を必須とする。ABI_VERSION=2。native/simでは`lm_init`は`SimNode::boot`が束ねたportsに対して呼ばれ（それ以外はUNSUPPORTED）、`lm_destroy`はstop後のみOK（実行中はBUSY）。v0.2はheaderの既知サイズと完全一致だけを受理する。将来のtail拡張受理は次ABIの互換表で追加するまで行わない。不明な必須flagはUNSUPPORTED。
 
 ## 2. 初期化と寿命
 `lm_workspace_required(config)`が必要な配置領域size/alignmentを返す。`lm_init(workspace,size,config,&ctx)`は検査と構築だけでRF送信しない。`lm_start`は非同期でSTARTED/FAULTを通知。stopはdeadline付きdrain、destroyはstop完了後のみ。ctxとworkspaceはdestroyまで有効。IDF portは必要なtask/ringを初期化し、それ以降coreでheap allocationをしない。
@@ -9,7 +9,7 @@
 
 ## 3. 非同期操作
 send/join/leave/transfer/group/policy/channel/objectの受付はoperation_id64を返す。受付エラーなら仕事は存在しない。operation_idはctx session内のhandle、再起動をまたぐ照会は完全なlm_message_ref_t（origin DeviceId + assignment_generation + MessageId + intent_hash）またはrequest_id16。異なる送信元のMessageIdが同じでも混同しない。payloadはOK復帰前に固定poolへcopy。callerは復帰直後解放できる。zero-copy寿命管理APIを最初から増やさない。
-`lm_get_operation`でphase、evidence、reason、MessageId、outcomeを返す。`lm_cancel`は未送信ならCANCELLED_NOT_SENT、送信の可能性があればCANCEL_TOO_LATE/INDETERMINATE。遠端undoではない。
+`lm_get_operation`でphase、evidence、reason、MessageId、outcomeを返す。phaseは`LM_PHASE_PENDING0/SENDING1/WAITING_RECEIPT2/FINAL3`（Host operation stateと同順）。`evidence_bits`は`LM_EVIDENCE_*`（headerが正本、追加のみ）：ACCEPTED bit0（RAM受理）/PERSISTED 1（origin journal commit）/SENT 2（radioへ渡した）/HOP_ACCEPTED 3（最初のhopのHOP_ACK）/END_RECEIVED 4（宛先受領）/APP_PENDING 5/APP_APPLIED 6/APP_REJECTED 7（宛先アプリ）/REFUSED 8（宛先の網層拒否）。HostのEvidence.kindは順に ROOT_ACCEPTED, ROOT_PERSISTED, ROOT_SENT, HOP_ACCEPTED, END_RECEIVED, APP_PENDING, APP_APPLIED, APP_REJECTED, DESTINATION_REFUSED。bitが無い＝「観測していない」であり「起きていない」ではない。outcomeと互いに推定で埋めない。`scripts/check_api_defined.py`がheaderとHostの対応を検査する。`lm_cancel`は未送信ならCANCELLED_NOT_SENT、送信の可能性があればCANCEL_TOO_LATE/INDETERMINATE。遠端undoではない。
 
 ## 4. send
 requestにdestination（DeviceId/group/root app）、port、delivery/storage/priority/queue_mode、coalesce_key64、deadlineを指定。short addressをアプリの永続宛先にしない。最大512B、object API有効時4096B。
@@ -17,12 +17,12 @@ requestにdestination（DeviceId/group/root app）、port、delivery/storage/pri
 DURABLEは予めjournal capacityを予約。APPLIEDは受信アプリの`lm_report_application_result`を待つ。サンプルは`examples/application.c`。副作用を起こす前にアプリpayload内の世代番号を検査し、自分の保存/実機ACKが揃ってからresultを返す。
 
 ## 5. lifecycle
-- `lm_membership_get` / `lm_connectivity_get`：07の独立状態とfull identityを返す。
+- `lm_membership_get` / `lm_connectivity_get`：07の独立状態とfull identityを返す。connectivityはmembershipと独立（ACTIVE+ISOLATEDは正常）。REACHABLE=有効な根までのpath（rootは常に）、DEGRADED=pathの修復中/lease失効、ISOLATED=親なし（reason=NO_ROUTE）、SLEEPING=予定Sleep中、UNKNOWN=memberでない。`validity_bits`（`LM_CONNECTIVITY_VALID_*`）が立った項目だけが既知で、このbuildは最終認証RX/最終root往復を追跡せず、その2項目は常に未知（0、bit clear）。
 - `lm_join`：初回/既存復帰/transfer-candidate、target_domain制約、budget、request_id。
 - `lm_leave`：DRAIN/IMMEDIATE。鍵とpendingの扱いは07。
 - `lm_install_control`：署名済みAssignmentTicket/ExpectedSet/Policy/ChannelPlan/RootDelegationをtype付きで受ける。署名検査・権限・revision照合を省略不可。S18: rootはRevokeObject（11）、CommissioningWindow（30）、RootHandover（31）、移設済みmemberのtransfer ticket（3、旧rootでのreconciliation）も受け、memberは移設ticket（3）とRootHandover（31）を保存する。
 - `lm_transfer_nonce_get(ctx, nonce[16])`（S18）：mode 0 AssignmentTicketへ結び付けるfreshなnonceを返す。RAMだけに保持し、再起動で失われる（新しいnonceで再発行を依頼する）。そのnonceを名指すticketだけを保存・提示でき、得たmembershipで消費される。IDENTITY未loadはAUTH_PENDING、読取失敗はRECOVERY_REQUIRED。
-- `lm_policy_get/set`：expected_revision必須。06の暗号条件を低セキュリティへ変えるflagは存在しない。
+- `lm_policy_get/set`：expected_revision必須。06の暗号条件を低セキュリティへ変えるflagは存在しない。policyはrootが持つ（他roleはUNSUPPORTED）。`lm_policy_set`はchannel_freezeの変更だけを`lm_channel_request`と同じcoordinator経路で適用し（operation=0＝受理時に適用済み）、join_mode/relay_allowed/自動移設など他の変更は署名policy objectを`lm_install_control`へ渡すまでUNSUPPORTED。署名なしstructで代替しない。古いexpected_revisionはCONFLICT。
 - `lm_channel_request`：auto/freeze/recalculateはrootへ認可要求。radioを直接操作しない。
 
 ## 6. diagnosticsとsleep

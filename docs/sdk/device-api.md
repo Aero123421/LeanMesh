@@ -132,19 +132,19 @@ lm_status_t app_poll_op(lm_context_t *ctx, lm_operation_id_t op, lm_operation_t 
 }
 ```
 
-`outcome` は結論、`evidence_bits` は**実際に観測した事実**です。互いに推定で埋めません。bitはheaderに無く、`src/core/delivery/types.hpp` の `ev::` が定義です（追加のみ・変更しない）。
+`outcome` は結論、`evidence_bits` は**実際に観測した事実**です。互いに推定で埋めません。bitは `api/leanmesh.h` の `LM_EVIDENCE_*` が正本です（追加のみ・変更しない）。Host の `Evidence.kind` との対応は `scripts/check_api_defined.py` が検査します。
 
-| bit | 意味 |
-|---|---|
-| 0 accepted | APIが受理（RAMのみ） |
-| 1 persisted | 送信元journalにcommit |
-| 2 sent | 少なくとも一度radioへ渡した（出た可能性） |
-| 3 hop_accepted | 最初のhopがbufferを確保（HOP_ACK） |
-| 4 end_received | 宛先が保存した（終端受領） |
-| 5 app_pending / 6 app_applied / 7 app_rejected | 宛先アプリの応答 |
-| 8 refused | 宛先の網層が拒否 |
+| bit | `LM_EVIDENCE_*` | 意味（Host kind） |
+|---|---|---|
+| 0 | `ACCEPTED` | APIが受理（RAMのみ）（ROOT_ACCEPTED） |
+| 1 | `PERSISTED` | 送信元journalにcommit（ROOT_PERSISTED） |
+| 2 | `SENT` | 少なくとも一度radioへ渡した（出た可能性）（ROOT_SENT） |
+| 3 | `HOP_ACCEPTED` | 最初のhopがbufferを確保（HOP_ACK） |
+| 4 | `END_RECEIVED` | 宛先が保存した（終端受領） |
+| 5 / 6 / 7 | `APP_PENDING` / `APP_APPLIED` / `APP_REJECTED` | 宛先アプリの応答 |
+| 8 | `REFUSED` | 宛先の網層が拒否（DESTINATION_REFUSED） |
 
-`phase`（Pending0/Sending1/WaitingReceipt2/Final3）も同様に内部定義です。`lm_cancel` は未送信なら `CANCELLED_NOT_SENT`、送信の可能性があれば `CANCEL_TOO_LATE`（遠端のundoではない）。
+`phase` は `LM_PHASE_PENDING`0 / `SENDING`1 / `WAITING_RECEIPT`2 / `FINAL`3（Hostのoperation stateと同順）。`lm_cancel` は未送信なら `CANCELLED_NOT_SENT`、送信の可能性があれば `CANCEL_TOO_LATE`（遠端のundoではない）。
 
 ## 6. 受信と適用の報告
 
@@ -264,7 +264,20 @@ int app_can_group(lm_context_t *ctx) {
 | `REVOKED` `STORAGE_FAILURE` `RECOVERY_REQUIRED` | 自動再試行しない。運用介入 |
 | `UNSUPPORTED` `ROLE_NOT_ALLOWED` `INVALID_ARGUMENT` `PAYLOAD_TOO_LARGE` | 呼び出し側の誤り/この構成に無い機能 |
 
-## 9. このbuildで未実装の宣言
+## 9. 接続状態とnetwork policy
 
-`lm_connectivity_get`、`lm_policy_get`、`lm_policy_set` はheaderに宣言がありますが**実装がありません**（呼ぶとリンクエラー。偽の成功は返しません）。
-`lm_init` / `lm_destroy` は ESP-IDF port（`src/port/idf`）にあり、native では meshsim の `SimNode` が代わりに context を作ります。
+```c
+lm_connectivity_t c = {0};
+c.struct_size = sizeof c; c.abi_version = LM_ABI_VERSION;
+if (lm_connectivity_get(ctx, &c) == LM_STATUS_OK) {
+  if ((c.validity_bits & LM_CONNECTIVITY_VALID_STATE) && c.state == LM_ISOLATED) { /* memberのまま。所属は消えていない */ }
+}
+```
+
+- `lm_connectivity_get` は membership と独立です（`ACTIVE`＋`ISOLATED` は正常）。`REACHABLE`（rootは常に）/ `DEGRADED`（path修復中・lease失効）/ `ISOLATED`（親なし。`reason`=`NO_ROUTE`）/ `SLEEPING`（予定Sleep中）/ `UNKNOWN`（memberでない）。`validity_bits` が立った項目だけが既知です。このbuildは最終認証RXと最終root往復を追跡しないので、その2項目は常に未知（0でbit clear）です。
+- `lm_policy_get(ctx, &p)` はroot専用（他roleは `UNSUPPORTED`）。`revision`, `join_mode`, `channel_automatic/freeze` などを返します。
+- `lm_policy_set(ctx, &p, expected_revision, &op)` は **channel_freezeの変更だけ**を適用します（`lm_channel_request` と同じ経路。`op=0`＝受理時に適用済み）。古い `expected_revision` は `CONFLICT`。`join_mode` / `relay_allowed` / 自動移設など他の変更は、署名済みpolicy objectを `lm_install_control` で渡すまで `UNSUPPORTED` で、署名なしstructで代替しません。`channel_automatic` と `channel_freeze` は排他（同値は `INVALID_ARGUMENT`）。
+
+## 10. 初期化のbuild差
+
+`lm_init` / `lm_destroy` は、ESP-IDF port（`src/port/idf`）では実機の1 contextを作る/壊す関数、native の sim port（`src/port/sim`）では `SimNode::boot()` が束ねた仮想機のportsに対して働く関数です。sim では `SimNode::boot()` の外から呼ぶと `UNSUPPORTED`、`lm_destroy` は `lm_stop` 後のみ `OK`（実行中は `BUSY`）で、その後の `boot()` が同じworkspaceで再び `lm_init` します。全関数が定義済みであることは `scripts/check_api_defined.py`（ctest `api_defined`、CI）が検査します。

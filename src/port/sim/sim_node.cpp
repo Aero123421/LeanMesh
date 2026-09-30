@@ -6,6 +6,11 @@
 
 namespace lm::sim {
 
+namespace {
+// The node whose boot() is running: the sim's lm_init binds to its ports (a real device has exactly one set).
+thread_local SimNode *g_booting = nullptr;
+} // namespace
+
 SimNode::SimNode(World &world, uint16_t index, const MacAddr &mac, const NodeOptions &opts)
     : clock(world, opts.clock_drift_ppm), radio(world, index, mac),
       jobs(world, index, world.options().seed * 0x9E3779B97F4A7C15ULL + index), store(opts.store),
@@ -33,11 +38,22 @@ Status SimNode::boot() {
     void *at = workspace_.get() + (aligned - base);
     clock.on_boot(world_.now_us());
     jobs.set_epoch(epoch_);
-    LM_TRY(capi::init_context(at, ws.bytes, &cfg, Ports{clock, radio, jobs, opts_.power_port ? &pm : nullptr, opts_.health_port ? &health : nullptr}, owner_call, opts_.rf, &ctx_));
+    g_booting = this;
+    const Status s = static_cast<Status>(lm_init(at, ws.bytes, &cfg, &ctx_));
+    g_booting = nullptr;
+    LM_TRY(s);
     ctx_->engine.mesh().set_enabled(opts_.mesh);
     ctx_->engine.chan().set_enabled(opts_.channel);
     notify();
     return Status::Ok;
+}
+
+void SimNode::release_context() {
+    if (ctx_ != nullptr) {
+        ctx_->~lm_context();
+        ctx_ = nullptr;
+        scheduled_wake_us_ = UINT64_MAX;
+    }
 }
 
 void SimNode::power_cut() {
@@ -126,3 +142,45 @@ void SimNode::request_wake(uint64_t world_at_us) {
 }
 
 } // namespace lm::sim
+
+// The public lifecycle of api/leanmesh.h for the simulator. lm_init needs the ports of a device: the sim has many,
+// so it takes those of the node being booted (SimNode::boot); called from anywhere else it is UNSUPPORTED.
+extern "C" {
+
+lm_status_t lm_init(void *workspace, size_t bytes, const lm_config_t *config, lm_context_t **out) {
+    using namespace lm;
+    using namespace lm::sim;
+    SimNode *node = g_booting;
+    if (node == nullptr) {
+        return to_abi(Status::Unsupported);
+    }
+    if (out == nullptr) {
+        return to_abi(Status::InvalidArgument);
+    }
+    if (node->ctx() != nullptr) {
+        return to_abi(Status::Busy); // one context per device
+    }
+    const NodeOptions &o = node->options();
+    return to_abi(capi::init_context(workspace, bytes, config,
+                                     Ports{node->clock, node->radio, node->jobs, o.power_port ? &node->pm : nullptr,
+                                           o.health_port ? &node->health : nullptr},
+                                     node->owner_call, o.rf, out));
+}
+
+lm_status_t lm_destroy(lm_context_t *ctx) {
+    using namespace lm;
+    using namespace lm::sim;
+    if (!capi::valid_ctx(ctx)) {
+        return to_abi(Status::InvalidArgument);
+    }
+    Command cmd;
+    cmd.kind = CommandKind::Destroy;
+    const Status s = ctx->owner.call(cmd).status;
+    if (s != Status::Ok) {
+        return to_abi(s); // still running (or a worker job holds borrowed memory): stop first
+    }
+    static_cast<DirectOwnerCall &>(ctx->owner).node().release_context();
+    return to_abi(Status::Ok);
+}
+
+} // extern "C"

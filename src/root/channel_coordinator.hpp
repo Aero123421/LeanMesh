@@ -222,6 +222,11 @@ struct NoCoordinator {
     void save(Writer &) const {}
     void restore(Reader &, const channel::Plan *) {}
     [[nodiscard]] Reply request(uint32_t, uint64_t, MonoTime) { return Reply{Status::Unsupported, 0, 0}; }
+    struct View {
+        bool frozen = false;
+        uint64_t policy_revision = 0;
+    };
+    [[nodiscard]] View view() const { return View{}; }
 };
 
 using CoordinatorType = std::conditional_t<k_root_capable, Coordinator, NoCoordinator>;

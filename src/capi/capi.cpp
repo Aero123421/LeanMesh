@@ -1,6 +1,6 @@
 // C ABI entry points (api/leanmesh.h). Each public call validates its arguments, then runs on the
-// mesh owner through OwnerCall. Entry points not defined here are not implemented in this build
-// (they fail to link rather than returning fake success); slices add them as they land.
+// mesh owner through OwnerCall. Every function of the header is defined (scripts/check_api_defined.py);
+// lm_init/lm_destroy belong to the platform port (src/port/idf, src/port/sim) because they own the ports.
 #include <new>
 
 #include "capi/context.hpp"
@@ -91,7 +91,7 @@ lm_status_t lm_workspace_required(const lm_config_t *config, lm_workspace_size_t
     return to_abi(Status::Ok);
 }
 
-// lm_init lives in the platform port (src/port/idf): it owns the tasks the context runs on.
+// lm_init / lm_destroy live in the platform port (src/port/idf: the tasks the context runs on; src/port/sim).
 
 lm_status_t lm_start(lm_context_t *ctx) {
     if (!lm::capi::valid_ctx(ctx)) {

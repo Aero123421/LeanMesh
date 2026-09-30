@@ -117,6 +117,76 @@ LM_TEST("capabilities through the owner call report what is implemented and noth
     LM_CHECK_EQ(lm_get_capabilities(fx.world.node(0).ctx(), &caps), LM_STATUS_UNSUPPORTED);
 }
 
+LM_TEST("public lifecycle: lm_init only on a booting sim node, lm_destroy only when stopped, then init again") {
+    World world(WorldOptions{5, 0});
+    NodeOptions o;
+    o.role = Role::Relay;
+    (void)world.add_node(o);
+    SimNode &node = world.node(0);
+    // Outside SimNode::boot() there is no device whose ports lm_init could bind: UNSUPPORTED, no fake context.
+    lm_config_t cfg;
+    LM_CHECK_EQ(lm_config_init(&cfg, sizeof(cfg)), LM_STATUS_OK);
+    alignas(std::max_align_t) static uint8_t ws[1 << 16];
+    lm_context_t *stray = nullptr;
+    LM_CHECK_EQ(lm_init(ws, sizeof(ws), &cfg, &stray), LM_STATUS_UNSUPPORTED);
+    LM_CHECK(stray == nullptr);
+
+    LM_CHECK_OK(node.boot()); // lm_init through the public function
+    lm_context_t *ctx = node.ctx();
+    LM_CHECK(ctx != nullptr);
+    LM_CHECK_OK(node.boot()); // already initialised: no second context
+    LM_CHECK(node.ctx() == ctx);
+    lm_membership_t m{};
+    m.struct_size = sizeof(m);
+    m.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_membership_get(ctx, &m), LM_STATUS_OK);
+    LM_CHECK_EQ(m.state, static_cast<uint32_t>(LM_UNASSIGNED));
+
+    LM_CHECK_EQ(lm_destroy(nullptr), LM_STATUS_INVALID_ARGUMENT);
+    LM_CHECK_EQ(lm_start(ctx), LM_STATUS_OK);
+    world.run_until(world.now_us() + 50'000);
+    LM_CHECK_EQ(lm_destroy(ctx), LM_STATUS_BUSY); // running: stop first
+    LM_CHECK(node.ctx() == ctx);
+    lm_operation_id_t drain = 0;
+    LM_CHECK_EQ(lm_stop(ctx, 0, &drain), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_destroy(ctx), LM_STATUS_OK);
+    LM_CHECK(node.ctx() == nullptr);
+    LM_CHECK(!node.powered());
+
+    LM_CHECK_OK(node.boot()); // the same workspace serves the next lm_init
+    LM_CHECK(node.ctx() != nullptr);
+    LM_CHECK_EQ(lm_membership_get(node.ctx(), &m), LM_STATUS_OK);
+    LM_CHECK_EQ(lm_start(node.ctx()), LM_STATUS_OK);
+}
+
+LM_TEST("lm_connectivity_get: a device that is no member reports UNKNOWN with no validity bit; ABI checked") {
+    World world(WorldOptions{6, 0});
+    NodeOptions o;
+    o.role = Role::Relay;
+    (void)world.add_node(o);
+    LM_CHECK_OK(world.node(0).boot());
+    lm_context_t *ctx = world.node(0).ctx();
+    lm_connectivity_t c{};
+    c.struct_size = sizeof(c);
+    c.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_connectivity_get(ctx, &c), LM_STATUS_OK);
+    LM_CHECK_EQ(c.state, static_cast<uint32_t>(LM_CONNECTIVITY_UNKNOWN));
+    LM_CHECK_EQ(c.validity_bits, 0u);
+    LM_CHECK_EQ(c.root_depth, 0u);
+    lm_connectivity_t bad = c;
+    bad.struct_size = sizeof(c) - 1;
+    LM_CHECK_EQ(lm_connectivity_get(ctx, &bad), LM_STATUS_INVALID_ARGUMENT);
+    bad = c;
+    bad.abi_version = 1;
+    LM_CHECK_EQ(lm_connectivity_get(ctx, &bad), LM_STATUS_UNSUPPORTED);
+    LM_CHECK_EQ(lm_connectivity_get(ctx, nullptr), LM_STATUS_INVALID_ARGUMENT);
+    LM_CHECK_EQ(lm_connectivity_get(nullptr, &c), LM_STATUS_INVALID_ARGUMENT);
+    lm_policy_t p{};
+    p.struct_size = sizeof(p);
+    p.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_policy_get(ctx, &p), LM_STATUS_UNSUPPORTED); // the policy lives on the root
+}
+
 LM_TEST("idle owner has no deadline (no fixed polling tick)") {
     Fixture fx(1);
     fx.world.run_until(10'000'000);

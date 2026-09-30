@@ -58,7 +58,9 @@ class SimNode {
     SimNode(const SimNode &) = delete;
     SimNode &operator=(const SimNode &) = delete;
 
-    [[nodiscard]] Status boot();
+    [[nodiscard]] Status boot(); // the firmware's app main: lm_init (public API) on this node's ports
+    // lm_destroy of a stopped context: the RAM is released cleanly (no radio/job power cut; the Store is untouched).
+    void release_context();
     void power_cut();
     [[nodiscard]] bool powered() const { return ctx_ != nullptr; }
     // Monotone count of power cycles; pending radio/job events of an older epoch are discarded.

@@ -123,6 +123,7 @@ class DirectOwnerCall final : public OwnerCall {
   public:
     explicit DirectOwnerCall(SimNode &node) : node_(node) {}
     [[nodiscard]] Reply call(const Command &cmd) override;
+    [[nodiscard]] SimNode &node() { return node_; }
 
   private:
     SimNode &node_;

@@ -5,7 +5,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* SPEC CONTRACT ONLY: these declarations do not implement a Mesh SDK. */
+/* Public C ABI of the LeanMesh SDK (ABI 2). Every function declared here is defined in the native/sim build and in
+   the ESP-IDF port (scripts/check_api_defined.py fails CI otherwise); semantics: docs/10, api/SEMANTICS.md. */
 #define LM_ABI_VERSION 2u
 #define LM_MAX_ROOT_DEPTH 20u
 #define LM_MAX_PATH_HOPS 40u
@@ -80,6 +81,21 @@ enum { LM_OUTCOME_PENDING=0, LM_OUTCOME_RECEIVED=1, LM_OUTCOME_APPLIED=2,
        LM_OUTCOME_REJECTED=3, LM_OUTCOME_EXPIRED=4,
        LM_OUTCOME_CANCELLED_NOT_SENT=5, LM_OUTCOME_INDETERMINATE=6,
        LM_OUTCOME_SUPERSEDED=7, LM_OUTCOME_PARTIAL=8, LM_OUTCOME_SUBMITTED=9 };
+/* lm_operation_t.phase (and the Host operation state PENDING/SENDING/WAITING_RECEIPT/FINAL). */
+enum { LM_PHASE_PENDING=0, LM_PHASE_SENDING=1, LM_PHASE_WAITING_RECEIPT=2, LM_PHASE_FINAL=3 };
+/* lm_operation_t.evidence_bits: what was actually observed, one bit per fact. Bits are only ever added, never
+   renumbered. A missing bit means "not observed", never "did not happen". The Host names the bits as Evidence.kind
+   (openapi): ROOT_ACCEPTED, ROOT_PERSISTED, ROOT_SENT, HOP_ACCEPTED, END_RECEIVED, APP_PENDING, APP_APPLIED,
+   APP_REJECTED, DESTINATION_REFUSED. */
+#define LM_EVIDENCE_ACCEPTED     (UINT32_C(1) << 0u) /* the API accepted the request (RAM only) */
+#define LM_EVIDENCE_PERSISTED    (UINT32_C(1) << 1u) /* origin journal commit */
+#define LM_EVIDENCE_SENT         (UINT32_C(1) << 2u) /* handed to the radio at least once (may have left) */
+#define LM_EVIDENCE_HOP_ACCEPTED (UINT32_C(1) << 3u) /* the first hop reserved a buffer (HOP_ACK) */
+#define LM_EVIDENCE_END_RECEIVED (UINT32_C(1) << 4u) /* destination receipt: stored as declared */
+#define LM_EVIDENCE_APP_PENDING  (UINT32_C(1) << 5u) /* destination application took it, no result yet */
+#define LM_EVIDENCE_APP_APPLIED  (UINT32_C(1) << 6u) /* APP_APPLIED by the destination application */
+#define LM_EVIDENCE_APP_REJECTED (UINT32_C(1) << 7u) /* the destination application refused it */
+#define LM_EVIDENCE_REFUSED      (UINT32_C(1) << 8u) /* the destination network layer refused it */
 enum { LM_JOIN_NEW=0, LM_JOIN_RESUME=1, LM_JOIN_TRANSFER_CANDIDATE=2 };
 enum { LM_LEAVE_DRAIN=0, LM_LEAVE_IMMEDIATE=1 };
 enum { LM_CHANNEL_AUTO=0, LM_CHANNEL_FREEZE=1, LM_CHANNEL_RECALCULATE=2 };
@@ -136,12 +152,20 @@ typedef struct {
  uint32_t state, reason;
  uint64_t state_since_mono_ms;
 } lm_membership_t;
+/* lm_connectivity_t.validity_bits: a field whose bit is clear is unknown (zero), not "zero". This build sets STATE,
+   and STATE_SINCE / ROOT_DEPTH where it knows them; it does not track the last authenticated RX or root roundtrip. */
+#define LM_CONNECTIVITY_VALID_STATE (UINT64_C(1) << 0u)
+#define LM_CONNECTIVITY_VALID_STATE_SINCE (UINT64_C(1) << 1u)
+#define LM_CONNECTIVITY_VALID_ROOT_DEPTH (UINT64_C(1) << 2u)
+#define LM_CONNECTIVITY_VALID_LAST_AUTH_RX (UINT64_C(1) << 3u)
+#define LM_CONNECTIVITY_VALID_LAST_ROOT_ROUNDTRIP (UINT64_C(1) << 4u)
 typedef struct {
  uint32_t struct_size, abi_version;
  uint32_t state, reason;
  uint64_t state_since_mono_ms, last_authenticated_rx_mono_ms;
  uint64_t last_root_roundtrip_mono_ms;
- uint32_t validity_bits, root_depth;
+ uint64_t validity_bits;
+ uint32_t root_depth, reserved;
 } lm_connectivity_t;
 typedef struct {
  uint32_t struct_size, abi_version;
@@ -149,6 +173,11 @@ typedef struct {
  lm_domain_id_t target_domain;
  uint32_t mode, search_budget_ms, constrain_target, reserved;
 } lm_join_request_t;
+/* The network policy the root holds (lm_policy_get: root only; other roles: UNSUPPORTED). `revision` is output only.
+   lm_policy_set takes expected_revision and applies the channel_freeze change (as lm_channel_request does) but
+   refuses (UNSUPPORTED) any other change: join_mode, relay_allowed and auto transfer are changed only by a signed
+   policy object (lm_install_control). This build fixes auto_transfer_on_isolation to 0 and isolation_before_transfer_ms
+   to 0 (no automatic transfer). No field lowers a docs/06 cryptographic condition. */
 typedef struct {
  uint32_t struct_size, abi_version;
  uint64_t revision;

@@ -4,10 +4,10 @@
 
 仕様0.2に沿ったソフトウェア実装を追加した。**実機で認定された製品ではない。** 使い方は [docs/sdk/](docs/sdk/README.md)、判断の履歴は [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)、資源の現状は [ADR-002](decisions/ADR-002-budget-status.md)。
 
-- 追加: 単一ownerのcore（wire、link、member、route、delivery、sched、group、channel、power、diag）、EDHOC suite 3 glue + PSA、2-slot封印Store、ESP-IDF port（4 SoC build）、root用USB serial bridge、FastAPI Host（SQLite、event journal、SSE）、meshsim、C ABI 2の実装（`lm_connectivity_get`、`lm_policy_get/set` を除く）。
+- 追加: 単一ownerのcore（wire、link、member、route、delivery、sched、group、channel、power、diag）、EDHOC suite 3 glue + PSA、2-slot封印Store、ESP-IDF port（4 SoC build）、root用USB serial bridge、FastAPI Host（SQLite、event journal、SSE）、meshsim、C ABI 2の全関数の実装（`scripts/check_api_defined.py` が未定義を検出）。`lm_policy_set` はchannel freezeの変更だけを適用し、他の変更は署名policy object（`lm_install_control`）が必要なため `UNSUPPORTED`。
 - 検証（ソフトウェア/simulation）: native ctest（ASan+UBSan含む）、Host unit/integration/E2E、meshsim上の21 node / 20 hop全経路、Store切断matrix（sim）、seed付きモデル試験、IDF build（S3/C3/C5/C6 の LEAF と ROOT、C3 の RELAY）。
 - 未検証: RF、HIL、消費電力、実電源断、鍵custody、EDHOCの独立実装との相互接続。ROOTのESP32-C3搭載は未対応（実機heap未測定）。量産用provisioningツールなし。RF承認は既定off。
-- 仕様ファイル（docs/01〜23、protocol、api、db）の意味は変更していない。`api/leanmesh.h` の冒頭コメントは仕様時点のまま。RAM/SLOCは目標超過（ADR-002）。
+- 仕様ファイル（docs/01〜23、protocol、api、db）の意味は変更していない。`api/leanmesh.h` には配送evidence bit（`LM_EVIDENCE_*`）とphase（`LM_PHASE_*`）、`lm_connectivity_t.validity_bits` の定義（`LM_CONNECTIVITY_VALID_*`）を追加した（既存の番号は不変）。`lm_connectivity_t.validity_bits` は未使用だったuint32からuint64へ変更。manifest.json は仕様bundleの目録であること、SHA256SUMS.txt はその目録の checksum であることを明記。RAM/SLOCは目標超過（ADR-002）。
 
 ## 0.2 — 2026-09-28 / 統合改訂
 

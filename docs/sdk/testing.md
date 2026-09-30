@@ -10,6 +10,7 @@
 | native ctest | `ctest --test-dir ~/.cache/leanmesh/native -j4` | 実coreを載せた `SimNode`/`World` での網（`tests/native/test_*.cpp`）。codec・暗号vectorだけがunit |
 | sanitizer | `-DLM_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug` の別buildでctest | ASan + UBSan（UBSanは致命扱い）。CIではASan meshsimでE2Eも通す |
 | Host unit / integration | `pytest host/tests/unit host/tests/integration` | codec、認証、API契約（OpenAPIと突き合わせ）、DB上限、Hostプロセスのcrash |
+| 公開C APIの網羅 | `python3 scripts/check_api_defined.py --native-build <build>`（ctest `api_defined`） | `api/leanmesh.h` の全関数がnative buildで定義済み、`LM_EVIDENCE_*`/`LM_PHASE_*` がHost・OpenAPIと一致 |
 | Host E2E | `pytest host/tests/e2e` | 本物のHost + 本物のcoreを載せた `meshsim`（pty経由のUSBセッション）。21 node / 20 hop の全経路（`test_fullstack_meshsim.py`）を含む |
 | 電源断matrix | 下記 | Storeの変更呼び出しの**各点**で電源断を注入して再起動 |
 | モデル試験 | `tests/native/test_model` | seed付きランダムな送信・loss・link・再起動列で証拠の不変条件を検査 |

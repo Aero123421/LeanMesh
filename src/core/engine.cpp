@@ -572,6 +572,9 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
                          : Status::Busy,
                      0, 0}; // [SLICE:S8] a cancelled join/ledger job still owns borrowed buffers
     case CommandKind::MembershipGet: // [SLICE:S8]
+    case CommandKind::ConnectivityGet:
+    case CommandKind::PolicyGet:
+    case CommandKind::PolicySet:
     case CommandKind::Join:
     case CommandKind::Leave:
     case CommandKind::InstallControl:

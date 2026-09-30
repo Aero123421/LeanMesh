@@ -112,6 +112,23 @@ class Mesh {
         uint64_t last_repair_ms = 0; // suspect -> path approved again
     };
     [[nodiscard]] State state() const { return state_; }
+    // lm_connectivity_get: this node's path to the root. A path being repaired or with a lapsed lease is DEGRADED
+    // (still a member, silence over the link is not a lost membership); no parent is ISOLATED; Off is unknown.
+    [[nodiscard]] uint32_t connectivity(MonoTime now) const {
+        switch (state_) {
+        case State::Root:
+            return LM_REACHABLE;
+        case State::Ready:
+            return path_valid(now) && !repairing_ ? LM_REACHABLE : LM_DEGRADED;
+        case State::Listen:
+        case State::Search:
+        case State::Attach:
+            return LM_ISOLATED;
+        case State::Off:
+            break;
+        }
+        return LM_CONNECTIVITY_UNKNOWN;
+    }
     [[nodiscard]] bool repairing() const { return repairing_; }
     [[nodiscard]] uint8_t attach_step_id() const { return static_cast<uint8_t>(att_.step); } // 0 idle .. 5 confirm
     [[nodiscard]] const Stats &stats() const { return stats_; }

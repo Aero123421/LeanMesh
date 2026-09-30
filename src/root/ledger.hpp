@@ -415,8 +415,6 @@ class Ledger {
     bool cancelled_ = false;
     int job_txn_ = -1;
     std::size_t job_slot_index_ = 0;
-    EntryState job_state_ = EntryState::Free;
-    bool job_confirmed_ = false;
     VerifyArgs vargs_;
     SignArgs sargs_;
     member::ExpectedSet exp_;
@@ -493,6 +491,7 @@ struct NoLedger {
     void join_control(const link::RxInfo &, ByteView, MonoTime) {}
     [[nodiscard]] bool link_control(const link::RxInfo &, ByteView, MonoTime) { return false; }
     void set_join_mode(JoinMode) {}
+    [[nodiscard]] JoinMode join_mode() const { return JoinMode::Closed; }
     [[nodiscard]] Status install_expected(ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
     [[nodiscard]] Status install_lifecycle(uint8_t, ByteView, MonoTime, uint64_t &) { return Status::Unsupported; }
     void renew_due(const DeviceId &, uint32_t, uint64_t, MonoTime) {}

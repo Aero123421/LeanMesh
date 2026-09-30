@@ -340,6 +340,113 @@ LM_TEST("C06 sim: a relay whose clock bound is wider than the tolerance refuses 
     LM_CHECK(n.clocks_hold());
 }
 
+LM_TEST("API sim: lm_policy_get/set on the root (channel freeze, compare-and-set, refused changes) and lm_connectivity_get on a formed chain") {
+    CNet n(3);
+    form(n);
+    lm_context_t *root = n.ctx(0);
+    auto get = [&](lm_context_t *c, lm_policy_t &p) {
+        p = lm_policy_t{};
+        p.struct_size = sizeof(p);
+        p.abi_version = LM_ABI_VERSION;
+        return lm_policy_get(c, &p);
+    };
+    lm_policy_t p;
+    LM_CHECK_EQ(get(root, p), LM_STATUS_OK);
+    LM_CHECK_EQ(p.revision, 0u);
+    LM_CHECK_EQ(p.join_mode, 1u); // external
+    LM_CHECK_EQ(p.channel_automatic, 1u);
+    LM_CHECK_EQ(p.channel_freeze, 0u);
+    LM_CHECK_EQ(p.relay_allowed, 1u);
+    LM_CHECK_EQ(p.auto_transfer_on_isolation, 0u);
+    lm_operation_id_t op = 99;
+    // Unchanged policy at the right revision: accepted, nothing happens, no revision bump.
+    LM_CHECK_EQ(lm_policy_set(root, &p, 0, &op), LM_STATUS_OK);
+    LM_CHECK_EQ(op, 0u);
+    LM_CHECK_EQ(n.view().policy_revision, 0u);
+    // Freeze through the policy is the same act as lm_channel_request(FREEZE).
+    lm_policy_t want = p;
+    want.channel_automatic = 0;
+    want.channel_freeze = 1;
+    LM_CHECK_EQ(lm_policy_set(root, &want, 1, &op), LM_STATUS_CONFLICT); // stale revision
+    LM_CHECK_EQ(lm_policy_set(root, &want, 0, &op), LM_STATUS_OK);
+    LM_CHECK(n.view().frozen);
+    LM_CHECK_EQ(get(root, p), LM_STATUS_OK);
+    LM_CHECK_EQ(p.revision, 1u);
+    LM_CHECK_EQ(p.channel_freeze, 1u);
+    LM_CHECK_EQ(p.channel_automatic, 0u);
+    // A change that needs a signed policy object is refused, never applied: not a fake success.
+    lm_policy_t closed = p;
+    closed.join_mode = 0;
+    LM_CHECK_EQ(lm_policy_set(root, &closed, 1, &op), LM_STATUS_UNSUPPORTED);
+    lm_policy_t transfer = p;
+    transfer.auto_transfer_on_isolation = 1;
+    LM_CHECK_EQ(lm_policy_set(root, &transfer, 1, &op), LM_STATUS_UNSUPPORTED);
+    LM_CHECK_EQ(get(root, p), LM_STATUS_OK);
+    LM_CHECK_EQ(p.join_mode, 1u);
+    // Malformed requests.
+    lm_policy_t bad = want;
+    bad.channel_automatic = 1; // both automatic and frozen
+    LM_CHECK_EQ(lm_policy_set(root, &bad, 1, &op), LM_STATUS_INVALID_ARGUMENT);
+    bad = want;
+    bad.join_mode = 3;
+    LM_CHECK_EQ(lm_policy_set(root, &bad, 1, &op), LM_STATUS_INVALID_ARGUMENT);
+    bad = want;
+    bad.reserved[1] = 1;
+    LM_CHECK_EQ(lm_policy_set(root, &bad, 1, &op), LM_STATUS_INVALID_ARGUMENT);
+    bad = want;
+    bad.struct_size = 8;
+    LM_CHECK_EQ(lm_policy_set(root, &bad, 1, &op), LM_STATUS_INVALID_ARGUMENT);
+    bad = want;
+    bad.abi_version = 1;
+    LM_CHECK_EQ(lm_policy_set(root, &bad, 1, &op), LM_STATUS_UNSUPPORTED);
+    LM_CHECK_EQ(lm_policy_set(root, &want, UINT64_MAX, &op), LM_STATUS_INVALID_ARGUMENT);
+    LM_CHECK_EQ(lm_policy_set(root, &want, 1, nullptr), LM_STATUS_INVALID_ARGUMENT);
+    // Unfreeze again.
+    want.channel_automatic = 1;
+    want.channel_freeze = 0;
+    LM_CHECK_EQ(lm_policy_set(root, &want, 1, &op), LM_STATUS_OK);
+    LM_CHECK_EQ(get(root, p), LM_STATUS_OK);
+    LM_CHECK_EQ(p.revision, 2u);
+    LM_CHECK_EQ(p.channel_freeze, 0u);
+    // A relay holds no policy.
+    LM_CHECK_EQ(get(n.ctx(1), p), LM_STATUS_UNSUPPORTED);
+    LM_CHECK_EQ(lm_policy_set(n.ctx(1), &want, 0, &op), LM_STATUS_UNSUPPORTED);
+
+    // ---- connectivity ----
+    auto conn = [&](unsigned i) {
+        lm_connectivity_t c{};
+        c.struct_size = sizeof(c);
+        c.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_connectivity_get(n.ctx(i), &c), LM_STATUS_OK);
+        return c;
+    };
+    const lm_connectivity_t cr = conn(0);
+    LM_CHECK_EQ(cr.state, static_cast<uint32_t>(LM_REACHABLE));
+    LM_CHECK_EQ(cr.root_depth, 0u);
+    LM_CHECK((cr.validity_bits & LM_CONNECTIVITY_VALID_STATE) != 0);
+    const lm_connectivity_t c2 = conn(2);
+    LM_CHECK_EQ(c2.state, static_cast<uint32_t>(LM_REACHABLE));
+    LM_CHECK_EQ(c2.root_depth, 2u);
+    LM_CHECK((c2.validity_bits & LM_CONNECTIVITY_VALID_ROOT_DEPTH) != 0);
+    LM_CHECK((c2.validity_bits & LM_CONNECTIVITY_VALID_STATE_SINCE) != 0);
+    LM_CHECK(c2.state_since_mono_ms > 0);
+    LM_CHECK_EQ(c2.validity_bits & (LM_CONNECTIVITY_VALID_LAST_AUTH_RX | LM_CONNECTIVITY_VALID_LAST_ROOT_ROUNDTRIP), 0u);
+    LM_CHECK_EQ(c2.last_authenticated_rx_mono_ms, 0u);
+    // The link to the parent goes away: the node is cut off, and stays a member (ACTIVE + not reachable, docs/07).
+    n.link(1, 2, false);
+    lm_connectivity_t cut{};
+    LM_CHECK(n.until([&] { cut = conn(2); return cut.state != LM_REACHABLE; }, 300'000, 20));
+    LM_CHECK(cut.state == LM_DEGRADED || cut.state == LM_ISOLATED);
+    LM_CHECK_EQ(cut.reason, static_cast<uint32_t>(LM_STATUS_NO_ROUTE));
+    lm_membership_t m{};
+    m.struct_size = sizeof(m);
+    m.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_membership_get(n.ctx(2), &m), LM_STATUS_OK);
+    LM_CHECK_EQ(m.state, static_cast<uint32_t>(LM_ACTIVE));
+    n.link(1, 2, true);
+    LM_CHECK(n.until([&] { return conn(2).state == LM_REACHABLE; }, 300'000, 20));
+}
+
 LM_TEST("C07 unit/sim: freeze stops a plan in PREPARING and never cancels a COMMITTED one; the revision is a compare-and-set") {
     CNet n(3);
     form(n);

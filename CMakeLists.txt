@@ -111,4 +111,7 @@ add_subdirectory(tools/budget_probe) # sizeof per profile for scripts/budget_rep
 if(LM_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests/native)
+    # Every function of api/leanmesh.h is defined in this build (nm of lm_sdk + lm_sim); evidence bits match the Host.
+    add_test(NAME api_defined COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_api_defined.py --native-build ${CMAKE_BINARY_DIR})
+    set_tests_properties(api_defined PROPERTIES LABELS "unit;api" TIMEOUT 60)
 endif()

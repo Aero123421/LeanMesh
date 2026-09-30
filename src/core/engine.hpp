@@ -84,6 +84,12 @@ enum class RadioState : uint8_t { Stopped, Running, Recovering, Faulted, Asleep 
 inline constexpr int k_radio_recover_attempts = 3;
 inline constexpr Duration k_radio_recover_backoff = Duration::from_ms(1000);
 
+// Request of CommandKind::PolicySet (lm_policy_set): the wanted policy and the revision it was read at.
+struct PolicySetRequest {
+    lm_policy_t policy;
+    uint64_t expected_revision;
+};
+
 class Engine {
   public:
     Engine(const EngineConfig &config, Ports ports);
@@ -222,6 +228,7 @@ class Engine {
     [[nodiscard]] bool is_root() const { return k_root_capable && config_.role == Role::Root; }
     void wire_join_hooks();
     Reply execute_membership(const Command &cmd, MonoTime now);
+    Reply execute_policy(const Command &cmd, MonoTime now); // lm_policy_get/set (root)
 
     EngineConfig config_;
     Ports ports_;

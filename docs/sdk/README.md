@@ -11,7 +11,7 @@ ESP32-S3 / C3 / C5 / C6 向けの汎用長距離Mesh（ESP-NOW + Wi-Fi LR）SDK�
 - **実機で認定されたものは何もありません**。RF、HIL、消費電力、実電源断、鍵のcustodyは未検証です（一覧は [testing.md](testing.md) §5）。
 - **ROOT を ESP32-C3 に載せる構成は、実機のheap測定が済むまで未対応**です（[ADR-002](../../decisions/ADR-002-budget-status.md)）。RAM・SLOCは目標を超過しており、その数値と理由もADRにあります。
 - 量産用のprovisioning（鍵・資格情報の書込み）ツールは含みません。sim用の `tools/lmfleet` はTEST-ONLYです。RF承認（`LEANMESH_RF_DEPLOYMENT_APPROVED`）は既定でoffです。
-- `lm_connectivity_get`、`lm_policy_get/set` は宣言のみで未実装です（[device-api §9](device-api.md)）。
+- `api/leanmesh.h` の全関数は定義済みです（`scripts/check_api_defined.py`）。`lm_policy_set` が適用するのはchannel freezeだけで、他の変更は署名policy objectが必要なため `UNSUPPORTED` です（[device-api §9](device-api.md)）。
 
 ## 読む順番
 

@@ -29,21 +29,23 @@ inline constexpr uint32_t k_tunnel_sid = 0xFFFFFFFEU;
 inline constexpr uint8_t k_link_attempts = static_cast<uint8_t>(gen::defaults::delivery::link_attempts);
 inline constexpr uint8_t k_e2e_rounds = static_cast<uint8_t>(gen::defaults::delivery::e2e_rounds);
 
-// lm_operation_t.evidence_bits (S9-D5): what was actually observed. Bits are only ever added.
+// lm_operation_t.evidence_bits (S9-D5): what was actually observed. Bits are only ever added. The numbers are the
+// public contract LM_EVIDENCE_* of api/leanmesh.h.
 namespace ev {
-inline constexpr uint32_t accepted = 1U << 0;      // the API accepted the request (RAM only)
-inline constexpr uint32_t persisted = 1U << 1;     // origin journal commit
-inline constexpr uint32_t sent = 1U << 2;          // handed to the radio at least once (may have left)
-inline constexpr uint32_t hop_accepted = 1U << 3;  // the first hop reserved a buffer (HOP_ACK)
-inline constexpr uint32_t end_received = 1U << 4;  // destination receipt: stored as declared
-inline constexpr uint32_t app_pending = 1U << 5;   // destination application acknowledged, no result yet
-inline constexpr uint32_t app_applied = 1U << 6;   // APP_APPLIED by the destination application
-inline constexpr uint32_t app_rejected = 1U << 7;  // the destination application refused it
-inline constexpr uint32_t refused = 1U << 8;       // the destination network layer refused it
+inline constexpr uint32_t accepted = LM_EVIDENCE_ACCEPTED; // the API accepted the request (RAM only)
+inline constexpr uint32_t persisted = LM_EVIDENCE_PERSISTED; // origin journal commit
+inline constexpr uint32_t sent = LM_EVIDENCE_SENT; // handed to the radio at least once (may have left)
+inline constexpr uint32_t hop_accepted = LM_EVIDENCE_HOP_ACCEPTED; // the first hop reserved a buffer (HOP_ACK)
+inline constexpr uint32_t end_received = LM_EVIDENCE_END_RECEIVED; // destination receipt: stored as declared
+inline constexpr uint32_t app_pending = LM_EVIDENCE_APP_PENDING; // destination application acknowledged, no result yet
+inline constexpr uint32_t app_applied = LM_EVIDENCE_APP_APPLIED; // APP_APPLIED by the destination application
+inline constexpr uint32_t app_rejected = LM_EVIDENCE_APP_REJECTED; // the destination application refused it
+inline constexpr uint32_t refused = LM_EVIDENCE_REFUSED; // the destination network layer refused it
 } // namespace ev
 
 // lm_operation_t.phase (matches the Host operation states).
-enum class Phase : uint8_t { Pending = 0, Sending = 1, WaitingReceipt = 2, Final = 3 };
+enum class Phase : uint8_t { Pending = LM_PHASE_PENDING, Sending = LM_PHASE_SENDING, WaitingReceipt = LM_PHASE_WAITING_RECEIPT,
+                             Final = LM_PHASE_FINAL };
 
 // delivery-receipt `evidence` (control.cddl 0..6, S9-D5).
 enum class ReceiptEv : uint8_t {

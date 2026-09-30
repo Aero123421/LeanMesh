@@ -5,4 +5,5 @@ list(APPEND LM_COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/capi_membership.cpp
     ${CMAKE_CURRENT_LIST_DIR}/capi_channel.cpp
     ${CMAKE_CURRENT_LIST_DIR}/capi_group.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/capi_power.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/capi_power.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/capi_policy.cpp)
