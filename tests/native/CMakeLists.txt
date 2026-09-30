@@ -94,3 +94,5 @@ target_compile_definitions(test_model PRIVATE LM_MODEL_COMMIT="${LM_MODEL_COMMIT
 lm_add_test(test_term SOURCES test_term.cpp LABELS "integration;sim;mesh;lifecycle;scenario")
 target_link_libraries(test_term PRIVATE lm_fleet)
 set_tests_properties(test_term PROPERTIES TIMEOUT 900)
+# Sim-heavy suites that take over 120 s under ASan/UBSan on a CI runner (they finish in seconds otherwise).
+set_tests_properties(test_power test_channel test_group test_delivery PROPERTIES TIMEOUT 900)

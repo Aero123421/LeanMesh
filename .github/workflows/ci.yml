@@ -63,7 +63,7 @@ jobs:
           cmake --build "$LEANMESH_NATIVE_BUILD"
       - name: public C API completeness (every api/leanmesh.h function defined in the native build)
         run: python3 scripts/check_api_defined.py --native-build "$LEANMESH_NATIVE_BUILD"
-      - name: ctest (per-test TIMEOUT properties; test_lifecycle, test_mesh and test_model get 900 s)
+      - name: ctest (per-test TIMEOUT properties; the sim-heavy suites get 900 s)
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
           ctest --test-dir "$LEANMESH_NATIVE_BUILD" --output-on-failure --no-tests=error -j2
@@ -228,7 +228,7 @@ jobs:
           cmake --build "$LEANMESH_ASAN_BUILD"
           cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
           cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host
-      - name: ctest under ASan + UBSan (test_mesh, test_lifecycle, test_model have TIMEOUT 900 s)
+      - name: ctest under ASan + UBSan (the sim-heavy suites have TIMEOUT 900 s, see tests/native/CMakeLists.txt)
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
           ctest --test-dir "$LEANMESH_ASAN_BUILD" --output-on-failure --no-tests=error -j2
