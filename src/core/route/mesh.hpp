@@ -74,6 +74,12 @@ class Mesh {
     // Bench switch (sim nodes of slices that drive links by hand). Product builds never call it.
     void set_enabled(bool on) { enabled_ = on; }
 
+    // Local relay DRAIN: root evidence, never inferred from absence of sends.
+    void begin_drain(MonoTime now, MonoTime until);
+    void end_drain(bool cancelled, MonoTime now);
+    [[nodiscard]] bool drained(MonoTime now) const;
+    void drain_timer(MonoTime now);
+
     // ---- services ----
     // May this node relay a joiner's frames (a relay attached to the tree, or the root)?
     [[nodiscard]] bool proxy_capable(MonoTime now) const;
@@ -248,6 +254,12 @@ class Mesh {
     [[nodiscard]] uint32_t next_sequence();
     [[nodiscard]] uint64_t credential_lease(bool attach) const;
 
+    uint32_t drain_sequence_ = 0, drain_ack_term_ = 0;
+    bool draining_ = false, drain_ok_ = false;
+    uint8_t drain_cancel_tries_ = 0;
+    MonoTime drain_until_ = MonoTime::never(), drain_at_ = MonoTime::never();
+    uint16_t avoid_relay_ = 0;
+    MonoTime avoid_relay_until_ = MonoTime::never(), evacuate_at_ = MonoTime::never();
     Engine &engine_;
     State state_ = State::Off;
     bool enabled_ = true;

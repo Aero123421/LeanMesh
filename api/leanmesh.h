@@ -172,12 +172,11 @@ typedef struct {
  lm_domain_id_t target_domain;
  uint32_t mode, search_budget_ms, constrain_target, reserved;
 } lm_join_request_t;
-/* The network policy the root holds (lm_policy_get: root only; other roles: UNSUPPORTED). `revision` is output only:
-   the committed channel and join-mode changes. lm_policy_set takes expected_revision and changes one field per call
-   (INVALID_ARGUMENT for two): channel_freeze as lm_channel_request does, join_mode committed durably before its
-   operation ends. relay_allowed and auto transfer have no mechanism in this build (UNSUPPORTED); it fixes
-   auto_transfer_on_isolation to 0 and isolation_before_transfer_ms to 0. No field lowers a docs/06 cryptographic
-   condition. */
+/* Root: revision counts committed channel/join-mode changes; one field changes per CAS call.
+   Leaf/relay: local persisted auto-transfer policy (default OFF), with its own revision.
+   Set auto_transfer_on_isolation and isolation_before_transfer_ms together; ON requires >=600000 ms.
+   Other fields are read-only on non-root. Isolation never replaces a signed AssignmentTicket/expected entry.
+   No field lowers a docs/06 cryptographic condition. */
 typedef struct {
  uint32_t struct_size, abi_version;
  uint64_t revision;

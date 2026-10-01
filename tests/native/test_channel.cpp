@@ -483,7 +483,7 @@ LM_TEST("API sim: lm_policy_get/set on the root (channel freeze, compare-and-set
     LM_CHECK_EQ(p.revision, 2u);
     LM_CHECK_EQ(p.channel_freeze, 0u);
     // A relay holds no policy.
-    LM_CHECK_EQ(get(n.ctx(1), p), LM_STATUS_UNSUPPORTED);
+    LM_CHECK_EQ(get(n.ctx(1), p), LM_STATUS_OK);
     LM_CHECK_EQ(lm_policy_set(n.ctx(1), &want, 0, &op), LM_STATUS_UNSUPPORTED);
 
     // ---- connectivity ----

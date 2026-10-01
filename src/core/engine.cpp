@@ -92,7 +92,10 @@ void Engine::wire_join_hooks() {
         // nothing installed them: DRAIN acted as IMMEDIATE and open sends stayed PENDING for ever.
         member::MembershipHooks m;
         m.ctx = this;
-        m.drained = [](void *c) { return !static_cast<Engine *>(c)->sends_open(); };
+        m.drained = [](void *c) {
+            Engine &e = *static_cast<Engine *>(c);
+            return !e.sends_open() && e.mesh_.drained(e.step_now_);
+        };
         m.refuse_sends = [](void *c, bool on) {
             Engine &e = *static_cast<Engine *>(c);
             e.delivery_.set_draining(on || e.draining_);

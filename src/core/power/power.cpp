@@ -780,6 +780,9 @@ void Power::wake(const port::WakeInfo &w, MonoTime now) {
     } else {
         ++stats_.sessions_kept;
     }
+    if (engine_.config().role != Role::Root) {
+        engine_.membership().pause_isolation(now - slept_at_);
+    }
     engine_.mesh().on_wake(now, last_path_ == SessionPath::FreshEdhoc);
     engine_.delivery().sleep_gap(now - slept_at_);
     if (auto_ && !wake_at_.is_never()) {

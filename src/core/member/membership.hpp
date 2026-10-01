@@ -22,6 +22,7 @@
 #include <cstdint>
 
 #include "core/bytes.hpp"
+#include "core/command.hpp"
 #include "core/ids.hpp"
 #include "core/jobs.hpp"
 #include "core/link/exchange.hpp"
@@ -139,6 +140,9 @@ class Membership {
     // The same answer for a node without the joiner side (the root, ADR-002 P8): `m` null.
     static void view(const LocalIdentity &id, const Membership *m, MonoTime since, lm_membership_t &out);
     [[nodiscard]] Status get_request(const RequestId &id, lm_operation_t &out, MonoTime now) const;
+    [[nodiscard]] Status local_policy(lm_policy_t &out) const;
+    [[nodiscard]] Reply set_local_policy(const lm_policy_t &want, uint64_t expected, MonoTime now);
+    void pause_isolation(Duration gap);
     void set_hooks(const MembershipHooks &h) { hooks_ = h; }
 
     // ---- [S18] lifecycle (lifecycle.cpp) ----
@@ -182,18 +186,21 @@ class Membership {
     enum class Step : uint8_t {
         None,
         BootLoadPrepared,
+        AutoPolicyLoad,
+        AutoPolicyCommit,
         CommitDelegation,
         LoadTicket,
         CommitPrepared,
         ActivateLoad,
         ActivateCommit,
-        ActivateMark,   // membership_prepared -> ACTIVATED (root acknowledgement still owed)
-        ConfirmConsume, // membership_prepared -> CONSUMED once the root acknowledged
+        ActivateMark,     // membership_prepared -> ACTIVATED (root acknowledgement still owed)
+        ConfirmConsume,   // membership_prepared -> CONSUMED once the root acknowledged
         VerifyActivation, // worker: the credential completed by JoinCommit's signature (SEC-D1)
-        ConsumePrepared, // refusal or leave of a PREPARED join
+        ConsumePrepared,  // refusal or leave of a PREPARED join
         InstallTicket,
         LeaveCommit,
-        LeaveCheck, // [FIX8-D6] the membership record read back after a tombstone commit reported a failure
+        LeaveCheck, // [FIX8-D6] the membership record read back after a tombstone commit reported a
+                    // failure
         RenewVerify, // [S18] worker: the renewed credential under the delegation
         RenewCommit, // [S18] membership record := the renewed credential
         RenewReload, // [P4] ... read again after a handshake made it wait without the record memory
@@ -201,7 +208,8 @@ class Membership {
         CommitPending, // [S18] pending_delegation := the new root's delegation (transfer/handover)
         SwitchLoad,    // [S18] after the ACTIVE commit: the pending delegation ...
         SwitchCommit,  // [S18] ... becomes root_delegation
-        SwitchPeek,    // [S18] the installed object says where a member's switch looks (its target domain)
+        SwitchPeek,    // [S18] the installed object says where a member's switch looks (its target
+                       // domain)
     };
     // Reconciling [FIX8-D6]: the tombstone commit reported a failure; RAM has left already, the stored record decides.
     enum class LeavePhase : uint8_t { Idle, Draining, Notifying, Committing, Reconciling };
@@ -288,6 +296,12 @@ class Membership {
     void leave_check(MonoTime now);
     void leave_checked(Status s, MonoTime now);
 
+    void auto_timer(MonoTime now);
+    bool auto_enabled_ = false, auto_loaded_ = false, auto_fault_ = false;
+    uint32_t isolation_ms_ = 0;
+    uint64_t auto_revision_ = 0, auto_policy_op_ = 0;
+    MonoTime isolated_since_ = MonoTime::never(), auto_at_ = MonoTime::never();
+
     Engine &engine_;
     JoinPipe pipe_;
     MembershipHooks hooks_;
@@ -346,7 +360,6 @@ class Membership {
     bool job_in_flight_ = false;
     bool cancelled_ = false;
     ByteView verify_input_;          // PREPARE: the withheld credential in scratch_; activation: the completed one in rec_
-    uint64_t op_counter_ = 0;
     uint64_t install_op_ = 0;
     bool boot_failed_ = false;       // reading the PREPARED record failed: unknown state, refuse to join
     bool renew_adopt_ = false;       // [S18] a renewed credential is durable and waits for an idle exchange

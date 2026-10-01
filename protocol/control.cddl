@@ -130,3 +130,9 @@ group-snapshot-v2 = [group-id: u32, group-revision: u63, token: id16,
 ; page0/token=nil starts a snapshot; later pages require the returned token.
 group-snapshot-request = [group-id: u32, group-revision: u63,
  page: 0..4, snapshot-token: id16 / nil]
+
+; Fixed binary end-session CONTROL opcodes, NOT CBOR arrays or ControlObject type IDs.
+; Big endian. Fields/lengths are normative in docs/09-wire.md and registry compact_control_opcodes.
+; 0xEF: u8 opcode | u32 sequence(nonzero) | u32 remaining-ms(0..30000) | u8 cancel(0..1)
+; 0xF0: u8 opcode | u32 sequence(nonzero) | u32 term(nonzero) | u8 status | u8 cancel(0..1)
+; 0xF1: u8 opcode | u32 term(nonzero) | u16 relay(1..65534)

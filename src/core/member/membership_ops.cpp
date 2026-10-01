@@ -85,7 +85,7 @@ Status Membership::join(const JoinArgs &a, MonoTime now, uint64_t &operation) {
     }
     target_ = a.target;
     constrain_ = a.constrain;
-    operation = k_op_tag | ++op_counter_;
+    operation = engine_.next_control_op();
     req_.operation = operation;
     req_.outcome = LM_OUTCOME_PENDING;
     req_.reason = Status::Ok;
@@ -167,7 +167,7 @@ Status Membership::install_ticket(ByteView cose, MonoTime now, uint64_t &operati
         engine_.identity().return_record(rec_);
         return st;
     }
-    install_op_ = k_op_tag | ++op_counter_;
+    install_op_ = engine_.next_control_op();
     operation = install_op_;
     return Status::Ok;
 }
@@ -276,7 +276,7 @@ Status Membership::leave(uint8_t mode, uint32_t deadline_ms, MonoTime now, uint6
         return Status::NotFound; // nothing to leave
     }
     leave_mode_ = mode;
-    leave_op_ = k_op_tag | ++op_counter_;
+    leave_op_ = engine_.next_control_op();
     operation = leave_op_;
     leave_deadline_ = now + Duration::from_ms(deadline_ms);
     leave_attempts_ = 0;
@@ -305,6 +305,9 @@ Status Membership::leave(uint8_t mode, uint32_t deadline_ms, MonoTime now, uint6
         leave_notify(now);
     } else {
         leave_ = LeavePhase::Draining;
+        if (engine_.config().role == Role::Relay) {
+            engine_.mesh().begin_drain(now, leave_deadline_);
+        }
         leave_timer(now);
     }
     return Status::Ok;
@@ -315,6 +318,10 @@ void Membership::leave_timer(MonoTime now) {
     case LeavePhase::Idle:
         return;
     case LeavePhase::Draining:
+        if (!revoked_ && now >= leave_deadline_) {
+            leave_finish(Status::DeadlineUnreachable, LM_OUTCOME_EXPIRED, now);
+            return;
+        }
         if (revoked_ || hooks_.drained == nullptr || hooks_.drained(hooks_.ctx)) {
             leave_ = LeavePhase::Notifying;
             leave_tx_wait_ = MonoTime::never();
@@ -535,7 +542,7 @@ void Membership::apply_left() {
 }
 
 void Membership::leave_finish(Status why, uint32_t outcome, MonoTime now) {
-    (void)now;
+    engine_.mesh().end_drain(engine_.identity().is_member(), now);
     (void)outcome; // (the event carries `why`: a storage failure or RECOVERY_REQUIRED reads as INDETERMINATE)
     engine_.identity().return_record(rec_);
     if (hooks_.refuse_sends != nullptr) {

@@ -143,6 +143,7 @@ LM_TEST("public lifecycle: lm_init only on a booting sim node, lm_destroy only w
     LM_CHECK_EQ(m.state, static_cast<uint32_t>(LM_UNASSIGNED));
 
     LM_CHECK_EQ(lm_destroy(nullptr), LM_STATUS_INVALID_ARGUMENT);
+    world.run_until(world.now_us() + 100'000); // policy loading must not borrow storage before lm_start
     LM_CHECK_EQ(lm_start(ctx), LM_STATUS_OK);
     world.run_until(world.now_us() + 50'000);
     LM_CHECK_EQ(lm_destroy(ctx), LM_STATUS_BUSY); // running: stop first
@@ -184,7 +185,8 @@ LM_TEST("lm_connectivity_get: a device that is no member reports UNKNOWN with no
     lm_policy_t p{};
     p.struct_size = sizeof(p);
     p.abi_version = LM_ABI_VERSION;
-    LM_CHECK_EQ(lm_policy_get(ctx, &p), LM_STATUS_UNSUPPORTED); // the policy lives on the root
+    LM_CHECK_EQ(lm_policy_get(ctx, &p),
+                LM_STATUS_AUTH_PENDING); // local policy is unknown before identity/record loading
 }
 
 LM_TEST("idle owner has no deadline (no fixed polling tick)") {

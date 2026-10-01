@@ -146,16 +146,34 @@ Reply Engine::execute_membership(const Command &cmd, MonoTime now) {
     }
 }
 
-// lm_policy_get/set (docs/10 §5, docs/07 §9). The policy lives on the root; other roles have none (UNSUPPORTED, as
-// lm_channel_request). FIX8-D12 (review M10): the join mode is a policy field like the channel freeze. One policy
-// revision counts every committed change - the coordinator's channel changes plus the ledger's join-mode changes, each
-// kept in its own record - and a set is a compare-and-set on it. One field changes per call: channel_freeze through the
-// coordinator, join_mode through the ledger (durable before its operation ends, CLOSED if that commit's result is
-// unknown). relay_allowed and automatic transfer have no mechanism in this build: UNSUPPORTED, never a fake success.
-// No field lowers a docs/06 condition: every join still needs a fleet-signed ticket, and preapproved a signed entry.
+// lm_policy_get/set: non-root owns the persisted local auto-transfer policy; root owns network
+// policy. FIX8-D12 (review M10): the join mode is a policy field like the channel freeze. One
+// policy revision counts every committed change - the coordinator's channel changes plus the
+// ledger's join-mode changes, each kept in its own record - and a set is a compare-and-set on it.
+// One field changes per call: channel_freeze through the coordinator, join_mode through the ledger
+// (durable before its operation ends, CLOSED if that commit's result is unknown). Root
+// relay_allowed and automatic transfer are read-only. No field lowers a docs/06 condition: every
+// join still needs a fleet-signed ticket, and preapproved a signed entry.
 Reply Engine::execute_policy(const Command &cmd, MonoTime now) {
     if (!is_root()) {
-        return Reply{Status::Unsupported, 0, 0};
+        if (cmd.kind == CommandKind::PolicyGet) {
+            if (cmd.response == nullptr || cmd.response_size != sizeof(lm_policy_t)) {
+                return Reply{Status::InvalidArgument, 0, 0};
+            }
+            lm_policy_t local{};
+            const Status st = membership().local_policy(local);
+            std::memcpy(cmd.response, &local, sizeof(local));
+            return Reply{st, 0, 0};
+        }
+        if (cmd.request == nullptr || cmd.request_size != sizeof(PolicySetRequest)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        const auto &r = *static_cast<const PolicySetRequest *>(cmd.request);
+        const Reply accepted = membership().set_local_policy(r.policy, r.expected_revision, now);
+        if (accepted.status == Status::Ok) {
+            note_ctl_op(accepted.operation_id, false, LM_OUTCOME_PENDING, 0);
+        }
+        return accepted;
     }
     const auto v = coord_.view();
     lm_policy_t cur{};

@@ -105,6 +105,11 @@
     "GroupSnapshotV2": 32,
     "GroupSnapshotRequest": 33
   },
+  "compact_control_opcodes": {
+    "DrainRequest": 239,
+    "DrainStatus": 240,
+    "DrainNotice": 241
+  },
   "fields": {
     "link": {
       "bytes": 24,

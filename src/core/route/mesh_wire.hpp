@@ -49,7 +49,32 @@ struct Probe {
                                   MutByteView out, std::size_t &len);
 [[nodiscard]] Status decode_probe(ByteView plain, Probe &out, DeviceId &issuer);
 
-enum class Op : uint8_t { Register = 0xE1, Lease = 0xE2, Ready = 0xE3, Query = 0xE4, Answer = 0xE5, Power = 0xEE /* S16; 0xE6..0xED are the channel module's */ };
+enum class Op : uint8_t {
+    Register = 0xE1,
+    Lease = 0xE2,
+    Ready = 0xE3,
+    Query = 0xE4,
+    Answer = 0xE5,
+    DrainRequest = 0xEF,
+    DrainStatus = 0xF0,
+    DrainNotice = 0xF1,
+    Power = 0xEE /* S16; 0xE6..0xED are the channel module's */
+};
+
+// Authenticated end-control: the root snapshots children and refuses new attachments to the relay.
+struct DrainRequest {
+    uint32_t sequence = 0, remaining_ms = 0;
+    uint8_t cancel = 0;
+};
+struct DrainStatus {
+    uint32_t sequence = 0, term = 0;
+    Status status = Status::Busy;
+    uint8_t cancel = 0;
+};
+struct DrainNotice {
+    uint32_t term = 0;
+    uint16_t relay = 0;
+};
 
 struct Register { // node -> root: "approve this parent for me"
     uint32_t sequence = 0;

@@ -54,6 +54,14 @@ class Routes {
 
   private:
     void sync(MonoTime now);
+    void on_drain(const DeviceId &peer, ShortAddr addr, const delivery::PathSpec &reply,
+                  ByteView body, MonoTime now);
+    void drain_notice(MonoTime now);
+    ShortAddr draining_addr_;
+    uint32_t drain_sequence_ = 0;
+    bool drain_granted_ = false;
+    MonoTime drain_until_ = MonoTime::never(), drain_notice_at_ = MonoTime::never();
+    uint64_t drain_notify_ = 0;
     [[nodiscard]] bool identify(const DeviceId &dev, ShortAddr &addr, uint64_t &gen);
     void on_register(const DeviceId &peer, ShortAddr addr, uint64_t gen, const delivery::PathSpec &reply,
                      ByteView body, MonoTime now);

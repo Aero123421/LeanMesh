@@ -89,6 +89,9 @@ std::size_t Topology::subtree_height(uint8_t self) const {
 }
 
 Status Topology::check_attach(uint8_t self, uint8_t parent) const {
+    if (parent != k_root && parent != k_none && nodes_[parent].draining) {
+        return Status::Busy;
+    }
     std::size_t depth = 0;
     for (uint8_t cur = parent; cur != k_root; cur = nodes_[cur].parent) {
         if (cur == self) {
@@ -167,6 +170,9 @@ void Topology::init(ShortAddr root_addr, RootTerm term) {
     root_addr_ = root_addr;
     term_ = term;
     revision_ = 0;
+    drain_idx_ = k_none;
+    drain_mask_ = 0;
+    drain_lost_ = false;
     for (Node &n : nodes_) {
         n = Node{};
     }
@@ -176,6 +182,13 @@ Status Topology::reset(ShortAddr addr) {
     const uint8_t at = find_addr(addr.value());
     if (at == k_none || at == k_root) {
         return Status::NotFound;
+    }
+    if (drain_mask_ & (1ULL << at)) {
+        drain_lost_ = true;
+    }
+    if (at == drain_idx_) {
+        drain_idx_ = k_none;
+        drain_mask_ = 0;
     }
     unattach_children(at); // the address means another generation now: old links are void
     const uint64_t gen = nodes_[at].gen;
@@ -191,6 +204,13 @@ Status Topology::remove(ShortAddr addr) {
     if (at == k_none || at == k_root) {
         return Status::NotFound;
     }
+    if (drain_mask_ & (1ULL << at)) {
+        drain_lost_ = true;
+    }
+    if (at == drain_idx_) {
+        drain_idx_ = k_none;
+        drain_mask_ = 0;
+    }
     unattach_children(at);
     nodes_[at] = Node{};
     return Status::Ok;
@@ -202,6 +222,9 @@ Status Topology::begin_term(RootTerm term) {
     }
     term_ = term;
     revision_ = 0;
+    drain_idx_ = k_none;
+    drain_mask_ = 0;
+    drain_lost_ = false;
     for (Node &n : nodes_) {
         const Node kept = n;
         n = Node{};
@@ -281,7 +304,11 @@ Status Topology::confirm_ready(ShortAddr addr, RootTerm term, PathRevision revis
     }
     Node &node = nodes_[idx];
     if (!node.pending) {
-        return node.active && node.revision == revision.value() ? Status::Ok : Status::Conflict;
+        if (!node.active || node.revision != revision.value()) {
+            return Status::Conflict;
+        }
+        node.confirmed_revision = revision.value();
+        return Status::Ok;
     }
     if (node.pending_revision != revision.value()) {
         return Status::Conflict;
@@ -303,6 +330,7 @@ Status Topology::confirm_ready(ShortAddr addr, RootTerm term, PathRevision revis
     node.active = true;
     node.pending = false;
     node.revision = node.pending_revision;
+    node.confirmed_revision = node.revision;
     node.lease_expires_ms = now + gen::defaults::routing::lease_ms;
     // Descendants keep their links but their path (through this node) changed.
     return bump_subtree(idx);
@@ -398,6 +426,68 @@ Status Topology::parent_of(ShortAddr node, ShortAddr &parent) const {
     }
     parent = nodes_[idx].parent == k_root ? root_addr_ : ShortAddr{nodes_[nodes_[idx].parent].addr};
     return Status::Ok;
+}
+
+Status Topology::begin_drain(ShortAddr relay, uint64_t now) {
+    const uint8_t idx = find_addr(relay.value());
+    if (idx == k_none || idx == k_root) {
+        return Status::NotFound;
+    }
+    if (drain_idx_ != k_none && drain_idx_ != idx) {
+        return Status::Busy;
+    }
+    // Unknown topology cannot establish that a disconnected child was evacuated.
+    for (const Node &n : nodes_) {
+        if (n.used && (!n.active || now >= n.lease_expires_ms)) {
+            return Status::NoRoute;
+        }
+    }
+    drain_idx_ = idx;
+    drain_mask_ = 0;
+    drain_lost_ = false;
+    nodes_[idx].draining = true;
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        if (i != idx && nodes_[i].used &&
+            (distance_below(static_cast<uint8_t>(i), idx) != 0 ||
+             (nodes_[i].pending && nodes_[i].pending_parent == idx))) {
+            drain_mask_ |= 1ULL << i;
+        }
+    }
+    return Status::Ok;
+}
+
+Status Topology::drain_status(ShortAddr relay, uint64_t now) const {
+    const uint8_t idx = find_addr(relay.value());
+    if (idx != drain_idx_ || idx == k_none || drain_lost_) {
+        return Status::NoRoute;
+    }
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        if (!(drain_mask_ & (1ULL << i))) {
+            continue;
+        }
+        Chain path{};
+        std::size_t n = 0;
+        if (!nodes_[i].used || chain(static_cast<uint8_t>(i), &now, path, n) != Status::Ok) {
+            return Status::NoRoute;
+        }
+        if (std::find(path.begin(), path.begin() + n, relay.value()) != path.begin() + n ||
+            nodes_[i].pending || nodes_[i].confirmed_revision != nodes_[i].revision) {
+            return Status::Busy;
+        }
+    }
+    return Status::Ok;
+}
+
+void Topology::cancel_drain(ShortAddr relay) {
+    const uint8_t idx = find_addr(relay.value());
+    if (idx != k_none && idx != k_root) {
+        nodes_[idx].draining = false;
+    }
+    if (idx == drain_idx_) {
+        drain_idx_ = k_none;
+        drain_mask_ = 0;
+        drain_lost_ = false;
+    }
 }
 
 } // namespace lm::root

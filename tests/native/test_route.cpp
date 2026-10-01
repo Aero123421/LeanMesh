@@ -353,6 +353,33 @@ void admit_n(Topology &t, unsigned n) {
 
 } // namespace
 
+LM_TEST("G02 topology drain needs confirmed alternate paths and freezes new child admission") {
+    Topology t{ShortAddr{k_root_addr}, RootTerm{1}};
+    admit_n(t, 4);
+    LM_CHECK_OK(attach(t, 0, k_root_addr, 1, 0, true));
+    LM_CHECK_OK(attach(t, 1, addr_of(0), 2, 0, true));
+    LM_CHECK_OK(attach(t, 2, k_root_addr, 3, 0, true));
+    LM_CHECK_OK(attach(t, 3, addr_of(1), 1, 0, true));
+    LM_CHECK_OK(t.begin_drain(ShortAddr{addr_of(0)}, 1));
+    LM_CHECK(t.drain_status(ShortAddr{addr_of(0)}, 1) == Status::Busy);
+    LM_CHECK(attach(t, 2, addr_of(0), 4, 1, true) == Status::Busy);
+    RouteGrant grant;
+    LM_CHECK_OK(attach(t, 1, k_root_addr, 5, 1, false, &grant));
+    LM_CHECK(t.drain_status(ShortAddr{addr_of(0)}, 1) == Status::Busy); // a grant is not READY
+    LM_CHECK_OK(t.confirm_ready(ShortAddr{addr_of(1)}, t.term(), grant.revision, 2));
+    LM_CHECK(t.drain_status(ShortAddr{addr_of(0)}, 2) ==
+             Status::Busy); // descendant must adopt the pushed revision
+    PathRevision descendant_revision;
+    LM_CHECK_OK(t.path_revision(ShortAddr{addr_of(3)}, descendant_revision));
+    LM_CHECK_OK(t.confirm_ready(ShortAddr{addr_of(3)}, t.term(), descendant_revision, 2));
+    LM_CHECK_OK(t.drain_status(ShortAddr{addr_of(0)}, 2));
+    LM_CHECK_OK(t.reset(ShortAddr{addr_of(1)}));
+    LM_CHECK(t.drain_status(ShortAddr{addr_of(0)}, 2) ==
+             Status::NoRoute); // loss/reuse is no evacuation proof
+    t.cancel_drain(ShortAddr{addr_of(0)});
+    LM_CHECK_OK(attach(t, 2, addr_of(0), 6, 2, true));
+}
+
 LM_TEST("topology: depth 20 accepted, 21 refused, 40-hop LCA path forwards end to end") {
     Topology t{ShortAddr{k_root_addr}, RootTerm{1}};
     admit_n(t, 41);

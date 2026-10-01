@@ -117,6 +117,19 @@ class Topology {
     // Approved parent of an Active member (NotFound otherwise); the root itself has none.
     [[nodiscard]] Status parent_of(ShortAddr node, ShortAddr &parent) const;
 
+    [[nodiscard]] Status begin_drain(ShortAddr relay, uint64_t now);
+    [[nodiscard]] Status drain_status(ShortAddr relay, uint64_t now) const;
+    void cancel_drain(ShortAddr relay);
+    [[nodiscard]] bool owns_drain(ShortAddr relay) const {
+        return drain_idx_ != k_none && nodes_[drain_idx_].addr == relay.value();
+    }
+    template <class F> void for_each_drain_child(F &&f) const {
+        for (std::size_t i = 0; i < nodes_.size(); ++i) {
+            if ((drain_mask_ & (1ULL << i)) && nodes_[i].used) {
+                f(ShortAddr{nodes_[i].addr});
+            }
+        }
+    }
     [[nodiscard]] RootTerm term() const { return term_; }
     [[nodiscard]] ShortAddr root_addr() const { return root_addr_; }
 
@@ -128,12 +141,15 @@ class Topology {
     struct Node {
         bool used = false;
         bool active = false;
+        bool draining = false;
         bool pending = false;
         bool has_seq = false;
         uint8_t parent = k_none;
         uint8_t pending_parent = k_none;
         uint16_t addr = 0;
         uint32_t revision = 0;
+        uint32_t confirmed_revision =
+            0; // READY from this member, including a pushed subtree revision
         uint32_t pending_revision = 0;
         uint32_t pending_parent_revision = 0;
         uint32_t last_seq = 0;
@@ -156,6 +172,10 @@ class Topology {
     // Distance in parent links from `node` up to `ancestor`; 0 when it is no descendant.
     [[nodiscard]] std::size_t distance_below(uint8_t node, uint8_t ancestor) const;
 
+    static_assert(k_max_members <= 64, "drain snapshot bitmap capacity");
+    uint8_t drain_idx_ = k_none;
+    uint64_t drain_mask_ = 0;
+    bool drain_lost_ = false;
     ShortAddr root_addr_;
     RootTerm term_;
     uint32_t revision_ = 0;

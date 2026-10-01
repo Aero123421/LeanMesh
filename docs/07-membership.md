@@ -51,3 +51,9 @@ membership commit・leave・transfer・root delegation変更はNodeごとに排�
 
 ## 10. spec0.2の運用面
 設置window、電源先行、大量設置、工場/倉庫、Root交換、resetは[21章](21-lifecycle-operations.md)。省電力で承認待ちを中断する場合はrequest_idを保持し、次wakeから同じ案件を照会する。sessionを失ったのにJOIN_ONLY traffic keyを復元しない。07章の二者commitは全装置同時の原子的transactionではなく、永続記録と再照会による収束契約である。
+
+## 実装の自動移設とrelay DRAIN
+
+leaf/relayのローカルpolicyをCAS更新して隔離triggerを明示ONにする。最短600秒、既定OFF。冷起動と到達回復で計時をリセットし、予定Sleep時間を除外する。worker、channel移行、確認待ちや通信予算の不足時は有界に延期する。署名付きB ticketが無ければA所属を保持しAUTH_PENDINGのまま。既存TRANSFER_CANDIDATEの検証とatomic activationを共有する。
+
+relay DRAINはrootごとに1件の64member bitmapで配下を固定する。新規子の登録を止め、各子がrelayを含まない有効root経路の現在revisionをREADYしたことを要求する。子の消失・世代変更や不明なtopologyは退避の証拠にしない（無関係な未確定memberがいても保守的に拒否する）。認証済み通知で子は予算内に代替親を探索・登録し、root確認前は旧経路を維持する。最大30秒の期限切れはDEADLINE_UNREACHABLEで所属維持。取消は認証済み応答を待ち最大5回送る。grant後の子受入停止は取消・離脱・世代変更まで保持し、応答紛失で新規依存を作らない。
