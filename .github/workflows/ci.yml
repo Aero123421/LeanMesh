@@ -34,7 +34,7 @@ jobs:
       # clang-format / clang-tidy are configured (.clang-format, .clang-tidy) but NOT gated: the C++ tree does not follow
       # the configured column limit (thousands of findings), so a gate would only be red. See docs/sdk/testing.md.
       - run: python -m pip install ruff==0.16.9
-      - run: ruff check host scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py
+      - run: ruff check host scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py scripts/report_pytest_failures.py
 
   native:
     name: native build + ctest + power-cut matrix + coverage
@@ -186,7 +186,11 @@ jobs:
           cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host meshsim lmtool
       - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
       - name: E2E (real Host + real cores on a simulated radio; sim timings, not RF)
-        run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s'
+        id: e2e
+        run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s --junitxml="$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - name: E2E failure details in the run summary
+        if: ${{ failure() && steps.e2e.outcome == 'failure' }}
+        run: '"$LEANMESH_VENV/bin/python" scripts/report_pytest_failures.py "$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with: { name: e2e-fullstack-report, path: /tmp/e2e-report }
@@ -205,6 +209,7 @@ jobs:
       LEANMESH_MESHSIM_BUILD: /tmp/leanmesh-asan
       LEANMESH_SIM_STRICT_EXIT: "1"                        # a meshsim that ended non-zero or printed a report fails its test
       LEANMESH_VENV: /tmp/leanmesh-venv
+      LEANMESH_E2E_REPORT_DIR: /tmp/asan-e2e-report
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=0:print_stacktrace=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1    # UBSan only prints by default: make it fatal
     steps:
@@ -234,7 +239,14 @@ jobs:
           ctest --test-dir "$LEANMESH_ASAN_BUILD" --output-on-failure --no-tests=error -j2
       - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
       - name: E2E with the ASan meshsim and the plain libleanmesh_host.so
-        run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s'
+        id: e2e
+        run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s --junitxml="$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - name: E2E failure details in the run summary
+        if: ${{ failure() && steps.e2e.outcome == 'failure' }}
+        run: '"$LEANMESH_VENV/bin/python" scripts/report_pytest_failures.py "$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with: { name: asan-e2e-report, path: /tmp/asan-e2e-report }
 
   idf-targets:
     name: IDF build ${{ matrix.target }} (baseline, example_node, crypto_link_check)

@@ -68,3 +68,7 @@ IDF pin `76f5dedd9950a3012fee8fb7d5586df21fc67802`、GCC 14.2、Python 3.12.14�
 `ac20429` のCIでnative jobとE2E jobの失敗をWebの実行一覧から確認。GitHub APIは403、Webの詳細ログは認証が必要で、この環境から取得できない。native job末尾の `python scripts/scenario_coverage.py --out-dir /tmp/leanmesh-ci-coverage` をローカルで実行すると、追加テスト名の先頭にあるレビューID `G01/G02` を未定義の製品scenario IDと誤認してexit 1になることを再現した。前回の検証一覧にこのCI手順が不足していた。
 
 レビューIDの前に `review` を付け、製品scenario名前空間との衝突を解消。同じ規則で、製品scenarioにも存在する `R01` と今回のレビューR01を区別した。テスト本体・製品scenario一覧・coverage gateは変更していない。同じコマンドはexit 0（158 scenarios / 337 references、既存の実機未検証表示を維持）。E2E側の失敗は別途調査対象で、この命名修正で解消したとは扱わない。
+
+修正commit `bfd2482` のGitHub CI run `36830831486` でnative jobの成功を確認した（build、ctest、power-cut matrix、coverage）。通常E2Eは再度失敗し、ローカルでは `python -m pytest -v host/tests/e2e -s` が53件合格（515.53秒）で再現しなかった。元のsanitizers jobもnative ctestは成功し、その後のE2Eで失敗していた。`curl https://api.github.com/...` はCONNECT tunnelをプロキシに403で拒否され、Webログも認証必須のため本文取得不可。
+
+両E2E jobでJUnit XMLを保存し、失敗時だけ `scripts/report_pytest_failures.py` が最大10件・各6000文字の失敗詳細をCIサマリーのannotationへ出すようにした。pytestのexit code、timeout、テスト集合は維持。XMLはartifactにも残す。実行可能なstdlibのみの処理で、ローカルの失敗/成功XML fixtureで出力と改行エスケープを確認し、Ruff・git diff --checkも合格。この診断変更をE2E不具合の修正とは扱わない。
