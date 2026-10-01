@@ -12,6 +12,11 @@ function(lm_add_test name)
     set_tests_properties(${name} PROPERTIES LABELS "${T_LABELS}" TIMEOUT 120)
 endfunction()
 
+# Python offline issuer -> SDK verifier/Join. Invoked by host/tests/integration, not an empty CTest.
+add_executable(issuer_driver issuer_driver.cpp ${LM_REPO_ROOT}/src/port/sim/assert_sim.cpp)
+target_compile_options(issuer_driver PRIVATE ${LM_CXX_WARNINGS})
+target_link_libraries(issuer_driver PRIVATE lm_sim)
+
 lm_add_test(test_foundation SOURCES test_foundation.cpp LABELS "unit;scenario")
 lm_add_test(test_crypto_backend SOURCES test_crypto_backend.cpp edhoc_link_check.c LABELS "unit;crypto;scenario")
 lm_add_test(test_runtime_sim SOURCES test_runtime_sim.cpp LABELS "integration;sim;scenario")

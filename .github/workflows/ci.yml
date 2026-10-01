@@ -150,7 +150,7 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
           cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
-          cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host meshsim lmtool
+          cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host meshsim lmtool issuer_driver
       - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
       - name: host pytest (unit, integration)
         run: 'timeout 1500 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/unit host/tests/integration'
@@ -238,6 +238,10 @@ jobs:
           . "$IDF_PATH/export.sh" >/dev/null
           ctest --test-dir "$LEANMESH_ASAN_BUILD" --output-on-failure --no-tests=error -j2
       - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
+      - name: offline issuer objects verified and joined by the sanitized SDK
+        env:
+          LEANMESH_ISSUER_DRIVER: /tmp/leanmesh-asan/tests/native/issuer_driver
+        run: '"$LEANMESH_VENV/bin/python" -m pytest -v host/tests/integration/test_fleet_issuer.py'
       - name: E2E with the ASan meshsim and the plain libleanmesh_host.so
         id: e2e
         run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s --junitxml="$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'

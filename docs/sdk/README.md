@@ -22,6 +22,7 @@ ESP32-S3 / C3 / C5 / C6 向けの汎用長距離Mesh（ESP-NOW + Wi-Fi LR）SDK�
 | [getting-started.md](getting-started.md) | 前提、取得、native build / ctest、Host venv / pytest、IDF build（4 SoC × LEAF/RELAY/ROOT）、meshsim + Host の起動 |
 | [device-api.md](device-api.md) | Cの使い方: init〜stop、join、send/受信、証拠と結果、group、power、channel、エラー |
 | [host.md](host.md) | Hostの設定・token、curl例、idempotency、event/SSE/cursor、crash時の意味 |
+| [fleet-issuer.md](fleet-issuer.md) | オフライン fleet 鍵管理と初回 Join の署名 CLI。機器書込みと custody 認定は後続 |
 | [architecture.md](architecture.md) | owner / worker / app、4 port、ディレクトリ、決定の所在 |
 | [testing.md](testing.md) | 試験の層、電源断matrix、シナリオ対応、資源報告、**未検証の一覧** |
 

@@ -42,6 +42,7 @@ lm_status_t app_shutdown(lm_context_t *ctx) {
 
 C API に provisioning 関数はありません。端末は `identity` / `state` パーティションの封印record（端末鍵、fleet署名のDeviceCredential、trust anchor、RootDelegation、必要ならMemberCredential）を起動時に読みます。
 - **量産用の書込みツールはこのリポジトリにありません。** あるのは sim/bench 専用の `tools/lmfleet`（TEST-ONLY発行者）と meshsim の `provision` コマンドだけで、その鍵を製品へ入れてはいけません。
+- 初回 Join の署名 object は独立した [オフライン fleet CLI](fleet-issuer.md) で発行できます。これは機器への鍵・record 書込み経路ではなく、Host HTTP に fleet 署名権限も追加しません。
 - 保存領域の読み取り失敗を「未provision」とは扱いません（`lm_init` はStore初期化の失敗をそのまま返し、fail closed）。
 - **端末秘密鍵はNVS暗号化が前提です（FIX8-D7）。** `identity` recordは端末のP-256秘密鍵、`discovery_scope` はDiscoveryScopeKeyを持ち、NVS partitionはflash暗号化の対象外です。IDF portは `CONFIG_NVS_ENCRYPTION` のとき `identity`/`state` を登録済みNVS security scheme（HMAC eFuse鍵、またはflash暗号化された`nvs_keys`）の鍵で暗号化mountし、鍵が読めなければ `STORAGE_FAILURE`（平文へは落ちない）。SDKはその鍵を**作りません**（eFuse書込み/`nvs_keys`書込みはprovisioning＝製品の鍵custody）。NVS暗号化なしのbuildは `CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS`（開発専用の明示承認）が無ければcompileエラーです。`firmware/example_node` の既定はHMAC方式（KEY2）で、既定partitionも**既にprovisionされた鍵でだけ**mountします（IDFの `nvs_flash_init()` は空のchipでHMAC鍵をeFuseへ書くので使いません。鍵が無ければmountせず、SDKも `lm_init` で失敗）。暗号化の方式は製品の寿命を通じて固定です：IDFは読めないentryをmount時に消去するため、別の方式のimageを一度起動すると記録（端末鍵、rootのledger）は**失われます**（端末は未provision、rootはRECOVERY_REQUIREDになる）。SDKはこれを検出しません（provisioningはfirmwareと同じ方式で書き、方式をまたぐ更新をしない）。
 - 端末の `DeviceId`、`assignment_generation`、`membership_generation` は別物です（`lm_membership_get`）。
