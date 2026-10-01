@@ -379,6 +379,28 @@ pw::Policy report_long() {
 
 } // namespace
 
+LM_TEST("R01 synchronous windowed light wake uses fresh owner time and excludes sleep from radio "
+        "accounting") {
+    for (const uint64_t advance_ms : {1000U, 5000U, 30000U}) {
+        PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+        n.form();
+        n.apply_policy(2, k_windowed);
+        n.node(2).pm.synchronous_wake_ms = advance_ms;
+        const uint64_t before = n.eng(2).power().radio_on_us(n.node(2).clock.now());
+        LM_CHECK(n.until([&] { return n.node(2).pm.sleep_calls() != 0; }, 5000));
+        const MonoTime fresh = n.node(2).clock.now();
+        LM_CHECK(n.eng(2).step_time() >= fresh + Duration::from_ms(-5));
+        const uint64_t after = n.eng(2).power().radio_on_us(fresh);
+        const MonoTime next = n.eng(2).step(fresh);
+        LM_CHECK(next.is_never() || next >= fresh);
+        // A stale time must not move the accounting origin back into the sleep gap.
+        (void)n.eng(2).power().radio_on_us(fresh +
+                                           Duration::from_ms(-static_cast<int64_t>(advance_ms)));
+        LM_CHECK_EQ(n.eng(2).power().radio_on_us(fresh), after);
+        LM_CHECK(after - before < 5'000'000U);
+    }
+}
+
 LM_TEST("S16 unit: the policy record and the schedule report round-trip and refuse malformed input") {
     std::array<uint8_t, 128> buf{};
     std::size_t len = 0;

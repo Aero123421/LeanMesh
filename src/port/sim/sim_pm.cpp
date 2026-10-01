@@ -1,5 +1,6 @@
 #include "port/sim/sim_pm.hpp"
 
+#include "port/sim/sim_node.hpp"
 #include <cstring>
 
 namespace lm::sim {
@@ -49,6 +50,12 @@ port::SleepStart SimPm::sleep(uint8_t kind, uint8_t sources, uint64_t duration_m
     woke.cause = port::ResetCause::LightWake;
     woke.ram_complete = ram_complete;
     woke.elapsed_known = elapsed_known;
+    if (synchronous_wake_ms != 0) {
+        node_.clock.advance(synchronous_wake_ms * 1000U);
+        woke.source = synchronous_source;
+        woke.elapsed_upper_ms = synchronous_wake_ms;
+        return port::SleepStart::Woke;
+    }
     return port::SleepStart::Pending; // the owner wakes itself at its deadline, or the bench calls power_wake()
 }
 

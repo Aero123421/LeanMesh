@@ -90,7 +90,7 @@ void IdfOwner::run() {
         }
         TickType_t wait = portMAX_DELAY; // idle: sleep until an external event
         if (!next.is_never()) {
-            const int64_t us = (next - now).us;
+            const int64_t us = (next - clock_->now()).us;
             const uint32_t ms = us <= 0 ? 0 : static_cast<uint32_t>((us + 999) / 1000);
             wait = ms == 0 ? 0 : (ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS;
         }

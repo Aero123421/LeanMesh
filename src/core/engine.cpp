@@ -200,6 +200,9 @@ MonoTime Engine::step(MonoTime now) {
         membership().on_timer(now);
     }
     power_.on_timer(now); // [SLICE:S16] episode/window ends, poll retry, mailbox expiry, ticket
+    if (step_now_ != now) {
+        return step_now_; // Woke advanced the clock: rerun all timers in a fresh pass
+    }
     if (power_.asleep()) { // this very step put the node to sleep: nothing else may run on a stopped radio
         return next_deadline();
     }
@@ -217,6 +220,9 @@ MonoTime Engine::step(MonoTime now) {
         serial_->on_step(now); // [SLICE:S10] port input and USB timers
     }
     power_.after_step(now); // [SLICE:S16] sleep-prepare progress, radio-time accounting, PM locks
+    if (step_now_ != now) {
+        return step_now_; // after_step may also cross a synchronous sleep boundary
+    }
     if (restart_pending_ && !jobs_.busy()) { // [SLICE:S18] a committed transfer/handover: boot into the new domain
         restart_pending_ = false;
         // FIX8-D14 (review L4): a restart that cannot bring the node up again is reported, never silent.

@@ -45,6 +45,7 @@ bool Engine::drain_radio(MonoTime now) {
 }
 
 void Engine::radio_wake(MonoTime now) {
+    step_now_ = now; // synchronous PM return is a new owner-time boundary
     if (radio_state_ != RadioState::Asleep) {
         return;
     }

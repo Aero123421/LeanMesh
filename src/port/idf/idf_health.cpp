@@ -47,8 +47,8 @@ port::HealthFacts IdfHealth::read() {
         f.stack_free_bytes = std::min(static_cast<uint32_t>(uxTaskGetStackHighWaterMark(owner_.task())),
                                       static_cast<uint32_t>(uxTaskGetStackHighWaterMark(jobs_.task())));
     }
-    f.cpu_valid = true;
-    f.owner_cpu_us = owner_.busy_us();
+    // owner busy_us is wall elapsed (including synchronous sleep/preemption), not CPU time.
+    f.cpu_valid = false;
     f.rx_ring_valid = true;
     f.rx_ring_depth = radio_.rx_depth();
     f.rx_ring_dropped = radio_.rx_dropped();

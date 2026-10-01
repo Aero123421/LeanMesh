@@ -10,7 +10,7 @@ MonoTime SimClock::now() const {
     const uint64_t local = world_.now_us() - boot_world_us_;
     const auto skew = static_cast<int64_t>(local) / 1000000 * drift_ppm_ +
                       static_cast<int64_t>(local % 1000000) * drift_ppm_ / 1000000;
-    return MonoTime{static_cast<uint64_t>(static_cast<int64_t>(local) + skew)};
+    return MonoTime{static_cast<uint64_t>(static_cast<int64_t>(local) + skew) + offset_us_};
 }
 
 // ---- SimRadio ----------------------------------------------------------------------------------
