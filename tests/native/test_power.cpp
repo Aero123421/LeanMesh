@@ -380,7 +380,7 @@ pw::Policy report_long() {
 } // namespace
 
 LM_TEST(
-    "G02 real cores evacuate a relay child before DRAIN, or retain membership at the deadline") {
+    "review G02 real cores evacuate a relay child before DRAIN, or retain membership at the deadline") {
     for (const bool alternate : {false, true}) {
         PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
         n.form();
@@ -403,7 +403,7 @@ LM_TEST(
     }
 }
 
-LM_TEST("G02 DRAIN waits for a moved subtree's descendants to adopt the new root path") {
+LM_TEST("review G02 DRAIN waits for a moved subtree's descendants to adopt the new root path") {
     PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Relay}, Spec{Role::Leaf}});
     n.form();
     n.world.set_link(0, 2, LinkParams{true});
@@ -419,7 +419,7 @@ LM_TEST("G02 DRAIN waits for a moved subtree's descendants to adopt the new root
     }
 }
 
-LM_TEST("R01 synchronous windowed light wake uses fresh owner time and excludes sleep from radio "
+LM_TEST("review R01 synchronous windowed light wake uses fresh owner time and excludes sleep from radio "
         "accounting") {
     for (const uint64_t advance_ms : {1000U, 5000U, 30000U}) {
         PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});

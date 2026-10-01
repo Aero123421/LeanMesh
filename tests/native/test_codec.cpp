@@ -76,7 +76,7 @@ template <class Dec> bool strict_length(const Bytes &good, Dec dec) {
 } // namespace
 
 // ---- mesh records (route/mesh_wire.cpp) ----
-LM_TEST("G02 codec golden: DRAIN control is byte-exact, bounded, and distinguishes cancel ACK") {
+LM_TEST("review G02 codec golden: DRAIN control is byte-exact, bounded, and distinguishes cancel ACK") {
     route::DrainRequest q{0x01020304, 30000, 0};
     const Bytes request = Be{}.u8(0xEF).u32(q.sequence).u32(30000).u8(0).v;
     LM_CHECK(

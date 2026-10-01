@@ -62,3 +62,9 @@ ASan buildは `cmake -S . -B /workspace/leanmesh-env/asan -G Ninja -DLM_IDF_PATH
 IDF pin `76f5dedd9950a3012fee8fb7d5586df21fc67802`、GCC 14.2、Python 3.12.14。nativeはpinされたTF-PSA backendとlibedhocを使用。既存のlibedhoc exact-input patchはscripts/third_party.sh setup/verifyの結果で、今回別のvendor改変を加えていない。ログは `/workspace/leanmesh-env/logs/review-*`。環境setupは `/workspace/leanmesh-env/install.sh` とactivate.shに保存し、onboarding draftにも保存済み。
 
 4 SoC firmware buildはIDFの必須constraints取得がプロキシHTTP403で止まり、未実行。依存検査/TLSの迂回はしていない。実機Light Sleep、実NVSの電源断、RF/長距離/20hop、電流、鍵custody/他実装とのEDHOC相互接続は未検証。E2Eの21node/20hopやsim store cutは実coreのプロトコル試験で、実電波・実電源断・電池寿命の証拠ではない。G01の隣接現場・sleep・channel移行・移設途中の実電源断を組み合わせたHILも未実施。
+
+## CI追補（2026-10-01）
+
+`ac20429` のCIでnative jobとE2E jobの失敗をWebの実行一覧から確認。GitHub APIは403、Webの詳細ログは認証が必要で、この環境から取得できない。native job末尾の `python scripts/scenario_coverage.py --out-dir /tmp/leanmesh-ci-coverage` をローカルで実行すると、追加テスト名の先頭にあるレビューID `G01/G02` を未定義の製品scenario IDと誤認してexit 1になることを再現した。前回の検証一覧にこのCI手順が不足していた。
+
+レビューIDの前に `review` を付け、製品scenario名前空間との衝突を解消。同じ規則で、製品scenarioにも存在する `R01` と今回のレビューR01を区別した。テスト本体・製品scenario一覧・coverage gateは変更していない。同じコマンドはexit 0（158 scenarios / 337 references、既存の実機未検証表示を維持）。E2E側の失敗は別途調査対象で、この命名修正で解消したとは扱わない。

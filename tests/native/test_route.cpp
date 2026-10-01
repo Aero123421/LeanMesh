@@ -353,7 +353,7 @@ void admit_n(Topology &t, unsigned n) {
 
 } // namespace
 
-LM_TEST("G02 topology drain needs confirmed alternate paths and freezes new child admission") {
+LM_TEST("review G02 topology drain needs confirmed alternate paths and freezes new child admission") {
     Topology t{ShortAddr{k_root_addr}, RootTerm{1}};
     admit_n(t, 4);
     LM_CHECK_OK(attach(t, 0, k_root_addr, 1, 0, true));

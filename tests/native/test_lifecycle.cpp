@@ -783,7 +783,7 @@ LM_TEST("R09 ARCH2 sim: a new membership generation at an address drops the rout
 // higher generation: A takes it back although its own ledger still lists the old membership (A never heard of the
 // move); an old grant (a ticket at or below a consumed generation) is refused on both sides.
 LM_TEST(
-    "G01 isolation trigger is opt-in, persistent, delayed, and uses the existing signed transfer") {
+    "review G01 isolation trigger is opt-in, persistent, delayed, and uses the existing signed transfer") {
     DNet n(1);
     const unsigned d = 2;
     n.eng(0).mesh().set_enabled(true);
@@ -844,7 +844,7 @@ LM_TEST(
     LM_CHECK_EQ(policy.revision, 1u);
 }
 
-LM_TEST("G01 isolation alone cannot transfer; recovery restarts the minimum interval") {
+LM_TEST("review G01 isolation alone cannot transfer; recovery restarts the minimum interval") {
     for (const unsigned scenario : {0U, 1U, 2U}) {
         DNet n(1);
         const unsigned d = 2;
@@ -894,7 +894,7 @@ LM_TEST("G01 isolation alone cannot transfer; recovery restarts the minimum inte
     }
 }
 
-LM_TEST("G01 unknown local policy commit disables automatic transfer until recovery") {
+LM_TEST("review G01 unknown local policy commit disables automatic transfer until recovery") {
     for (const CutMode mode : {CutMode::Before, CutMode::After}) {
         DNet n(1);
         const unsigned d = 2;
