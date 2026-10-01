@@ -94,6 +94,8 @@ def recover(conn: sqlite3.Connection, cfg: Settings, floor: Floor | None,
     """One transaction at start. Returns the rollback reason when one was detected. A floor file
     that exists but cannot be parsed is treated as a possible rollback (quarantine), never as a
     first start."""
+    conn.execute("CREATE INDEX IF NOT EXISTS operations_expiry ON operations(expiry_utc_ms) "
+                 "WHERE state!='FINAL' AND expiry_utc_ms IS NOT NULL")
     reason = "floor_unreadable" if floor_unreadable else None
     now = current_floor(conn)
     if floor is not None:

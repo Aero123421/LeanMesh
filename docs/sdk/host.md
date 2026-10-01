@@ -48,7 +48,7 @@ groupへのSENDは対象全員について権限を照合します。
 | `GET /v1/diagnostics` | READ | rootの診断。要求時のみ問い合わせ（1回/秒まで） |
 | `POST /v1/epochs`、`POST /v1/epochs/{id}/close` | 書込み権限 | `client_epoch` の発行/終了 |
 | `POST /v1/messages` | SEND | 送信（202） |
-| `POST /v1/control` | 型による | JOIN_DECISION / LEAVE / REVOKE / TRANSFER / INSTALL_CONTROL / POLICY_SET / CHANNEL_FREEZE / CHANNEL_RECALCULATE / GROUP_SET / POWER_POLICY_SET / COMMISSIONING_WINDOW_SET / ROOT_HANDOVER |
+| `POST /v1/control` | 型による | JOIN_DECISION / LEAVE（503 UNSUPPORTED） / REVOKE / TRANSFER / INSTALL_CONTROL / POLICY_SET / CHANNEL_FREEZE / CHANNEL_RECALCULATE / GROUP_SET / POWER_POLICY_SET / COMMISSIONING_WINDOW_SET / ROOT_HANDOVER |
 | `GET /v1/operations/{id}`、`POST .../cancel`、`GET .../targets` | READ / 書込み | 状態と証拠 / 取消 / group個別結果（16件/page） |
 | `GET /v1/nodes[/{device_id}[/power]]`、`/v1/channel`、`/v1/lifecycle/requests` | READ | rootの報告のmirror（`domain_id` クエリ必須） |
 | `GET /v1/events`、`GET /v1/events/stream`、`POST /v1/consumers/{name}/ack` | READ | event journal（§4） |
@@ -103,3 +103,5 @@ curl -s --unix-socket $S -H "$H" http://localhost/v1/operations/<operation>
 
 `INDETERMINATE` の副作用命令は、端末アプリの `application_result` かアプリ側の冪等契約で解決します（[device-api §5](device-api.md)）。
 この挙動は `host/tests/e2e/test_bridge_meshsim.py` が、Hostを `kill -9` 相当で落として検証しています（sim上）。
+
+`root_app`宛先と遠隔LEAVEはこのHost/bridgeでは未対応で、503 `UNSUPPORTED`を返してoperationを作りません。UTC期限の未送信outboxはroot未接続でも期限処理します。LATESTは満杯でも同一streamの未送信値をatomicに置換できます。dispatchの優先枠と公平性は[API semantics](../../api/SEMANTICS.md)参照。

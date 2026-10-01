@@ -68,7 +68,7 @@ int app_is_active(lm_context_t *ctx) {
 ```
 
 承認は root 側です（Host の `POST /v1/control` `JOIN_DECISION`、または join-mode preapproved）。`LM_APPROVAL_PENDING` は正常な待ちです。
-`lm_leave(ctx, LM_LEAVE_DRAIN|LM_LEAVE_IMMEDIATE, deadline_ms, &op)` で離脱。DRAINは未完了sendが無くなるまで待ち（その間の新規sendは `BUSY`）、期限までに終わらなければ `DEADLINE_UNREACHABLE` で失敗してACTIVEのまま（自動でIMMEDIATEにしない）。離脱のcommit時、残ったsendは最終eventを受けます（出た可能性があれば `INDETERMINATE`、出ていなければ `CANCELLED_NOT_SENT`）。relayの子の代替経路確認は行いません（子はmeshの修復規則で付け替わる）。tombstoneのcommitが失敗しても端末はRAMで離脱したままで、保存recordを読み直して結果を確定します（`APPLIED`、確定できなければ `INDETERMINATE`。FIX8-D5/D6）。署名付きobject（移設ticket等）は `lm_install_control(ctx, type, cbor, len, &op)`。移設ticketは先に `lm_transfer_nonce_get()` のnonceを名指す必要があります（RAM保持、再起動で失効）。
+`lm_leave(ctx, LM_LEAVE_DRAIN|LM_LEAVE_IMMEDIATE, deadline_ms, &op)` で離脱。DRAINは未完了sendが無くなるまで待ち（その間の新規sendは `BUSY`）、期限までに終わらなければ `DEADLINE_UNREACHABLE` で失敗してACTIVEのまま（自動でIMMEDIATEにしない）。離脱のcommit時、残ったsendは最終eventを受けます（出た可能性があれば `INDETERMINATE`、出ていなければ `CANCELLED_NOT_SENT`）。relayは新規子の受入を停止し、認証済みrootから配下の全memberが代替経路をREADY確認した証拠を待ちます。rootへの到達や子の状態が不明なら成功扱いせず、期限で所属を維持します。同時DRAINはrootごとに1件です。tombstoneのcommitが失敗しても端末はRAMで離脱したままで、保存recordを読み直して結果を確定します（`APPLIED`、確定できなければ `INDETERMINATE`。FIX8-D5/D6）。署名付きobject（移設ticket等）は `lm_install_control(ctx, type, cbor, len, &op)`。移設ticketは先に `lm_transfer_nonce_get()` のnonceを名指す必要があります（RAM保持、再起動で失効）。
 
 ## 4. 送信
 
@@ -276,8 +276,10 @@ if (lm_connectivity_get(ctx, &c) == LM_STATUS_OK) {
 ```
 
 - `lm_connectivity_get` は membership と独立です（`ACTIVE`＋`ISOLATED` は正常）。`REACHABLE`（rootは常に）/ `DEGRADED`（path修復中・lease失効）/ `ISOLATED`（親なし。`reason`=`NO_ROUTE`）/ `SLEEPING`（予定Sleep中）/ `UNKNOWN`（memberでない）。`validity_bits` が立った項目だけが既知です。このbuildは最終認証RXと最終root往復を追跡しないので、その2項目は常に未知（0でbit clear）です。
-- `lm_policy_get(ctx, &p)` はroot専用（他roleは `UNSUPPORTED`）。`revision`, `join_mode`, `channel_automatic/freeze` などを返します。
-- `lm_policy_set(ctx, &p, expected_revision, &op)` は **1回に1項目**（`channel_freeze` または `join_mode`）を変更します（2項目同時は `INVALID_ARGUMENT`）。`channel_freeze` は `lm_channel_request` と同じ経路、`join_mode`（0 closed / 1 external / 2 preapproved）はrootのpolicy recordへcommitされてから適用・`LM_EVENT_OPERATION`（再起動後も保持。commit結果不明ならCLOSEDのまま、以後 `RECOVERY_REQUIRED`）。`revision` はchannelとjoin_modeの確定済み変更の合計で、古い `expected_revision` は `CONFLICT`。`relay_allowed` / 自動移設は変更手段が無く `UNSUPPORTED`。どの項目もdocs/06の暗号条件を下げません（preapprovedも署名ticketと署名済みexpected entryが必須）。`channel_automatic` と `channel_freeze` は排他（同値は `INVALID_ARGUMENT`）。
+- `lm_policy_get(ctx, &p)` は全roleで使えます。rootはネットワークpolicy、leaf/relayはローカルの自動移設policyです。`revision`, `join_mode`, `channel_automatic/freeze` などを返します。
+- `lm_policy_set(ctx, &p, expected_revision, &op)` は **1回に1項目**（`channel_freeze` または `join_mode`）を変更します（2項目同時は `INVALID_ARGUMENT`）。`channel_freeze` は `lm_channel_request` と同じ経路、`join_mode`（0 closed / 1 external / 2 preapproved）はrootのpolicy recordへcommitされてから適用・`LM_EVENT_OPERATION`（再起動後も保持。commit結果不明ならCLOSEDのまま、以後 `RECOVERY_REQUIRED`）。`revision` はchannelとjoin_modeの確定済み変更の合計で、古い `expected_revision` は `CONFLICT`。rootの `relay_allowed` / 自動移設の変更は `UNSUPPORTED`。どの項目もdocs/06の暗号条件を下げません（preapprovedも署名ticketと署名済みexpected entryが必須）。`channel_automatic` と `channel_freeze` は排他（同値は `INVALID_ARGUMENT`）。
+
+- leaf/relayでは `auto_transfer_on_isolation` と `isolation_before_transfer_ms` を同じCASで設定できます（ONは600000 ms以上、既定OFF）。他の項目は読取専用です。設定はsealed recordにcommitした後に適用してoperation eventを出し、再起動でも保持します。設定が未読込なら `AUTH_PENDING`、壊れたrecord/commit不明なら `RECOVERY_REQUIRED` とし、自動移設を止めます。隔離時間は冷起動・到達回復で再計時し、予定Sleepを含めません。認可されたtransfer ticketとexpected entryが必要で、旧A所属を保持したまま既存TRANSFER_CANDIDATE経路でBを検証し、Bの保存・有効化後に切り替えます。
 
 ## 10. 初期化のbuild差
 

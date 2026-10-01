@@ -158,8 +158,8 @@ def test_size_capability_and_destination_rules(tmp_path: Path) -> None:
         past = h.post("/v1/messages", message(e, delivery="APPLIED", deadline={
             "mode": "utc", "expires_at": "2001-01-01T00:00:00Z"}), "p")
         assert past.status_code == 400 and past.json()["code"] == "EXPIRED"
-        assert h.post("/v1/messages", message(e, destination={"kind": "root_app"}), "r").status_code == 202
-        assert op_count(h) == 3
+        assert h.post("/v1/messages", message(e, destination={"kind": "root_app"}), "r").status_code == 503
+        assert op_count(h) == 2
 
 
 def test_control_rules_permissions_capabilities_and_revision(tmp_path: Path) -> None:
@@ -184,7 +184,7 @@ def test_control_rules_permissions_capabilities_and_revision(tmp_path: Path) -> 
         # authority: IMMEDIATE needs REVOKE, not just APPROVE
         r = ctl("6", who="approver", type="LEAVE", device_id=NODE, leave_mode="IMMEDIATE")
         assert r.status_code == 403 and r.json()["details"]["required"] == ["REVOKE"]
-        assert ctl("7", who="approver", type="LEAVE", device_id=NODE, leave_mode="DRAIN").status_code == 202
+        assert ctl("7", who="approver", type="LEAVE", device_id=NODE, leave_mode="DRAIN").status_code == 503
         assert ctl("8", who="sender", type="JOIN_DECISION", device_id=NODE, decision="REJECT").status_code == 403
         # capability gating: unknown mandatory capability -> 503 UNSUPPORTED, then allowed
         signed = {"type": "TRANSFER", "device_id": NODE, "signed_cbor_b64": signed_object(3, TRANSFER_TICKET)}

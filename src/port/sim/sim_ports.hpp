@@ -20,12 +20,17 @@ class SimClock final : public port::Clock {
     SimClock(const World &world, int32_t drift_ppm) : world_(world), drift_ppm_(drift_ppm) {}
     [[nodiscard]] MonoTime now() const override;
     // Local monotonic time restarts at 0 on every boot (power cycle).
-    void on_boot(uint64_t world_us) { boot_world_us_ = world_us; }
+    void on_boot(uint64_t world_us) {
+        boot_world_us_ = world_us;
+        offset_us_ = 0;
+    }
+    // Fault seam: a blocking PM call advances only this device clock, without reentering the world.
+    void advance(uint64_t us) { offset_us_ += us; }
 
   private:
     const World &world_;
     int32_t drift_ppm_;
-    uint64_t boot_world_us_ = 0;
+    uint64_t boot_world_us_ = 0, offset_us_ = 0;
 };
 
 class SimRadio final : public port::Radio {

@@ -137,6 +137,10 @@ void Membership::release_join() {
 
 // ---- boot ----
 void Membership::on_identity_ready(MonoTime now) {
+    auto_enabled_ = auto_loaded_ = auto_fault_ = false;
+    auto_revision_ = 0;
+    isolation_ms_ = 0;
+    isolated_since_ = auto_at_ = MonoTime::never();
     have_prepared_ = false;
     resume_ = false;
     state_since_ = now;
@@ -421,13 +425,47 @@ bool Membership::lend_record_only() {
 // ---- Flash chain of the joiner ----
 void Membership::flash_done(Step step, Status s, MonoTime now) {
     switch (step) {
+    case Step::AutoPolicyLoad:
+    case Step::AutoPolicyCommit: {
+        auto_loaded_ = true;
+        auto_fault_ = s != Status::Ok && !(step == Step::AutoPolicyLoad && s == Status::NotFound);
+        if (s == Status::Ok) {
+            Reader r{ByteView{rec_->payload.data(), rec_->payload_len}};
+            const uint8_t version = r.u8();
+            const uint64_t revision = r.u64be();
+            const uint8_t enabled = r.u8();
+            const uint32_t interval = r.u32be();
+            if (r.finish() != Status::Ok || version != 2 || revision > INT64_MAX || enabled > 1 ||
+                (enabled && interval < 600000)) {
+                auto_fault_ = true;
+            } else {
+                auto_revision_ = revision;
+                auto_enabled_ = enabled != 0;
+                isolation_ms_ = interval;
+            }
+        }
+        if (auto_fault_) {
+            auto_enabled_ = false;
+            engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(Status::RecoveryRequired), 0,
+                               nullptr);
+        }
+        isolated_since_ = auto_at_ = MonoTime::never();
+        engine_.identity().return_record(rec_);
+        if (step == Step::AutoPolicyCommit) {
+            engine_.emit_event(
+                LM_EVENT_OPERATION,
+                static_cast<uint32_t>(auto_fault_ ? Status::RecoveryRequired : Status::Ok),
+                auto_policy_op_, nullptr);
+        }
+        return;
+    }
     case Step::BootLoadPrepared:
         if (s == Status::Ok && engine_.identity().is_member()) {
             parse_activated_record(*rec_);
         } else if (s == Status::Ok && parse_prepared_record(*rec_) == Status::Ok) {
             have_prepared_ = true;
             resume_ = true;
-            req_.operation = k_op_tag | ++op_counter_;
+            req_.operation = engine_.next_control_op();
         } else if (s != Status::Ok && s != Status::NotFound) {
             engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(s), 0, nullptr);
         }
@@ -585,6 +623,7 @@ MonoTime Membership::deadline() const {
     next = earliest(next, final_wait_until_);
     next = earliest(next, leave_tx_wait_); // (the DRAIN deadline is folded into it by leave_timer)
     next = earliest(next, confirm_at_);
+    next = earliest(next, auto_at_);
     return next;
 }
 
@@ -632,6 +671,7 @@ void Membership::on_timer(MonoTime now) {
         finish_join(Status::Expired, LM_OUTCOME_INDETERMINATE, now);
     }
     leave_timer(now);
+    auto_timer(now);
     if (confirm_pending_ && now >= confirm_at_) {
         send_confirm(now);
     }
@@ -670,6 +710,120 @@ void Membership::retry_work(MonoTime now) {
         }
         break;
     }
+}
+
+Status Membership::local_policy(lm_policy_t &out) const {
+    out = lm_policy_t{};
+    out.struct_size = sizeof(out);
+    out.abi_version = LM_ABI_VERSION;
+    out.revision = auto_revision_;
+    out.channel_automatic = 1;
+    out.relay_allowed = engine_.config().role == Role::Relay ? 1U : 0U;
+    out.auto_transfer_on_isolation = auto_enabled_ ? 1U : 0U;
+    out.isolation_before_transfer_ms = isolation_ms_;
+    return auto_fault_ ? Status::RecoveryRequired
+                       : (auto_loaded_ ? Status::Ok : Status::AuthPending);
+}
+
+Reply Membership::set_local_policy(const lm_policy_t &want, uint64_t expected, MonoTime now) {
+    if (!auto_loaded_ || auto_fault_) {
+        return Reply{auto_fault_ ? Status::RecoveryRequired : Status::AuthPending, 0, 0};
+    }
+    if (expected != auto_revision_) {
+        return Reply{Status::Conflict, 0, 0};
+    }
+    lm_policy_t cur{};
+    (void)local_policy(cur);
+    if (want.join_mode != cur.join_mode || want.relay_allowed != cur.relay_allowed ||
+        want.channel_automatic != cur.channel_automatic ||
+        want.channel_freeze != cur.channel_freeze) {
+        return Reply{Status::Unsupported, 0, 0};
+    }
+    if (want.auto_transfer_on_isolation > 1 ||
+        (want.auto_transfer_on_isolation && want.isolation_before_transfer_ms < 600000) ||
+        auto_revision_ == INT64_MAX) {
+        return Reply{Status::InvalidArgument, 0, 0};
+    }
+    if (phase_ != JoinPhase::Idle || leaving() || job_in_flight_ || !lend_record_only()) {
+        return Reply{Status::Busy, 0, 0};
+    }
+    Writer w{MutByteView{rec_->payload}};
+    w.u8(2);
+    w.u64be(auto_revision_ + 1);
+    w.u8(static_cast<uint8_t>(want.auto_transfer_on_isolation));
+    w.u32be(want.isolation_before_transfer_ms);
+    const Status st = start_flash(Step::AutoPolicyCommit, store::RecordJob::Op::Commit,
+                                  store::rec::policy, 0, w.size(), now);
+    if (st != Status::Ok) {
+        engine_.identity().return_record(rec_);
+        return Reply{st, 0, 0};
+    }
+    auto_policy_op_ = engine_.next_control_op();
+    return Reply{Status::Ok, auto_policy_op_, 0};
+}
+
+void Membership::pause_isolation(Duration gap) {
+    if (!isolated_since_.is_never()) {
+        isolated_since_ = isolated_since_ + gap;
+    }
+    if (!auto_at_.is_never()) {
+        auto_at_ = auto_at_ + gap;
+    }
+}
+
+void Membership::auto_timer(MonoTime now) {
+    if (engine_.identity().state() != LocalIdentity::State::Ready ||
+        engine_.radio_state() == RadioState::Stopped) {
+        isolated_since_ = auto_at_ = MonoTime::never();
+        return; // boot/start owns the record first; no policy job may race identity loading
+    }
+    if (!auto_loaded_ && !auto_fault_ && !boot_load_ && phase_ == JoinPhase::Idle &&
+        !job_in_flight_) {
+        if (!lend_record_only()) {
+            auto_at_ = now + k_busy_retry;
+            return;
+        }
+        const Status st = start_flash(Step::AutoPolicyLoad, store::RecordJob::Op::Load,
+                                      store::rec::policy, 0, 0, now);
+        if (st != Status::Ok) {
+            engine_.identity().return_record(rec_);
+            auto_at_ = now + k_busy_retry;
+        } else {
+            auto_at_ = MonoTime::never();
+        }
+        return;
+    }
+    if (!auto_enabled_ || auto_fault_ || !engine_.identity().is_member()) {
+        isolated_since_ = auto_at_ = MonoTime::never();
+        return;
+    }
+    const uint32_t conn = engine_.mesh().connectivity(now);
+    if (conn != LM_ISOLATED && conn != LM_DEGRADED) {
+        isolated_since_ = auto_at_ = MonoTime::never();
+        return;
+    }
+    if (isolated_since_.is_never()) {
+        isolated_since_ = now;
+        auto_at_ = now + Duration::from_ms(isolation_ms_);
+    }
+    if (now < auto_at_) {
+        return;
+    }
+    if (phase_ != JoinPhase::Idle || leaving() || have_prepared_ || confirm_pending_ ||
+        job_in_flight_ || engine_.chan().unsettled() || !engine_.power().search_allowed(now)) {
+        auto_at_ = now + Duration::from_s(30);
+        return;
+    }
+    // The existing transfer path keeps A live, checks the installed signed grant and authenticates
+    // B. A missing grant stays AUTH_PENDING: never turn isolation into permission to change
+    // domains.
+    JoinArgs a;
+    a.mode = LM_JOIN_TRANSFER_CANDIDATE;
+    engine_.random(MutByteView{a.request.bytes});
+    uint64_t operation = 0;
+    (void)join(a, now, operation);
+    auto_at_ = now + Duration::from_ms(
+                         isolation_ms_); // bounded attempts, including missing/expired grants
 }
 
 } // namespace lm::member

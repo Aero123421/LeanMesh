@@ -52,3 +52,5 @@ rootのroot_termはmembership recordの自credentialが正本（ARCH2-D1）：bo
 
 power policy/scheduleは既存sealed recordのtyped objectとして保存し、別の汎用設定DBをNodeへ足さない。毎poll/packetでNVS書込みを行わない。group DURABLEはpayload1copy・immutable snapshot・target ID割当・進捗を一つの有界operation journalにまとめる。mid-commit sleep禁止。
 Host既存DBへの導入はadditive schema migrationで`node_power/group_targets`を追加し、旧consumerを止めずphaseごとに有効化する。本ZIPのschema.sqlを既存製品DBへそのまま再実行しない。
+
+非rootの `policy` record (8) はversion 2: `version u8 | revision u64 | enabled u8 | isolation_ms u32`（14 B、big endian）。rootのversion 1とはroleで区別し、読み違い・不正値・commit失敗は自動移設を停止してRECOVERY_REQUIREDを報告する。隔離の計時はRAMのみで、毎packetのFlash書込みはしない。

@@ -87,13 +87,15 @@ def test_battery_readings_reach_the_host_and_only_the_newest_is_kept_when_queued
         return [base64.b64decode(e["payload_b64"]) for e in b.events()["events"]
                 if e["kind"] == "MESSAGE_RECEIVED" and e["origin"] == sensor]
 
-    got = wait_for(lambda: (r := readings()) and len(r) >= 1 and r, 60, "a reading at the Host")
+    # An older sample already in flight may arrive first; LATEST only replaces unsent samples.
+    got = wait_for(lambda: (r := readings()) and any(struct.unpack(">BIHB", x)[1] == 3 for x in r) and r,
+                   60, "the newest reading at the Host")
     seen.extend(got)
     for reading in seen:
         version, seq, mv, pct = struct.unpack(">BIHB", reading)
         assert version == 1 and 1 <= seq <= 3 and 3680 <= mv <= 3700 and 79 <= pct <= 81
     # LATEST: a reading that had not left the node is replaced by the next; the newest one always arrives.
-    assert struct.unpack(">BIHB", seen[-1])[1] == 3
+    assert any(struct.unpack(">BIHB", x)[1] == 3 for x in seen)
 
 
 @pytest.mark.scenario("LC12")

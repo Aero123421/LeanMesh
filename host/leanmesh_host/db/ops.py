@@ -173,8 +173,12 @@ def accept(conn: sqlite3.Connection, cfg: Settings, sub: Submission,
         raise ApiError(410, "EPOCH_CLOSED", "client epoch is closed; open a new epoch")
     if precheck is not None:  # request-specific state checks (destination, revision), replay excluded
         precheck(conn)
+    from .outbox import expire_unsent
+    expire_unsent(conn, cfg)
     prune_finished(conn, cfg)
+    replaceable = _latest_unsent(conn, sub) if sub.latest_key is not None else []
     open_ops = conn.execute(f"SELECT COUNT(*) FROM operations WHERE {_UNFINISHED}").fetchone()[0]
+    open_ops -= len(replaceable)
     if open_ops >= cfg.max_open_operations:
         raise no_capacity("open_operations", 429, retry_after_ms=1000)
     journal.check_reserve(conn, cfg, open_ops)  # every open op keeps room for its progress/terminal events
@@ -187,9 +191,9 @@ def accept(conn: sqlite3.Connection, cfg: Settings, sub: Submission,
         (op_id, sub.principal, sub.domain, sub.op_type, sub.epoch, sub.idem_key, sub.request_hash,
          sub.target, canonical_json(sub.request), sub.payload, sub.expiry_utc_ms, now_ms()))
     conn.execute("INSERT INTO outbox(operation,state) VALUES(?,'QUEUED')", (op_id,))
-    operation_event(conn, cfg, op_id, sub.domain, sub.critical, "HOST_COMMITTED", admission=True)
     if sub.latest_key is not None:
-        _supersede_unsent(conn, cfg, sub, op_id)
+        _supersede_unsent(conn, cfg, sub, op_id, replaceable)
+    operation_event(conn, cfg, op_id, sub.domain, sub.critical, "HOST_COMMITTED", admission=True)
     return view_any(conn, op_id), True
 
 
@@ -219,19 +223,23 @@ def operation_event(conn: sqlite3.Connection, cfg: Settings, op_id: bytes, domai
         admission=admission)
 
 
-def _supersede_unsent(conn: sqlite3.Connection, cfg: Settings, sub: Submission, new_id: bytes) -> None:
-    """LATEST replaces only records that were never handed to the root (docs/08 §1); the cause is
-    kept in superseded_by."""
+def _latest_unsent(conn: sqlite3.Connection, sub: Submission) -> list[tuple[bytes]]:
     req = sub.request
-    rows = conn.execute(
+    return conn.execute(
         "SELECT o.id FROM operations o JOIN outbox b ON b.operation=o.id "
-        "WHERE o.principal=? AND o.domain=? AND o.type='MESSAGE' AND b.state='QUEUED' AND o.id!=? "
+        "WHERE o.principal=? AND o.domain=? AND o.type='MESSAGE' AND b.state='QUEUED' "
+        "AND b.external_write_possible=0 AND o.state!='FINAL' "
         "AND json_extract(o.request_json,'$.queue_mode')='LATEST' "
         "AND json_extract(o.request_json,'$.destination')=json(?) "
         "AND json_extract(o.request_json,'$.app_port')=? "
         "AND json_extract(o.request_json,'$.coalesce_key')=?",
-        (sub.principal, sub.domain, new_id, canonical_json(req["destination"]), req["app_port"],
+        (sub.principal, sub.domain, canonical_json(req["destination"]), req["app_port"],
          req["coalesce_key"])).fetchall()
+
+
+def _supersede_unsent(conn: sqlite3.Connection, cfg: Settings, sub: Submission, new_id: bytes,
+                     rows: list[tuple[bytes]]) -> None:
+    """Replace proven-unsent records only, in the same transaction as admission."""
     for (old,) in rows:
         conn.execute("UPDATE operations SET state='FINAL', outcome='SUPERSEDED', superseded_by=? "
                      "WHERE id=?", (new_id, old))

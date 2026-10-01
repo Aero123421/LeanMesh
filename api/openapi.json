@@ -2647,7 +2647,8 @@
             "type": "object",
             "properties": {
               "kind": {
-                "const": "root_app"
+                "const": "root_app",
+                "description": "Reserved; current Host bridge returns 503 UNSUPPORTED before admission."
               }
             },
             "required": [
@@ -2805,6 +2806,7 @@
           },
           "type": {
             "type": "string",
+            "description": "LEAVE is reserved; current Host bridge returns 503 UNSUPPORTED before admission.",
             "enum": [
               "JOIN_DECISION",
               "LEAVE",

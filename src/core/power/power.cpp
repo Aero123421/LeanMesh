@@ -222,6 +222,9 @@ void Power::account_radio(MonoTime now) {
         return;
     }
     const int64_t dt_us = (now - acct_at_).us;
+    if (dt_us < 0) {
+        return; // never move the accounting origin back across a synchronous wake
+    }
     acct_at_ = now;
     if (dt_us <= 0 || engine_.radio_state() != RadioState::Running) {
         acct_offline_ = offline();
@@ -777,6 +780,9 @@ void Power::wake(const port::WakeInfo &w, MonoTime now) {
     } else {
         ++stats_.sessions_kept;
     }
+    if (engine_.config().role != Role::Root) {
+        engine_.membership().pause_isolation(now - slept_at_);
+    }
     engine_.mesh().on_wake(now, last_path_ == SessionPath::FreshEdhoc);
     engine_.delivery().sleep_gap(now - slept_at_);
     if (auto_ && !wake_at_.is_never()) {
@@ -824,6 +830,9 @@ void Power::on_timer(MonoTime now) {
             (void)search_allowed(now); // the search budget just ran out: say so once
         }
         windowed_timer(now);
+        if (engine_.step_time() != now) {
+            return; // synchronous wake: the next pass owns all post-wake timers
+        }
     }
     expire_mailboxes(now);
     flush_grants(now);

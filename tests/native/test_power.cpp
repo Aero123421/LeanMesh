@@ -379,6 +379,68 @@ pw::Policy report_long() {
 
 } // namespace
 
+LM_TEST(
+    "review G02 real cores evacuate a relay child before DRAIN, or retain membership at the deadline") {
+    for (const bool alternate : {false, true}) {
+        PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+        n.form();
+        LM_CHECK_EQ(n.eng(2).mesh().parent_addr().value(), 2u);
+        if (alternate) {
+            n.world.set_link(0, 2, LinkParams{true});
+        }
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_DRAIN, 30000, &op), LM_STATUS_OK);
+        LM_CHECK(n.until([&] { return !n.eng(1).membership().leaving(); }, 35000, 10));
+        if (alternate) {
+            LM_CHECK(!n.eng(1).identity().is_member());
+            LM_CHECK_EQ(n.eng(2).mesh().parent_addr().value(), 1u);
+            LM_CHECK_EQ(n.eng(2).mesh().connectivity(n.node(2).clock.now()), LM_REACHABLE);
+        } else {
+            LM_CHECK(n.eng(1).identity().is_member());
+            LM_CHECK(n.eng(1).membership().reason() == Status::DeadlineUnreachable);
+            LM_CHECK_EQ(n.eng(2).mesh().parent_addr().value(), 2u);
+        }
+    }
+}
+
+LM_TEST("review G02 DRAIN waits for a moved subtree's descendants to adopt the new root path") {
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    n.world.set_link(0, 2, LinkParams{true});
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_DRAIN, 30000, &op), LM_STATUS_OK);
+    LM_CHECK(n.until([&] { return !n.eng(1).membership().leaving(); }, 35000, 10));
+    LM_CHECK(!n.eng(1).identity().is_member());
+    for (unsigned i : {2U, 3U}) {
+        const auto &mesh = n.eng(i).mesh();
+        LM_CHECK_EQ(mesh.connectivity(n.node(i).clock.now()), LM_REACHABLE);
+        LM_CHECK(std::find(mesh.path(), mesh.path() + mesh.path_size(), 2u) ==
+                 mesh.path() + mesh.path_size());
+    }
+}
+
+LM_TEST("review R01 synchronous windowed light wake uses fresh owner time and excludes sleep from radio "
+        "accounting") {
+    for (const uint64_t advance_ms : {1000U, 5000U, 30000U}) {
+        PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+        n.form();
+        n.apply_policy(2, k_windowed);
+        n.node(2).pm.synchronous_wake_ms = advance_ms;
+        const uint64_t before = n.eng(2).power().radio_on_us(n.node(2).clock.now());
+        LM_CHECK(n.until([&] { return n.node(2).pm.sleep_calls() != 0; }, 5000));
+        const MonoTime fresh = n.node(2).clock.now();
+        LM_CHECK(n.eng(2).step_time() >= fresh + Duration::from_ms(-5));
+        const uint64_t after = n.eng(2).power().radio_on_us(fresh);
+        const MonoTime next = n.eng(2).step(fresh);
+        LM_CHECK(next.is_never() || next >= fresh);
+        // A stale time must not move the accounting origin back into the sleep gap.
+        (void)n.eng(2).power().radio_on_us(fresh +
+                                           Duration::from_ms(-static_cast<int64_t>(advance_ms)));
+        LM_CHECK_EQ(n.eng(2).power().radio_on_us(fresh), after);
+        LM_CHECK(after - before < 5'000'000U);
+    }
+}
+
 LM_TEST("S16 unit: the policy record and the schedule report round-trip and refuse malformed input") {
     std::array<uint8_t, 128> buf{};
     std::size_t len = 0;

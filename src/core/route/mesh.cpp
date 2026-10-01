@@ -110,7 +110,7 @@ uint32_t Mesh::next_sequence() {
 
 bool Mesh::proxy_capable(MonoTime now) const {
     const member::MemberCredential &mc = engine_.identity().member();
-    return engine_.identity().is_member() && mc.relay_allowed && mc.role >= 1 &&
+    return engine_.identity().is_member() && mc.relay_allowed && mc.role >= 1 && !draining_ &&
            (state_ == State::Root || path_valid(now));
 }
 
@@ -248,6 +248,10 @@ void Mesh::begin(MonoTime now) {
 }
 
 void Mesh::stop() {
+    draining_ = drain_ok_ = false;
+    drain_cancel_tries_ = 0;
+    drain_at_ = drain_until_ = evacuate_at_ = avoid_relay_until_ = MonoTime::never();
+    avoid_relay_ = 0;
     state_ = State::Off;
     disc_.stop();
     cands_ = {};
@@ -288,10 +292,11 @@ MonoTime Mesh::deadline() const {
             d = earliest(d, q.next_at);
         }
     }
-    return d;
+    return earliest(d, earliest(drain_at_, evacuate_at_));
 }
 
 void Mesh::on_timer(MonoTime now) {
+    drain_timer(now);
     sync(now);
     if (state_ == State::Off) {
         return;
@@ -404,6 +409,10 @@ int Mesh::pick_candidate(MonoTime now) const {
     int shallow = -1;
     for (std::size_t i = 0; i < cands_.size(); ++i) {
         const Cand &c = cands_[i];
+        if (avoid_relay_ != 0 && now < avoid_relay_until_ &&
+            std::find(c.path.begin(), c.path.begin() + c.n, avoid_relay_) != c.path.begin() + c.n) {
+            continue;
+        }
         if (!c.used || now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth) {
             continue;
         }
@@ -440,7 +449,7 @@ void Mesh::send_beacon(bool solicit, MonoTime now) {
         b.n = 1;
         b.path[0] = self_addr().value();
     } else if (path_valid(now)) {
-        b.flags = mc.relay_allowed && mc.role >= 1 ? k_beacon_accepting : 0;
+        b.flags = mc.relay_allowed && mc.role >= 1 && !draining_ ? k_beacon_accepting : 0;
         b.revision = rev_;
         b.n = path_n_;
         std::copy(path_.begin(), path_.begin() + path_n_, b.path.begin());
@@ -755,6 +764,10 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
         return;
     }
     c->addr = n->address.value();
+    if (avoid_relay_ != 0) {
+        c->avoid_until =
+            MonoTime{}; // a successful spare handshake can serve an explicit evacuation
+    }
     if (att_.step == Step::Link && att_.cand == index_of(c)) {
         attach_step(now);
     } else if (state_ == State::Ready && !c->q.known()) {
@@ -1062,6 +1075,39 @@ void Mesh::on_control(const DeviceId &peer, const delivery::PathSpec &reply, Byt
     if (peer != root_id()) {
         return; // only the root speaks to a node about its path
     }
+    DrainStatus ds;
+    DrainNotice dn;
+    if (decode(body, ds) == Status::Ok) {
+        if (drain_cancel_tries_ && ds.cancel && ds.sequence == drain_sequence_ &&
+            ds.term == term().value() && ds.status == Status::Ok) {
+            drain_cancel_tries_ = 0;
+            drain_at_ = MonoTime::never();
+        }
+        if (draining_ && !ds.cancel && ds.sequence == drain_sequence_ &&
+            ds.term == term().value() && now < drain_until_) {
+            drain_ok_ = ds.status == Status::Ok;
+            drain_ack_term_ = ds.term;
+        }
+        return;
+    }
+    if (decode(body, dn) == Status::Ok) {
+        if (dn.term == term().value() && std::find(path_.begin(), path_.begin() + path_n_,
+                                                   dn.relay) != path_.begin() + path_n_) {
+            avoid_relay_ = dn.relay;
+            avoid_relay_until_ = now + Duration::from_s(30);
+            for (Cand &c : cands_) {
+                if (c.used && linked(c) && c.q.known() &&
+                    std::find(c.path.begin(), c.path.begin() + c.n, dn.relay) ==
+                        c.path.begin() + c.n) {
+                    c.avoid_until =
+                        now; // a measured authenticated spare needs no handshake retry delay
+                }
+            }
+            evacuate_at_ = now;
+            send_beacon(true, now); // request fresh alternate-parent hints
+        }
+        return;
+    }
     LeaseRec l;
     Answer a;
     if (decode(body, l) == Status::Ok) {
@@ -1096,6 +1142,9 @@ void Mesh::on_lease(const LeaseRec &l, MonoTime now) {
             engine_.delivery().routes_changed(now);
             trickle_reset(now);
             schedule_beacon(now, 50);
+            if (avoid_relay_ != 0) {
+                renew_at_ = now; // READY proves adoption of the pushed evacuation path
+            }
         }
         return;
     }
@@ -1381,6 +1430,79 @@ void Mesh::on_answer(const Answer &a, MonoTime now) {
         (void)engine_.delivery().install_route(dest, ps, now + (left < k_route_life ? left : k_route_life));
         engine_.delivery().routes_changed(now);
         return;
+    }
+}
+
+void Mesh::begin_drain(MonoTime now, MonoTime until) {
+    draining_ = true;
+    drain_ok_ = false;
+    drain_ack_term_ = 0;
+    drain_cancel_tries_ = 0;
+    drain_sequence_ = next_sequence();
+    drain_until_ = until;
+    drain_at_ = now;
+    schedule_beacon(now, 0); // stop advertising child admission at once
+}
+
+bool Mesh::drained(MonoTime now) const {
+    if (engine_.config().role != Role::Relay) {
+        return true;
+    }
+    return draining_ && drain_ok_ && drain_ack_term_ == term().value() && now < drain_until_;
+}
+
+void Mesh::end_drain(bool cancelled, MonoTime now) {
+    drain_cancel_tries_ = draining_ && cancelled ? 5 : 0;
+    draining_ = drain_ok_ = false;
+    drain_until_ = MonoTime::never();
+    drain_at_ = drain_cancel_tries_ ? now : MonoTime::never();
+    schedule_beacon(now, 0);
+}
+
+void Mesh::drain_timer(MonoTime now) {
+    if (drain_cancel_tries_ && now >= drain_at_) {
+        --drain_cancel_tries_;
+        drain_at_ = drain_cancel_tries_ ? now + Duration::from_s(1) : MonoTime::never();
+        delivery::PathSpec path;
+        DrainRequest q;
+        q.sequence = drain_sequence_;
+        q.cancel = 1;
+        std::array<uint8_t, 12> out{};
+        std::size_t len = 0;
+        if (route_to_root(path, now) && encode(q, MutByteView{out}, len) == Status::Ok) {
+            (void)to_root(ByteView{out.data(), len}, path, now);
+        }
+    }
+    if (draining_ && now >= drain_at_) {
+        drain_at_ = now < drain_until_ ? now + Duration::from_s(1) : MonoTime::never();
+        delivery::PathSpec path;
+        DrainRequest q;
+        q.sequence = drain_sequence_;
+        q.remaining_ms = static_cast<uint32_t>(std::max<int64_t>(0, (drain_until_ - now).to_ms()));
+        std::array<uint8_t, 12> out{};
+        std::size_t len = 0;
+        if (now < drain_until_ && route_to_root(path, now) &&
+            encode(q, MutByteView{out}, len) == Status::Ok) {
+            (void)to_root(ByteView{out.data(), len}, path, now);
+        }
+    }
+    if (now >= evacuate_at_) {
+        evacuate_at_ = MonoTime::never();
+        if (now >= avoid_relay_until_) {
+            avoid_relay_ = 0;
+            return;
+        }
+        const bool depends = std::find(path_.begin(), path_.begin() + path_n_, avoid_relay_) !=
+                             path_.begin() + path_n_;
+        if (depends && state_ == State::Ready) {
+            if (att_.step == Step::Idle && engine_.power().search_allowed(now)) {
+                const int cand = pick_candidate(now);
+                if (cand >= 0 && cand != parent_) {
+                    begin_attach(cand, true, now);
+                }
+            }
+            evacuate_at_ = now + Duration::from_s(1);
+        }
     }
 }
 

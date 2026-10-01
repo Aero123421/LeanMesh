@@ -198,12 +198,17 @@ std::string cmd_ledger(Sim &sim, const Args &a) {
         out += buf;
         first = false;
     }
+    unsigned pending = 0;
+    for (std::size_t i = 0; i < lm::root::k_join_txns; ++i) {
+        lm::root::PendingJoin request;
+        pending += l.pending_join(i, request) ? 1U : 0U;
+    }
     char tail[256];
     std::snprintf(tail, sizeof tail,
                   "],\"prepared\":%" PRIu64 ",\"activated\":%" PRIu64 ",\"confirmed\":%" PRIu64 ",\"refused\":%" PRIu64
-                  ",\"conflicts\":%" PRIu64 ",\"expected_revision\":%" PRIu64 "}",
+                  ",\"conflicts\":%" PRIu64 ",\"expected_revision\":%" PRIu64 ",\"pending\":%u}",
                   l.stats().prepared, l.stats().activated, l.stats().confirmed, l.stats().refused, l.stats().conflicts,
-                  l.expected_revision());
+                  l.expected_revision(), pending);
     return out + tail;
 }
 

@@ -84,6 +84,8 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
     if len(payload) > (MAX_OBJECT_BYTES if body.object_transfer else MAX_MESSAGE_BYTES):
         raise ApiError(413, "PAYLOAD_TOO_LARGE", "payload exceeds the message limit")
     dest = body.destination
+    if dest.kind == "root_app":
+        raise ApiError(503, "UNSUPPORTED", "Host delivery to a root application is not implemented")
     if isinstance(dest, DestGroup) and (body.storage == "DURABLE" or body.queue_mode == "LATEST"):
         # No compact durable group record and no LATEST group (docs/22 §4, §6): an explicit UNSUPPORTED.
         raise ApiError(503, "UNSUPPORTED", "durable or LATEST group operations are not available",
@@ -148,6 +150,8 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
                          p: Principal = require(*WRITE_PERMISSIONS)) -> dict[str, Any]:
     hub = _hub(request)
     need_all(p, body.permissions())
+    if body.type == "LEAVE":
+        raise ApiError(503, "UNSUPPORTED", "remote LEAVE has no authenticated serial method")
     rule = CONTROL_RULES[body.type]
     domain = codec.hex_bytes(body.domain_id, 16)
     request_doc, digest = _dump(body, "signed_cbor_b64")

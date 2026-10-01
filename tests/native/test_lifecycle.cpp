@@ -782,6 +782,140 @@ LM_TEST("R09 ARCH2 sim: a new membership generation at an address drops the rout
 // root cannot reach it afterwards (its credential names another root), its key and DeviceId stay. Then B -> A with a
 // higher generation: A takes it back although its own ledger still lists the old membership (A never heard of the
 // move); an old grant (a ticket at or below a consumed generation) is refused on both sides.
+LM_TEST(
+    "review G01 isolation trigger is opt-in, persistent, delayed, and uses the existing signed transfer") {
+    DNet n(1);
+    const unsigned d = 2;
+    n.eng(0).mesh().set_enabled(true);
+    n.eng(d).mesh().set_enabled(true);
+    n.node(0).notify();
+    n.node(d).notify();
+    LM_CHECK(
+        n.until([&] { return n.eng(d).mesh().state() == route::Mesh::State::Ready; }, 120000, 20));
+    lm_policy_t policy{};
+    policy.struct_size = sizeof(policy);
+    policy.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_policy_get(n.ctx(d), &policy), LM_STATUS_OK);
+    LM_CHECK_EQ(policy.auto_transfer_on_isolation, 0u);
+    policy.auto_transfer_on_isolation = 1;
+    policy.isolation_before_transfer_ms = 599999;
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_policy_set(n.ctx(d), &policy, 0, &op), LM_STATUS_INVALID_ARGUMENT);
+    policy.isolation_before_transfer_ms = 600000;
+    lm_status_t policy_status = LM_STATUS_BUSY;
+    LM_CHECK(n.until(
+        [&] {
+            return (policy_status = lm_policy_set(n.ctx(d), &policy, 0, &op)) != LM_STATUS_BUSY;
+        },
+        5000));
+    LM_CHECK_EQ(policy_status, LM_STATUS_OK);
+    lm_operation_t policy_operation{};
+    policy_operation.struct_size = sizeof(policy_operation);
+    policy_operation.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(n.ctx(d), op, &policy_operation), LM_STATUS_OK);
+    LM_CHECK_EQ(policy_operation.phase, 1u); // accepted, still committing
+    n.run_ms(100);
+    LM_CHECK_EQ(lm_get_operation(n.ctx(d), op, &policy_operation), LM_STATUS_OK);
+    LM_CHECK_EQ(policy_operation.outcome, static_cast<uint32_t>(LM_OUTCOME_APPLIED));
+    LM_CHECK_EQ(lm_policy_set(n.ctx(d), &policy, 0, &op), LM_STATUS_CONFLICT);
+    policy = lm_policy_t{};
+    policy.struct_size = sizeof(policy);
+    policy.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_policy_get(n.ctx(d), &policy), LM_STATUS_OK);
+    LM_CHECK_EQ(policy.revision, 1u);
+    const Bytes ab = n.transfer_ticket(d, n.a, n.b, 1, 2);
+    n.eng(1).ledger().set_join_mode(root::JoinMode::Preapproved);
+    LM_CHECK_EQ(n.expect(1, n.b, d, 2, ab, 1), 0u);
+    LM_CHECK_EQ(n.install(d, 3, ab), 0u);
+    n.node(0).power_cut();
+    n.run_ms(590000);
+    LM_CHECK(n.in_domain(d, n.a)); // old membership retained; neither silence nor policy is a grant
+    LM_CHECK(n.until([&] { return n.in_domain(d, n.b); }, 180000, 50));
+    LM_CHECK_EQ(n.assignment(d), 2u);
+    // Reboot reads the durable opt-in; a cold boot starts the isolation duration again.
+    n.node(d).power_cut();
+    n.boot(d);
+    n.run_ms(100);
+    policy = lm_policy_t{};
+    policy.struct_size = sizeof(policy);
+    policy.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_policy_get(n.ctx(d), &policy), LM_STATUS_OK);
+    LM_CHECK_EQ(policy.auto_transfer_on_isolation, 1u);
+    LM_CHECK_EQ(policy.revision, 1u);
+}
+
+LM_TEST("review G01 isolation alone cannot transfer; recovery restarts the minimum interval") {
+    for (const unsigned scenario : {0U, 1U, 2U}) {
+        DNet n(1);
+        const unsigned d = 2;
+        n.eng(0).mesh().set_enabled(true);
+        n.eng(d).mesh().set_enabled(true);
+        n.node(0).notify();
+        n.node(d).notify();
+        LM_CHECK(n.until([&] { return n.eng(d).mesh().state() == route::Mesh::State::Ready; },
+                         120000, 20));
+        lm_policy_t p{};
+        p.struct_size = sizeof(p);
+        p.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_policy_get(n.ctx(d), &p), LM_STATUS_OK);
+        if (scenario != 0) {
+            p.auto_transfer_on_isolation = 1;
+            p.isolation_before_transfer_ms = 600000;
+            lm_operation_id_t op = 0;
+            lm_status_t st = LM_STATUS_BUSY;
+            LM_CHECK(n.until(
+                [&] { return (st = lm_policy_set(n.ctx(d), &p, 0, &op)) != LM_STATUS_BUSY; },
+                5000));
+            LM_CHECK_EQ(st, LM_STATUS_OK);
+            n.run_ms(100);
+        }
+        const Bytes ab = n.transfer_ticket(d, n.a, n.b, 1, 2);
+        if (scenario != 1) {
+            n.eng(1).ledger().set_join_mode(root::JoinMode::Preapproved);
+            LM_CHECK_EQ(n.expect(1, n.b, d, 2, ab, 1), 0u);
+            LM_CHECK_EQ(n.install(d, 3, ab), 0u);
+        }
+        if (scenario == 2) {
+            n.world.set_link(0, d, LinkParams{false});
+            n.run_ms(500000);
+            n.world.set_link(0, d, LinkParams{true});
+            LM_CHECK(n.until(
+                [&] { return n.eng(d).mesh().connectivity(n.node(d).clock.now()) == LM_REACHABLE; },
+                120000));
+            n.run_ms(100); // the membership owner observes recovery
+            n.world.set_link(0, d, LinkParams{false});
+            n.run_ms(590000);
+        } else {
+            n.node(0).power_cut();
+            n.run_ms(780000); // OFF despite a valid ticket, or ON without a grant
+        }
+        LM_CHECK(n.in_domain(d, n.a));
+        LM_CHECK_EQ(n.assignment(d), 1u);
+    }
+}
+
+LM_TEST("review G01 unknown local policy commit disables automatic transfer until recovery") {
+    for (const CutMode mode : {CutMode::Before, CutMode::After}) {
+        DNet n(1);
+        const unsigned d = 2;
+        lm_policy_t p{};
+        p.struct_size = sizeof(p);
+        p.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_policy_get(n.ctx(d), &p), LM_STATUS_OK);
+        p.auto_transfer_on_isolation = 1;
+        p.isolation_before_transfer_ms = 600000;
+        SimStore &st = n.node(d).store;
+        st.arm_cut(st.mutating_ops() + 1, mode);
+        lm_operation_id_t op = 0;
+        LM_CHECK_EQ(lm_policy_set(n.ctx(d), &p, 0, &op), LM_STATUS_OK);
+        n.run_ms(100);
+        LM_CHECK(st.cut_fired());
+        LM_CHECK_EQ(lm_policy_get(n.ctx(d), &p), LM_STATUS_RECOVERY_REQUIRED);
+        LM_CHECK_EQ(lm_policy_set(n.ctx(d), &p, 0, &op), LM_STATUS_RECOVERY_REQUIRED);
+        LM_CHECK(n.in_domain(d, n.a));
+    }
+}
+
 LM_TEST("M02 M03 sim: A -> B while A runs, never ACTIVE twice, A refused afterwards; then B -> A, old grants refused") {
     DNet n(1);
     const unsigned d = 2;

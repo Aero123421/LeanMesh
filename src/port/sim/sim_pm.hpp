@@ -16,6 +16,8 @@ class SimNode;
 class SimPm final : public port::Pm {
   public:
     explicit SimPm(SimNode &node) : node_(node) {}
+    uint64_t synchronous_wake_ms = 0; // test-only Woke path (including an early GPIO wake)
+    uint8_t synchronous_source = LM_WAKE_TIMER;
 
     [[nodiscard]] uint8_t set_locks(uint8_t mask) override;
     port::WakeInfo boot_info() override;

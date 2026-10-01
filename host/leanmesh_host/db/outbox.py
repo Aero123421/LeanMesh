@@ -62,33 +62,72 @@ class OutboxItem:
 
 def claim(conn: sqlite3.Connection, cfg: Settings, adapter_incarnation: bytes,
           limit: int = 16, domain: bytes | None = None) -> list[OutboxItem]:
-    """Takes due QUEUED entries, oldest first. Expired UTC deadlines are finalised as EXPIRED and
+    """Takes due QUEUED entries by bounded weighted priority, FIFO within each class. Expired UTC deadlines are finalised as EXPIRED and
     never sent (the deadline is checked before the first transmission). Each returned entry is
     marked external_write_possible so that a crash after this commit is reconciled, not re-sent.
     With `domain` only that domain's entries are taken: the connected root serves one domain (FIX11-D14)."""
+    expire_unsent(conn, cfg)
     items: list[OutboxItem] = []
-    rows = conn.execute(
-        "SELECT o.id,o.domain,o.type,o.request_json,o.payload,o.target_device,o.message_id,"
-        "o.expiry_utc_ms,b.attempts FROM outbox b JOIN operations o ON o.id=b.operation "
-        "WHERE b.state='QUEUED' AND (b.next_attempt_utc_ms IS NULL OR b.next_attempt_utc_ms<=:now) "
-        "AND (:domain IS NULL OR o.domain=:domain) ORDER BY o.created_utc_ms, o.id LIMIT :limit",
-        {"now": now_ms(), "domain": domain, "limit": limit}).fetchall()
-    for op, domain, typ, req_json, payload, target, mid, expiry, attempts in rows:
-        op, domain = bytes(op), bytes(domain)
-        if expiry is not None and expiry <= now_ms():
-            record(conn, cfg, op, state="FINAL", outcome="EXPIRED",
-                   evidence={"kind": "HOST_DEADLINE_EXPIRED", "assurance": "SELF_REPORTED",
-                             "details": {"reason": "deadline passed before first transmission"}},
-                   outbox_state="DONE")
-            continue
+    # A durable weighted round robin: controls and URGENT have reserved slots,
+    # NORMAL/BULK still progress under a continuous urgent load. FIFO within a class.
+    slots = ("CONTROL", "URGENT", "NORMAL", "URGENT", "URGENT", "BULK", "URGENT", "NORMAL")
+    cursor_row = conn.execute("SELECT value FROM meta WHERE key='dispatch_cursor'").fetchone()
+    cursor = int.from_bytes(cursor_row[0], "big") % len(slots) if cursor_row else 0
+    for _ in range(max(0, min(limit, 64))):
+        row = None
+        for offset in range(len(slots)):
+            pos = (cursor + offset) % len(slots)
+            row = conn.execute(
+                "SELECT o.id,o.domain,o.type,o.request_json,o.payload,o.target_device,o.message_id,"
+                "o.expiry_utc_ms,b.attempts FROM outbox b JOIN operations o ON o.id=b.operation "
+                "WHERE b.state='QUEUED' AND b.external_write_possible=0 AND o.state!='FINAL' "
+                "AND (b.next_attempt_utc_ms IS NULL OR b.next_attempt_utc_ms<=:now) "
+                "AND (:domain IS NULL OR o.domain=:domain) "
+                "AND (CASE WHEN o.type!='MESSAGE' THEN 'CONTROL' ELSE "
+                "json_extract(o.request_json,'$.priority') END)=:class "
+                "AND (o.expiry_utc_ms IS NULL OR o.expiry_utc_ms>:now) "
+                "ORDER BY o.rowid LIMIT 1", # committed insertion order survives UTC ties/corrections
+                {"now": now_ms(), "domain": domain, "class": slots[pos]}).fetchone()
+            if row is not None:
+                cursor = (pos + 1) % len(slots)
+                break
+        if row is None:
+            break
+        op, item_domain, typ, req_json, payload, target, mid, expiry, attempts = row
+        op, item_domain = bytes(op), bytes(item_domain)
         conn.execute("UPDATE outbox SET state='SENDING', adapter_incarnation=?, external_write_possible=1,"
                      " attempts=attempts+1 WHERE operation=?", (adapter_incarnation, op))
         conn.execute("UPDATE operations SET state='SENDING' WHERE id=?", (op,))
-        items.append(OutboxItem(op, domain, typ, json.loads(req_json),
+        items.append(OutboxItem(op, item_domain, typ, json.loads(req_json),
                                 bytes(payload) if payload is not None else None,
                                 bytes(target) if target is not None else None,
                                 bytes(mid) if mid is not None else None, attempts + 1))
+    if items:
+        conn.execute("INSERT INTO meta(key,value) VALUES('dispatch_cursor',?) ON CONFLICT(key) "
+                     "DO UPDATE SET value=excluded.value", (cursor.to_bytes(1, "big"),))
     return items
+
+
+def expire_unsent(conn: sqlite3.Connection, cfg: Settings, limit: int = 64) -> int:
+    """Only UTC deadlines whose outbox proves no external write. Bounded, indexed, offline-safe."""
+    rows = conn.execute(
+        "SELECT o.id FROM operations o JOIN outbox b ON b.operation=o.id "
+        "WHERE o.state!='FINAL' AND o.expiry_utc_ms IS NOT NULL AND o.expiry_utc_ms<=? "
+        "AND b.state='QUEUED' AND b.external_write_possible=0 ORDER BY o.expiry_utc_ms LIMIT ?",
+        (now_ms(), limit)).fetchall()
+    for (op,) in rows:
+        record(conn, cfg, bytes(op), state="FINAL", outcome="EXPIRED", outbox_state="DONE",
+               evidence={"kind": "HOST_DEADLINE_EXPIRED", "assurance": "SELF_REPORTED",
+                         "details": {"reason": "deadline passed before first transmission"}})
+    return len(rows)
+
+
+def next_expiry(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute(
+        "SELECT o.expiry_utc_ms FROM operations o JOIN outbox b ON b.operation=o.id "
+        "WHERE o.state!='FINAL' AND o.expiry_utc_ms IS NOT NULL "
+        "AND b.state='QUEUED' AND b.external_write_possible=0 ORDER BY o.expiry_utc_ms LIMIT 1").fetchone()
+    return row[0] if row else None
 
 
 def release_unwritten(conn: sqlite3.Connection, cfg: Settings, op_id: bytes) -> None:

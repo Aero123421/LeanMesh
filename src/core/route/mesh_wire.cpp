@@ -131,6 +131,24 @@ Status decode_probe(ByteView plain, Probe &out, DeviceId &issuer) {
 // ---- mesh records ----
 namespace {
 
+template <class F> void io(F &f, DrainRequest &m) {
+    f.is(Op::DrainRequest);
+    f.u32(m.sequence);
+    f.u32(m.remaining_ms);
+    f.u8(m.cancel);
+}
+template <class F> void io(F &f, DrainStatus &m) {
+    f.is(Op::DrainStatus);
+    f.u32(m.sequence);
+    f.u32(m.term);
+    f.en(m.status);
+    f.u8(m.cancel);
+}
+template <class F> void io(F &f, DrainNotice &m) {
+    f.is(Op::DrainNotice);
+    f.u32(m.term);
+    f.u16(m.relay);
+}
 // One field list per record (core/codec.hpp): it writes and reads the same layout.
 template <class F> void io(F &f, Register &m) {
     f.is(Op::Register);
@@ -173,6 +191,14 @@ template <class F> void io(F &f, Answer &m) {
 bool path_min(uint8_t n, const std::array<uint16_t, k_max_root_path> &p, std::size_t min) {
     return n >= min && (n == 0 || path_ok(p.data(), n));
 }
+bool valid(const DrainRequest &m) {
+    return m.sequence != 0 && m.remaining_ms <= 30000 && m.cancel <= 1;
+}
+bool valid(const DrainStatus &m) {
+    return m.sequence != 0 && m.term != 0 && m.cancel <= 1 &&
+           m.status <= Status::TargetGenerationChanged;
+}
+bool valid(const DrainNotice &m) { return m.term != 0 && is_valid_short_addr(ShortAddr{m.relay}); }
 bool valid(const Register &m) { return is_valid_short_addr(ShortAddr{m.parent}); }
 bool valid(const Ready &) { return true; }
 bool valid(const LeaseRec &m) { return path_min(m.n, m.path, m.status == Status::Ok ? 2 : 0); }
@@ -197,6 +223,9 @@ template <class M> Status decode(ByteView body, M &out) {
 #define LM_MESH_RECORD(T) \
     template Status encode<T>(const T &, MutByteView, std::size_t &); \
     template Status decode<T>(ByteView, T &);
+LM_MESH_RECORD(DrainRequest)
+LM_MESH_RECORD(DrainStatus)
+LM_MESH_RECORD(DrainNotice)
 LM_MESH_RECORD(Register)
 LM_MESH_RECORD(Ready)
 LM_MESH_RECORD(LeaseRec)
@@ -205,8 +234,11 @@ LM_MESH_RECORD(Answer)
 #undef LM_MESH_RECORD
 
 bool is_mesh_record(ByteView body) {
-    return !body.empty() && ((body[0] >= static_cast<uint8_t>(Op::Register) && body[0] <= static_cast<uint8_t>(Op::Answer)) ||
-                             body[0] == static_cast<uint8_t>(Op::Power)); // Power: the S16 schedule report
+    return !body.empty() &&
+           ((body[0] >= static_cast<uint8_t>(Op::Register) &&
+             body[0] <= static_cast<uint8_t>(Op::Answer)) ||
+            (body[0] >= static_cast<uint8_t>(Op::Power) &&
+             body[0] <= static_cast<uint8_t>(Op::DrainNotice))); // Power: the S16 schedule report
 }
 
 } // namespace lm::route

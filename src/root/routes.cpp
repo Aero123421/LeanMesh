@@ -16,6 +16,10 @@ void Routes::stop() {
     inited_ = false;
     push_mask_ = 0;
     push_at_ = MonoTime::never();
+    draining_addr_ = ShortAddr{};
+    drain_sequence_ = 0;
+    drain_notify_ = 0;
+    drain_until_ = drain_notice_at_ = MonoTime::never();
 }
 
 void Routes::forget(ShortAddr addr) {
@@ -34,6 +38,10 @@ void Routes::sync(MonoTime /*now*/) {
         topo_.init(mc.address, mc.root_term);
         inited_ = true;
         push_mask_ = 0;
+        draining_addr_ = ShortAddr{};
+        drain_sequence_ = 0;
+        drain_notify_ = 0;
+        drain_until_ = drain_notice_at_ = MonoTime::never();
     }
 }
 
@@ -97,6 +105,9 @@ void Routes::on_control(const DeviceId &peer, const delivery::PathSpec &reply, B
         return;
     }
     switch (static_cast<route::Op>(body[0])) {
+    case route::Op::DrainRequest:
+        on_drain(peer, addr, reply, body, now);
+        break;
     case route::Op::Register:
         on_register(peer, addr, gen, reply, body, now);
         break;
@@ -274,6 +285,22 @@ void Routes::extend_lease(ShortAddr addr, uint32_t lease_ms, MonoTime now) {
 }
 
 void Routes::on_timer(MonoTime now) {
+    if ((drain_sequence_ != 0 && !topo_.owns_drain(draining_addr_)) ||
+        (!drain_granted_ && !drain_until_.is_never() && now >= drain_until_)) {
+        topo_.cancel_drain(draining_addr_);
+        draining_addr_ = ShortAddr{};
+        drain_sequence_ = 0;
+        drain_notify_ = 0;
+        drain_until_ = drain_notice_at_ = MonoTime::never();
+    }
+    // A lost grant must not admit a new child while the relay is committing its leave.
+    // Keep its bounded owner until authenticated cancellation, removal or generation reset.
+    if (drain_granted_ && now >= drain_until_) {
+        drain_until_ = MonoTime::never();
+    }
+    if (now >= drain_notice_at_) {
+        drain_notice(now);
+    }
     if (!inited_) {
         return;
     }
@@ -284,12 +311,102 @@ void Routes::on_timer(MonoTime now) {
 }
 
 MonoTime Routes::deadline() const {
-    MonoTime d = push_at_;
+    MonoTime d = earliest(push_at_, earliest(drain_until_, drain_notice_at_));
     const uint64_t exp = topo_.next_expiry_ms();
     if (exp != UINT64_MAX) {
         d = earliest(d, MonoTime{exp * 1000ULL + 1000ULL});
     }
     return d;
+}
+
+void Routes::on_drain(const DeviceId &peer, ShortAddr addr, const delivery::PathSpec &reply,
+                      ByteView body, MonoTime now) {
+    route::DrainRequest q;
+    if (route::decode(body, q) != Status::Ok) {
+        return;
+    }
+    route::DrainStatus answer;
+    answer.sequence = q.sequence;
+    answer.term = topo_.term().value();
+    answer.cancel = q.cancel;
+    if (q.cancel) {
+        if (addr == draining_addr_ && q.sequence == drain_sequence_) {
+            topo_.cancel_drain(addr);
+            draining_addr_ = ShortAddr{};
+            drain_sequence_ = 0;
+            drain_notify_ = 0;
+            drain_until_ = drain_notice_at_ = MonoTime::never();
+        }
+        answer.status = Status::Ok; // cancellation is idempotent, including a lost reply
+        std::array<uint8_t, 16> out{};
+        std::size_t len = 0;
+        if (route::encode(answer, MutByteView{out}, len) == Status::Ok) {
+            (void)engine_.delivery().send_control(peer, reply, ByteView{out.data(), len}, now);
+        }
+        return;
+    }
+    if (drain_sequence_ == 0) {
+        answer.status = topo_.begin_drain(addr, ms(now));
+        if (answer.status == Status::Ok) {
+            draining_addr_ = addr;
+            drain_sequence_ = q.sequence;
+            drain_granted_ = false;
+            drain_until_ = now + Duration::from_ms(q.remaining_ms);
+        }
+    } else if (draining_addr_ != addr || drain_sequence_ != q.sequence) {
+        answer.status = Status::Busy;
+    } else {
+        answer.status = Status::Ok;
+    }
+    if (answer.status == Status::Ok) {
+        answer.status =
+            now >= drain_until_ ? Status::DeadlineUnreachable : topo_.drain_status(addr, ms(now));
+        if (answer.status == Status::Ok) {
+            drain_granted_ = true;
+        }
+        if (!drain_granted_ && drain_notify_ == 0 && drain_notice_at_.is_never()) {
+            // Finish this bounded notification round before refilling it: a one-second poll
+            // must not keep putting low addresses ahead of descendants later in the bitmap.
+            topo_.for_each_drain_child([&](ShortAddr child) {
+                if (child.value() >= 2 && child.value() < 66) {
+                    drain_notify_ |= 1ULL << (child.value() - 2U);
+                }
+            });
+            drain_notice_at_ = now;
+        }
+    }
+    std::array<uint8_t, 16> out{};
+    std::size_t len = 0;
+    if (route::encode(answer, MutByteView{out}, len) == Status::Ok) {
+        (void)engine_.delivery().send_control(peer, reply, ByteView{out.data(), len}, now);
+    }
+}
+
+void Routes::drain_notice(MonoTime now) {
+    drain_notice_at_ = MonoTime::never();
+    while (drain_notify_ != 0) {
+        const auto bit = static_cast<unsigned>(__builtin_ctzll(drain_notify_));
+        drain_notify_ &= drain_notify_ - 1U;
+        const ShortAddr addr{static_cast<uint16_t>(bit + 2U)};
+        const auto *session = engine_.delivery().end_session_at(addr);
+        delivery::PathSpec path;
+        if (session == nullptr || !path_to_addr(addr, path, now)) {
+            continue;
+        }
+        route::DrainNotice notice;
+        notice.term = topo_.term().value();
+        notice.relay = draining_addr_.value();
+        std::array<uint8_t, 8> out{};
+        std::size_t len = 0;
+        if (route::encode(notice, MutByteView{out}, len) == Status::Ok) {
+            (void)engine_.delivery().send_control(session->peer, path, ByteView{out.data(), len},
+                                                  now);
+        }
+        break;
+    }
+    if (drain_notify_ != 0) {
+        drain_notice_at_ = now + k_push_gap;
+    }
 }
 
 } // namespace lm::root

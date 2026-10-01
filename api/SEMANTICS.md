@@ -8,7 +8,7 @@ OpenAPIは形、本文は横断制約。実装は両方を満たす。u63はJSON
 ## Control
 すべてexpected_revisionとrequest_idを要求。署名objectが必要な操作でraw JSONの承認だけを代替にしない。
 - JOIN_DECISION: device_id/decision必須。APPROVEはactive pending requestのkey/credential hashと一致し、root自身のticket検証も通る。
-- LEAVE: device_id/leave_mode必須。IMMEDIATEは明示的な権限を要求。
+- LEAVE: schemaには予約されているが、このHost bridgeでは未対応。権限確認後、DB受理前に503/UNSUPPORTED。端末のローカルlm_leaveとは別機能。
 - REVOKE: device_id、署名revoke object必須。網側拒否と端末消去は別evidence。
 - TRANSFER: device_id、署名AssignmentTicket必須。source/target/generation/nonce検査。
 - INSTALL_CONTROL/POLICY_SET: signed_cbor_b64必須。typeとsender権限を検査。
@@ -38,3 +38,10 @@ Power policyの新revisionはexpected_revision+1とし、u63上限到達時は�
 
 ## GroupSnapshotV2
 DeviceIdだけでなくassignment/membership世代を送信snapshotへ含める。detail APIのPARTIALは集約だけ、target outcomeはPARTIALを認めない。SUBMITTEDはBEST_EFFORTの送出、RECEIVED/APPLIEDとは別。現在outcomeの件数の和はtotal。各targetのevidence historyを件数へ二重加算しない。
+
+## Host admissionとdispatch
+
+`destination.kind=root_app` はこのbridgeでは未対応で、DB受理前に503/UNSUPPORTED。
+UTC期限を過ぎた未送信QUEUED要求はserial接続無しでも最大64件ずつEXPIREDにし、受付枠を解放する。外部書込みの可能性がある要求はrootとのreconcile対象で、Host時計で終端到達を推定しない。root期限はUTCとして扱わない。LATESTは同principal/domain/destination/port/keyの未送信旧要求だけを同一transactionで置換し、未完了枠の正味増分で受付を判断する。保存・証拠容量不足なら旧要求を残して拒否する。
+
+Host dispatchは永続cursorによる8枠のweighted round robin: CONTROL, URGENT, NORMAL, URGENT, URGENT, BULK, URGENT, NORMAL。空classは飛ばし、class内は既存operationsのrowidによるcommit挿入順（UTC補正や同msの乱数IDで順序を変えない）。継続負荷でも通常・BULK枠を維持する。これはclaim回数の上限であり実無線遅延秒数の保証ではない。

@@ -72,3 +72,15 @@ creditはrecord数とbyte数の二重上限。Hostcommit受信ACKとSerial write
 ## spec0.2追加: PowerとGroupSnapshot
 固定link/route/endヘッダーとDATA暗号goldenは変更しない。frame kind8 POWERは認証済み直結link専用で、28B poll/24B grantをlink AEADで保護する。最大frameは68B/64B。protocol/power.cddlとregistryのstruct_formatsを参照。unknown frame kind/capabilityは明示拒否する。
 Control28 SleepSchedule、29 PowerPolicy、30 CommissioningWindow、31 RootHandover、32 GroupSnapshotV2を追加。type22は旧GroupSnapshot予約となり、新規送信は行わない。version1 envelopeのままでも未対応typeを解釈したふりはしない。
+
+## relay DRAIN compact end-control
+
+node↔rootの認証済みend session CONTROL内に以下のbig endian固定長recordを使用する。ControlObjectのtype IDではない。sequenceは非0、termは現root term、remaining_msは0..30000、cancelは0/1。余剰bytesと範囲外値は拒否する。
+
+|opcode|layout (opcodeを含む)|方向|
+|---|---|---|
+|0xEF DrainRequest|u8 opcode, u32 sequence, u32 remaining_ms, u8 cancel (10 B)|relay→root|
+|0xF0 DrainStatus|u8 opcode, u32 sequence, u32 term, u8 status, u8 cancel (11 B)|root→relay|
+|0xF1 DrainNotice|u8 opcode, u32 term, u16 relay (7 B)|root→子|
+
+取消ACKはcancel=1でgrantと区別する。rootは完全Identity/assignment/membership世代を認証済みsessionとledgerで照合してから処理し、beaconは退避の証拠にしない。

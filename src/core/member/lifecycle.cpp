@@ -227,7 +227,7 @@ void Membership::resume_switch(const store::RecordJob &rec) {
     switch_ = true;
     switch_domain_ = env.domain;
     handover_ = env.domain == id.delegation().domain;
-    req_.operation = k_op_tag | ++op_counter_;
+    req_.operation = engine_.next_control_op();
 }
 
 Status Membership::transfer_nonce(std::array<uint8_t, 16> &out) {

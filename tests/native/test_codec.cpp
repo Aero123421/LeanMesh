@@ -76,6 +76,46 @@ template <class Dec> bool strict_length(const Bytes &good, Dec dec) {
 } // namespace
 
 // ---- mesh records (route/mesh_wire.cpp) ----
+LM_TEST("review G02 codec golden: DRAIN control is byte-exact, bounded, and distinguishes cancel ACK") {
+    route::DrainRequest q{0x01020304, 30000, 0};
+    const Bytes request = Be{}.u8(0xEF).u32(q.sequence).u32(30000).u8(0).v;
+    LM_CHECK(
+        encodes_to([&](MutByteView o, std::size_t &l) { return route::encode(q, o, l); }, request));
+    LM_CHECK(strict_length(request, [](ByteView b) {
+        route::DrainRequest x;
+        return route::decode(b, x);
+    }));
+    route::DrainRequest decoded;
+    LM_CHECK_OK(route::decode(view(request), decoded));
+    LM_CHECK_EQ(decoded.remaining_ms, 30000u);
+    for (const Bytes &bad :
+         {Be{}.u8(0xEF).u32(0).u32(30000).u8(0).v, Be{}.u8(0xEF).u32(1).u32(30001).u8(0).v,
+          Be{}.u8(0xEF).u32(1).u32(30000).u8(2).v}) {
+        LM_CHECK(route::decode(view(bad), decoded) == Status::BadFrame);
+    }
+    for (const uint8_t cancel : {uint8_t{0}, uint8_t{1}}) {
+        route::DrainStatus s{q.sequence, 7, Status::Ok, cancel};
+        const Bytes status = Be{}.u8(0xF0).u32(q.sequence).u32(7).u8(0).u8(cancel).v;
+        LM_CHECK(encodes_to([&](MutByteView o, std::size_t &l) { return route::encode(s, o, l); },
+                            status));
+        route::DrainStatus decoded_status;
+        LM_CHECK_OK(route::decode(view(status), decoded_status));
+        LM_CHECK_EQ(decoded_status.cancel, cancel);
+        LM_CHECK(strict_length(status, [](ByteView b) {
+            route::DrainStatus x;
+            return route::decode(b, x);
+        }));
+    }
+    route::DrainNotice n{7, 2};
+    const Bytes notice = Be{}.u8(0xF1).u32(7).u16(2).v;
+    LM_CHECK(
+        encodes_to([&](MutByteView o, std::size_t &l) { return route::encode(n, o, l); }, notice));
+    LM_CHECK(strict_length(notice, [](ByteView b) {
+        route::DrainNotice x;
+        return route::decode(b, x);
+    }));
+}
+
 LM_TEST("codec golden: mesh REGISTER / READY / QUERY are byte-exact and strict") {
     route::Register rg;
     rg.sequence = 0x01020304;
