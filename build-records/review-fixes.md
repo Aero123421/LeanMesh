@@ -72,3 +72,11 @@ IDF pin `76f5dedd9950a3012fee8fb7d5586df21fc67802`、GCC 14.2、Python 3.12.14�
 修正commit `bfd2482` のGitHub CI run `36830831486` でnative jobの成功を確認した（build、ctest、power-cut matrix、coverage）。通常E2Eは再度失敗し、ローカルでは `python -m pytest -v host/tests/e2e -s` が53件合格（515.53秒）で再現しなかった。元のsanitizers jobもnative ctestは成功し、その後のE2Eで失敗していた。`curl https://api.github.com/...` はCONNECT tunnelをプロキシに403で拒否され、Webログも認証必須のため本文取得不可。
 
 両E2E jobでJUnit XMLを保存し、失敗時だけ `scripts/report_pytest_failures.py` が最大10件・各6000文字の失敗詳細をCIサマリーのannotationへ出すようにした。pytestのexit code、timeout、テスト集合は維持。XMLはartifactにも残す。実行可能なstdlibのみの処理で、ローカルの失敗/成功XML fixtureで出力と改行エスケープを確認し、Ruff・git diff --checkも合格。この診断変更をE2E不具合の修正とは扱わない。
+
+診断commit `6201fef` のCI run `36832469562` で `test_host_restart_mid_operation_reconciles_by_message_id_and_never_resends` の `GROUP_SET applied` 待ちが失敗する詳細を取得できた。テストのpoll predicateが毎回 `control(...)` を呼び、新しいrequest_idの設定要求を作ってからその直後の状態だけを見ていた。同じ誤りは取消試験にも存在した。遅い環境では常に新しい未完了要求を見てtimeoutし、速い環境でも後続のCONFLICTをFINALと見て初期設定の成功と誤認し得た。
+
+rootのworkerへ200 msの遅延を設定し、設定要求が1件だけであることを検査する回帰条件を追加。修正前はローカルでも失敗（69.52秒、3要求 != 1）。設定のPOSTを待機ループの外で一度だけ実行し、固定operation IDを照会してAPPLIEDを確認するよう2箇所を修正した。元の20秒の待機期限は維持し、後続のgroup fan-out/restart/reconcile前にworker latencyを通常値へ戻す。
+
+この調査でローカルの通常E2E 53件（515.53秒）とASan/UBSan E2E 53件（584.61秒、strict simulator exit有効）が合格したが、上記の回帰条件を追加する前の結果である。変更後の関連試験とCI結果は別途確認する。
+
+修正後は `python -m pytest -v host/tests/e2e/test_group_meshsim.py -s` の3件が合格（191.73秒）。同じ3件を `LEANMESH_MESHSIM_BUILD=/workspace/leanmesh-env/asan LEANMESH_SIM_STRICT_EXIT=1 ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:print_stacktrace=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` で実行して合格（195.75秒）。200 ms worker遅延・設定要求1件・APPLIED確認に加え、取消/遅延結果、Host再起動後のreconcileと非再送を実core経路で確認した。Ruff・git diff --checkも合格。製品コードや期限の緩和は今回のCI追補で追加していない。

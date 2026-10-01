@@ -160,7 +160,9 @@ def test_host_cancel_keeps_sent_targets_open_and_a_late_result_updates_them(
     b.start_host()
     b.await_root()
     ids = devices(b)
-    wait_for(lambda: b.operation(control(b, 2, 0, ids)["id"])["state"] == "FINAL", 20, "GROUP_SET applied")
+    ctl = control(b, 2, 0, ids)
+    done = wait_for(lambda: (x := b.operation(ctl["id"]))["state"] == "FINAL" and x, 20, "GROUP_SET applied")
+    assert done["outcome"] == "APPLIED"
     op = group_send(b, 2, 1)["id"]
     # No application answers: four targets are in flight (stored, result outstanding), eight have not started.
     wait_for(lambda: sum(b.sim.ok(f"delivery {i}")["delivered"] for i in range(1, MEMBERS + 1)) >= 4, 40,
@@ -207,7 +209,13 @@ def test_host_restart_mid_operation_reconciles_by_message_id_and_never_resends(
     b.start_host()
     b.await_root()
     ids = devices(b)
-    wait_for(lambda: b.operation(control(b, 4, 0, ids)["id"])["state"] == "FINAL", 20, "GROUP_SET applied")
+    # Delay the durable commit so that setup must wait for an asynchronous result.
+    b.sim.ok("job-latency 0 200000")
+    ctl = control(b, 4, 0, ids)
+    done = wait_for(lambda: (x := b.operation(ctl["id"]))["state"] == "FINAL" and x, 20, "GROUP_SET applied")
+    assert done["outcome"] == "APPLIED"
+    b.sim.ok("job-latency 0 2000")
+    assert db_rows(b.host.db, "SELECT COUNT(*) FROM operations WHERE type='GROUP_SET'")[0][0] == 1
     op = group_send(b, 4, 1)["id"]
     wait_for(lambda: len(targets_or_empty(b, op)) == MEMBERS, 30, "the targets are mirrored")
     b.kill_host()
