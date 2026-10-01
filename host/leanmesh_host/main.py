@@ -32,11 +32,12 @@ from .api.errors import ApiError
 from .api.limits import BodyLimit, RateLimiter
 from .auth import Principal, load_principals, sync_principals
 from .bridge import Bridge
-from .db import startup
+from .db import outbox, startup
 from .events.hub import Hub
+from .events.journal import now_ms
 from .serial import NativeError, SerialLink
 from .settings import Settings
-from .storage import StorageBusy, StorageFull, StorageThread
+from .storage import StorageBusy, StorageFault, StorageFull, StorageThread
 
 log = logging.getLogger(__name__)
 __all__ = ["ApiError", "create_app"]
@@ -83,6 +84,35 @@ def _run(link: SerialLink) -> SerialLink:
     return link
 
 
+async def _expire_outbox(hub: Hub) -> None:
+    """Sleep until a committed UTC deadline or new work, even without a serial port.
+
+    The one-minute cap rechecks wall-clock corrections; each query uses the expiry index.
+    """
+    while not hub.closing:
+        hub.expiry_ready.clear()
+        try:
+            count = await hub.storage.run(lambda c: outbox.expire_unsent(c, hub.cfg))
+            if count:
+                hub.bump()
+            due = await hub.read(outbox.next_expiry)
+        except StorageFault:
+            return  # explicit recovery, never keep submitting to a dead thread
+        except (StorageBusy, StorageFull, sqlite3.Error, ApiError) as exc:
+            log.warning("outbox expiry deferred: %s", exc)
+            # Avoid a tight loop on a due deadline when admission/storage is temporarily busy.
+            try:
+                await asyncio.wait_for(hub.expiry_ready.wait(), 1.0)
+            except TimeoutError:
+                pass
+            continue
+        delay = min(60.0, max(0.0, (due - now_ms()) / 1000)) if due is not None else None
+        try:
+            await asyncio.wait_for(hub.expiry_ready.wait(), delay)
+        except TimeoutError:
+            pass
+
+
 def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
     """`fault_hook` is the storage test seam (crash tests); production passes nothing."""
 
@@ -116,8 +146,15 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
             app.state.limiter = RateLimiter(settings.principal_rps, settings.principal_burst,
                                             settings.global_rps, settings.global_burst)
             app.state.serial, app.state.bridge = _start_serial(settings, hub)  # [SLICE:S10/S13]
+            expiry_task = asyncio.create_task(_expire_outbox(hub), name="host-outbox-expiry")
             yield
         finally:
+            if "expiry_task" in locals():
+                expiry_task.cancel()
+                try:
+                    await expiry_task
+                except asyncio.CancelledError:
+                    pass
             bridge = getattr(app.state, "bridge", None)
             if bridge is not None:
                 await bridge.stop()  # before the link: nothing new is claimed while the port closes
@@ -174,6 +211,11 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
         log.error("sqlite error: %s", exc)
         return _envelope(503, "STORAGE_FAILURE", "database error")
 
+    @app.exception_handler(StorageFault)
+    async def _storage_fault(_: Request, exc: StorageFault) -> JSONResponse:
+        log.error("storage unavailable: %s", exc)
+        return _envelope(503, "STORAGE_FAILURE", "database unavailable; explicit recovery required")
+
     @app.get("/v1/status")
     async def get_status(request: Request, _: Principal = require("READ")) -> dict[str, Any]:
         hub: Hub = request.app.state.hub
@@ -183,7 +225,7 @@ def create_app(settings: Settings, fault_hook: Any = None) -> FastAPI:
             "spec_version": SPEC_VERSION,
             # ready = DB + host USB credential + migrations OK (docs/11 §8). The credential is the
             # Host kit of the USB session; without it (or with a rejected one) the host is not ready.
-            "ready": getattr(request.app.state, "serial", None) is not None,
+            "ready": getattr(request.app.state, "serial", None) is not None and not hub.storage.failed,
             "root_connected": hub.root_connected,
             "journal_id": hub.storage.journal_id.hex(),
             "capabilities": {

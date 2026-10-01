@@ -55,6 +55,8 @@ class StorageThread:
         self._sentinel_queued = False
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
+        self._state_lock = threading.Lock()
+        self._fatal: BaseException | None = None
         self.journal_id: bytes = b""
         # Runs on the storage thread right after COMMIT (never inside a transaction).
         self.after_commit: Callable[[sqlite3.Connection], None] | None = None
@@ -65,6 +67,11 @@ class StorageThread:
     @property
     def db_path(self) -> Path:
         return self._db_path
+
+    @property
+    def failed(self) -> bool:
+        with self._state_lock:
+            return self._fatal is not None
 
     # ---- lifecycle -------------------------------------------------------------------------
     def start(self) -> None:
@@ -90,9 +97,10 @@ class StorageThread:
         """
         if self._thread is None:
             return
-        self._closing = True
+        with self._state_lock:
+            self._closing = True
         deadline = time.monotonic() + timeout_s
-        if not self._sentinel_queued:
+        if self._thread.is_alive() and not self._sentinel_queued:
             try:
                 self._queue.put(_SENTINEL, timeout=timeout_s)
             except queue.Full:
@@ -107,13 +115,16 @@ class StorageThread:
     # ---- work submission -------------------------------------------------------------------
     def submit(self, fn: Callable[[sqlite3.Connection], T]) -> concurrent.futures.Future[T]:
         """Queues fn(conn) to run in its own transaction. Raises StorageBusy when full."""
-        if self._closing:
-            raise StorageBusy("storage is shutting down")
         fut: concurrent.futures.Future[T] = concurrent.futures.Future()
-        try:
-            self._queue.put_nowait((fn, fut))
-        except queue.Full:
-            raise StorageBusy("storage queue full") from None
+        with self._state_lock:
+            if self._fatal is not None:
+                raise StorageFault("storage failed; explicit recovery required") from self._fatal
+            if self._closing:
+                raise StorageBusy("storage is shutting down")
+            try:
+                self._queue.put_nowait((fn, fut))
+            except queue.Full:
+                raise StorageBusy("storage queue full") from None
         return fut
 
     async def run(self, fn: Callable[[sqlite3.Connection], T]) -> T:
@@ -121,14 +132,23 @@ class StorageThread:
 
     # ---- thread body -----------------------------------------------------------------------
     def _run(self) -> None:
+        conn = None
+        active = None
         try:
             conn = _open(self._db_path, self._schema_path)
             if self._max_page_count is not None:
                 conn.execute(f"PRAGMA max_page_count={int(self._max_page_count)}")
             self.journal_id = _journal_id(conn)
-        except (sqlite3.Error, StorageFault, OSError) as exc:
+        except BaseException as exc:
             self._start_error = exc
-            self._ready.set()
+            self._fail(exc)
+            try:
+                if conn is not None:
+                    conn.close()
+            except BaseException as close_error:
+                exc.add_note(f"startup close failed: {close_error}")
+            finally:
+                self._ready.set()
             return
         self._ready.set()
         try:
@@ -139,13 +159,47 @@ class StorageThread:
                 fn, fut = item  # type: ignore[misc]
                 if not fut.set_running_or_notify_cancel():
                     continue
+                active = fut
                 self._run_one(conn, fn, fut)
+                active = None
+        except BaseException as exc:
+            self._fail(exc, active)
         finally:
             # Safe checkpoint on shutdown (docs/11 §6); failures are left to the next start.
             try:
                 conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except BaseException as exc:
+                self._fail(exc)
             finally:
-                conn.close()
+                try:
+                    conn.close()
+                except BaseException as exc:
+                    self._fail(exc)
+
+    def _fail(self, cause: BaseException, active: concurrent.futures.Future | None = None) -> None:
+        # Serialize with submit: no future can be queued after the fatal drain.
+        pending = []
+        with self._state_lock:
+            if self._fatal is None:
+                self._fatal = cause
+                log.error("storage thread failed; explicit recovery required", exc_info=cause)
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not _SENTINEL:
+                    pending.append(item[1])
+        if active is not None:
+            pending.append(active)
+        for fut in pending:
+            if not fut.done():
+                fault = StorageFault("storage failed; transaction outcome may be unknown")
+                fault.__cause__ = self._fatal
+                try:
+                    fut.set_exception(fault)
+                except concurrent.futures.InvalidStateError:  # caller cancelled during the drain
+                    pass
 
     def _run_one(self, conn: sqlite3.Connection, fn: Callable[[sqlite3.Connection], T],
                  fut: concurrent.futures.Future[T]) -> None:
@@ -158,9 +212,18 @@ class StorageThread:
                 self.fault_hook("before_commit", name)
             conn.execute("COMMIT")
         except BaseException as exc:  # the transaction must end either way
-            _rollback(conn)
+            try:
+                _rollback(conn)
+            except BaseException as rollback_error:
+                exc.add_note(f"rollback failed: {rollback_error}")
+                raise StorageFault("transaction could not be rolled back") from exc
             full = isinstance(exc, sqlite3.Error) and (
                 getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_FULL)
+            code = (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xff
+            if code in (sqlite3.SQLITE_IOERR, sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB) or (
+                isinstance(exc, sqlite3.ProgrammingError) and "closed" in str(exc)
+            ):
+                raise StorageFault("database failed; transaction outcome may be unknown") from exc
             fut.set_exception(StorageFull(str(exc)) if full else exc)
             return
         if self.fault_hook:
@@ -184,7 +247,6 @@ def _rollback(conn: sqlite3.Connection) -> None:
         try:
             conn.execute("ROLLBACK")
         except sqlite3.Error:
-            conn.close()  # cannot end the transaction: fail the thread rather than continue dirty
             raise
 
 
@@ -201,17 +263,23 @@ def _acquire_singleton_lock(db_path: Path) -> int:
 def _open(db_path: Path, schema_path: Path) -> sqlite3.Connection:
     # isolation_level=None: transactions are explicit (BEGIN/COMMIT above).
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=True)
-    for pragma in ("journal_mode=WAL", "synchronous=FULL", "foreign_keys=ON", "busy_timeout=1000"):
-        conn.execute(f"PRAGMA {pragma}")
-    if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-        conn.close()
-        raise StorageFault("database failed quick_check; quarantine and recover explicitly")
-    exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
-    ).fetchone()
-    if exists is None:
-        _apply_schema(conn, schema_path.read_text())
-    return conn
+    try:
+        for pragma in ("journal_mode=WAL", "synchronous=FULL", "foreign_keys=ON", "busy_timeout=1000"):
+            conn.execute(f"PRAGMA {pragma}")
+        if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise StorageFault("database failed quick_check; quarantine and recover explicitly")
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone()
+        if exists is None:
+            _apply_schema(conn, schema_path.read_text())
+        return conn
+    except BaseException as exc:
+        try:
+            conn.close()
+        except BaseException as close_error:
+            exc.add_note(f"startup close failed: {close_error}")
+        raise
 
 
 def _apply_schema(conn: sqlite3.Connection, schema_sql: str) -> None:

@@ -40,6 +40,8 @@ CREATE TABLE operations (
  UNIQUE(principal,domain,type,client_epoch,idempotency_key),
  FOREIGN KEY(client_epoch,principal) REFERENCES client_epochs(id,principal)
 ) STRICT;
+CREATE INDEX operations_expiry ON operations(expiry_utc_ms)
+ WHERE state!='FINAL' AND expiry_utc_ms IS NOT NULL;
 CREATE TABLE outbox (
  operation BLOB PRIMARY KEY REFERENCES operations(id), state TEXT NOT NULL,
  adapter_incarnation BLOB, external_write_possible INTEGER NOT NULL DEFAULT 0 CHECK(external_write_possible IN(0,1)),

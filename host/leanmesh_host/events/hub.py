@@ -27,6 +27,7 @@ class Hub:
         self.cfg = cfg
         self.closing = False
         self.full_reported = False  # log the first SQLITE_FULL, not one line per rejected request
+        self.expiry_ready = asyncio.Event()
         self.outbox_ready = asyncio.Event()  # the bridge waits here; set after commit
         self._active = 0
         self.version = 0  # incremented by every commit; readers wait for it to move
@@ -57,6 +58,7 @@ class Hub:
     def bump(self) -> None:
         self.version += 1
         self.outbox_ready.set()
+        self.expiry_ready.set()
         for waiter in self._waiters:
             if not waiter.done():
                 waiter.set_result(None)
