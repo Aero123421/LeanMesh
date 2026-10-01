@@ -346,10 +346,15 @@ def test_pending_approval_survives_device_sleep_and_host_restart_without_a_secon
     assert b.sim.ok("ledger")["activated"] == 0
     b.start_host()
     wait_for(lambda: b.status().get("root_connected"), 25, "root_connected again")
+    b.sim.ok("job-latency 0 500000")  # expose RequestOut before the root verifies the ticket
     assert b.sim.ok("boot 1")["ok"] and b.sim.ok("start 1")["status"] == "OK"
     time.sleep(0.5)
     assert b.sim.ok("join 1 96")["status"] == "OK"  # the same request id after waking
-    wait_for(lambda: b.sim.ok("membership 1")["state"] == 3, 30, "the woken device is APPROVAL_PENDING at the root again")
+    wait_for(lambda: b.sim.ok("membership 1")["state"] == 3, 30, "the woken device awaits approval")
+    # The local RequestOut state precedes root-side ticket verification. Approve only a
+    # request that the root actually lists as pending, rather than the Host's old mirror row.
+    wait_for(lambda: b.sim.ok("ledger")["pending"] == 1, 30, "the root verifies the resumed request")
+    b.sim.ok("job-latency 0 2000")
     items = b.get("/v1/lifecycle/requests", domain_id=domain)["items"]
     assert len(items) == 1 and items[0]["device_id"] == node and items[0]["state"] == "PENDING_APPROVAL"
     entries = [e for e in b.sim.ok("ledger")["entries"] if e["device"] == node]
@@ -357,7 +362,7 @@ def test_pending_approval_survives_device_sleep_and_host_restart_without_a_secon
     assert b.sim.ok("membership 1")["state"] != 5  # nothing was approved by the wake-up
     ok = _control(b, "JOIN_DECISION", device_id=node, decision="APPROVE", expected_revision=items[0]["revision"])
     o = wait_for(lambda: (x := b.operation(ok["id"]))["state"] == "FINAL" and x, 30, "decision applied")
-    assert o["outcome"] == "APPLIED"
+    assert o["outcome"] == "APPLIED", o
     b.await_active(1, timeout_s=40)
     assert b.sim.ok("ledger")["activated"] == 1
     assert len([e for e in b.sim.ok("ledger")["entries"] if e["device"] == node]) == 1

@@ -80,3 +80,7 @@ rootのworkerへ200 msの遅延を設定し、設定要求が1件だけである
 この調査でローカルの通常E2E 53件（515.53秒）とASan/UBSan E2E 53件（584.61秒、strict simulator exit有効）が合格したが、上記の回帰条件を追加する前の結果である。変更後の関連試験とCI結果は別途確認する。
 
 修正後は `python -m pytest -v host/tests/e2e/test_group_meshsim.py -s` の3件が合格（191.73秒）。同じ3件を `LEANMESH_MESHSIM_BUILD=/workspace/leanmesh-env/asan LEANMESH_SIM_STRICT_EXIT=1 ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:print_stacktrace=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` で実行して合格（195.75秒）。200 ms worker遅延・設定要求1件・APPLIED確認に加え、取消/遅延結果、Host再起動後のreconcileと非再送を実core経路で確認した。Ruff・git diff --checkも合格。製品コードや期限の緩和は今回のCI追補で追加していない。
+
+次のCI run `36834455563`（`7658f54`）ではgroup関連の失敗が消え、LC05の復帰後承認がREJECTEDになる競合が現れた。端末の `LM_APPROVAL_PENDING` はRequestOut段階も含み、rootのticket検証完了を証明しない。rootのworkerを500 msに遅延させ、修正前のテストでROOT_REFUSED/NOT_FOUNDを再現（43.94秒）。meshsimの `ledger` 診断へ `pending_join()` と同じ有界4slotから数えるpending件数を追加し、root側が本当にPendingになるまで承認を待つよう修正した。署名・credential・revisionの検査は維持し、製品コードは変更していない。
+
+変更後は当該テストを通常meshsimで1件合格（44.43秒）、ASan/UBSan+strict exitでも1件合格（44.64秒）。両meshsim targetの再build、Ruff・git diff --checkも合格。元の承認期限や「単一request・単一reservation・勝手に承認しない」の検査は維持している。
