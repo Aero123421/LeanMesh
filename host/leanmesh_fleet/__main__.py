@@ -7,6 +7,7 @@ import getpass
 import json
 import os
 import sys
+import warnings
 from hashlib import sha256
 from pathlib import Path
 
@@ -55,9 +56,14 @@ def run(a: argparse.Namespace) -> None:
     if a.password_file:
         password = keys.password_file(a.password_file)
     else:
-        password = getpass.getpass("Fleet key passphrase: ").encode("utf-8")
-        if a.command == "init" and password != getpass.getpass("Repeat passphrase: ").encode("utf-8"):
-            raise ValueError("passphrases do not match")
+        if not sys.stdin.isatty():
+            raise ValueError("noninteractive issuance requires a protected password file")
+        # getpass otherwise falls back to echoed stdin when it cannot disable terminal echo.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            password = getpass.getpass("Fleet key passphrase: ").encode("utf-8")
+            if a.command == "init" and password != getpass.getpass("Repeat passphrase: ").encode("utf-8"):
+                raise ValueError("passphrases do not match")
         if len(password) < 16:
             raise ValueError("passphrase must contain at least 16 bytes")
     if a.command == "init":
@@ -98,7 +104,7 @@ def main() -> int:
     a = parser().parse_args()
     try:
         run(a)
-    except (OSError, ValueError, TypeError, KeyError, InvalidSignature, EOFError):
+    except (OSError, ValueError, TypeError, KeyError, InvalidSignature, EOFError, getpass.GetPassWarning):
         # Do not echo a parser/backend exception: inputs may contain secret material.
         print("fleet issuer refused: check inputs, environment, permissions and passphrase", file=sys.stderr)
         return 1

@@ -44,6 +44,8 @@ directory inode を固定して読み、store や鍵ファイルの symlink を�
 自動化の場合だけ `--password-file` を使えます。そのファイルも所有ユーザーの regular file / `0600` /
 hard link なしを要求し、末尾の CR/LF を除いて16〜1024 byteです。秘密を含む backend 例外は表示せず、
 標準出力には id、出力先、hash、件数だけを出します。
+端末なし・echo を無効にできない端末では prompt を拒否します。`getpass` の標準入力への
+fallback は使わず、非対話実行では保護された password file を必須にします。
 
 この PEM backend は OS ユーザーが署名者の境界です。HSM、複数人承認、署名監査サーバー、Python
 プロセスの秘密メモリ消去の保証はありません。署名担当者は専用オフライン端末を管理し、暗号化した

@@ -31,15 +31,15 @@ repository's pin. No dependency lock changed and no key material is committed.
 | Command | Observed result |
 |---|---|
 | `cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"` and `cmake --build "$LEANMESH_NATIVE_BUILD" --target issuer_driver -j4` | Build succeeds with the existing warning-as-error flags |
-| `python -m pytest -q host/tests/integration/test_fleet_issuer.py` | **54 passed in 1.63 s**, including CLI-output Join |
-| `python -m pytest -q host/tests/unit host/tests/integration` | **250 passed in 53.58 s**, including CLI-output Join |
+| `python -m pytest -q host/tests/integration/test_fleet_issuer.py` | **55 passed in 1.53 s**, including CLI-output Join |
+| `python -m pytest -q host/tests/unit host/tests/integration` | **251 passed in 50.18 s**, including CLI-output Join |
 | `ctest --test-dir "$LEANMESH_NATIVE_BUILD" --output-on-failure --no-tests=error -R 'test_(credentials\|security\|join)$' -j2` | **3/3 passed**, 6.57 s (SDK credentials, crypto/EDHOC, Join) |
 | `cmake -S . -B /workspace/leanmesh-env/asan -G Ninja -DLM_IDF_PATH="$IDF_PATH" -DLM_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug` and `cmake --build /workspace/leanmesh-env/asan --target issuer_driver -j4` | ASan/UBSan driver build succeeds |
-| `ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:print_stacktrace=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 LEANMESH_ISSUER_DRIVER=/workspace/leanmesh-env/asan/tests/native/issuer_driver python -m pytest -q host/tests/integration/test_fleet_issuer.py` | **54 passed in 7.04 s**, including CLI-output Join; no sanitizer report |
+| `ASAN_OPTIONS=detect_leaks=1:abort_on_error=0:print_stacktrace=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 LEANMESH_ISSUER_DRIVER=/workspace/leanmesh-env/asan/tests/native/issuer_driver python -m pytest -q host/tests/integration/test_fleet_issuer.py` | **55 passed in 6.66 s**, including CLI-output Join; no sanitizer report |
 | `ruff check host scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py scripts/report_pytest_failures.py` and `git diff --check` | Pass |
 | `python scripts/check_spec.py` | Overall PASS; regenerated `evidence/VALIDATION.json` restored to its original bytes afterward |
 | `python scripts/scenario_coverage.py --out-dir /workspace/leanmesh-env/issuer-coverage` | Exit 0: 158 scenarios / 337 references; 116 NOT_RUN_HARDWARE remain |
-| `python scripts/budget_report.py --native-build "$LEANMESH_NATIVE_BUILD" --json /workspace/leanmesh-env/logs/issuer-budget.json` | Exit 0, existing budget overruns reported; no gate relaxed |
+| `python scripts/budget_report.py --native-build "$LEANMESH_NATIVE_BUILD" --json /workspace/leanmesh-env/logs/issuer-budget-final.json` | Exit 0, existing budget overruns reported; no gate relaxed |
 
 Failure cases: shared or linked files, plaintext/key-mismatched metadata, wrong password/environment,
 invalid serial/curve/domain/generation/permissions, duplicate/oversized batches, foreign or corrupted inputs,
@@ -51,6 +51,13 @@ The new fixture initially encountered BUSY while the boot's record jobs still ow
 now retries **only unaccepted BUSY/AUTH_PENDING calls**, with a fixed bound, and polls accepted operation evidence.
 It never resubmits an accepted Join or installation. Both the Python API and actual CLI outputs pass EDHOC and
 sealed-record Join through Root ACTIVE **confirmed**, using random ephemeral device keys and unchanged SDK paths.
+
+Follow-up after `929e995`: `getpass` can fall back to unprotected stdin if it cannot control terminal echo.
+The regression `python -m pytest -q host/tests/integration/test_fleet_issuer.py -k unprotected_stdin` first
+failed (1 failed / 54 deselected, 0.20 s): piped input created a store and printed echo warnings. The CLI now
+refuses noninteractive prompts before reading the password or creating a store and treats `GetPassWarning`
+as refusal. Automation requires the owned 0600 password file. The full normal and sanitized suites above
+include the passing regression. Existing SDK sources and the native driver did not change in this follow-up.
 
 CI changes: build the driver in the Host job; run the same tests with the ASan/UBSan driver in the sanitizer job.
 The existing native/model/E2E/4-SoC jobs and their gates remain enabled. Remote results are recorded in the PR;
@@ -66,7 +73,7 @@ Measured with the same native budget probes and SLOC counter as main:
 | RELAY native workspace | 46,240 B | 46,240 B | 0 B |
 | ROOT native workspace | 127,784 B | 127,784 B | 0 B |
 | SDK C/C++ SLOC | 37,954 | 37,954 | 0 |
-| Python under host, excluding tests | 4,558 | 4,869 | +311 (offline CLI only) |
+| Python under host, excluding tests | 4,558 | 4,874 | +316 (offline CLI only) |
 
 The test-only native driver adds 196 C++ SLOC and is never linked into firmware. Existing SDK SLOC / SoC RAM /
 flash budget overruns are not resolved. The native workspace measurements exclude platform/vendor heap.

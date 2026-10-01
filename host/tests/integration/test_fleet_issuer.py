@@ -289,10 +289,10 @@ def test_sdk_refuses_valid_signature_with_wrong_semantic_binding(tmp_path, fleet
     assert result.returncode == 1 and b"OK" not in result.stdout
 
 
-def cli(*args):
+def cli(*args, input=None):
     return subprocess.run([sys.executable, "-m", "leanmesh_fleet", *map(str, args)],
                           cwd=REPO, env={**os.environ, "PYTHONPATH": str(REPO / "host")},
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=30, input=input)
 
 
 def test_cli_generates_complete_batch_without_secrets_or_overwrite(tmp_path):
@@ -349,3 +349,10 @@ def test_cli_refuses_readable_password_file_before_creating_store(tmp_path):
                  "--password-file", password)
     assert result.returncode == 1 and not (tmp_path / "fleet").exists()
     assert "Traceback" not in result.stderr and PASSWORD.decode() not in result.stderr
+
+
+def test_cli_refuses_unprotected_stdin_password_before_creating_store(tmp_path):
+    result = cli("init", "--store", tmp_path / "fleet", "--environment", "test",
+                 input=(PASSWORD.decode() + "\n") * 2)
+    assert result.returncode == 1 and not (tmp_path / "fleet").exists()
+    assert "GetPassWarning" not in result.stderr and PASSWORD.decode() not in result.stderr
