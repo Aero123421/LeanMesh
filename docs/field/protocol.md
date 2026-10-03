@@ -69,17 +69,20 @@ measured by the sequence number, not by receipts.
 ### 3.2 Ping (Host -> node), app_port 211
 
 The laptop checks every node at once (one request per node), once or in a loop (interval >= 1 s). Host request:
-`delivery APPLIED`, `storage VOLATILE`, `queue_mode FIFO` (the Host allows LATEST / `coalesce_key` only with
-BEST_EFFORT + VOLATILE), priority NORMAL, deadline (UTC, converted by the Host on its bound of the root clock) =
-min(loop interval, 3 s): a ping is never kept, so rounds of a loop cannot pile up.
+`delivery RECEIVED`, `storage VOLATILE`, `queue_mode FIFO`, priority NORMAL, deadline 3 s (UTC, converted by the Host on
+its bound of the root clock), whatever the loop interval.
 
-Payload: `u8 version = 1, u32 round`. The node application reports `lm_report_application_result(APPLIED)` at once, with
-no result bytes. Alive = the operation ends APPLIED (evidence APP_APPLIED). RTT = `APP_APPLIED.observed_mono_ms -
-ROOT_SENT.observed_mono_ms` (both on the root's clock; fall back to END_RECEIVED when APP_APPLIED has no time). The
-current Host does not fill `observed_mono_ms`; fieldview then measures POST -> final event on the laptop and marks the
-value as laptop-measured (it includes the Host's own latency).
-A request the Host or root refuses (RATE_LIMITED, NO_CAPACITY, BUSY ...) is "not sent", counted apart from "no answer"
-(EXPIRED / INDETERMINATE).
+Why RECEIVED and 3 s (HIL 2026-10-04 + review): an APPLIED ping needs two receipts back (END_RECEIVED, then APP_APPLIED);
+a receipt inherits the message's deadline and a relay drops it once expired, and the sender asks again for a lost
+application result only after 10 s (`k_result_poll`). With 1 s deadlines two-hop nodes looked dead while they received
+every ping. A RECEIVED ping costs one receipt; the node application's liveness is shown by its telemetry.
+
+Payload: `u8 version = 1, u32 round`. The node needs to do nothing (the SDK's end-to-end receipt answers); it does not
+report an application result for a RECEIVED message. Alive = the operation ends RECEIVED (evidence END_RECEIVED).
+RTT = `END_RECEIVED.observed_mono_ms - ROOT_SENT.observed_mono_ms` (root clock). The current Host does not fill
+`observed_mono_ms`; fieldview then measures POST -> final event on the laptop and marks the value as laptop-measured.
+A request the Host or root refuses (RATE_LIMITED, NO_CAPACITY, BUSY ...) is "not sent"; a POST whose answer is lost is
+"unknown" (it may have been admitted), both counted apart from "no answer" (EXPIRED / INDETERMINATE).
 
 ### 3.3 Display state (Host -> display), app_port 212
 
