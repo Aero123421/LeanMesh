@@ -71,7 +71,7 @@ creditはrecord数とbyte数の二重上限。Hostcommit受信ACKとSerial write
 
 ## spec0.2追加: PowerとGroupSnapshot
 固定link/route/endヘッダーとDATA暗号goldenは変更しない。frame kind8 POWERは認証済み直結link専用で、28B poll/24B grantをlink AEADで保護する。最大frameは68B/64B。protocol/power.cddlとregistryのstruct_formatsを参照。unknown frame kind/capabilityは明示拒否する。
-Control28 SleepSchedule、29 PowerPolicy、30 CommissioningWindow、31 RootHandover、32 GroupSnapshotV2を追加。type22は旧GroupSnapshot予約となり、新規送信は行わない。version1 envelopeのままでも未対応typeを解釈したふりはしない。
+Control28 SleepSchedule、29 PowerPolicy、30 CommissioningWindow、31 RootHandover、32 GroupSnapshotV2を追加（その後、33 GroupSnapshotRequest、34 LedgerBackup＝rootが署名する台帳backupのheader、19章§9。34はserial 18〜22だけで運び、`lm_install_control`はUNSUPPORTED）。type22は旧GroupSnapshot予約となり、新規送信は行わない。version1 envelopeのままでも未対応typeを解釈したふりはしない。
 
 ## relay DRAIN compact end-control
 

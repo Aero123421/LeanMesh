@@ -284,11 +284,17 @@ lm_status_t lmb_provision_leaf(const uint8_t trust88[88], const uint8_t *device_
     return to_abi(st);
 }
 
-lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_cose, size_t device_len,
-                               const uint8_t *delegation_cose, size_t delegation_len, const uint8_t host_id[32]) {
+// A root: of a new network (`replacement_first_term` 0: its credential stores term 0, so its first boot publishes 1, and the
+// empty ledger of the new network is written) or the REPLACEMENT of a failed root (issue #5, docs/21 section 8): the same
+// domain under a higher delegation generation, the credential one term below the first term the fleet's RootHandover names,
+// and NO ledger - the root is RECOVERY_REQUIRED until the old root's signed backup is restored onto it.
+static lm_status_t provision_root(const uint8_t trust88[88], const uint8_t *device_cose, size_t device_len,
+                                  const uint8_t *delegation_cose, size_t delegation_len, const uint8_t host_id[32],
+                                  uint32_t replacement_first_term) {
     using namespace lm;
 #ifndef LM_BUILD_PROFILE_ROOT
     (void)trust88, (void)device_cose, (void)device_len, (void)delegation_cose, (void)delegation_len, (void)host_id;
+    (void)replacement_first_term;
     return to_abi(Status::Unsupported);
 #else
     using namespace lm::idf;
@@ -313,8 +319,9 @@ lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_
     if (st == Status::Ok && host.is_zero()) {
         st = Status::InvalidArgument;
     }
-    // The root's own MemberCredential of a new network (docs/12: stored term 0, so its first boot publishes 1),
-    // signed here with the device key, as the root re-signs it at every boot (LocalIdentity::advance_term).
+    // The root's own MemberCredential (docs/12: stored term 0 for a new network, so its first boot publishes 1; a replacement
+    // root stores the term below its first one), signed here with the device key, as the root re-signs it at every boot
+    // (LocalIdentity::advance_term).
     std::array<uint8_t, member::k_max_member_cose> member_cose{};
     std::size_t member_len = 0;
     if (st == Status::Ok) {
@@ -325,7 +332,7 @@ lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_
         mc.membership = MembershipGen{1};
         mc.role = 2;
         mc.relay_allowed = true;
-        mc.root_term = RootTerm{0};
+        mc.root_term = RootTerm{replacement_first_term != 0 ? replacement_first_term - 1 : 0};
         mc.lease_expires_root_ms = UINT64_MAX; // the root is its own time base (docs/12)
         st = sec::sha256(dc, mc.credential_hash);
         std::array<uint8_t, 256> data{};
@@ -356,7 +363,7 @@ lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_
     if (st == Status::Ok) {
         st = commit(store::rec::membership, member::k_membership_active, ByteView{member_cose.data(), member_len});
     }
-    if (st == Status::Ok) {
+    if (st == Status::Ok && replacement_first_term == 0) {
         root::Manifest m; // the empty ledger of a new network: the only path that creates one (SEC-D5)
         m.domain = d.domain;
         std::array<uint8_t, root::k_manifest_bytes> buf{};
@@ -374,6 +381,20 @@ lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_
     }
     return to_abi(st);
 #endif
+}
+
+lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_cose, size_t device_len,
+                               const uint8_t *delegation_cose, size_t delegation_len, const uint8_t host_id[32]) {
+    return provision_root(trust88, device_cose, device_len, delegation_cose, delegation_len, host_id, 0);
+}
+
+lm_status_t lmb_provision_replacement_root(const uint8_t trust88[88], const uint8_t *device_cose, size_t device_len,
+                                           const uint8_t *delegation_cose, size_t delegation_len,
+                                           const uint8_t host_id[32], uint32_t first_term) {
+    if (first_term < 2) {
+        return lm::to_abi(lm::Status::InvalidArgument); // the first root of a domain is a new network's (term 1)
+    }
+    return provision_root(trust88, device_cose, device_len, delegation_cose, delegation_len, host_id, first_term);
 }
 
 lm_status_t lmb_debug(lm_context_t *ctx, char *out, size_t cap) {

@@ -105,3 +105,16 @@ CREATE TABLE group_targets (
  evidence_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(evidence_json)),
  PRIMARY KEY(operation,position), UNIQUE(operation,device)
 ) STRICT;
+
+-- Issue #5: the newest ledger backup of a domain (docs/12 section 5). ADDITIVE: statements written `IF NOT EXISTS` are also run
+-- by the Host at start on a database made before them (storage._open), so an existing database gains the table without
+-- re-running this file. One row per domain; a lower sequence never replaces a higher one (db/ledger_backup.py).
+CREATE TABLE IF NOT EXISTS ledger_backups (
+ domain BLOB PRIMARY KEY REFERENCES domains(id) CHECK(length(domain)=16),
+ sequence INTEGER NOT NULL CHECK(sequence>=1),
+ root_device BLOB NOT NULL CHECK(length(root_device)=32),
+ root_term INTEGER NOT NULL CHECK(root_term>=0),
+ records INTEGER NOT NULL CHECK(records BETWEEN 1 AND 68),
+ taken_utc_ms INTEGER NOT NULL,
+ blob BLOB NOT NULL
+) STRICT;

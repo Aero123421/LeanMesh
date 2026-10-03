@@ -46,7 +46,7 @@ def test_frame_kinds_and_control_types_match_registry_and_cddl() -> None:
     assert not {22, 23, 24} & types and set(REGISTRY["reserved_control_types"]) == {22, 23, 24}
     assert set(C.SIGNED_TYPES) == set(REGISTRY["signed_control_types"])
     cddl = (REPO_ROOT / "protocol/control.cddl").read_text()
-    assert "type: (1..21 / 25..33)" in re.sub(r"\s+", " ", cddl)
+    assert "type: (1..21 / 25..34)" in re.sub(r"\s+", " ", cddl)
     lim = REGISTRY["limits"]
     assert (F.MAX_FRAME, F.MAX_PATH) == (lim["rf_body_bytes"], lim["path_hops"])
     assert lim["serial_decoded_bytes"] == 18 + lim["serial_payload_bytes"] + 16 + 4
@@ -119,7 +119,7 @@ def test_control_type_table_and_carrier_rules() -> None:
     with pytest.raises(WireError) as e:
         C.decode_control_body(ok, "signed")
     assert e.value.status == "AUTH_REJECTED"
-    for t in (0, 22, 23, 24, 34):
+    for t in (0, 22, 23, 24, 35):
         with pytest.raises(WireError) as e:
             C.decode_control_body(cbor_encode([t, 1, *base, probe]), "session")
         assert e.value.status == "UNSUPPORTED"

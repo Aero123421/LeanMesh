@@ -32,11 +32,20 @@ leaf/relayの初期pending16件×最大512B、結果32件。rootはpending64、�
 |Host DB commit後、HTTP切断|同keyで保存済みoperationを返す|
 |Host receive commit後、serial ACK損失|dedupしてACK再送|
 |古いDB backupへ復元|new client epoch、root/fleet高水位照合。自動再発行停止|
+|台帳restoreのmanifest前の電源断（交換root）|manifest無し=RECOVERY_REQUIRED（空の台帳で再開しない）。書き済みのrecordは読まれず、次のrestoreが先に中和する|
+|台帳restoreのmanifest commit後|完全な台帳（chain検証済みの全record）。manifestが読めて初めて存在する|
+|backupの取得中に台帳が書かれた|その断面は破棄（CONFLICT）。次のbackupは新しいsequence|
 
 全点で電源断を注入する。存在しないcommitを「おそらく完了」と復元しない。
 
 ## 5. 認可情報の回復
 root ledgerを失ったら空member網として同じdomainキーで再起動しない。ledgerはdomainに結び付いたmanifest（domain、一度でも使ったslot、expected setの進捗）を持ち、manifestが無い・別domain・使用済みslotの記録が無い場合はRECOVERY_REQUIREDで入会・session受理を止める。空ledgerを作るのは新規networkのprovisioningだけ。fleet署名recovery objectでroot delegation/authorization世代を更新する。失効情報の完全な復旧ができなければ既存資格の再検証を要求。offline性能と失効の即時性には限界がある。既存認可lease15分を過ぎた通信は期限切れ理由を返し、root不在なのに恒久的な認可更新を合成しない。
+
+**台帳のbackupと交換rootへの復元（issue #5）。** 空の台帳で再開しない代わりの、検証済みの回復手段である。
+- 内容：rootのdurable stateだけ。manifestと、Flashに存在する各entry record（0x100+slot）、存在すれば`revocation_floors`・`root_groups`・rootの`policy`。RAMではなくFlashのrecordを読む（RAMが先行する失効はdurableになるまでbackupを断り、backupがrootより緩くならない）。秘密を含まない：entryはDeviceId・世代・request id・hash・rootが発行したMemberCredential COSE（公開情報）で、root秘密鍵・identity・sessionは入らない（native testが全recordと全秘密鍵を照合する）。commissioning windowのbudget recordは運ばない（windowは1つのroot termに属し、交換rootは新しいtermで動く）。paired_hostも運ばない（rootごとにHostとpairする）。
+- 整合性：現rootが署名する1つのheader（control type 34, [19章 §9](19-serial-and-control.md)）。domain、rootのDeviceId、rootのRootDelegation COSE（fleet署名から公開鍵を取れる）、delegation世代、署名時のroot_term、**単調なbackup sequence**（record `ledger_backup_seq`=21。署名の**前**にdurableにする。電源断で番号を失っても繰り返さない。読めなければ署名しない）、台帳のchange point、各recordの存在（entry mask）と内容（hash chain）を固定する。recordはheaderのchainで1件ずつ、書く前に検証される（受け側はO(1)メモリ）。取得は1つの断面で、その後に台帳が書かれたらその断面は破棄される。
+- 復元の入口：manifestが無く台帳が失われた交換root（自分のDeviceId、上位generationのdelegation、上位termのcredentialを持つ）だけ。台帳があればCONFLICT。順序：（1）fleet署名のRootHandoverでこのrootが新rootと名指しされ、そのhash/generation/termが自分のものと一致する（旧rootが故障していても、台帳の無いrootはlm_install_controlでhandoverを受けない設計なので、handoverは復元要求の一部として検証する。保持はしない）、（2）旧rootのheader：fleet trust → headerの中の旧RootDelegation → 旧rootの署名、同じdomain、handoverのold_root/old generationと一致、署名時のtermがhandoverの新termより前、sequenceが交換root自身の知る番号以上（古いbackupで失効や離脱を巻き戻さない）、（3）recordを順に1件ずつchain検証してから書く。manifestは最後（sequence recordの後）で、これが無い間は台帳は存在せず、途中の電源断は「台帳なし（RECOVERY_REQUIRED）」か「完全な台帳」のどちらかだけを残す。manifestの前に書いたrecordは次の復元が先に中和する（entry slotはFree record、groupは空、policyは既定）ので、別のbackupのmanifestがそれらを主張することはない。revocation floorsはrootの自分の表へmergeする（入らなければNO_CAPACITY。floorを捨てない）。
+- 退役したrootはbackupを作らない。失効のdurable化が済んでいない間（RAMが先行）もbackupを断る。
 
 ## 6. 実記憶容量と物理限界
 NVS内部のcopy、page overhead、書込み増幅、GC、brownout挙動はIDF実装に依存する。論理record計算だけでFlash enduranceを保証しない。erase回数/byte量/最大commit latencyをHILで測る。tamper resistant monotonic counterなしの全Flash巻戻しを、2slotだけで防げるとは主張しない。
@@ -48,6 +57,7 @@ Flash I/Oをworkerへ移しても、SoC/IDFのflash-cache停止や割込み制�
 追加record: `root_handover`（17、自rootを退役させたRootHandoverそのもの。存在すれば起動後も入会/session受理をしない。検証済みobjectが自rootを旧rootと名指した時点でRAMは退役し、commit失敗（read-back失敗を含む）でも戻さない。失敗後はrecordを読み直し、あればAPPLIED、無ければRECOVERY_REQUIRED）、`pending_delegation`（18、transfer/handover先のRootDelegation。新MemberCredentialのcommit後にroot_delegationへ移す。二つのcommitの間の電源断は、membershipを検証できるpending側で起動し書き直す）、`commissioning_window`（19、version u8(1) + policy_revision u64 + window_id16 + expected_set_revision u64 + max_new_members u8 + allowed_roles u8 + そのwindowで予約した数u8。予約entryのcommit前に数える。電源断は数え過ぎにしかならない。policy_revisionはwindowのreplay floor：低いrevisionのwindow、同じrevisionの別window（id/予算が違う）はCONFLICT、同じwindowの再投入（term変更時の再発行を含む）は数を継続。読めない/旧形式のrecordは「windowなし」とせずRECOVERY_REQUIRED）。membership recordのstate 5はrevocation通知による離脱tombstone（LEFTと同じfloor、状態はMEMBER_REVOKED）。
 ledgerに載るDeviceのfloorはそのentry自身（`consumed`以下のticket、`membership`以下のmembershipは失効）であり、失効・移設の反映はentry 1回のcommitで表の空きを要さない。`revocation_floors`表（rootでは最大10件）はledgerに無いDeviceのfloorと、離脱entryの写し（そのslotを他Deviceへ再利用できる条件。写しは冗長で、ledgerに無いDeviceのfloorに場所を譲る）を持つ（FIX8-D1）。rootの`policy`（8: version u8 | join_mode u8 | 確定変更数 u64。読めなければCLOSEDで`lm_policy_set`はRECOVERY_REQUIRED、FIX8-D12）と`root_groups`（20: version u8 | n u8 | n×(group id u32 | revision u64 | count u8 | ledger slot×count)。setはこのcommit後に適用・報告。groupが名指すslotは再利用しない。読めなければgroup操作はRECOVERY_REQUIRED、FIX8-D9/D10）。
 provisioningが書くrecord: 全Device＝boot_incarnation（最初）、identity、fleet_trust、root_delegation、必要ならmembership（ACTIVE credential）、revocation_floors、discovery_scope。新規networkのrootだけが空ledgerのmanifest（root_ledger: domain、used slot、expected進捗）を書き、既存memberの一覧はそのentryとして同じ手順で書く。交換用rootは自分のdelegation（上位generation）とcredential（上位term）だけを持ち、ledgerは検証済みbackupから復元する。backupが無いrootはRECOVERY_REQUIREDで止まり、空ledgerで再開しない。rootの自credentialのleaseは自rootが時刻基準なので遠い将来でよい（rootは自身のleaseで他者を認可しない）。
+backup sequenceは`ledger_backup_seq`（21: u64 big endian、rootが最後に署名した番号。`rec::k_all`の1つ）。復元は自分の番号をbackupの番号以上にする（Hostが保持する最新sequenceに交換rootの次のbackupが続く）。
 rootのroot_termはmembership recordの自credentialが正本（ARCH2-D1）：boot毎にidentity load jobがterm+1で自署名し直してcommitし、その後にだけidentityがReadyになる（commit前の電源断は旧recordのまま次bootがその一つ上、commit後は新termが床。同じtermを二度公開しない）。保存値は最後に公開したtermで、新規networkのrootは0、交換用rootは最初に公開するtermの一つ下でprovisionする。u32上限ではRECOVERY_REQUIRED。
 
 power policy/scheduleは既存sealed recordのtyped objectとして保存し、別の汎用設定DBをNodeへ足さない。毎poll/packetでNVS書込みを行わない。group DURABLEはpayload1copy・immutable snapshot・target ID割当・進捗を一つの有界operation journalにまとめる。mid-commit sleep禁止。

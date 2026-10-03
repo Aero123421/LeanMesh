@@ -9,7 +9,7 @@ channel = 1..13
 cose-key = {1: 2, -1: 1, -2: bstr .size 32, -3: bstr .size 32}
 ccs = {2: tstr .size 64, 8: {1: cose-key}}
 ; Every signed payload is this typed array; type may not be repurposed.
-control-body = [type: (1..21 / 25..33), version: 1, request-id: id16,
+control-body = [type: (1..21 / 25..34), version: 1, request-id: id16,
                 domain: id16, revision: u63, issuer: id32, data: control-data]
 ; The semantic type/data mapping is mandatory, not any cross-product.
 control-data = device-credential / root-delegation / assignment-ticket /
@@ -18,7 +18,8 @@ control-data = device-credential / root-delegation / assignment-ticket /
  route-register / route-lease / route-query / probe / time-request /
  time-response / channel-plan / channel-receipt / recovery-beacon /
  group-snapshot-v2 / delivery-receipt /
- ota-manifest / leave-request / sleep-schedule / power-policy / commissioning-window / root-handover / group-snapshot-request
+ ota-manifest / leave-request / sleep-schedule / power-policy / commissioning-window / root-handover / group-snapshot-request /
+ ledger-backup
 cose-sign1 = #6.18([protected: bstr, unprotected: {}, payload: bstr,
                     signature: bstr .size 64])
 ; protected decodes to {1: -7, 4: id32}; external_aad = h'4c4d312d434f4e54524f4c'
@@ -130,6 +131,23 @@ group-snapshot-v2 = [group-id: u32, group-revision: u63, token: id16,
 ; page0/token=nil starts a snapshot; later pages require the returned token.
 group-snapshot-request = [group-id: u32, group-revision: u63,
  page: 0..4, snapshot-token: id16 / nil]
+
+; 34. Signature of the CURRENT root (kid = its DeviceId, domain = the ledger's, revision = seq). It is the header of a ledger
+; backup (docs/12 section 5, docs/21 section 8): it fixes WHICH records the backup holds, and their content by one hash chain.
+; delegation is the root's own RootDelegation COSE (fleet signed), so that a verifier can reach the root's public key from the
+; fleet trust anchor. seq is persisted by the root before it signs and never repeats nor goes back (1.. u63). root-term is the
+; root's term when it signed; change-point is the root's count of durable ledger writes of that boot at the scan (pages are
+; served only while it is unchanged: a backup is one consistent cut). entry-mask has bit i set when ledger slot i (record
+; 0x100+i) is part of the backup; extras: bit0 revocation_floors, bit1 root_groups, bit2 policy. The records, in this order:
+; floors, groups, policy, the masked entries by slot, the manifest (always last). count = popcount(entry-mask) +
+; popcount(extras) + 1 <= 68.
+; chain-head = H1, where H(i) = SHA256("LMBK1" || id u16be || state u8 || len u16be || payload || H(i+1)) of element i and
+; H(count+1) = 32 zero bytes. Element i travels with its next = H(i+1). A receiver holds one expected value (H1 first),
+; accepts an element only when SHA256(.. || next) equals it, then expects `next`; after the last element next must be
+; zero. So each element is authenticated, in order, before anything is written, with O(1) memory.
+ledger-backup = [seq: 1..u63, root-term: u32, delegation-generation: u63,
+ delegation: bstr .size (1..448), change-point: u63, entry-mask: u64,
+ extras: 0..7, chain-head: id32]
 
 ; Fixed binary end-session CONTROL opcodes, NOT CBOR arrays or ControlObject type IDs.
 ; Big endian. Fields/lengths are normative in docs/09-wire.md and registry compact_control_opcodes.

@@ -220,6 +220,10 @@ Status Ledger::submit(Step step, JobClass cls, port::JobFn fn, void *arg, int ow
     }
     job_slot_ = Handle{0, ++job_gen_};
     LM_TRY(engine_.submit_job(JobOwner::Ledger, job_slot_, cls, fn, arg));
+    if (fn == &store::record_job && arg == rec_ &&
+        (rec_->op == store::RecordJob::Op::Commit || rec_->op == store::RecordJob::Op::Recover)) {
+        ++change_; // ISSUE5: a durable write of the ledger's records is under way: a backup cut before it is stale
+    }
     step_ = step;
     job_in_flight_ = true;
     job_txn_ = owner;
@@ -331,6 +335,17 @@ Status Ledger::load_all_job(port::JobEnv &env, void *arg) {
         detail::decode_policy(ByteView{rec.payload.data(), rec.payload_len}, l.load_mode_, l.load_count_) !=
             Status::Ok) {
         l.load_policy_ = Status::RecoveryRequired;
+    }
+    // [ISSUE5] The last backup sequence number. Unreadable is never "none yet": no backup is signed on a number that might
+    // repeat (the ledger itself is not affected: a backup is no authorisation).
+    rec.id = store::rec::ledger_backup_seq;
+    st = store::record_load(env.store, rec);
+    l.load_seq_ = 0;
+    l.load_seq_ok_ = st == Status::NotFound;
+    if (st == Status::Ok && rec.payload_len == 8) {
+        Reader r{ByteView{rec.payload.data(), rec.payload_len}};
+        l.load_seq_ = r.u64be();
+        l.load_seq_ok_ = r.finish() == Status::Ok && l.load_seq_ <= k_u63_max;
     }
     // [FIX8-D10] The group registry last: its payload stays in the record memory for the owner to restore.
     rec.id = store::rec::root_groups;
@@ -447,6 +462,8 @@ void Ledger::stop() {
     }
     loaded_ = false;
     exp_active_ = false;
+    bk_ = Backup{}; // [ISSUE5] (a step the stop cut ends with the engine's stop; nothing is signed or written after it)
+    rs_ = Restore{};
     renew_mask_ = 0;
     lc_.active = false;
     lc_.retry_at = MonoTime::never();
@@ -577,6 +594,9 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             policy_doubt_ = load_policy_ != Status::Ok && load_policy_ != Status::NotFound;
             mode_ = policy_doubt_ ? JoinMode::Closed : (load_policy_ == Status::Ok ? load_mode_ : mode_);
             policy_count_ = load_policy_ == Status::Ok ? load_count_ : 0;
+            bk_seq_ = load_seq_;
+            bk_seq_ok_ = load_seq_ok_;
+            bk_ = Backup{}; // (a backup held before a reload was cut from the ledger as it was)
         }
         release(-2);
         if (s == Status::Ok) {
@@ -593,6 +613,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             failed_ = true; // fail closed: no joins, no admissions, and the application is told
             engine_.emit_event(LM_EVENT_FAULT, static_cast<uint32_t>(s), 0, nullptr);
         }
+        rs_loaded(s); // [ISSUE5] the load a restore ended with
         return;
     case Step::VerifyTicket:
         if (t != nullptr && t->state == TxnState::Verifying) {
@@ -699,6 +720,21 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
         release(-2);
         policy_done(s);
         return;
+    case Step::BkScan: // [ISSUE5]
+    case Step::BkSeq:
+    case Step::BkSign:
+    case Step::BkPage:
+        bk_step(step, s, now);
+        return;
+    case Step::RsHandover:
+    case Step::RsProbe:
+    case Step::RsHeader:
+    case Step::RsElem:
+    case Step::RsFloors:
+    case Step::RsSeq:
+    case Step::RsManifest:
+        rs_step(step, s, now);
+        return;
     case Step::None:
         return;
     }
@@ -707,6 +743,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
 // ---- timers ----
 MonoTime Ledger::deadline() const {
     MonoTime next = earliest(earliest(maint_retry_, notice_until_), lc_.active ? lc_.retry_at : MonoTime::never());
+    next = earliest(next, rs_.deadline); // [ISSUE5] a restore waiting for its next step gives up after a while
     for (const Txn &t : txns_) {
         if (t.state != TxnState::Free) {
             next = earliest(next, earliest(t.deadline, earliest(t.retry_at, t.pipe.deadline())));
@@ -754,6 +791,10 @@ void Ledger::on_timer(MonoTime now) {
         }
     }
     abort_expired(now);
+    if (!rs_.deadline.is_never() && now >= rs_.deadline &&
+        (rs_.phase == RsPhase::HeaderWait || rs_.phase == RsPhase::Elements)) {
+        rs_ = Restore{}; // [ISSUE5] nothing is held while it waits: the records written so far are cleared by the next one
+    }
     if (now >= notice_until_) { // [S18] the revoked member's notice had its chance: its sessions end now
         notice_until_ = MonoTime::never();
         forget_member(notice_device_, notice_addr_);

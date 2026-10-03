@@ -2,6 +2,7 @@
 // lm_context + Engine per node on simulated ports, credentials from the TEST-ONLY fleet issuer, the mesh and the
 // channel module (root clock over TIME_REQ/RESP) running by themselves. Scenario IDs are in the test names; every
 // result is a protocol-bench (sim) result: virtual time, no RF, no energy, no real Flash (docs/18 §3).
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include "port/sim/sim_node.hpp"
 #include "port/sim/sim_provision.hpp"
 #include "port/sim/sim_world.hpp"
+#include "root/backup.hpp"
 #include "security/crypto.hpp"
 #include "store/record.hpp"
 
@@ -273,6 +275,20 @@ struct LNet {
     }
 };
 
+// A backup the old root made (ISSUE5, below): a signed header and the records of its hash chain, as the Host holds them.
+struct BkRecord {
+    uint16_t id = 0;
+    uint8_t state = 0;
+    Bytes payload;
+    Sha256Digest next{}; // the chain link after it
+};
+struct BkImage {
+    Bytes header; // the signed COSE
+    root::backup::Header hdr;
+    uint64_t seq = 0;
+    std::vector<BkRecord> records;
+};
+
 // Two domains of one fleet: root A (node 0) and root B (node 1), each with its own ledger; devices 2.. are provisioned
 // members of A (address = node + 1). The mesh is off: joins and sessions are one hop, as on the join slice's bench.
 // Root time is set by hand on every node (term 1, the roots' own clocks agree: they booted together).
@@ -317,14 +333,13 @@ struct DNet {
         run_ms(100);
         set_time();
     }
-    // Handover: the new root device gets its own delegation and credential; `backup`: the old root's ledger copied
-    // from its store now (a verified backup), else none. `boot`: powered on at once.
-    void provision_new_root(bool backup) {
-        LM_CHECK_OK(fleet::provision_replacement_root(node(1).store, a, kits[1], deleg2));
-        if (backup) {
-            LM_CHECK_OK(fleet::copy_ledger(node(0).store, node(1).store));
-        }
-    }
+    // Handover: the new root device gets its own delegation and credential and NO ledger (RECOVERY_REQUIRED once it runs).
+    // Its ledger comes from the old root's signed backup (take_backup, before that root retires or fails) restored onto it
+    // (restore_new_root, once it runs): the verified path of docs/12 section 5, not a copy of the old root's store.
+    void provision_new_root() { LM_CHECK_OK(fleet::provision_replacement_root(node(1).store, a, kits[1], deleg2)); }
+    BkImage taken_;
+    void take_backup();                          // the old root (node 0) makes a backup and the Host pulls it
+    void restore_new_root(uint32_t term = 2);    // the handover naming `term` and that backup restored onto node 1
     member::RootHandover handover(uint32_t new_term = 2) {
         member::RootHandover h;
         h.id[0] = 0x48;
@@ -1295,14 +1310,16 @@ LM_TEST("LC08 sim: planned root handover - old root retires, members re-authenti
     for (unsigned d = 2; d < 4; ++d) {
         before[d] = n.eng(d).identity().member().membership.value();
     }
+    n.take_backup(); // the planned exchange: the backup is made before the old root drains
     LM_CHECK_EQ(n.install(0, 31, ho), 0u); // the old root retires
     LM_CHECK(n.eng(0).ledger().retired());
     for (unsigned d = 2; d < 4; ++d) {
         LM_CHECK_EQ(n.install(d, 31, ho), 0u); // stored at every member (its own evidence)
     }
-    n.provision_new_root(true);
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root();
     n.set_time(2, 1);
     LM_CHECK_EQ(n.install(1, 31, ho), 0u); // the new root recognises itself; nothing changes
     LM_CHECK_EQ(n.eng(1).ledger().count(root::EntryState::Active), 2u);
@@ -1341,7 +1358,7 @@ LM_TEST("LC08 sim: planned root handover - old root retires, members re-authenti
 LM_TEST("LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term must rise, a verified backup works") {
     {
         DNet n(1, 86, DNet::Kind::Handover);
-        n.provision_new_root(false);
+        n.provision_new_root();
         n.node(0).power_cut(); // failed, never retired
         n.boot(1);
         n.run_ms(300);
@@ -1354,10 +1371,12 @@ LM_TEST("LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term mu
     }
     {
         DNet n(1, 87, DNet::Kind::Handover);
-        n.provision_new_root(true);
+        n.take_backup();
+        n.provision_new_root();
         n.node(0).power_cut();
         n.boot(1);
         n.run_ms(300);
+        n.restore_new_root();
         const Bytes stale = n.a.fleet.handover(n.a.domain, n.handover(1)); // term 1: not above the known term
         // The new root cannot tell which of its boots' terms the fleet named (ARCH2-D1: one term per boot); it only
         // refuses a term it has not reached. The floor is the device's check: above the term it knows.
@@ -1381,11 +1400,13 @@ LM_TEST("LC10 sim: old root reappears - refused by moved members, the unreached 
     // each of its boots publishes one more (ARCH2-D1), and it retires only on a new term above its own (FIX5-D4). Here it
     // comes back once (term 2), so the new root starts at term 3.
     DNet n(2, 88, DNet::Kind::Handover, 3);
-    n.provision_new_root(true);
+    n.take_backup();
+    n.provision_new_root();
     n.node(0).power_cut();
     n.node(0).store.power_restore();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root(3);
     const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover(3));
     const uint64_t m3 = n.eng(3).identity().member().membership.value();
     LM_CHECK_EQ(n.install(2, 31, ho), 0u);
@@ -1641,13 +1662,15 @@ CutRun handover_cut(unsigned target, uint64_t k, CutMode mode) {
     DNet n(1, 400 + k * 5 + target, DNet::Kind::Handover);
     const unsigned d = 2;
     const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    n.take_backup();
     if (n.install(0, 31, ho) != 0 || n.install(d, 31, ho) != 0) {
         out.why = "setup";
         return out;
     }
-    n.provision_new_root(true);
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root();
     n.set_time(2, 1);
     const uint64_t m0 = n.eng(d).identity().member().membership.value();
     SimStore &st = n.node(target).store;
@@ -2118,9 +2141,11 @@ LM_TEST("LC08 FIX5 sim: a same-root, non-increasing or stale-term handover is re
     LM_CHECK_EQ(n.install(0, 31, stale), static_cast<uint32_t>(LM_STATUS_CONFLICT));
     LM_CHECK(!n.eng(0).ledger().retired());
     LM_CHECK_EQ(n.eng(0).ledger().admission(), Status::Ok);
-    n.provision_new_root(true);
+    n.take_backup();
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root();
     n.set_time(2, 1);
     member::RootHandover down = n.handover();
     down.old_generation = 3; // the new delegation (generation 2) is not above the old one
@@ -2887,4 +2912,662 @@ LM_TEST("S06 FIX12 sim: a revocation whose commit failed is not reported applied
     LM_CHECK_EQ(n.install_result(0, 11, rv), 0u); // now durable: OK, and it stays blocked after a restart
     LM_CHECK(stored_state(st, rec1) == static_cast<int>(root::EntryState::Blocked));
     LM_CHECK_EQ(n.install_result(0, 11, rv), 0u); // idempotent once durable
+}
+
+// ---- ISSUE5: backup and restore of the root's ledger (docs/12 §5, docs/21 §8) -------------------------------------------
+// Driven through the root's commands - the ones the serial bridge runs for the Host (methods 18..22) - so what is tested is
+// the path the Host takes: a backup is pulled record by record, a restore pushes the handover, the header and the records.
+namespace {
+
+using BkLedger = root::LedgerType;
+
+uint32_t u(Status s) { return static_cast<uint32_t>(s); }
+
+// The status of the OPERATION event of `op` at node i (0xFFFF: none within the wait).
+uint32_t await_op(DNet &n, unsigned i, uint64_t op, uint64_t wait_ms = 20'000) {
+    uint32_t reason = 0xFFFF;
+    (void)n.until([&] {
+        lm_event_t ev{};
+        ev.struct_size = sizeof(ev);
+        ev.abi_version = LM_ABI_VERSION;
+        while (lm_next_event(n.ctx(i), &ev, nullptr, 0, nullptr) == LM_STATUS_OK) {
+            if (ev.kind == LM_EVENT_OPERATION && ev.operation_id == op) {
+                reason = ev.reason;
+            }
+        }
+        return reason != 0xFFFF;
+    }, wait_ms);
+    return reason;
+}
+
+Reply bk_call(DNet &n, unsigned i, const LedgerBackupRequest &rq, BkLedger::BackupPage *pg = nullptr) {
+    const Reply r = capi::call(n.ctx(i), CommandKind::RootLedgerBackup, &rq, sizeof(rq), pg, pg != nullptr ? sizeof(*pg) : 0);
+    n.node(i).notify();
+    return r;
+}
+
+// One backup, pulled the way the Host does: begin (asked again while BUSY), the operation's end, the header, every record
+// (BUSY while a record is read), and the chain links computed from the end. The chain the root signed must be the chain of
+// what it served.
+Status pull_backup(DNet &n, unsigned i, BkImage &out) {
+    LedgerBackupRequest rq;
+    Reply r;
+    (void)n.until([&] {
+        r = bk_call(n, i, rq);
+        return r.status != Status::Busy;
+    }, 5000);
+    if (r.status != Status::Ok) {
+        return r.status;
+    }
+    const uint32_t ended = await_op(n, i, r.operation_id);
+    if (ended != 0) {
+        return static_cast<Status>(ended);
+    }
+    rq.get = 1;
+    BkLedger::BackupPage pg;
+    Status st = Status::Busy;
+    const auto page = [&](uint32_t index) {
+        rq.index = index;
+        (void)n.until([&] {
+            st = bk_call(n, i, rq, &pg).status;
+            return st != Status::Busy;
+        }, 3000);
+        return st;
+    };
+    LM_CHECK_EQ(u(page(0)), 0u);
+    out = BkImage{};
+    out.header.assign(pg.data.begin(), pg.data.end());
+    member::Envelope env;
+    ByteView data;
+    LM_CHECK_OK(member::peek_signed(view(out.header), member::k_type_ledger_backup, env, data));
+    LM_CHECK_OK(root::backup::decode_header(data, out.hdr));
+    out.hdr.delegation = ByteView{}; // (a view into the COSE above: not kept)
+    out.seq = out.hdr.seq;
+    const uint32_t count = pg.count;
+    rq.seq = out.seq;
+    for (uint32_t k = 1; k <= count; ++k) {
+        if (page(k) != Status::Ok) {
+            return st;
+        }
+        out.records.push_back(BkRecord{pg.id, pg.state, Bytes(pg.data.begin(), pg.data.end()), {}});
+    }
+    Sha256Digest next{};
+    for (std::size_t k = out.records.size(); k-- > 0;) {
+        out.records[k].next = next;
+        LM_CHECK_OK(root::backup::link(out.records[k].id, out.records[k].state, view(out.records[k].payload), next, next));
+    }
+    LM_CHECK(next == out.hdr.head);
+    return Status::Ok;
+}
+
+// One restore step: asked again while BUSY, then its operation's end. The first status that is not Ok (the command's, or
+// the operation's reason) is returned.
+Status restore_step(DNet &n, unsigned i, LedgerRestoreRequest &rq, ByteView payload, uint64_t wait_ms = 30'000) {
+    Reply r;
+    (void)n.until([&] {
+        r = capi::call(n.ctx(i), CommandKind::RootLedgerRestore, &rq, sizeof(rq), nullptr, 0, payload);
+        n.node(i).notify();
+        return r.status != Status::Busy;
+    }, 5000);
+    if (r.status != Status::Ok) {
+        return r.status;
+    }
+    const uint32_t e = await_op(n, i, r.operation_id, wait_ms);
+    return e == 0xFFFF ? Status::DriverResultUnknown : static_cast<Status>(e);
+}
+
+// One record of `img` pushed at node i.
+Status restore_record(DNet &n, unsigned i, const BkImage &img, std::size_t k) {
+    LedgerRestoreRequest rq;
+    rq.step = 2;
+    const BkRecord &rec = img.records[k];
+    rq.element.index = static_cast<uint32_t>(k);
+    rq.element.id = rec.id;
+    rq.element.state = rec.state;
+    rq.element.payload = view(rec.payload);
+    rq.element.next = rec.next;
+    return restore_step(n, i, rq, ByteView{});
+}
+
+// The whole restore at node i: handover, header, `records` records (all by default).
+Status restore_all(DNet &n, unsigned i, const Bytes &handover, const BkImage &img, std::size_t records = SIZE_MAX) {
+    LedgerRestoreRequest rq;
+    rq.step = 0;
+    LM_TRY(restore_step(n, i, rq, view(handover)));
+    rq.step = 1;
+    LM_TRY(restore_step(n, i, rq, view(img.header)));
+    for (std::size_t k = 0; k < img.records.size() && k < records; ++k) {
+        LM_TRY(restore_record(n, i, img, k));
+    }
+    return Status::Ok;
+}
+
+void DNet::take_backup() { LM_CHECK_EQ(u(pull_backup(*this, 0, taken_)), 0u); }
+
+void DNet::restore_new_root(uint32_t term) {
+    LM_CHECK(eng(1).ledger().failed()); // RECOVERY_REQUIRED: it has no ledger of its own
+    const Bytes ho = a.fleet.handover(a.domain, handover(term));
+    LM_CHECK_EQ(u(restore_all(*this, 1, ho, taken_)), 0u);
+}
+
+// The replacement root of a Handover net: provisioned (no ledger), powered on, its ledger failed (RECOVERY_REQUIRED).
+void start_replacement_root(DNet &n) {
+    n.provision_new_root();
+    n.boot(1);
+    n.run_ms(300);
+    n.set_time(2, 1);
+    LM_CHECK(n.eng(1).ledger().failed());
+}
+
+} // namespace
+
+LM_TEST("ISSUE5 sim: a backup is one signed cut - canonical records, a hash chain, a sequence that never repeats, stale after a write") {
+    DNet n(2, 601, DNet::Kind::Handover);
+    BkImage b1;
+    LM_CHECK_EQ(u(pull_backup(n, 0, b1)), 0u);
+    LM_CHECK_EQ(b1.seq, 1u);
+    // two ACTIVE members (addresses 3, 4 = slots 1, 2) and the manifest, which is always the last record
+    LM_CHECK_EQ(b1.records.size(), 3u);
+    LM_CHECK_EQ(b1.records[0].id, root::k_rec_ledger_base + 1);
+    LM_CHECK_EQ(b1.records[1].id, root::k_rec_ledger_base + 2);
+    LM_CHECK_EQ(b1.records[2].id, store::rec::root_ledger);
+    LM_CHECK_EQ(b1.records[0].state, static_cast<uint8_t>(root::EntryState::Active));
+    // signed by the root that made it: its key, its domain, the sequence as the revision, its own delegation inside
+    member::Envelope env;
+    ByteView data;
+    LM_CHECK_OK(member::open_signed(view(b1.header), n.kits[0].kit.pub, member::k_type_ledger_backup, env, data));
+    LM_CHECK(env.issuer == n.id(0) && env.domain == n.a.domain && env.revision == 1);
+    root::backup::Header h;
+    LM_CHECK_OK(root::backup::decode_header(data, h));
+    LM_CHECK(Bytes(h.delegation.begin(), h.delegation.end()) == n.a.delegation_cose);
+    LM_CHECK_EQ(h.generation, 1u);
+    LM_CHECK_EQ(h.term, 1u);
+    // no secret is in a backup: not the root's private key, not a member's
+    for (const unsigned d : {0u, 2u, 3u}) {
+        const Bytes scalar(n.kits[d].kit.scalar.begin(), n.kits[d].kit.scalar.end());
+        for (const BkRecord &r : b1.records) {
+            LM_CHECK(std::search(r.payload.begin(), r.payload.end(), scalar.begin(), scalar.end()) == r.payload.end());
+        }
+        LM_CHECK(std::search(b1.header.begin(), b1.header.end(), scalar.begin(), scalar.end()) == b1.header.end());
+    }
+    // a backup header is no object to install (it travels by serial 18..22 only), and a member has no ledger to back up or restore
+    lm_operation_id_t unused_op = 0;
+    LM_CHECK_EQ(lm_install_control(n.ctx(0), 34, b1.header.data(), b1.header.size(), &unused_op),
+                static_cast<lm_status_t>(LM_STATUS_UNSUPPORTED));
+    LedgerBackupRequest begin;
+    LM_CHECK_EQ(u(bk_call(n, 2, begin).status), u(Status::Unsupported));
+    LedgerRestoreRequest restore_step0;
+    LM_CHECK_EQ(u(capi::call(n.ctx(2), CommandKind::RootLedgerRestore, &restore_step0, sizeof(restore_step0)).status),
+                u(Status::Unsupported));
+    // the sequence number is persisted before it is signed on: a second backup is 2, and a restart does not repeat it
+    BkImage b2;
+    LM_CHECK_EQ(u(pull_backup(n, 0, b2)), 0u);
+    LM_CHECK_EQ(b2.seq, 2u);
+    LM_CHECK(stored_state(n.node(0).store, store::rec::ledger_backup_seq) >= 0);
+    n.reboot(0);
+    BkImage b3;
+    LM_CHECK_EQ(u(pull_backup(n, 0, b3)), 0u);
+    LM_CHECK_EQ(b3.seq, 3u);
+    LM_CHECK(b3.hdr.term > b2.hdr.term); // (the term of the new boot)
+    // the page of an older backup is refused once another exists; one cut is dropped as soon as the ledger writes anything
+    LedgerBackupRequest rq;
+    rq.get = 1;
+    rq.seq = 2;
+    rq.index = 1;
+    BkLedger::BackupPage pg;
+    LM_CHECK_EQ(u(bk_call(n, 0, rq, &pg).status), u(Status::Conflict));
+    const Bytes rv = n.a.fleet.revoke(n.id(3), 2, 2, 1);
+    LM_CHECK_EQ(n.install(0, 11, rv), 0u); // the entry of member 3 is Blocked: a durable write
+    rq.seq = 3;
+    LM_CHECK_EQ(u(bk_call(n, 0, rq, &pg).status), u(Status::Conflict));
+    rq.index = 0; // the cut is gone altogether
+    LM_CHECK_EQ(u(bk_call(n, 0, rq, &pg).status), u(Status::NotFound));
+    BkImage b4; // the next backup carries the revocation
+    LM_CHECK_EQ(u(pull_backup(n, 0, b4)), 0u);
+    LM_CHECK_EQ(b4.seq, 4u);
+    bool blocked = false;
+    for (const BkRecord &r : b4.records) {
+        blocked = blocked || (r.id == root::k_rec_ledger_base + 2 && r.state == static_cast<uint8_t>(root::EntryState::Blocked));
+    }
+    LM_CHECK(blocked);
+}
+
+namespace {
+
+// The records of `img` as the node's store holds them (the bench's view of the Flash): every one present, with the very
+// bytes and state of the backup. The revocation floors are the merge of the root's own table and the backup's, so they are
+// compared only when the root had none.
+bool store_matches(SimStore &st, const BkImage &img) {
+    auto job = std::make_unique<store::RecordJob>();
+    for (const BkRecord &r : img.records) {
+        job->arm(store::RecordJob::Op::Load, r.id);
+        if (store::record_load(st, *job) != Status::Ok || job->state != r.state ||
+            Bytes(job->payload.begin(), job->payload.begin() + job->payload_len) != r.payload) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The ledger at node i lists exactly the entries of the backup, as they were.
+void expect_ledger_of(DNet &n, unsigned i, const BkImage &img) {
+    LM_CHECK(n.eng(i).ledger().ready() && !n.eng(i).ledger().failed());
+    for (const BkRecord &r : img.records) {
+        if (r.id < root::k_rec_ledger_base) {
+            continue;
+        }
+        const root::Entry &e = n.eng(i).ledger().entry(r.id - root::k_rec_ledger_base);
+        LM_CHECK_EQ(static_cast<uint8_t>(e.state), r.state);
+    }
+}
+
+} // namespace
+
+// The whole path (docs/21 §8): a backup is pulled from the old root, which then dies; the replacement root has its own
+// identity and no ledger (RECOVERY_REQUIRED: it admits nobody); the fleet's handover and the backup restore its ledger; the
+// members then follow it - the same assignment, the next membership generation - without any ticket, expected entry or
+// approval, because the ledger already lists them.
+LM_TEST("ISSUE5 sim: old root dies, the replacement root is restored from the backup, the members follow without joining anew") {
+    DNet n(2, 602, DNet::Kind::Handover);
+    BkImage bk;
+    LM_CHECK_EQ(u(pull_backup(n, 0, bk)), 0u);
+    std::array<uint64_t, 4> before{};
+    for (unsigned d = 2; d < 4; ++d) {
+        before[d] = n.eng(d).identity().member().membership.value();
+    }
+    const uint64_t expected_revision = n.eng(0).ledger().expected_revision();
+    n.node(0).power_cut(); // the old root fails: nothing of it is left
+    start_replacement_root(n);
+    LM_CHECK_EQ(u(n.eng(1).ledger().admission()), u(Status::RecoveryRequired));
+    LM_CHECK(stored_state(n.node(1).store, store::rec::root_ledger) == -1);
+    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    // before the restore it admits nobody, and the handover alone is refused (docs/12 §5: no ledger, no authority)
+    LM_CHECK_EQ(n.install(1, 31, ho), static_cast<uint32_t>(LM_STATUS_RECOVERY_REQUIRED));
+    LM_CHECK_EQ(u(restore_all(n, 1, ho, bk)), 0u);
+    expect_ledger_of(n, 1, bk);
+    LM_CHECK(store_matches(n.node(1).store, bk));
+    LM_CHECK_EQ(n.eng(1).ledger().count(root::EntryState::Active), 2u);
+    LM_CHECK_EQ(n.eng(1).ledger().backup_seq(), bk.seq); // its next backup goes on above the old root's
+    LM_CHECK_EQ(n.eng(1).ledger().expected_revision(), expected_revision);
+    LM_CHECK_EQ(u(n.eng(1).ledger().admission()), 0u);
+    // a restore does not repeat onto a root that has a ledger now
+    LedgerRestoreRequest again;
+    LM_CHECK_EQ(u(capi::call(n.ctx(1), CommandKind::RootLedgerRestore, &again, sizeof(again), nullptr, 0, view(ho)).status),
+                u(Status::Conflict));
+    // the members follow: their own evidence of the handover, then the re-issue the existing path makes (S18-D9)
+    n.run_ms(31'000);
+    n.set_time(2, 1);
+    for (unsigned d = 2; d < 4; ++d) {
+        LM_CHECK_EQ(n.install(d, 31, ho), 0u);
+        LM_CHECK(hand_over(n, d, static_cast<uint8_t>(0x90 + d)));
+        const member::MemberCredential &mc = n.eng(d).identity().member();
+        LM_CHECK(mc.root_term == RootTerm{2});
+        LM_CHECK_EQ(mc.assignment.value(), 1u);                // the same assignment generation
+        LM_CHECK_EQ(mc.membership.value(), before[d] + 1);     // the next membership generation
+        LM_CHECK(n.until([&] { return n.eng(d).membership().phase() == member::JoinPhase::Idle; }, 30'000));
+        const root::Entry *e = n.eng(1).ledger().find(n.id(d));
+        LM_CHECK(e != nullptr && e->state == root::EntryState::Active && e->membership == before[d] + 1 && e->assignment == 1);
+    }
+    n.run_ms(31'000);
+    n.set_time(2, 1);
+    for (unsigned d = 2; d < 4; ++d) { // fresh sessions: the restored ledger is what admits them
+        LM_CHECK_OK(n.eng(d).link().connect(n.mac(1), n.node(d).clock.now()));
+        n.node(d).notify();
+        LM_CHECK(n.until([&] { return n.eng(1).link().neighbors().find_device(n.id(d)) != nullptr; }, 6000));
+        LM_CHECK(n.eng(1).ledger().authorized(n.id(d)) != nullptr);
+    }
+    // the ledger is durable at the new root: a restart reloads it, and its backups continue the sequence
+    n.reboot(1);
+    LM_CHECK(n.until([&] { return n.eng(1).ledger().ready(); }, 5000));
+    LM_CHECK_EQ(n.eng(1).ledger().count(root::EntryState::Active), 2u);
+    n.run_ms(31'000);
+    BkImage next;
+    LM_CHECK_EQ(u(pull_backup(n, 1, next)), 0u);
+    LM_CHECK_EQ(next.seq, bk.seq + 1);
+    member::Envelope env;
+    ByteView data;
+    LM_CHECK_OK(member::open_signed(view(next.header), n.kits[1].kit.pub, member::k_type_ledger_backup, env, data));
+    LM_CHECK(env.issuer == n.id(1)); // signed by the new root now
+    std::printf("  ISSUE5: restored %zu records, members 2, 3 followed (assignment 1, membership +1), next backup seq %llu\n",
+                bk.records.size(), static_cast<unsigned long long>(next.seq));
+}
+
+// What a restore refuses, and that a refusal changes nothing: the replacement root stays RECOVERY_REQUIRED with no manifest,
+// and the good restore still works afterwards.
+LM_TEST("ISSUE5 sim: a restore refuses a tampered backup, another domain's, a non-root's signature, an older sequence, a root with a ledger") {
+    DNet n(2, 603, DNet::Kind::Handover);
+    DNet other(1, 603, DNet::Kind::TwoDomains); // the same fleet, domain B: node 1 is B's root
+    BkImage bk;
+    BkImage foreign;
+    LM_CHECK_EQ(u(pull_backup(n, 0, bk)), 0u);
+    LM_CHECK_EQ(u(pull_backup(other, 1, foreign)), 0u);
+    n.node(0).power_cut();
+    start_replacement_root(n);
+    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    SimStore &st = n.node(1).store;
+    LedgerRestoreRequest rq;
+
+    // the handover: another new root, a first term this root has not reached, and not a fleet signature at all
+    {
+        member::RootHandover h = n.handover();
+        h.new_root = n.id(2);
+        rq.step = 0;
+        const Bytes wrong_root = n.a.fleet.handover(n.a.domain, h);
+        LM_CHECK_EQ(u(restore_step(n, 1, rq, view(wrong_root))), u(Status::NetworkMismatch));
+        const Bytes ahead = n.a.fleet.handover(n.a.domain, n.handover(5));
+        LM_CHECK_EQ(u(restore_step(n, 1, rq, view(ahead))), u(Status::NetworkMismatch));
+        Bytes forged = ho;
+        forged[forged.size() - 1] ^= 0x01U;
+        LM_CHECK(restore_step(n, 1, rq, view(forged)) != Status::Ok);
+        const Bytes other_domain = other.a.fleet.handover(other.b.domain, member::RootHandover{}); // (not even a valid handover)
+        LM_CHECK(restore_step(n, 1, rq, view(other_domain)) != Status::Ok);
+    }
+    // steps in the wrong order are refused without a trace
+    rq.step = 1;
+    LM_CHECK_EQ(u(restore_step(n, 1, rq, view(bk.header))), u(Status::Conflict)); // no handover yet
+    rq.step = 2;
+    rq.element.index = 0;
+    LM_CHECK_EQ(u(restore_step(n, 1, rq, ByteView{})), u(Status::Conflict));
+
+    const auto begin = [&] {
+        rq.step = 0;
+        LM_CHECK_EQ(u(restore_step(n, 1, rq, view(ho))), 0u);
+    };
+    const auto header = [&](const Bytes &h) {
+        rq.step = 1;
+        return restore_step(n, 1, rq, view(h));
+    };
+    // the header: a flipped signature byte, a flipped byte in the delegation it carries, another domain's backup, a backup
+    // of the right domain whose root is not the one the handover hands over from
+    {
+        member::RootHandover h = n.handover();
+        h.old_root = n.id(2); // the fleet hands over from some other device (same domain, same generation)
+        const Bytes from_other = n.a.fleet.handover(n.a.domain, h);
+        rq.step = 0;
+        LM_CHECK_EQ(u(restore_step(n, 1, rq, view(from_other))), 0u);
+        LM_CHECK_EQ(u(header(bk.header)), u(Status::NetworkMismatch));
+        member::RootHandover g = n.handover();
+        g.old_generation = 0; // a handover that does not name the delegation generation the backup was signed under
+        const Bytes from_gen0 = n.a.fleet.handover(n.a.domain, g);
+        LM_CHECK(restore_step(n, 1, rq, view(from_gen0)) != Status::Ok); // (not even a valid handover: refused at once)
+    }
+    begin();
+    Bytes bad = bk.header;
+    bad[bad.size() - 1] ^= 0x01U;
+    LM_CHECK_EQ(u(header(bad)), u(Status::AuthRejected));
+    begin();
+    bad = bk.header;
+    bad[bad.size() / 2] ^= 0x01U; // inside the payload: the delegation or the data it is signed over
+    LM_CHECK(header(bad) != Status::Ok);
+    begin();
+    LM_CHECK_EQ(u(header(foreign.header)), u(Status::NetworkMismatch));
+    // signed by a device that is no root: the old root's delegation inside, a member's key outside
+    {
+        root::backup::Header h = bk.hdr;
+        h.delegation = view(n.a.delegation_cose);
+        std::array<uint8_t, 640> data{};
+        std::size_t dlen = 0;
+        LM_CHECK_OK(root::backup::encode_header(h, MutByteView{data}, dlen));
+        sec::KeyHandle key;
+        LM_CHECK_OK(sec::import_signing_key(ByteView{n.kits[2].kit.scalar}, key));
+        member::Envelope env;
+        env.type = member::k_type_ledger_backup;
+        env.domain = n.a.domain;
+        env.issuer = n.id(2); // a member (kid = its DeviceId)
+        env.revision = h.seq;
+        Bytes cose(member::k_max_bundle);
+        std::size_t len = 0;
+        LM_CHECK_OK(member::issue_signed(key, env, ByteView{data.data(), dlen}, MutByteView{cose.data(), cose.size()}, len));
+        cose.resize(len);
+        begin();
+        LM_CHECK_EQ(u(header(cose)), u(Status::AuthRejected));
+        // claiming to be the root with a member's key (the signer cannot, so the bytes are changed afterwards): the kid and
+        // the issuer name the root, the signature is not its
+        for (auto at = std::search(cose.begin(), cose.end(), n.id(2).bytes.begin(), n.id(2).bytes.end()); at != cose.end();
+             at = std::search(at, cose.end(), n.id(2).bytes.begin(), n.id(2).bytes.end())) {
+            std::copy(n.id(0).bytes.begin(), n.id(0).bytes.end(), at);
+        }
+        begin();
+        LM_CHECK_EQ(u(header(cose)), u(Status::AuthRejected));
+        sec::destroy_key(key);
+    }
+    // the records: tampered, out of order, another place of the chain, a manifest that does not end the chain
+    begin();
+    LM_CHECK_EQ(u(header(bk.header)), 0u);
+    rq.step = 2;
+    rq.element = {};
+    rq.element.index = 1; // skipping record 0
+    rq.element.id = bk.records[1].id;
+    rq.element.state = bk.records[1].state;
+    rq.element.payload = view(bk.records[1].payload);
+    rq.element.next = bk.records[1].next;
+    LM_CHECK_EQ(u(restore_step(n, 1, rq, ByteView{})), u(Status::Conflict));
+    rq.element.index = 0; // the right place, another record's id
+    LM_CHECK_EQ(u(restore_step(n, 1, rq, ByteView{})), u(Status::InvalidArgument));
+    Bytes tampered = bk.records[0].payload;
+    tampered[tampered.size() / 2] ^= 0x01U;
+    rq.element.id = bk.records[0].id;
+    rq.element.state = bk.records[0].state;
+    rq.element.payload = view(tampered);
+    rq.element.next = bk.records[0].next;
+    LM_CHECK_EQ(u(restore_step(n, 1, rq, ByteView{})), u(Status::AuthRejected)); // (the restore ended: nothing written)
+    LM_CHECK(stored_state(st, bk.records[0].id) == -1);
+    begin();
+    LM_CHECK_EQ(u(header(bk.header)), 0u);
+    LM_CHECK_EQ(u(restore_record(n, 1, bk, 0)), 0u); // the first record is the real one
+    BkImage wrong_next = bk; // the second one with a link that is not the chain's
+    wrong_next.records[1].next[0] ^= 0x01U;
+    LM_CHECK_EQ(u(restore_record(n, 1, wrong_next, 1)), u(Status::AuthRejected));
+    begin();
+    LM_CHECK_EQ(u(header(bk.header)), 0u);
+    for (std::size_t k = 0; k + 1 < bk.records.size(); ++k) {
+        LM_CHECK_EQ(u(restore_record(n, 1, bk, k)), 0u);
+    }
+    BkImage end_open = bk; // the manifest with a chain that goes on
+    end_open.records.back().next[5] = 1;
+    LM_CHECK_EQ(u(restore_record(n, 1, end_open, bk.records.size() - 1)), u(Status::AuthRejected));
+    BkImage bad_manifest = bk;
+    bad_manifest.records.back().payload[40] ^= 0x01U;
+    begin();
+    LM_CHECK_EQ(u(header(bk.header)), 0u);
+    for (std::size_t k = 0; k + 1 < bk.records.size(); ++k) {
+        LM_CHECK_EQ(u(restore_record(n, 1, bk, k)), 0u);
+    }
+    LM_CHECK_EQ(u(restore_record(n, 1, bad_manifest, bk.records.size() - 1)), u(Status::AuthRejected));
+    // nothing of all this made a ledger
+    LM_CHECK(stored_state(st, store::rec::root_ledger) == -1);
+    LM_CHECK(n.eng(1).ledger().failed());
+    LM_CHECK_EQ(n.eng(1).ledger().count(root::EntryState::Active), 0u);
+    LM_CHECK_EQ(u(n.eng(1).ledger().admission()), u(Status::RecoveryRequired));
+    // the good restore after all of it: complete and exact (the records written by the refused attempts are replaced)
+    LM_CHECK_EQ(u(restore_all(n, 1, ho, bk)), 0u);
+    expect_ledger_of(n, 1, bk);
+    LM_CHECK(store_matches(st, bk));
+    // a root with a ledger is never restored over: the new root now, and the (healthy) old root of another world
+    rq.step = 0;
+    LM_CHECK_EQ(u(capi::call(n.ctx(1), CommandKind::RootLedgerRestore, &rq, sizeof(rq), nullptr, 0, view(ho)).status),
+                u(Status::Conflict));
+    LM_CHECK_EQ(u(capi::call(other.ctx(1), CommandKind::RootLedgerRestore, &rq, sizeof(rq), nullptr, 0, view(ho)).status),
+                u(Status::Conflict));
+}
+
+// An older backup than one the root has seen is a rollback: the replacement root that holds a sequence number refuses a
+// backup below it (it would give back the members and the revocations of an earlier day).
+LM_TEST("ISSUE5 sim: a backup older than the sequence the root has seen is refused; a newer or equal one restores") {
+    for (const uint64_t known : {2ULL, 1ULL}) {
+        DNet n(2, 604, DNet::Kind::Handover);
+        BkImage bk;
+        LM_CHECK_EQ(u(pull_backup(n, 0, bk)), 0u); // sequence 1
+        n.node(0).power_cut();
+        n.provision_new_root();
+        {
+            auto job = std::make_unique<store::RecordJob>();
+            job->arm(store::RecordJob::Op::Commit, store::rec::ledger_backup_seq, 0, 8);
+            for (int i = 0; i < 8; ++i) {
+                job->payload[i] = static_cast<uint8_t>(known >> (8 * (7 - i)));
+            }
+            LM_CHECK_OK(store::record_commit(n.node(1).store, *job));
+        }
+        n.boot(1);
+        n.run_ms(300);
+        n.set_time(2, 1);
+        const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+        if (known > bk.seq) {
+            LM_CHECK_EQ(u(restore_all(n, 1, ho, bk)), u(Status::Conflict));
+            LM_CHECK(n.eng(1).ledger().failed());
+            LM_CHECK(stored_state(n.node(1).store, store::rec::root_ledger) == -1);
+        } else {
+            LM_CHECK_EQ(u(restore_all(n, 1, ho, bk)), 0u); // equal: the same number is not older
+            LM_CHECK_EQ(n.eng(1).ledger().backup_seq(), 1u);
+        }
+    }
+}
+
+namespace {
+
+// A restore at the replacement root (node 1) with a power cut at its store call `k` of `mode`. Allowed after the restart:
+// no ledger at all (no manifest durable: RECOVERY_REQUIRED, nobody admitted), or the complete one - the very records of the
+// backup. Nothing in between; and a restore made again always ends complete.
+struct RestoreCut {
+    bool fired = false;
+    bool ok = false;
+    bool complete = false; // the cut left the whole ledger (the manifest was durable)
+    std::string why;
+};
+
+RestoreCut restore_cut(uint64_t k, CutMode mode) {
+    RestoreCut out;
+    DNet n(2, 710, DNet::Kind::Handover);
+    BkImage bk;
+    if (pull_backup(n, 0, bk) != Status::Ok) {
+        out.why = "backup";
+        return out;
+    }
+    n.node(0).power_cut();
+    start_replacement_root(n);
+    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    SimStore &st = n.node(1).store;
+    st.arm_cut(st.mutating_ops() + k, mode);
+    const Status s = restore_all(n, 1, ho, bk);
+    out.fired = st.cut_fired();
+    if (!out.fired) {
+        out.ok = s == Status::Ok && n.eng(1).ledger().ready() && store_matches(st, bk);
+        out.complete = out.ok;
+        out.why = out.ok ? "" : "no cut, no restore";
+        return out;
+    }
+    n.reboot(1);
+    n.run_ms(500);
+    const bool manifest = stored_state(st, store::rec::root_ledger) >= 0;
+    if (!manifest) {
+        if (!n.eng(1).ledger().failed() || n.eng(1).ledger().count(root::EntryState::Active) != 0 ||
+            n.eng(1).ledger().admission() != Status::RecoveryRequired) {
+            out.why = "no manifest, yet the root is not RECOVERY_REQUIRED";
+            return out;
+        }
+    } else {
+        if (!n.eng(1).ledger().ready() || n.eng(1).ledger().failed() || !store_matches(st, bk) ||
+            n.eng(1).ledger().count(root::EntryState::Active) != 2) {
+            out.why = "a manifest, yet no complete ledger of the backup";
+            return out;
+        }
+        out.complete = true;
+    }
+    if (manifest) { // a root with a ledger refuses a second restore: the cut left a finished one
+        out.ok = true;
+        return out;
+    }
+    n.set_time(2, 1);
+    if (restore_all(n, 1, ho, bk) != Status::Ok || !n.eng(1).ledger().ready() || !store_matches(st, bk)) {
+        out.why = "the restore made again did not complete";
+        return out;
+    }
+    out.ok = true;
+    return out;
+}
+
+} // namespace
+
+// POWER (sim): a power cut at each store call of a restore (the swept calls: the records of the ledger, the sequence number
+// and the manifest, every one a two-step commit). The only states: no ledger (still RECOVERY_REQUIRED) or the complete one.
+LM_TEST("ISSUE5 POWER sim: power cut at each store write of a restore leaves no ledger or the complete one") {
+    const lmtest::CutTotals t = lmtest::cut_matrix(
+        "ledger restore", {{1, "new root"}}, [](unsigned, uint64_t k, CutMode mode) {
+            const RestoreCut r = restore_cut(k, mode);
+            return lmtest::CutRun{r.fired, r.ok, r.complete, r.why};
+        });
+    LM_CHECK(t.points >= 12);
+    LM_CHECK_EQ(t.truncated, 0u);
+}
+
+// A restore the power cut stopped half-way left records on the Flash; they are never read without the manifest, and a later
+// restore of ANOTHER backup (a member gone from it) clears them first: the manifest it writes does not claim a record of
+// the earlier one.
+LM_TEST("ISSUE5 sim: records of an unfinished restore never come back with the next backup's manifest") {
+    DNet big(2, 720, DNet::Kind::Handover);   // members 2 and 3
+    DNet small(1, 720, DNet::Kind::Handover); // the same fleet, root and replacement root; member 2 only
+    BkImage b_big;
+    BkImage b_small;
+    LM_CHECK_EQ(u(pull_backup(big, 0, b_big)), 0u);
+    LM_CHECK_EQ(u(pull_backup(small, 0, b_small)), 0u);
+    LM_CHECK_EQ(b_big.records.size(), 3u);
+    LM_CHECK_EQ(b_small.records.size(), 2u);
+    small.node(0).power_cut();
+    start_replacement_root(small);
+    SimStore &st = small.node(1).store;
+    const Bytes ho = small.a.fleet.handover(small.a.domain, small.handover());
+    // the bigger backup goes in up to its last entry (not the manifest), then the power goes
+    LM_CHECK_EQ(u(restore_all(small, 1, ho, b_big, 2)), 0u);
+    LM_CHECK(stored_state(st, root::k_rec_ledger_base + 2) == static_cast<int>(root::EntryState::Active)); // member 3's entry is there
+    LM_CHECK(stored_state(st, store::rec::root_ledger) == -1);
+    small.reboot(1);
+    small.run_ms(500);
+    LM_CHECK(small.eng(1).ledger().failed());
+    LM_CHECK_EQ(small.eng(1).ledger().count(root::EntryState::Active), 0u); // (never read without the manifest)
+    small.set_time(2, 1);
+    // the smaller backup: member 3 is not in it
+    LM_CHECK_EQ(u(restore_all(small, 1, ho, b_small)), 0u);
+    LM_CHECK(small.eng(1).ledger().ready());
+    LM_CHECK_EQ(small.eng(1).ledger().count(root::EntryState::Active), 1u);
+    LM_CHECK(small.eng(1).ledger().find(big.id(2)) != nullptr);
+    LM_CHECK(small.eng(1).ledger().find(big.id(3)) == nullptr); // not resurrected from the earlier attempt
+    LM_CHECK(stored_state(st, root::k_rec_ledger_base + 2) == static_cast<int>(root::EntryState::Free));
+    small.reboot(1);
+    LM_CHECK(small.until([&] { return small.eng(1).ledger().ready(); }, 5000));
+    LM_CHECK(small.eng(1).ledger().find(big.id(3)) == nullptr);
+    LM_CHECK_EQ(small.eng(1).ledger().count(root::EntryState::Active), 1u);
+}
+
+// What the old root's ledger said about revocation survives the restore: a revoked member stays refused at the new root, a
+// floor of a device that was never a member is merged into the replacement root's own table.
+LM_TEST("ISSUE5 sim: a revocation in the backup is still in force at the restored root, floors included") {
+    DNet n(2, 730, DNet::Kind::Handover);
+    // member 3 revoked by the fleet (its entry blocked); a device the ledger never listed gets a floor (the table)
+    const Bytes rv = n.a.fleet.revoke(n.id(3), 2, 2, 1);
+    LM_CHECK_EQ(n.install(0, 11, rv), 0u);
+    const fleet::Kit stranger = n.a.fleet.device(777, "stranger");
+    const Bytes rv2 = n.a.fleet.revoke(stranger.id, 5, 6, 2);
+    LM_CHECK_EQ(n.install(0, 11, rv2), 0u);
+    BkImage bk;
+    LM_CHECK_EQ(u(pull_backup(n, 0, bk)), 0u);
+    bool floors = false;
+    for (const BkRecord &r : bk.records) {
+        floors = floors || r.id == store::rec::revocation_floors;
+    }
+    LM_CHECK(floors);
+    n.node(0).power_cut();
+    start_replacement_root(n);
+    const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    LM_CHECK_EQ(u(restore_all(n, 1, ho, bk)), 0u);
+    LM_CHECK(n.eng(1).ledger().authorized(n.id(2)) != nullptr);  // member 2 is a member
+    LM_CHECK(n.eng(1).ledger().authorized(n.id(3)) == nullptr);  // member 3 stays revoked
+    LM_CHECK_EQ(n.eng(1).ledger().find(n.id(3))->state, root::EntryState::Blocked);
+    const member::Floors::Entry f = n.eng(1).identity().floors().floor_of(stranger.id);
+    LM_CHECK(f.assignment == 5 && f.membership == 6);
+    // durable: after a restart too
+    n.reboot(1);
+    LM_CHECK(n.until([&] { return n.eng(1).ledger().ready(); }, 5000));
+    LM_CHECK(n.eng(1).ledger().authorized(n.id(3)) == nullptr);
+    const member::Floors::Entry f2 = n.eng(1).identity().floors().floor_of(stranger.id);
+    LM_CHECK(f2.assignment == 5 && f2.membership == 6);
 }

@@ -7,7 +7,8 @@
  *   not provisioned  keygen | prov-leaf <trust88> <device_cose> <ticket> | prov-root <trust88> <device_cose>
  *                    <delegation> <host_id>                                        (hex arguments)
  *   leaf/relay, provisioned (mesh running)
- *                    status | join [noretry] | send root <text> | send <device_id hex> <text> | op <id> | stop | start
+ *                    status | join [noretry|transfer] | send root <text> | send <device_id hex> <text> | op <id> | stop | start
+ *                    install <control type> <signed object hex>   (lm_install_control: e.g. 31, the fleet's RootHandover)
  * A provisioned ROOT starts the mesh and leaves the port to the Host's USB session: it has no console then.
  * Events of a leaf/relay are printed as "EV ..." lines. No product logic, no polling inside the SDK: this app polls
  * its own event queue every 50 ms while it waits for console input.
@@ -180,12 +181,18 @@ static void prov_command(char *line) {
         int nd = unhex(strtok_r(NULL, " ", &save), s_blob[0], BLOB_MAX);
         int nx = unhex(strtok_r(NULL, " ", &save), s_blob[1], BLOB_MAX);
         int nh = root ? unhex(strtok_r(NULL, " ", &save), host, sizeof host) : 32;
-        if (nt != 88 || nd <= 0 || nx <= 0 || nh != 32) {
+        /* prov-root takes an optional first term: the REPLACEMENT root of a failed one (no ledger, issue #5). */
+        const char *term_tok = root ? strtok_r(NULL, " ", &save) : NULL;
+        const unsigned long first_term = term_tok != NULL ? strtoul(term_tok, NULL, 10) : 0;
+        if (nt != 88 || nd <= 0 || nx <= 0 || nh != 32 || (term_tok != NULL && (first_term < 2 || first_term > 0xFFFFFFFFUL))) {
             answer(LM_STATUS_INVALID_ARGUMENT);
             return;
         }
-        lm_status_t st = root ? lmb_provision_root(trust, s_blob[0], (size_t)nd, s_blob[1], (size_t)nx, host)
-                              : lmb_provision_leaf(trust, s_blob[0], (size_t)nd, s_blob[1], (size_t)nx);
+        lm_status_t st = !root ? lmb_provision_leaf(trust, s_blob[0], (size_t)nd, s_blob[1], (size_t)nx)
+                         : term_tok != NULL
+                             ? lmb_provision_replacement_root(trust, s_blob[0], (size_t)nd, s_blob[1], (size_t)nx, host,
+                                                              (uint32_t)first_term)
+                             : lmb_provision_root(trust, s_blob[0], (size_t)nd, s_blob[1], (size_t)nx, host);
         answer(st);
         if (st == LM_STATUS_OK) {
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -202,7 +209,7 @@ static void prov_command(char *line) {
 
 static void provisioning_console(void) {
     console_init();
-    out("HIL provisioning console (" HIL_ROLE_NAME "): info | keygen | prov-leaf | prov-root | reboot\n");
+    out("HIL provisioning console (" HIL_ROLE_NAME "): info | keygen | prov-leaf | prov-root [first_term: replacement] | reboot\n");
     for (;;) {
         char *line = console_line(portMAX_DELAY);
         if (line != NULL) prov_command(line);
@@ -273,9 +280,10 @@ static void cmd_status(void) {
 static lm_operation_id_t s_join_op;
 static int s_join_retries;
 static TickType_t s_join_again_at;
+static uint32_t s_join_mode = LM_JOIN_NEW; /* `join transfer`: the handover / transfer path of a member (docs/07 section 8) */
 
 static lm_status_t join_once(void) {
-    lm_join_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION, .mode = LM_JOIN_NEW};
+    lm_join_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION, .mode = s_join_mode};
     esp_fill_random(r.request_id.bytes, sizeof r.request_id.bytes);
     lm_status_t st = lm_join(s_ctx, &r, &s_join_op);
     if (st == LM_STATUS_OK) {
@@ -288,6 +296,7 @@ static lm_status_t join_once(void) {
 
 static void cmd_join(char *save) {
     const char *arg = strtok_r(NULL, " ", &save);
+    s_join_mode = arg != NULL && strcmp(arg, "transfer") == 0 ? LM_JOIN_TRANSFER_CANDIDATE : LM_JOIN_NEW;
     s_join_retries = arg != NULL && strcmp(arg, "noretry") == 0 ? 0 : 5; /* noretry: the SDK's own result */
     s_join_again_at = 0;
     lm_status_t st = join_once();
@@ -317,6 +326,25 @@ static void join_timer(void) {
         lm_status_t st = join_once();
         if (st != LM_STATUS_OK) outf("JOIN again refused: %u\n", (unsigned)st);
     }
+}
+
+/* install <type> <hex>: a signed control object for this node (lm_install_control). A member stores the fleet's RootHandover
+   (31) this way (its own evidence that the domain's root changed) and then asks `join transfer`. The end of the operation
+   is printed as an EV line. */
+static void cmd_install(char *save) {
+    const char *type = strtok_r(NULL, " ", &save);
+    int n = unhex(strtok_r(NULL, " ", &save), s_blob[2], BLOB_MAX);
+    if (type == NULL || n <= 0) {
+        answer(LM_STATUS_INVALID_ARGUMENT);
+        return;
+    }
+    lm_operation_id_t op = 0;
+    lm_status_t st = lm_install_control(s_ctx, (uint32_t)strtoul(type, NULL, 10), s_blob[2], (size_t)n, &op);
+    if (st != LM_STATUS_OK) {
+        answer(st);
+        return;
+    }
+    outf("OK op=%llu\n", (unsigned long long)op);
 }
 
 static void cmd_send(char *save) {
@@ -432,6 +460,8 @@ static void run_command(char *line) {
         cmd_join(save);
     } else if (strcmp(cmd, "send") == 0) {
         cmd_send(save);
+    } else if (strcmp(cmd, "install") == 0) {
+        cmd_install(save);
     } else if (strcmp(cmd, "power") == 0) {
         cmd_power(save);
     } else if (strcmp(cmd, "debug") == 0) {

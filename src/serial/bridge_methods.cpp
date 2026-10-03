@@ -20,7 +20,12 @@ enum Method : uint64_t {
     kCapabilities = 1, kSend, kGetMessage, kCancel, kJoinDecide, kInstall, kNodeQuery, kGroupSnapshot,
     kHostStoreAck, kEventAck, kChannelAction, kSleepWindow, kGetRequest, kGroupSet, kGroupTargets,
     kDiagnostics, // [S19] 16: not in the spec's table of 15; additive (protocol/serial.cddl, docs/19)
-    kPolicySet    // HIL-F5 17: the root's join mode through lm_policy_set (additive)
+    kPolicySet,   // HIL-F5 17: the root's join mode through lm_policy_set (additive)
+    kBackupBegin, // ISSUE5 18: begin a backup of the root's ledger (signed by this root)
+    kBackupGet,   // 19: one page of it
+    kRestoreHandover, // 20..22: restore a ledger onto this (replacement) root: the fleet's RootHandover, the old
+    kRestoreHeader,   //     root's signed header, then the records in order
+    kRestoreRecord
 };
 
 template <std::size_t N> void take(wire::CborReader &r, std::array<uint8_t, N> &out) {
@@ -96,6 +101,14 @@ void Bridge::handle(Pending &p, uint64_t method, ByteView params) {
         return m_group_targets(p, params);
     case kPolicySet:
         return m_policy_set(p, params);
+    case kBackupBegin:
+        return m_backup_begin(p, params);
+    case kBackupGet:
+        return m_backup_get(p, params);
+    case kRestoreHandover:
+    case kRestoreHeader:
+    case kRestoreRecord:
+        return m_restore(p, method, params);
     default:
         return m_unsupported(p, method, params);
     }
@@ -492,6 +505,82 @@ void Bridge::m_policy_set(Pending &p, ByteView params) {
     p.status = rep.status;
     if (rep.status == Status::Ok && rep.operation_id != 0) {
         p.has_op = true;
+        p.op = rep.operation_id;
+        p.result = Result::Ack;
+    }
+}
+
+// ISSUE5: 18 LEDGER_BACKUP_BEGIN (params nil). The root cuts its ledger, makes the next sequence number durable and signs
+// the header; accepted here, ended by the OPERATION event (Ok: the pages can be read). BUSY: a join or an install holds the
+// ledger's memory, ask again; RECOVERY_REQUIRED: there is no ledger to vouch for. (docs/19 §4, docs/12 §5)
+void Bridge::m_backup_begin(Pending &p, ByteView params) {
+    wire::CborReader r{params};
+    if (!r.try_null() || r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    LedgerBackupRequest rq;
+    const Reply rep = run(CommandKind::RootLedgerBackup, &rq, sizeof(rq));
+    p.status = rep.status;
+    if (rep.status == Status::Ok) {
+        p.has_op = true;
+        p.op = rep.operation_id;
+        p.result = Result::Ack;
+    }
+}
+
+// 19 LEDGER_BACKUP_GET = [seq, index]: index 0 is the signed header (seq 0 asks for the header of the backup held), 1..count
+// the records in the canonical order. A record is one Flash read: BUSY until it is in, ask again for the same index; CONFLICT:
+// the ledger changed (or another backup was made) - begin again.
+void Bridge::m_backup_get(Pending &p, ByteView params) {
+    wire::CborReader r{params};
+    (void)r.array(2, 2);
+    const uint64_t seq = r.uint_in(0, 0x7FFFFFFFFFFFFFFFULL);
+    const uint64_t index = r.uint_in(0, 68);
+    if (r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    LedgerBackupRequest rq;
+    rq.get = 1;
+    rq.seq = seq;
+    rq.index = static_cast<uint32_t>(index);
+    root::LedgerType::BackupPage pg;
+    p.status = run(CommandKind::RootLedgerBackup, &rq, sizeof(rq), ByteView{}, &pg, sizeof(pg)).status;
+    if (p.status == Status::Ok) {
+        p.backup = Pending::BackupAt{seq, rq.index}; // (the page is read again from the ledger when the reply is built)
+        p.result = Result::BackupPage;
+    }
+}
+
+// 20..22: the three steps of a restore onto a replacement root (RECOVERY_REQUIRED, no ledger): 20 = [handover COSE],
+// 21 = [the old root's header COSE], 22 = [index, record id, state, payload, next] (one record, in order). Each is accepted
+// here and ended by its OPERATION event; the last one ends when the ledger is loaded. CONFLICT: this root has a ledger.
+void Bridge::m_restore(Pending &p, uint64_t method, ByteView params) {
+    wire::CborReader r{params};
+    LedgerRestoreRequest rq;
+    ByteView object;
+    if (method == kRestoreRecord) {
+        (void)r.array(5, 5);
+        rq.step = 2;
+        rq.element.index = static_cast<uint32_t>(r.uint_in(0, 67));
+        rq.element.id = static_cast<uint16_t>(r.uint_in(0, 0xFFFF));
+        rq.element.state = static_cast<uint8_t>(r.uint_in(0, 255));
+        rq.element.payload = r.bstr(0, 672);
+        take(r, rq.element.next);
+    } else {
+        (void)r.array(1, 1);
+        rq.step = method == kRestoreHandover ? 0 : 1;
+        object = r.bstr(1, 1024);
+    }
+    if (r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    const Reply rep = run(CommandKind::RootLedgerRestore, &rq, sizeof(rq), object);
+    p.status = rep.status;
+    if (rep.status == Status::Ok) {
+        p.has_op = true; // acceptance only: the step's end arrives as an OPERATION event
         p.op = rep.operation_id;
         p.result = Result::Ack;
     }

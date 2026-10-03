@@ -460,7 +460,7 @@ def control_seeds(rnd: random.Random) -> tuple[list[bytes], list[bytes]]:
             if b is not None:
                 bad.append(b)
     data = [valid_value(s, rnd) for s in C.SHAPES[16]]
-    for typ in (0, 22, 23, 24, 34, 255, 256, 2**32 - 1, 2**32, -1, "x", True):
+    for typ in (0, 22, 23, 24, 35, 255, 256, 2**32 - 1, 2**32, -1, "x", True):
         b = control_body(typ, 1, *base, data)
         if b is not None:
             bad.append(b)

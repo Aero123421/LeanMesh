@@ -398,23 +398,6 @@ Status provision_replacement_root(sim::SimStore &store, const Network &net, cons
     return sim::provision_store(store, in);
 }
 
-Status copy_ledger(sim::SimStore &from, sim::SimStore &to) {
-    auto job = std::make_unique<store::RecordJob>();
-    for (uint32_t id = store::rec::root_ledger; id < root::k_rec_ledger_base + root::k_ledger_slots;
-         id = id == store::rec::root_ledger ? root::k_rec_ledger_base : id + 1) {
-        job->op = store::RecordJob::Op::Load;
-        job->id = static_cast<uint16_t>(id);
-        const Status st = store::record_load(from, *job);
-        if (st == Status::NotFound) {
-            continue;
-        }
-        LM_TRY(st);
-        job->op = store::RecordJob::Op::Commit;
-        LM_TRY(store::record_commit(to, *job));
-    }
-    return Status::Ok;
-}
-
 Status register_member(sim::SimStore &root_store, const NodeKit &node, uint16_t *slot) {
     member::Envelope env;
     ByteView data;

@@ -128,7 +128,7 @@ class Bridge final : public BridgeHook {
     [[nodiscard]] uint64_t boot_id() const { return boot_; }
 
   private:
-    enum class Result : uint8_t { None, Snapshot, Ack, Caps, Nodes, Request, Targets, Diag };
+    enum class Result : uint8_t { None, Snapshot, Ack, Caps, Nodes, Request, Targets, Diag, BackupPage };
     struct Pending {
         std::array<uint8_t, 16> request_id{};
         uint8_t lane = 0;
@@ -143,10 +143,15 @@ class Bridge final : public BridgeHook {
             uint32_t offset;
             uint32_t limit;
         };
+        struct BackupAt { // BackupPage: which page of which backup (ISSUE5)
+            uint64_t seq;
+            uint32_t index;
+        };
         union {
             OpSnap snap;                      // Snapshot, Request
             std::array<uint8_t, 32> filter;   // Nodes
             GroupPage page;                   // Targets
+            BackupAt backup;                  // BackupPage
         };
         Pending() : snap() {}
     };
@@ -173,6 +178,9 @@ class Bridge final : public BridgeHook {
     void m_get_request(Pending &p, ByteView params);
     void m_channel(Pending &p, ByteView params); // [S17] CHANNEL_ACTION
     void m_policy_set(Pending &p, ByteView params); // HIL-F5: 17 POLICY_SET (the root's join mode)
+    void m_backup_begin(Pending &p, ByteView params);   // ISSUE5: 18 LEDGER_BACKUP_BEGIN
+    void m_backup_get(Pending &p, ByteView params);     // 19 LEDGER_BACKUP_GET
+    void m_restore(Pending &p, uint64_t method, ByteView params); // 20 HANDOVER, 21 HEADER, 22 RECORD of a LEDGER_RESTORE
     void m_group_set(Pending &p, ByteView params);
     void m_group_targets(Pending &p, ByteView params);
     void m_unsupported(Pending &p, uint64_t method, ByteView params);

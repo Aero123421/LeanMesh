@@ -63,12 +63,13 @@ inline constexpr uint16_t root_handover = 17;     // S18: the fleet's RootHandov
 inline constexpr uint16_t pending_delegation = 18; // S18: the RootDelegation of a transfer/handover target, until it is live
 inline constexpr uint16_t commissioning_window = 19; // S18: window id 16 || reservations made u8 (docs/21 §2 budget)
 inline constexpr uint16_t root_groups = 20;          // FIX8-D10: the root's group registry (api/SEMANTICS.md: durable)
+inline constexpr uint16_t ledger_backup_seq = 21;    // ISSUE5: the last backup sequence number the root signed (u64be); never repeats nor goes back
 // One owner per NVS key: two records on one id overwrite and misread each other (ARCH-D7 and SEC-Da each found
 // such a collision). Every id above is listed here; the ledger's entries use 0x100 + slot.
 inline constexpr uint16_t k_all[] = {boot_incarnation, identity, fleet_trust, membership, membership_prepared,
                                      assignment_high_water, channel_plan, policy, root_ledger, revocation_floors,
                                      root_delegation, assignment_ticket, paired_host, power_policy, discovery_scope, ota_state,
-                                     root_handover, pending_delegation, commissioning_window, root_groups};
+                                     root_handover, pending_delegation, commissioning_window, root_groups, ledger_backup_seq};
 constexpr bool all_distinct() {
     for (std::size_t i = 0; i < std::size(k_all); ++i) {
         if (k_all[i] == 0 || k_all[i] >= 0x100) {
