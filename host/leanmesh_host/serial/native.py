@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 from ctypes import POINTER, Structure, c_int32, c_size_t, c_uint8, c_uint32, c_uint64, c_void_p
 from pathlib import Path
 
@@ -54,7 +55,8 @@ def library_path() -> Path:
     if explicit:
         return Path(explicit)
     build = Path(os.environ.get("LEANMESH_NATIVE_BUILD", Path.home() / ".cache/leanmesh/native"))
-    return build / "libleanmesh_host.so"
+    # CMake names a SHARED library after the platform: .dylib on macOS, .so elsewhere.
+    return build / ("libleanmesh_host.dylib" if sys.platform == "darwin" else "libleanmesh_host.so")
 
 
 def load_library(path: Path | None = None) -> ctypes.CDLL:

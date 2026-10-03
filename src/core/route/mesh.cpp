@@ -12,7 +12,6 @@ namespace {
 constexpr Duration k_probe_wait = Duration::from_ms(1500);
 constexpr Duration k_probe_fresh = Duration::from_s(20); // a candidate not heard for this long is probed before use
 constexpr Duration k_link_wait = Duration::from_s(6);      // a link handshake takes a few seconds at most
-constexpr Duration k_attach_hard = Duration::from_s(60);   // one candidate, all steps
 constexpr Duration k_session_wait = Duration::from_s(30);  // registry session_binding.timeout_ms
 constexpr Duration k_busy_retry = Duration::from_ms(20);   // radio/TX pool busy: local, not a failure
 constexpr Duration k_slot_retry = Duration::from_ms(250);

@@ -15,7 +15,6 @@ constexpr Duration k_default_budget = Duration::from_s(30);   // docs/07 §3: on
 constexpr Duration k_collect = Duration::from_ms(300);       // wait for a shallower offer than the first
 constexpr Duration k_busy_retry = Duration::from_ms(50);      // borrowed memory is taken: try again
 constexpr Duration k_connect_retry = Duration::from_ms(500);
-constexpr Duration k_request_wait = Duration::from_s(310);    // approval timeout 300 s + margin
 
 } // namespace
 

@@ -31,7 +31,9 @@ def native_symbols(build: Path):
     if len(libs) != 2:
         sys.exit(f"FAIL: liblm_sdk.a / liblm_sim.a not found in {build} (build first)")
     out = subprocess.run(["nm", "-g", "--defined-only", *map(str, libs)], check=True, capture_output=True, text=True).stdout
-    return {ln.split()[-1] for ln in out.splitlines() if re.match(r"^[0-9a-f]+ [TW] ", ln)}
+    names = {ln.split()[-1] for ln in out.splitlines() if re.match(r"^[0-9a-f]+ [TW] ", ln)}
+    # Mach-O prefixes C symbol names with an underscore.
+    return {n[1:] for n in names} if sys.platform == "darwin" else names
 
 
 def source_defined():

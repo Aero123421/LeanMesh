@@ -6,11 +6,15 @@ import asyncio
 import ctypes
 import fcntl
 import os
+import sys
 import threading
 from typing import Any
 
 import pytest
 from leanmesh_host.serial.link import SerialLink, SessionChanged, _Pending
+
+# F_SETPIPE_SZ (fcntl 1031) shrinks a pipe so a write is partial; only Linux has it.
+linux_pipe = pytest.mark.skipif(sys.platform != "linux", reason="needs Linux F_SETPIPE_SZ")
 
 
 class _Lib:
@@ -47,6 +51,7 @@ def _link(lib: _Lib) -> SerialLink:
     return link
 
 
+@linux_pipe
 def test_tx_bytes_leave_the_native_queue_only_as_far_as_the_os_accepted_them() -> None:
     r, w = os.pipe()
     os.set_blocking(w, False)
@@ -66,6 +71,7 @@ def test_tx_bytes_leave_the_native_queue_only_as_far_as_the_os_accepted_them() -
     assert link._drain_tx(w) is False and link._tx_blocked_since is None
 
 
+@linux_pipe
 def test_a_port_that_takes_nothing_keeps_every_byte_queued() -> None:
     r, w = os.pipe()
     os.set_blocking(w, False)

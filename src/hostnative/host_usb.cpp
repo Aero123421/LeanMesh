@@ -154,11 +154,12 @@ std::size_t HostUsb::write(ByteView out) {
 }
 
 void HostUsb::random(MutByteView out) {
+    // getentropy (Linux glibc 2.25+ and macOS): at most 256 bytes per call, never short.
     std::size_t done = 0;
     while (done < out.size()) {
-        const ssize_t n = ::getrandom(out.data() + done, out.size() - done, 0);
-        if (n > 0) {
-            done += static_cast<std::size_t>(n);
+        const std::size_t n = std::min<std::size_t>(256, out.size() - done);
+        if (::getentropy(out.data() + done, n) == 0) {
+            done += n;
         }
     }
 }
