@@ -13,6 +13,7 @@ Issue [#3](https://github.com/Aero123421/LeanMesh/issues/3) の最初の経路�
 | `device` | 外部から渡された P-256 公開鍵に DeviceCredential（type 1）を発行 |
 | `root` | 非ゼロ domain と Root 公開鍵に RootDelegation（type 2）を発行 |
 | `admit` | 1〜64台分の初回 AssignmentTicket（type 3）と ExpectedSet（type 5）を一括発行 |
+| `transfer` | 1台分の移設 AssignmentTicket（type 3、source = 現在の domain）と、任意で移設先 root の ExpectedSet 1 page |
 
 署名は ES256、kid は SHA-256（既存の deterministic COSE_Key）、external AAD は
 `LM1-CONTROL` です。DeviceCredential の CCS hash と、参加券の device credential hash / root
@@ -25,7 +26,7 @@ RootDelegation に approve 権限が必要です。重複機器と Root 自身�
 
 **機器への書込みは未実装です。** 機器鍵の生成・所有証明・暗号化 NVS の書込み、eFuse、Root の
 初期 membership/ledger、USB paired_host/Host kit は後続です。TRANSFER、commissioning window、
-revoke、RootHandover の発行 CLI も後続です。#3 の実機完了条件は満たしていません。
+revoke、RootHandover の発行 CLI も後続です（TRANSFER は下の「移設参加券」）。#3 の実機完了条件は満たしていません。
 
 ## 鍵の保管と署名権限
 
@@ -97,7 +98,54 @@ manifest は運搬時の整合確認用で、署名 object の検証や権限確
 参加券は **初回専用**（source=zero16、expected-old=0）。mode1 の一回限り grant を暗号乱数で生成し、
 機器への事前登録を前提とします。入力を変えずに再実行しても新しい grant と署名になります。
 配備の再試行では完成済み batch をそのまま使い、参加券を再発行しないでください。
-参加済み・離脱済み機器の再加入や移設は、この command の対象ではありません。
+参加済み・離脱済み機器の再加入や移設は、`admit` の対象ではありません（次節の `transfer`）。
+
+## 移設参加券（`transfer`）
+
+domain A の ACTIVE な member を、旧 root A が止まっていても domain B へ動かす fleet 署名の AssignmentTicket
+（docs/07 §8、docs/21 §6）。SDK の移設（`lm_join(LM_JOIN_TRANSFER_CANDIDATE)`、`lm_transfer_nonce_get`、
+`lm_install_control(3, ...)`）が受け取る object を発行します。**発行するだけで、機器への投入は行いません。**
+
+```sh
+# 機器の DeviceCredential、移設先 B の root の RootDelegation（B の domain を持つ。approve 権限が必要）は発行済みの入力。
+$PY -m leanmesh_fleet transfer --store /secure/fleet-a --environment production \
+  --device-credential leaf-01.cose --source-domain 1234567890abcdef1234567890abcdef \
+  --root-delegation root-b-delegation.cose --expected-old 1 --new-generation 2 \
+  --nonce 00112233445566778899aabbccddeeff --expected-revision 3 --output-dir transfer-0001
+# --nonce の代わりに --grant（mode 1）。どちらか一方が必須。--expected-revision は省略可。
+```
+
+| 入力 | 意味 |
+|---|---|
+| `--source-domain` | 機器が**今いる** domain（非ゼロ16 B）。移設先と同じは拒否 |
+| `--root-delegation` | 移設先 root の RootDelegation。target domain はこれから取る。この object の SHA-256 が参加券に入る |
+| `--expected-old` / `--new-generation` | 機器の現在の assignment generation（1 以上）と、移設後の generation（それより大きい） |
+| `--nonce HEX` | mode 0。機器が `lm_transfer_nonce_get` で出した 16 B。その機器・その nonce にだけ効く |
+| `--grant` | mode 1。暗号乱数の一回限り grant id。事前に発行でき、機器の nonce は要らない |
+| `--expected-revision` | 指定すると移設先 B の ExpectedSet 1 page（`expected-00.cose`）も発行（PREAPPROVED の root B 用） |
+
+出力は `ticket-<device id hex>.cose`（と `expected-00.cose`）と、最後に書く `manifest.json`（種別 `transfer`、
+source/target domain、generation、mode、各 object の SHA-256）。directory は新規 `0700`、file は `0600`、
+上書きせず、失敗した入力では directory を作りません。`admit` と同じ検証（fleet・kid・DeviceCredential の
+CCS/credential hash・RootDelegation の意味 binding・サイズ上限）に加え、B の root 自身を B へ移す指定も拒否します。
+
+参加券の field（`tools/lmfleet/fleet.cpp` の `Fleet::ticket` と同じ順序。CBOR array 11）:
+`[device, fleet, source_domain, target_domain, sha256(target RootDelegation), expected_old, new_generation,
+grant_id16, mode, nonce16, sha256(DeviceCredential)]`。envelope の domain は target、revision は new_generation。
+mode 0 の nonce16 は機器の nonce、mode 1 の nonce16 は埋め草の乱数で、grant_id は mode によらず新規乱数です。
+
+**mode 0 と mode 1 の違い（SDK の実際の動作）。** 機器側に移設 grant の登録台帳はありません。機器は
+`lm_install_control(3)` で「source / expected_old が自分の現在の domain / assignment と一致する移設」だけを受け、
+mode 0 では ticket の nonce16 が自分の未使用の nonce と一致することを要求します（nonce は `lm_transfer_nonce_get` の
+最初の呼出しで作られ RAM にだけ残り、再起動か、それで得た membership で失効）。mode 1 の「一回限り」は
+**generation の floor**（機器の消費済み assignment と root の `consumed`）と、PREAPPROVED の root B が持つ
+ExpectedSet の entry（grant hash = ticket COSE 全体の SHA-256、assignment = new_generation）で守られます。
+EXTERNAL の root B なら operator の承認で通ります。使い分け: 機器が手元にあって nonce を取れるなら mode 0
+（別の機器・別の時点の ticket として使えない）、事前に配る・機器に触れないなら mode 1。
+
+移設 ticket は **旧 root A にも `lm_install_control(3, ...)` で渡せます**。A が戻ったとき、同じ ticket で
+ledger の ACTIVE entry が LEFT になり、旧 generation が floor されます（`old_domain_reconciliation`）。
+A が止まっている間は A の ledger は更新されず、機器側が A を拒否します。紛失機器は revoke floor で拒否します。
 
 ExpectedSet は DeviceId 順に8件ずつ、最大8 pageです。全 page で共通の set hash は
 SHA-256（CBOR `[domain, expected_revision, 全 entry]`）です。entry の grant hash は
@@ -119,6 +167,10 @@ $PY -m pytest -q host/tests/integration/test_fleet_issuer.py
 で検証し、SimStore に設定して EDHOC → durable membership → Root ACTIVE confirmed まで動かします。
 CLI 自体の出力も同じ Join 経路に渡します。署名改ざん、正しく署名されても誤った device/CCS/hash/fleet、
 鍵用途・権限・password・symlink/hard link の異常、最大64台の全 page を検査します。
+移設は同じ driver の `transfer`（mode 1）/ `transfer-nonce`（mode 0。driver が出す nonce に対して Python が発行）で、
+A の member を root A 停止中に B の root へ移し、B で ACTIVE（A と B の同時 ACTIVE なし）、古い・別 nonce・別 source の
+ticket と使用済み ticket の再 install は機器が拒否、A が戻ると同じ ticket で ledger が LEFT になり A は機器と session を
+持たない、までを検査します。
 CI の Host job と sanitizer job で実行し、build output がなければ失敗します。
 
 driver の平文 device scalar は一時的な `0700` pytest directory の fixture だけに置き、

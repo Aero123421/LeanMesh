@@ -47,7 +47,12 @@ def objects(fleet):
     return root, leaf, dc, delegation, batch
 
 
-def driver(tmp_path, fleet, objects, mode="verify"):
+def native_binary():
+    native = Path(os.environ.get("LEANMESH_NATIVE_BUILD", Path.home() / ".cache/leanmesh/native"))
+    return Path(os.environ.get("LEANMESH_ISSUER_DRIVER", native / "tests/native/issuer_driver"))
+
+
+def prepare(tmp_path, fleet, objects):
     _, meta, issuer = fleet
     root, leaf, dc, delegation, batch = objects
     folder = tmp_path / "driver"
@@ -69,8 +74,12 @@ def driver(tmp_path, fleet, objects, mode="verify"):
         p = folder / name
         p.write_bytes(value)
         p.chmod(0o600)
-    native = Path(os.environ.get("LEANMESH_NATIVE_BUILD", Path.home() / ".cache/leanmesh/native"))
-    binary = Path(os.environ.get("LEANMESH_ISSUER_DRIVER", native / "tests/native/issuer_driver"))
+    return folder
+
+
+def driver(tmp_path, fleet, objects, mode="verify"):
+    folder = prepare(tmp_path, fleet, objects)
+    binary = native_binary()
     # Missing build output is a failure, never a skip (same policy as the existing Host harness).
     result = subprocess.run([str(binary), mode, str(folder)], capture_output=True, text=True,
                             timeout=120)
@@ -356,3 +365,212 @@ def test_cli_refuses_unprotected_stdin_password_before_creating_store(tmp_path):
                  input=(PASSWORD.decode() + "\n") * 2)
     assert result.returncode == 1 and not (tmp_path / "fleet").exists()
     assert "GetPassWarning" not in result.stderr and PASSWORD.decode() not in result.stderr
+
+
+# ---- transfer ticket (docs/07 §8): Python-issued, verified and executed by the SDK in simulation ----
+
+DOMAIN_B = bytes.fromhex("34" * 16)
+DOMAIN_C = bytes.fromhex("56" * 16)
+
+
+@pytest.fixture
+def move(fleet):
+    """Domain B: its root key, the root's DeviceCredential and its RootDelegation."""
+    issuer = fleet[2]
+    root_b = ec.generate_private_key(ec.SECP256R1())
+    return (root_b, issuer.device(root_b.public_key(), "root-b", 1),
+            issuer.root(root_b.public_key(), DOMAIN_B, 1, 15))
+
+
+def issue_move(issuer, dc, domain_a, delegation_b, nonce):
+    """The ticket and ExpectedSet for A -> B, plus the two tickets the device must refuse."""
+    device = issuer._device(dc)[0]
+    files = issuer.transfer(dc, domain_a, delegation_b, 1, 2, nonce=nonce, expected_revision=1)
+    if nonce is None:  # a ticket from another source domain than the device's
+        foreign = issuer.transfer(dc, DOMAIN_C, delegation_b, 1, 2, nonce=None)
+    else:  # the right transfer under a nonce this device never issued
+        foreign = issuer.transfer(dc, domain_a, delegation_b, 1, 2, nonce=os.urandom(16))
+    stale = issuer.transfer(dc, domain_a, delegation_b, 5, 6, nonce=nonce)  # not the device's assignment (1)
+    return {"transfer.cose": files[f"ticket-{device.hex()}.cose"], "expected-b.cose": files["expected-00.cose"],
+            "foreign.cose": foreign[f"ticket-{device.hex()}.cose"],
+            "stale.cose": stale[f"ticket-{device.hex()}.cose"]}
+
+
+def run_transfer(tmp_path, fleet, objects, move, *, nonce_mode, issue=None, tamper=None):
+    """The sim run: leaf joins A, A is powered off, the ticket moves it to B. -> (returncode, stdout, stderr)."""
+    issuer = fleet[2]
+    _, _, dc, delegation, _ = objects
+    root_b, rootb_cose, delegation_b = move
+    folder = prepare(tmp_path, fleet, objects)
+    domain_a = issuer.open(delegation, 2, 448)[0]
+
+    def put(files):
+        for name, value in files.items():
+            path = folder / name
+            path.write_bytes(tamper[name](value) if tamper and name in tamper else value)
+            path.chmod(0o600)
+
+    put({"rootb.cose": rootb_cose, "delegation-b.cose": delegation_b,
+         "rootb.scalar": root_b.private_numbers().private_value.to_bytes(32, "big")})
+    issue = issue or (lambda nonce: issue_move(issuer, dc, domain_a, delegation_b, nonce))
+    binary = native_binary()
+    if not nonce_mode:
+        put(issue(None))
+        done = subprocess.run([str(binary), "transfer", str(folder)], capture_output=True, text=True, timeout=300)
+        return done.returncode, done.stdout, done.stderr
+    proc = subprocess.Popen([str(binary), "transfer-nonce", str(folder)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        first = proc.stdout.readline()
+        if not first.startswith("NONCE "):  # the run ended before it could ask
+            out, err = proc.communicate(timeout=60)
+            return proc.returncode, first + out, err
+        put(issue(bytes.fromhex(first.split()[1])))  # issued for the nonce the device just exported
+        proc.stdin.write("GO\n")
+        proc.stdin.flush()
+        out, err = proc.communicate(timeout=300)
+        return proc.returncode, first + out, err
+    finally:
+        proc.kill()
+
+
+@pytest.mark.parametrize("nonce_mode", [False, True], ids=["mode1-grant", "mode0-nonce"])
+def test_sdk_moves_a_device_a_to_b_with_python_issued_ticket(tmp_path, fleet, objects, move, nonce_mode):
+    # The driver checks: ACTIVE in A -> A powered off -> stale/foreign/initial tickets refused at the device ->
+    # ACTIVE in B at generation 2 (never in both) -> the ticket again refused -> A reconciles from the same
+    # ticket and has no session with the device.
+    code, out, err = run_transfer(tmp_path, fleet, objects, move, nonce_mode=nonce_mode)
+    assert code == 0 and out.strip().splitlines()[-1] == "OK", out + err
+
+
+@pytest.mark.parametrize("case", ["ticket-signature", "page-signature", "page-for-another-ticket"])
+def test_sdk_refuses_transfer_objects_that_do_not_verify_or_grant(tmp_path, fleet, objects, move, case):
+    issuer = fleet[2]
+    _, _, dc, delegation, _ = objects
+    domain_a = issuer.open(delegation, 2, 448)[0]
+
+    def flip(raw):
+        return raw[:-1] + bytes([raw[-1] ^ 1])
+
+    issue, tamper = None, None
+    if case == "ticket-signature":
+        tamper = {"transfer.cose": flip}
+    elif case == "page-signature":
+        tamper = {"expected-b.cose": flip}
+    else:  # a page granting an earlier issue of the same transfer: its grant hash is not this ticket's
+        other = issue_move(issuer, dc, domain_a, move[2], None)
+
+        def issue(nonce):
+            return {**issue_move(issuer, dc, domain_a, move[2], nonce), "expected-b.cose": other["expected-b.cose"]}
+    code, out, err = run_transfer(tmp_path, fleet, objects, move, nonce_mode=False, issue=issue, tamper=tamper)
+    assert code == 1 and "AUTH_REJECTED" in out and "OK" not in out.split(), out + err
+
+
+def cli_key(tmp_path, args, name, command, extra, key=None):
+    """Issues one object with the CLI for `key` (a new P-256 key by default); -> (key, cose path)."""
+    key = key or ec.generate_private_key(ec.SECP256R1())
+    pem = tmp_path / f"{name}.pem"
+    pem.write_bytes(key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    out = tmp_path / f"{name}.cose"
+    result = cli(command, *args, "--public-key", pem, "--generation", 1, "--output", out, *extra)
+    assert result.returncode == 0, result.stderr
+    return key, out
+
+
+def cli_store(tmp_path):
+    password = tmp_path / "passphrase"
+    keys.write_new(password, PASSWORD + b"\n")
+    args = ["--store", tmp_path / "fleet", "--environment", "test", "--password-file", password]
+    assert cli("init", *args).returncode == 0
+    return args
+
+
+def test_cli_transfer_issues_a_complete_batch_the_sdk_executes(tmp_path):
+    args = cli_store(tmp_path)
+    leaf, dc = cli_key(tmp_path, args, "leaf", "device", ["--serial", "leaf-01"])
+    root_a, rd_a = cli_key(tmp_path, args, "delegation-a", "root", ["--domain", "12" * 16, "--permissions", "15"])
+    root_b, rd_b = cli_key(tmp_path, args, "delegation-b", "root", ["--domain", DOMAIN_B.hex(), "--permissions", "15"])
+    _, root_b_dc = cli_key(tmp_path, args, "root-b", "device", ["--serial", "root-b"], key=root_b)
+    admission = tmp_path / "admission"
+    assert cli("admit", *args, "--device-credential", dc, "--root-delegation", rd_a, "--assignment", 1,
+               "--expected-revision", 1, "--output-dir", admission).returncode == 0
+    meta, key = keys.load(tmp_path / "fleet", "test", PASSWORD)
+    saved = Issuer(bytes.fromhex(meta["fleet_id"]), key)
+    device = keys.key_id(leaf.public_key())
+    names = json.loads((admission / "manifest.json").read_bytes())["files"]
+    objects = (root_a, leaf, dc.read_bytes(), rd_a.read_bytes(), {n: (admission / n).read_bytes() for n in names})
+
+    out = tmp_path / "transfer"
+    transfer = ["transfer", *args, "--device-credential", dc, "--source-domain", "12" * 16,
+                "--root-delegation", rd_b, "--expected-old", 1, "--new-generation", 2,
+                "--expected-revision", 1, "--output-dir", out, "--grant"]
+    result = cli(*transfer)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"output_dir": str(out), "objects": 2, "target_domain": DOMAIN_B.hex(),
+                                         "mode": 1}
+    manifest = json.loads((out / "manifest.json").read_bytes())
+    assert (manifest["kind"], manifest["source_domain"], manifest["target_domain"], manifest["mode"]) == (
+        "transfer", "12" * 16, DOMAIN_B.hex(), 1)
+    assert (manifest["expected_old"], manifest["new_generation"], manifest["environment"]) == (1, 2, "test")
+    assert set(manifest["files"]) == {f"ticket-{device.hex()}.cose", "expected-00.cose"}
+    assert stat.S_IMODE(out.stat().st_mode) == 0o700
+    for name, digest in manifest["files"].items():
+        assert sha256((out / name).read_bytes()).hexdigest() == digest
+        assert stat.S_IMODE((out / name).stat().st_mode) == 0o600
+    # A finished batch is never replaced.
+    before = {p.name: p.read_bytes() for p in out.iterdir()}
+    assert cli(*transfer).returncode == 1
+    assert {p.name: p.read_bytes() for p in out.iterdir()} == before
+
+    # The CLI's own output is what the SDK verifies and executes.
+    def from_cli(nonce):
+        return {**issue_move(saved, dc.read_bytes(), bytes.fromhex("12" * 16), rd_b.read_bytes(), nonce),
+                "transfer.cose": (out / f"ticket-{device.hex()}.cose").read_bytes(),
+                "expected-b.cose": (out / "expected-00.cose").read_bytes()}
+
+    move_b = (root_b, root_b_dc.read_bytes(), rd_b.read_bytes())
+    code, stdout, stderr = run_transfer(tmp_path, (None, meta, saved), objects, move_b, nonce_mode=False,
+                                        issue=from_cli)
+    assert code == 0 and stdout.strip() == "OK", stdout + stderr
+
+
+@pytest.mark.parametrize("bad", [
+    {"--source-domain": DOMAIN_B.hex()},                    # source == target
+    {"--source-domain": "00" * 16},                         # zero source
+    {"--source-domain": "12" * 15},                         # short source
+    {"--nonce": "00" * 15},                                 # short nonce
+    {"--nonce": "zz" * 16},                                 # not hex
+    {"--expected-old": "2"},                                # new generation not above the old one
+    {"--expected-old": "0"},                                # not a transfer
+    {"--new-generation": str(U63 + 1)},
+])
+def test_cli_transfer_refuses_bad_input_and_leaves_no_directory(tmp_path, bad):
+    args = cli_store(tmp_path)
+    _, dc = cli_key(tmp_path, args, "leaf", "device", ["--serial", "leaf-01"])
+    _, rd = cli_key(tmp_path, args, "delegation-b", "root", ["--domain", DOMAIN_B.hex(), "--permissions", "15"])
+    out = tmp_path / "out"
+    options = {"--source-domain": "12" * 16, "--expected-old": "1", "--new-generation": "2", "--nonce": "0f" * 16}
+    options.update(bad)
+    result = cli("transfer", *args, "--device-credential", dc, "--root-delegation", rd, "--output-dir", out,
+                 *[x for pair in options.items() for x in pair])
+    assert result.returncode == 1 and not out.exists()
+    assert "Traceback" not in result.stderr and PASSWORD.decode() not in result.stderr
+
+
+def test_cli_transfer_requires_exactly_one_mode(tmp_path):
+    args = cli_store(tmp_path)
+    _, dc = cli_key(tmp_path, args, "leaf", "device", ["--serial", "leaf-01"])
+    _, rd = cli_key(tmp_path, args, "delegation-b", "root", ["--domain", DOMAIN_B.hex(), "--permissions", "15"])
+    command = ["transfer", *args, "--device-credential", dc, "--source-domain", "12" * 16, "--root-delegation", rd,
+               "--expected-old", 1, "--new-generation", 2]
+    for index, mode in enumerate(([], ["--grant", "--nonce", "00" * 16])):
+        out = tmp_path / f"out{index}"
+        result = cli(*command, "--output-dir", out, *mode)
+        assert result.returncode == 2 and not out.exists()  # a usage error: there is no hidden default mode
+    out = tmp_path / "ok"
+    result = cli(*command, "--output-dir", out, "--nonce", "0f" * 16)  # no --expected-revision: the ticket only
+    assert result.returncode == 0 and json.loads(result.stdout)["mode"] == 0
+    assert sorted(p.name for p in out.iterdir()) == sorted(
+        [*json.loads((out / "manifest.json").read_bytes())["files"], "manifest.json"])
+    assert not (out / "expected-00.cose").exists()

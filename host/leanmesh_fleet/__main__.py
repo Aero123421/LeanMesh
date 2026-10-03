@@ -27,9 +27,9 @@ def bounded_read(path: Path, limit: int) -> bytes:
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Offline LM1 fleet issuer: initial Join objects")
+    p = argparse.ArgumentParser(description="Offline LM1 fleet issuer: initial Join and transfer objects")
     sub = p.add_subparsers(dest="command", required=True)
-    for command in ("init", "device", "root", "admit"):
+    for command in ("init", "device", "root", "admit", "transfer"):
         q = sub.add_parser(command)
         q.add_argument("--store", type=Path, required=True)
         q.add_argument("--environment", choices=("production", "test"), required=True)
@@ -49,7 +49,31 @@ def parser() -> argparse.ArgumentParser:
             q.add_argument("--assignment", type=int, required=True)
             q.add_argument("--expected-revision", type=int, required=True)
             q.add_argument("--output-dir", type=Path, required=True)
+        if command == "transfer":
+            q.add_argument("--device-credential", type=Path, required=True)
+            q.add_argument("--source-domain", required=True, help="nonzero 16-byte hex: the domain it is in now")
+            q.add_argument("--root-delegation", type=Path, required=True, help="the TARGET root's delegation")
+            q.add_argument("--expected-old", type=int, required=True, help="its current assignment generation")
+            q.add_argument("--new-generation", type=int, required=True)
+            mode = q.add_mutually_exclusive_group(required=True)
+            mode.add_argument("--nonce", help="mode 0: the device's 16-byte transfer nonce (hex)")
+            mode.add_argument("--grant", action="store_true", help="mode 1: a fresh one-time grant")
+            q.add_argument("--expected-revision", type=int, help="also issue the target's ExpectedSet page")
+            q.add_argument("--output-dir", type=Path, required=True)
     return p
+
+
+def write_batch(directory: Path, files: dict[str, bytes], meta: dict, fields: dict) -> None:
+    directory.mkdir(mode=0o700)  # never overwrite or reuse a previous batch
+    with keys.private_directory(directory) as fd:
+        for name, data in files.items():
+            keys.write_new(name, data, directory=fd)
+        manifest = {"format": 1, "environment": meta["environment"], "fleet_id": meta["fleet_id"],
+                    "key_id": meta["key_id"], **fields,
+                    "files": {n: sha256(data).hexdigest() for n, data in files.items()}}
+        # Last write: only a directory with this marker is a complete batch.
+        keys.write_new("manifest.json", (json.dumps(manifest, indent=2) + "\n").encode(), directory=fd)
+        os.fsync(fd)
 
 
 def run(a: argparse.Namespace) -> None:
@@ -82,21 +106,27 @@ def run(a: argparse.Namespace) -> None:
         keys.write_new(a.output, cose)
         print(json.dumps({"output": str(a.output), "sha256": sha256(cose).hexdigest()}))
         return
+    if a.command == "transfer":
+        delegation = bounded_read(a.root_delegation, 448)
+        source = bytes.fromhex(a.source_domain)
+        files = issuer.transfer(bounded_read(a.device_credential, 448), source, delegation,
+                                a.expected_old, a.new_generation,
+                                nonce=bytes.fromhex(a.nonce) if a.nonce is not None else None,
+                                expected_revision=a.expected_revision)
+        target = issuer.open(delegation, 2, 448)[0]
+        write_batch(a.output_dir, files, meta,
+                    {"kind": "transfer", "source_domain": source.hex(), "target_domain": target.hex(),
+                     "expected_old": a.expected_old, "new_generation": a.new_generation,
+                     "mode": 1 if a.nonce is None else 0, "expected_revision": a.expected_revision})
+        print(json.dumps({"output_dir": str(a.output_dir), "objects": len(files),
+                          "target_domain": target.hex(), "mode": 1 if a.nonce is None else 0}))
+        return
     if len(a.device_credential) > 64:
         raise ValueError("admission batch must contain 1..64 devices")
     files = issuer.admission([bounded_read(p, 448) for p in a.device_credential],
                              bounded_read(a.root_delegation, 448), a.assignment, a.expected_revision)
-    a.output_dir.mkdir(mode=0o700)  # never overwrite or reuse a previous batch
-    with keys.private_directory(a.output_dir) as fd:
-        for name, data in files.items():
-            keys.write_new(name, data, directory=fd)
-        manifest = {"format": 1, "environment": meta["environment"], "fleet_id": meta["fleet_id"],
-                    "key_id": meta["key_id"], "assignment": a.assignment,
-                    "expected_revision": a.expected_revision,
-                    "files": {n: sha256(data).hexdigest() for n, data in files.items()}}
-        # Last write: only a directory with this marker is a complete batch.
-        keys.write_new("manifest.json", (json.dumps(manifest, indent=2) + "\n").encode(), directory=fd)
-        os.fsync(fd)
+    write_batch(a.output_dir, files, meta,
+                {"assignment": a.assignment, "expected_revision": a.expected_revision})
     print(json.dumps({"output_dir": str(a.output_dir), "objects": len(files)}))
 
 

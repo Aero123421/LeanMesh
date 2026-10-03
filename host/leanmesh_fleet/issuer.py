@@ -94,6 +94,16 @@ class Issuer:
             raise ValueError("DeviceCredential semantic binding mismatch")
         return dc
 
+    def _delegation(self, cose: bytes) -> tuple[bytes, list]:
+        """A target RootDelegation of this fleet that grants approve: (domain, decoded fields)."""
+        domain, generation, root = self.open(cose, 2, 448)
+        public = public_from_cose(root[2])
+        if (domain == ZERO_DOMAIN or root[0] != self.fleet or root[1] != key_id(public)
+                or root[3] != domain or root[4] != generation or not root[5] & 1
+                or root[5] & ~15):
+            raise ValueError("RootDelegation semantic binding/approve permission mismatch")
+        return domain, root
+
     def admission(self, devices: list[bytes], delegation: bytes, assignment: int,
                   revision: int) -> dict[str, bytes]:
         """One immutable initial-assignment batch; mode1 grants, <=64 devices, <=8 per page."""
@@ -101,12 +111,7 @@ class Issuer:
         positive(revision)
         if not 1 <= len(devices) <= 64:
             raise ValueError("admission batch must contain 1..64 devices")
-        domain, generation, root = self.open(delegation, 2, 448)
-        public = public_from_cose(root[2])
-        if (domain == ZERO_DOMAIN or root[0] != self.fleet or root[1] != key_id(public)
-                or root[3] != domain or root[4] != generation or not root[5] & 1
-                or root[5] & ~15):
-            raise ValueError("RootDelegation semantic binding/approve permission mismatch")
+        domain, root = self._delegation(delegation)
         checked = sorted((self._device(cose)[0], cose) for cose in devices)
         ids = [device for device, _ in checked]
         if len(set(ids)) != len(ids) or root[1] in ids:
@@ -125,4 +130,48 @@ class Issuer:
             files[f"expected-{page:02d}.cose"] = self._sign(
                 5, domain, revision, [page, pages, digest, entries[page * 8:(page + 1) * 8]], 1024
             )
+        return files
+
+    def transfer(self, device_credential: bytes, source: bytes, delegation: bytes, expected_old: int,
+                 new_generation: int, *, nonce: bytes | None, expected_revision: int | None = None
+                 ) -> dict[str, bytes]:
+        """A transfer (docs/07 §8): one AssignmentTicket moving an ACTIVE member of `source` to the domain
+        of `delegation` (the TARGET root's RootDelegation), and optionally the target's ExpectedSet page.
+
+        nonce: the device's 16-byte lm_transfer_nonce_get value -> mode 0 (bound to that nonce; the device
+        must not restart in between). None -> mode 1: a fresh one-time grant. The SDK keeps no grant registry at
+        the device: a mode-1 ticket is spent by generation (the device's and the root's floors, SEC-D4/D8) and,
+        under PREAPPROVED, by the target root's ExpectedSet entry (grant hash = SHA-256 of this ticket). The device
+        only accepts a ticket whose source and expected_old are its CURRENT domain and assignment.
+        expected_revision: also issue the ExpectedSet page (revision above the target root's current one).
+        Field order: tools/lmfleet/fleet.cpp Fleet::ticket and member::decode_assignment_ticket.
+        """
+        if type(source) is not bytes or len(source) != 16 or not any(source):
+            raise ValueError("source domain must be nonzero16")
+        if nonce is not None and (type(nonce) is not bytes or len(nonce) != 16):
+            raise ValueError("transfer nonce must be 16 bytes")
+        positive(expected_old)
+        positive(new_generation)
+        if new_generation <= expected_old:
+            raise ValueError("new generation must be above the expected old assignment generation")
+        if expected_revision is not None:
+            positive(expected_revision)
+        device = self._device(device_credential)[0]
+        target, root = self._delegation(delegation)
+        if source == target:
+            raise ValueError("source and target domain are the same")
+        if device == root[1]:
+            raise ValueError("a root device cannot be transferred into its own domain")
+        ticket = self._sign(3, target, new_generation,
+                            [device, self.fleet, source, target, sha256(delegation).digest(),
+                             expected_old, new_generation, secrets.token_bytes(16),
+                             1 if nonce is None else 0,
+                             secrets.token_bytes(16) if nonce is None else nonce,
+                             sha256(device_credential).digest()], 1024)
+        files = {f"ticket-{device.hex()}.cose": ticket}
+        if expected_revision is not None:
+            entries = [[device, new_generation, sha256(ticket).digest(), True]]
+            digest = sha256(cbor_encode([target, expected_revision, entries])).digest()
+            files["expected-00.cose"] = self._sign(5, target, expected_revision,
+                                                   [0, 1, digest, entries], 1024)
         return files
