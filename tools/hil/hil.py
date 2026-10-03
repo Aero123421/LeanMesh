@@ -9,7 +9,8 @@ Run with the Host venv:  PYTHONPATH=host ~/.cache/leanmesh/host-venv/bin/python 
                                          a REPLACEMENT root of a failed one (issue #5): delegation generation + 1, credential
                                          one term below N, no ledger (RECOVERY_REQUIRED until restored)
   provision leaf --port P [--name N] [--net netB]
-                                         same for a leaf: DeviceCredential + initial ticket (+ ExpectedSet page)
+                                         same for a leaf: DeviceCredential + initial ticket (+ ExpectedSet page);
+                                         `relay` and `display` (firmware/field_node) are provisioned the same way
   handover --term N                      the fleet's RootHandover old root -> replacement root (after `provision root --replacement`)
   backup                                 the Host's newest ledger backup (GET /v1/ledger/backup): sequence, records, root
   restore [--sequence S]                 LEDGER_RESTORE of that backup onto the replacement root through the Host
@@ -695,7 +696,7 @@ def main() -> int:
     q = sub.add_parser("init")
     q.add_argument("--name", help="a further network of the same fleet (default: the bench's first network)")
     q = sub.add_parser("provision")
-    q.add_argument("role", choices=("root", "leaf", "relay"))  # a relay board is provisioned like a leaf
+    q.add_argument("role", choices=("root", "leaf", "relay", "display"))  # a relay or display board is provisioned like a leaf
     q.add_argument("--port", required=True)
     q.add_argument("--name")
     net_option(q)

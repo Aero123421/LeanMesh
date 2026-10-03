@@ -1,0 +1,8 @@
+# The 64x32 HUB75 panel library of the display build (CONFIG_FIELD_HUB75 only; nothing is fetched for the other builds).
+# MIT, pinned to the commit of tag 3.0.14 (a tag can move, a commit cannot). Recorded in THIRD-PARTY-LICENSES.md section 1b and LICENSE-AND-SOURCES.md.
+dependencies:
+  esp32-hub75-matrixpanel-dma:
+    git: https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA.git
+    version: "f17fb7fe9d487e9643f919eb5aeedea8d9d1f8d7"  # tag 3.0.14
+    rules:
+      - if: "$CONFIG{FIELD_HUB75} == True"

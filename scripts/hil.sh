@@ -30,7 +30,8 @@ case "$action" in
     printf 'CONFIG_LEANMESH_PROFILE_%s=y\n' "$profile" > "$extra"
     defaults="$proj/sdkconfig.defaults;$proj/sdkconfig.$overlay;$extra"
     # A board overlay of the target (e.g. the XIAO ESP32C6 RF switch), when the bench has one.
-    [ ! -f "$proj/sdkconfig.board.$target" ] || defaults="$defaults;$proj/sdkconfig.board.$target"
+    # (firmware/common/: shared with firmware/field_node)
+    [ ! -f "$repo/firmware/common/sdkconfig.board.$target" ] || defaults="$defaults;$repo/firmware/common/sdkconfig.board.$target"
     if [ ! -f "$b/sdkconfig" ]; then
       (cd "$proj" && idf.py -B "$b" -DSDKCONFIG="$b/sdkconfig" -DSDKCONFIG_DEFAULTS="$defaults" set-target "$target")
     fi
