@@ -426,4 +426,25 @@ LM_TEST("FIX6 sim: a forwarded frame of the old term held at a relay that learns
 }
 
 
+LM_TEST("HIL-F9 sim: after a root restart the members are back in its new tree within 60 s, not after three silent probes") {
+    // Bench 2026-10-03: a leaf followed a restarted root after 138 s (three unanswered probes of the dead session).
+    // A parent's beacon with a newer term now starts the re-attach: the root's child at once (its link session died),
+    // a relay's child once the relay advertises the new term (its end session with the root died).
+    TNet n(3); // root - relay 1 - relay 2 (a chain: node 2 reaches the root through node 1)
+    n.boot_all();
+    LM_CHECK(n.until([&] { return n.formed(); }, 180'000));
+    n.run_ms(60'000);
+    n.cut(0);
+    n.run_ms(2000);
+    n.boot(0);
+    const uint64_t t0 = n.world.now_us();
+    LM_CHECK(n.until([&] { return n.formed(); }, 300'000));
+    const uint64_t took_ms = (n.world.now_us() - t0) / 1000;
+    std::printf("  HIL-F9-sim: members back in the new tree %llu ms after the root booted (hints: %llu, %llu)\n",
+                (unsigned long long)took_ms, (unsigned long long)n.eng(1).mesh().stats().term_hints,
+                (unsigned long long)n.eng(2).mesh().stats().term_hints);
+    LM_CHECK(took_ms < 60'000);
+    LM_CHECK(n.eng(1).mesh().stats().term_hints >= 1u);
+}
+
 LM_TEST_MAIN()

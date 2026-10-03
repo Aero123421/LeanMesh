@@ -15,6 +15,7 @@ constexpr Duration k_link_wait = Duration::from_s(6);      // a link handshake t
 constexpr Duration k_session_wait = Duration::from_s(30);  // registry session_binding.timeout_ms
 constexpr Duration k_busy_retry = Duration::from_ms(20);   // radio/TX pool busy: local, not a failure
 constexpr Duration k_slot_retry = Duration::from_ms(250);
+constexpr Duration k_term_hint_gap = Duration::from_s(30); // HIL-F9: an unauthenticated newer-term hint, at most this often
 constexpr Duration k_lease_margin = Duration::from_s(2);
 constexpr Duration k_hello_max = Duration::from_ms(gen::defaults::routing::hello_max_ms);
 constexpr Duration k_silence = Duration::from_ms(gen::defaults::routing::hello_max_ms *
@@ -511,6 +512,23 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
     c->n = b.n;
     std::copy(b.path.begin(), b.path.begin() + b.n, c->path.begin());
     c->heard = now;
+    // HIL-F9: our parent advertises a newer root term: the root restarted, and its RAM - our end session with it, and
+    // the link session too when the parent is the root - went with it. docs/04 §7 allows trying a newer term at once
+    // (the beacon's term is a hint; the root's authenticated LEASE is what moves this node's term). Without this the
+    // node noticed only after three unanswered probes (138 s on the bench). Unauthenticated, so rate-limited.
+    if (state_ == State::Ready && !fresh && index_of(c) == parent_ && b.term > term().value() && now >= term_hint_at_) {
+        term_hint_at_ = now + k_term_hint_gap;
+        ++stats_.term_hints;
+        if (delivery::EndSession *es = engine_.delivery().sessions().find_peer(root_id())) {
+            es->suspect = true; // the next registration sets up a fresh end session
+        }
+        if (c->n == 1) {
+            parent_session_lost(src, now); // the parent is the root: its link session is gone as well
+        } else {
+            lose_path(now); // a relay kept its link session: register again through it
+        }
+        return;
+    }
     if (fresh && (state_ == State::Search || state_ == State::Listen)) {
         // A candidate that is ready: no reason to wait for the end of the listen. A beacon is unauthenticated: it may
         // end a backoff only through the rate-limited hint bucket, never reset it (review finding 1).

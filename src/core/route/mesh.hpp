@@ -115,6 +115,7 @@ class Mesh {
         uint64_t beacons_tx = 0, beacons_rx = 0, probes_tx = 0, probes_rx = 0;
         uint64_t registers = 0, leases = 0, readies = 0, queries = 0, answers = 0;
         uint64_t suspects = 0, attach_failed = 0, tx_busy = 0;
+        uint64_t term_hints = 0; // HIL-F9: re-attaches started by a parent's newer root term
         uint64_t last_repair_ms = 0; // suspect -> path approved again
     };
     [[nodiscard]] State state() const { return state_; }
@@ -297,6 +298,7 @@ class Mesh {
     MonoTime attempt_at_ = MonoTime::never(); // Search: look at the candidates then
     MonoTime probe_retry_at_ = MonoTime::never();
     MonoTime beacon_at_ = MonoTime::never();  // a beacon is due (answer to a solicit, change, or TX busy)
+    MonoTime term_hint_at_{};                  // HIL-F9: the next newer-term hint may act from then
     bool beacon_solicit_ = false;
     MonoTime trickle_at_ = MonoTime::never();
     Duration trickle_i_ = Duration::from_ms(gen::defaults::routing::hello_min_ms);
