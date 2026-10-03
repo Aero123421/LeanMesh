@@ -433,7 +433,7 @@ static void run_command(char *line) {
     } else if (strcmp(cmd, "power") == 0) {
         cmd_power(save);
     } else if (strcmp(cmd, "debug") == 0) {
-        static char dbg[768];
+        static char dbg[1024];
         lm_status_t st = lmb_debug(s_ctx, dbg, sizeof dbg);
         if (st == LM_STATUS_OK) {
             out("OK ");

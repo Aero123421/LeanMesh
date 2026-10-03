@@ -16,6 +16,8 @@
 #include "core/member/credentials.hpp"
 #include "core/member/records.hpp"
 #include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "leanmesh_bench.h"
 #include "nvs.h"
 #include "port/idf/idf_store.hpp"
@@ -410,6 +412,18 @@ lm_status_t lmb_debug(lm_context_t *ctx, char *out, size_t cap) {
                                nb.lease_uncertain ? "U" : "");
         }
     });
+    // Stack high-water marks per SDK task (bytes never used since boot); the public diagnostics report only the least.
+    if (n > 0 && static_cast<size_t>(n) < cap) {
+        n += std::snprintf(out + n, cap - static_cast<size_t>(n), "| stack_free");
+        for (const char *name : {"lm_owner", "lm_worker", "lm_usb", "main"}) {
+            const TaskHandle_t t = xTaskGetHandle(name);
+            if (t != nullptr && n > 0 && static_cast<size_t>(n) < cap) {
+                n += std::snprintf(out + n, cap - static_cast<size_t>(n), " %s=%u", name,
+                                   static_cast<unsigned>(uxTaskGetStackHighWaterMark(t)));
+            }
+        }
+        n += std::snprintf(out + n, cap - static_cast<size_t>(n), " ");
+    }
     if (n > 0 && static_cast<size_t>(n) < cap) {
         n += std::snprintf(out + n, cap - static_cast<size_t>(n), "| cand=");
     }
