@@ -18,7 +18,7 @@ from typing import Any
 import httpx2 as httpx
 import pytest
 import uvicorn
-from fieldview_fake import DOMAIN, ROOT, TOKEN, FakeHost
+from fieldview_fake import DOMAIN, ROOT, TOKEN, FakeHost, hex_id
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
@@ -595,3 +595,113 @@ def test_a_page_with_a_final_operation_is_not_acknowledged_before_its_result_is_
     asyncio.run(scenario())
     rec = lines(next(tmp_path.glob("rec*/ping.ndjson")))
     assert [x for x in rec if x.get("event") == "posted"] and any(x.get("result") == "noanswer" for x in rec)
+
+
+# ---- client epochs rotate so the Host can prune (review finding 2) ------------------------------------------------------
+
+def test_epochs_rotate_and_the_old_one_is_closed_when_its_operations_are_final(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "EPOCH_ROTATE_OPS", 3)
+    monkeypatch.setattr(engine_mod, "EPOCH_CLOSE_MARGIN_S", 0.1)
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "apply", "rtt": 1.0}                  # operations stay open for a second
+    e1, e2 = hex_id(0xE1), hex_id(0xE2)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            for _ in range(3):
+                await fv.ping_round(3.0)
+            assert fake.epochs == 1 and fv.epoch == e1
+            rnd = await fv.ping_round(3.0)                               # the epoch has served 3 requests: a new one
+            assert fake.epochs == 2 and fv.epoch == e2
+            await asyncio.sleep(0.4)
+            assert fake.epoch_state[e1] == "OPEN"                         # its operations are still in flight
+            await until(lambda: rnd["open"] == 0 and fake.epoch_state[e1] == "CLOSED", "the old epoch is closed", 8)
+            assert fake.epoch_state[e2] == "OPEN"
+
+    asyncio.run(scenario())
+    assert [p["client_epoch"] for p in fake.posts] == [e1, e1, e1, e2]
+    assert set(fake.epoch_state.values()) == {"CLOSED"}                   # a graceful stop closes the last one too
+
+
+def test_a_long_ping_loop_never_holds_more_than_a_few_epochs_open(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "EPOCH_ROTATE_OPS", 1)
+    monkeypatch.setattr(engine_mod, "EPOCH_CLOSE_MARGIN_S", 0.05)
+    fake.add_node(A, parent_device_id=ROOT)
+    most = 0
+
+    async def scenario() -> None:
+        nonlocal most
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            for _ in range(15):
+                rnd = await fv.ping_round(3.0)
+                await until(lambda: rnd["open"] == 0, "the round ends", 5)
+                await asyncio.sleep(0.15)
+                most = max(most, sum(1 for v in fake.epoch_state.values() if v == "OPEN"))
+            assert fake.epochs == 15 and most <= 3
+            assert len(fv._tracked) <= 3 and len(fv._retiring) <= 2
+
+    asyncio.run(scenario())
+    assert most < 15 and set(fake.epoch_state.values()) == {"CLOSED"}
+
+
+def test_epochs_a_crashed_run_left_open_are_closed_at_the_next_start(fake: FakeHost, tmp_path: Path) -> None:
+    left = [hex_id(0xAA), hex_id(0xAB)]
+    for e in left:
+        fake.epoch_state[e] = "OPEN"                                      # opened by the run that crashed
+    state = tmp_path / f"epochs-fieldview-{DOMAIN[:8]}.json"
+    state.write_text(json.dumps({"domain": DOMAIN, "consumer": "fieldview",
+                                 "epochs": [*left, hex_id(0xFF)]}))      # 0xFF: the Host forgot it
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: all(fake.epoch_state[e] == "CLOSED" for e in left), "stale epochs closed")
+            await until(lambda: not fv._tracked, "the state file is empty")
+            epoch = await fv.ensure_epoch()                               # this run's own epoch is on file before use
+            assert json.loads(state.read_text())["epochs"] == [epoch]
+
+    asyncio.run(scenario())
+    assert json.loads(state.read_text())["epochs"] == []
+    assert any("left open by an earlier run" in e["text"] for e in lines(next(tmp_path.glob("rec*/events.ndjson"))))
+
+
+def test_a_lost_answer_to_the_epoch_open_is_replayed_and_gives_the_same_epoch(fake: FakeHost, tmp_path: Path) -> None:
+    fake.epoch_fault = 1
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, post_timeout=0.3) as fv:
+            assert await fv.ensure_epoch() == hex_id(0xE1)
+            assert fake.epochs == 1                                       # not a second epoch left open
+
+    asyncio.run(scenario())
+
+
+def test_a_replayed_request_keeps_its_epoch_and_holds_it_open_across_a_rotation(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "EPOCH_ROTATE_OPS", 1)
+    monkeypatch.setattr(engine_mod, "EPOCH_CLOSE_MARGIN_S", 0.05)
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.add_node(C, parent_device_id=ROOT)
+    fake.fault = {"mode": "after", "count": 1, "delay": 1.5}              # the first answer is lost; its replay is due soon
+    e1, e2 = hex_id(0xE1), hex_id(0xE2)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, post_timeout=0.3) as fv:
+            await until(lambda: len(fv.active_nodes()) == 2, "nodes")
+            first = asyncio.ensure_future(fv.ping_round(3.0))             # A and C: one of them meets the fault
+            await asyncio.sleep(0.15)
+            second = await fv.ping_round(3.0)                             # rotates to a new epoch meanwhile
+            assert fv.epoch == e2
+            await asyncio.sleep(0.2)
+            assert fake.epoch_state[e1] == "OPEN"                         # the retry of a request of e1 is still due
+            rnd = await first
+            await until(lambda: rnd["open"] == 0 and second["open"] == 0, "both rounds end", 10)
+            assert (rnd["alive"], rnd["unknown"], rnd["notsent"]) == (2, 0, 0)
+            await until(lambda: fake.epoch_state[e1] == "CLOSED", "e1 is closed after its operations ended")
+
+    asyncio.run(scenario())
+    assert fake.replays >= 1
+    assert {op["epoch"] for op in fake.ops.values()} <= {e1, e2} and fake.posts[0]["client_epoch"] == e1

@@ -11,6 +11,11 @@ How it reads the Host (api/SEMANTICS.md, 'Cursor/consumer'):
     the engine writes an explicit gap record first, and while it cannot write, nothing is acknowledged (the Host keeps
     the events and a restart reads them again);
   * a CURSOR_GAP (410) or an EVENT_GAP event is shown and logged, never skipped quietly: the telemetry baseline restarts;
+  * client epochs rotate: the Host prunes the finished operations of an epoch only after it is CLOSED, so one epoch for a
+    whole session would let the Host's database grow with every ping. A new epoch is opened every EPOCH_ROTATE_S / every
+    EPOCH_ROTATE_OPS requests; the old one serves only what is already in flight (a retry of a request keeps the epoch it
+    was sent under) and is closed when that is final. The ids of the epochs this tool holds are kept in a small state
+    file, so epochs a crashed run left open are closed at the next start (the Host allows 64 open per principal);
   * operation progress comes from OPERATION_UPDATE events: GET /v1/operations/{id} is called only for an operation whose
     event says it ended (a display command: at every change), plus a slow safety poll after its deadline."""
 
@@ -19,8 +24,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -37,6 +43,10 @@ ACK_EVERY_S = 2.0
 RECORD_SYNC_S = 5.0           # how long the engine waits for the recorder's fsync barrier
 SEGMENTS_MAX = 64             # unacknowledged pages kept apart (more are merged: the ack gets coarser, never wrong)
 HOLD_MAX_S = 20.0             # an ack waits at most this long for the operations of a page to be read
+EPOCH_ROTATE_S = 1800.0       # a client epoch serves new requests for this long ...
+EPOCH_ROTATE_OPS = 5000       # ... or this many requests (the Host keeps 7 days of closed epochs: ~48..300 a day)
+EPOCH_CLOSE_MARGIN_S = 2.0    # a retired epoch is closed when its requests are final, at the earliest this much later
+EPOCH_CLOSE_RETRY_S = 10.0
 EVENT_PAUSE_S = 0.1           # between two event reads: at most ~10 requests/s even under a flood
 PENDING_MAX = 512             # open operations we follow at once
 GIVE_UP_S = 8.0               # after its deadline an operation is polled, and given up on after this
@@ -59,6 +69,7 @@ class Config:
     root_id: str | None = None
     root_name: str = "root"
     state_file: Path | None = None    # tools/hil's state file: names are read again when it changes (boards provisioned later)
+    epoch_file: Path | None = None    # the epochs this tool holds open (default: <logs_dir>/epochs-<consumer>-<domain>.json)
     net: str | None = None
     nodes_poll_s: float = 5.0
     summary_s: float = 10.0
@@ -83,6 +94,7 @@ class Pending:
     round_no: int
     t_post: float                     # monotonic, when the request went out
     deadline: float                   # monotonic, when the Host's deadline passes
+    epoch: str = ""                   # the client epoch the request was sent under
     fetch_any: bool = False           # fetch at every change (display), not only at the end
     fetching: bool = False
     last_fetch: float = 0.0
@@ -123,6 +135,14 @@ class FieldView:
         self.started_utc = utc_text(utcnow())
         self.epoch: str | None = None
         self._epoch_lock = asyncio.Lock()
+        self._epoch_since = 0.0
+        self._epoch_ops = 0
+        self._rotate_retry_at = 0.0
+        self._retiring: dict[str, float] = {}      # epochs that take no new request: id -> earliest close time
+        self._epoch_users: Counter[str] = Counter()  # requests being sent right now, per epoch
+        self._tracked: set[str] = set()            # every epoch id this tool may have open (also those of a crashed run)
+        self._closing: set[str] = set()
+        self._epoch_file = cfg.epoch_file or cfg.logs_dir / f"epochs-{cfg.consumer}-{cfg.domain[:8]}.json"
         self.api_nodes: dict[str, dict[str, Any]] = {}
         self.nodes_seen = False
         self.first_listed: dict[str, float] = {}
@@ -185,6 +205,10 @@ class FieldView:
 
     # ---- run / stop ---------------------------------------------------------------------------------------------
     async def start(self) -> None:
+        self._load_epoch_file()
+        for epoch in sorted(self._tracked):
+            self.note("session", f"client epoch {epoch[:8]} was left open by an earlier run: closing it")
+            self._spawn(self._close_epoch(epoch, retry=True))
         self._tasks = [asyncio.ensure_future(self._guard(f, n)) for f, n in
                        ((self._events_loop, "events"), (self._nodes_loop, "nodes"), (self._tick_loop, "tick"))]
 
@@ -197,9 +221,9 @@ class FieldView:
                 await t
         with contextlib.suppress(Exception):
             await self._ack(force=True)
-        if self.epoch:
+        for epoch in sorted(self._tracked):
             with contextlib.suppress(Exception):
-                await self.client.close_epoch(self.epoch)
+                await self._close_epoch(epoch)
         self.note("session", "fieldview stopped")
         self.rec.summary(self.summary_rows())
         self.rec.close()
@@ -499,17 +523,132 @@ class FieldView:
         return {"running": self.loop_interval is not None, "interval_s": self.loop_interval, "round": self.round_no,
                 "nodes": n, "warning": warning, "rounds": list(self.rounds)[-10:], "open": len(self.pending)}
 
-    async def ensure_epoch(self) -> str | None:
-        async with self._epoch_lock:
-            if self.epoch:
-                return self.epoch
+    # ---- client epochs ------------------------------------------------------------------------------------------
+    def _load_epoch_file(self) -> None:
+        try:
+            doc = json.loads(self._epoch_file.read_text())
+            self._tracked |= {e for e in doc.get("epochs", []) if isinstance(e, str)}
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def _save_epoch_file(self) -> None:
+        try:
+            self._epoch_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._epoch_file.with_name(self._epoch_file.name + ".tmp")
+            tmp.write_text(json.dumps({"domain": self.cfg.domain, "consumer": self.cfg.consumer,
+                                       "epochs": sorted(self._tracked)}))
+            os.replace(tmp, self._epoch_file)
+            self.warn("epoch-file", None)
+        except OSError as exc:
+            self.warn("epoch-file", f"cannot write {self._epoch_file}: {exc} (epochs of a crash would stay open)")
+
+    def _rotation_due(self) -> bool:
+        return self.mono() - self._epoch_since >= EPOCH_ROTATE_S or self._epoch_ops >= EPOCH_ROTATE_OPS
+
+    async def _open_epoch(self) -> str | None:
+        try:
             r = await self.client.open_epoch()
-            if r.ok:
-                self.epoch = str(r.body["id"])
-                self.note("session", f"client epoch {self.epoch[:8]} opened")
-            else:
-                self.warn("epoch", f"cannot open a client epoch: HTTP {r.status} {r.code}")
+        except HostUnreachable as exc:  # SendUnknown too: the replays with the same key got no answer either
+            self.warn("epoch", f"cannot open a client epoch: {exc}")
+            return None
+        if not r.ok:
+            self.warn("epoch", f"cannot open a client epoch: HTTP {r.status} {r.code}")
+            return None
+        self.warn("epoch", None)
+        epoch = str(r.body["id"])
+        self._tracked.add(epoch)
+        self._save_epoch_file()  # written before the first request is made under it
+        return epoch
+
+    async def ensure_epoch(self) -> str | None:
+        """The epoch new requests are sent under; opens a new one when there is none or the current one is due."""
+        async with self._epoch_lock:
+            if self.epoch and (not self._rotation_due() or self.mono() < self._rotate_retry_at):
+                return self.epoch
+            new = await self._open_epoch()
+            if new is None:
+                self._rotate_retry_at = self.mono() + 30.0  # keep serving from the old one, do not hammer the Host
+                return self.epoch
+            old, self.epoch = self.epoch, new
+            self._epoch_since, self._epoch_ops, self._rotate_retry_at = self.mono(), 0, 0.0
+            if old:
+                self._retiring[old] = self.mono() + EPOCH_CLOSE_MARGIN_S
+            self.note("session", f"client epoch {new[:8]} opened" + (f" (replaces {old[:8]})" if old else ""))
             return self.epoch
+
+    def _take_epoch(self) -> str:
+        epoch = self.epoch or ""
+        self._epoch_users[epoch] += 1
+        self._epoch_ops += 1
+        return epoch
+
+    def _release_epoch(self, epoch: str | None) -> None:
+        if epoch is not None:
+            self._epoch_users[epoch] -= 1
+            if self._epoch_users[epoch] <= 0:
+                del self._epoch_users[epoch]
+
+    async def _close_epoch(self, epoch: str, retry: bool = False) -> bool:
+        """Close one epoch (monotonic and idempotent on the Host; it never cancels operations already committed)."""
+        if epoch in self._closing:
+            return False
+        self._closing.add(epoch)
+        done = False
+        try:
+            while True:
+                try:
+                    r = await self.client.close_epoch(epoch)
+                    done = r.ok or r.status == 404  # 404: the Host does not know it any more
+                except HostUnreachable:
+                    done = False
+                if done or not retry:
+                    break
+                await asyncio.sleep(EPOCH_CLOSE_RETRY_S)
+        finally:
+            self._closing.discard(epoch)
+        if done:
+            self._tracked.discard(epoch)
+            self._retiring.pop(epoch, None)
+            if epoch == self.epoch:
+                self.epoch = None
+            self._save_epoch_file()
+        return done
+
+    def _close_retired(self) -> None:
+        """A retired epoch is closed when no request of it is being sent and no operation of it is open."""
+        now = self.mono()
+        busy = {p.epoch for p in self.pending.values()}
+        for epoch, due in list(self._retiring.items()):
+            if now < due or epoch in busy or self._epoch_users.get(epoch) or epoch in self._closing:
+                continue
+            self._retiring[epoch] = now + EPOCH_CLOSE_RETRY_S  # next attempt if this one fails
+            self._spawn(self._close_epoch(epoch))
+
+    def _epoch_refused(self, r: Reply, sent_under: str | None) -> None:
+        if r.status == 410 and r.code == "EPOCH_CLOSED" and sent_under:
+            self._tracked.discard(sent_under)
+            self._retiring.pop(sent_under, None)
+            if self.epoch == sent_under:
+                self.epoch = None  # the next request opens a new one
+            self._save_epoch_file()
+
+    async def _post(self, build: Callable[[str], dict[str, Any]], max_wait: float) -> tuple[Reply, str, float]:
+        """One POST /v1/messages under the current epoch -> (reply, the epoch it was sent under, laptop time of the
+        send). The epoch is fixed when the body is made: a replay of the same request keeps it."""
+        used: dict[str, Any] = {"epoch": None, "t": 0.0}
+
+        def body() -> dict[str, Any]:
+            used["t"] = self.mono()
+            used["epoch"] = self._take_epoch()
+            return build(used["epoch"])
+
+        self._posting += 1
+        try:
+            r = await self.client.post_message(body, max_wait=max_wait)
+        finally:
+            self._posting -= 1
+            self._release_epoch(used["epoch"])
+        return r, used["epoch"] or "", used["t"]
 
     async def start_ping_loop(self, interval_s: float) -> None:
         if interval_s < 1.0:
@@ -574,17 +713,12 @@ class FieldView:
         if len(self.pending) >= PENDING_MAX:
             self._ping_refused(device, rnd, pr.PingResult("notsent", "too many open operations on the laptop"))
             return
-        assert self.epoch is not None
-        t_post = 0.0
 
-        def body() -> dict[str, Any]:
-            nonlocal t_post
-            t_post = self.mono()
-            return pr.ping_request(self.cfg.domain, self.epoch or "", device, rnd["round"], interval_s, self.utcnow())
+        def build(epoch: str) -> dict[str, Any]:
+            return pr.ping_request(self.cfg.domain, epoch, device, rnd["round"], interval_s, self.utcnow())
 
-        self._posting += 1
         try:
-            r = await self.client.post_message(body, max_wait=max_wait)
+            r, epoch, t_post = await self._post(build, max_wait)
         except SendUnknown as exc:  # the answer is lost and the replays with the same key got none either
             self.warn("post-unknown", "a POST /v1/messages got no answer: those pings are 'unknown' (see the ping log)")
             self._ping_refused(device, rnd, pr.classify_post_unknown(str(exc)), key=exc.key)
@@ -592,15 +726,12 @@ class FieldView:
         except HostUnreachable as exc:  # failed before anything was sent
             self._ping_refused(device, rnd, pr.classify_post_error(None, exc=str(exc)))
             return
-        finally:
-            self._posting -= 1
         if r.status == 0:
             self.warn("rate", "the laptop's request budget is used up: pings were not sent (see 'not sent')")
             self._ping_refused(device, rnd, pr.PingResult("notsent", "local request budget (rate limit guard)"))
             return
         if not r.ok:
-            if r.status == 410 and r.code == "EPOCH_CLOSED":
-                self.epoch = None
+            self._epoch_refused(r, epoch)
             if r.status == 429:
                 self.warn("rate", f"the Host rate-limits us (HTTP 429, retry after {r.retry_after_ms} ms)")
             self._ping_refused(device, rnd, pr.classify_post_error(r.status, r.body))
@@ -608,11 +739,10 @@ class FieldView:
         self.warn("post-unknown", None)
         op_id = str(r.body["id"])
         self.ping.setdefault(device, PingTrack()).accepted()
-        p = Pending(op_id, "ping", device, rnd["round"], t_post,
-                    t_post + pr.ping_deadline_s(interval_s))
+        p = Pending(op_id, "ping", device, rnd["round"], t_post, t_post + pr.ping_deadline_s(interval_s), epoch=epoch)
         self.pending[op_id] = p
         self.rec.log("ping", {"event": "posted", "round": rnd["round"], "device": device, "name": self.name_of(device),
-                              "op": op_id, "epoch": self.epoch})
+                              "op": op_id, "epoch": epoch})
         if op_id in self.final_hint or r.body.get("state") == "FINAL":
             self.final_hint.pop(op_id, None)
             self._fetch(p)
@@ -654,30 +784,25 @@ class FieldView:
             raise RuntimeError("cannot open a client epoch")
         self.command_seq = (self.command_seq + 1) & 0xFFFFFFFF
         seq = self.command_seq
-        t_post = 0.0
 
-        def body() -> dict[str, Any]:
-            nonlocal t_post
-            t_post = self.mono()
-            return pr.display_request(self.cfg.domain, self.epoch or "", device, state, seq, self.utcnow())
+        def build(epoch: str) -> dict[str, Any]:
+            return pr.display_request(self.cfg.domain, epoch, device, state, seq, self.utcnow())
 
-        r = Reply(0, {})
+        r, epoch, t_post = Reply(0, {}), "", 0.0
         unknown: SendUnknown | None = None
-        self._posting += 1
-        try:
-            for _ in range(3):  # a 429 stops the budget for what the Host asked, then the next try goes out
-                try:
-                    r = await self.client.post_message(body, max_wait=5.0)
-                except SendUnknown as exc:
-                    unknown = exc
-                    break
-                except HostUnreachable as exc:  # failed before anything was sent
-                    r = Reply(0, {"code": "UNREACHABLE", "message": str(exc)})
-                    break
-                if r.status != 429:
-                    break
-        finally:
-            self._posting -= 1
+        for _ in range(3):  # a 429 stops the budget for what the Host asked, then the next try goes out
+            try:
+                r, epoch, t_post = await self._post(build, 5.0)
+            except SendUnknown as exc:
+                unknown = exc
+                break
+            except HostUnreachable as exc:  # failed before anything was sent
+                r = Reply(0, {"code": "UNREACHABLE", "message": str(exc)})
+                break
+            if r.status != 429:
+                break
+        if not r.ok:
+            self._epoch_refused(r, epoch)
         entry = {"device": device, "name": self.name_of(device), "state": state, "seq": seq,
                  "posted": utc_text(self.utcnow()), "op": None, "arrived": False, "drawn": False,
                  "arrived_ms": None, "drawn_ms": None, "result": "pending", "detail": ""}
@@ -695,7 +820,7 @@ class FieldView:
         entry["op"] = op_id
         self.rec.log("display", {"event": "posted", **entry})
         self.note("display", f"display {self.name_of(device)} -> {state} (seq {seq}) sent", device)
-        p = Pending(op_id, "display", device, 0, t_post, t_post + pr.DISPLAY_DEADLINE_S, fetch_any=True)
+        p = Pending(op_id, "display", device, 0, t_post, t_post + pr.DISPLAY_DEADLINE_S, epoch=epoch, fetch_any=True)
         self.pending[op_id] = p
         if op_id in self.final_hint:
             self.final_hint.pop(op_id, None)
@@ -808,6 +933,7 @@ class FieldView:
             await asyncio.sleep(self.cfg.tick_s)
             self._check_lost()
             await self._watch_pending()
+            self._close_retired()
             with contextlib.suppress(HostUnreachable):  # the events loop shows an unreachable Host
                 await self._ack()
             now = self.mono()
