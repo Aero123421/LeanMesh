@@ -133,7 +133,8 @@ CONTROL_RULES = {
     "REVOKE": ControlRule(("device_id", "signed_cbor_b64"), ("REVOKE",)),
     "TRANSFER": ControlRule(("device_id", "signed_cbor_b64"), ("TRANSFER",), "SIGNED_TRANSFER"),
     "INSTALL_CONTROL": ControlRule(("signed_cbor_b64",), ("CONFIGURE",)),
-    "POLICY_SET": ControlRule(("signed_cbor_b64",), ("CONFIGURE",)),
+    # HIL-F5: the root's join mode (serial POLICY_SET -> lm_policy_set). The SDK has no signed policy object (type 12).
+    "POLICY_SET": ControlRule(("join_mode",), ("CONFIGURE",)),
     "CHANNEL_FREEZE": ControlRule(("freeze",), ("CONFIGURE",), "AUTO_CHANNEL"),
     "CHANNEL_RECALCULATE": ControlRule((), ("CONFIGURE",), "AUTO_CHANNEL"),
     "GROUP_SET": ControlRule(("group_id", "members"), ("CONFIGURE",), "GROUP_FANOUT_V2"),
@@ -143,7 +144,7 @@ CONTROL_RULES = {
                                             "COMMISSIONING_WINDOW"),
     "ROOT_HANDOVER": ControlRule(("signed_cbor_b64",), ("CONFIGURE", "TRANSFER"), "ROOT_HANDOVER"),
 }
-_OPTIONAL = ("device_id", "signed_cbor_b64", "decision", "leave_mode", "freeze", "group_id", "members")
+_OPTIONAL = ("device_id", "signed_cbor_b64", "decision", "leave_mode", "freeze", "group_id", "members", "join_mode")
 
 
 class ControlRequest(Strict):
@@ -161,6 +162,7 @@ class ControlRequest(Strict):
     freeze: bool | None = None
     group_id: Annotated[int, Field(ge=1, le=0xFFFFFFFF)] | None = None
     members: Annotated[list[DeviceIdStr], Field(max_length=64)] | None = None
+    join_mode: Literal["CLOSED", "EXTERNAL", "PREAPPROVED"] | None = None
 
     @model_validator(mode="after")
     def _mode_specific_fields(self) -> ControlRequest:
@@ -192,6 +194,6 @@ SIGNED_OBJECT_PERMISSIONS: dict[int, tuple[str, ...]] = {
     2: ("CONFIGURE",), 3: ("TRANSFER",), 5: ("CONFIGURE",), 11: ("REVOKE",), 12: ("CONFIGURE",), 19: ("CONFIGURE",),
     21: ("CONFIGURE",), 26: ("UPDATE_FIRMWARE",), 29: ("CONFIGURE",), 30: ("APPROVE",), 31: ("CONFIGURE", "TRANSFER"),
 }
-SIGNED_OBJECT_TYPE_OF = {"REVOKE": 11, "TRANSFER": 3, "POLICY_SET": 12, "POWER_POLICY_SET": 29,
+SIGNED_OBJECT_TYPE_OF = {"REVOKE": 11, "TRANSFER": 3, "POWER_POLICY_SET": 29,
                          "COMMISSIONING_WINDOW_SET": 30, "ROOT_HANDOVER": 31}
 SIGNED_OBJECT_SUBJECT = frozenset({3, 11, 29})  # the first DeviceId of the object data is the device it is about

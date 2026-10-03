@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 M_CAPABILITIES, M_SEND, M_GET_MESSAGE, M_CANCEL, M_JOIN_DECIDE, M_INSTALL = 1, 2, 3, 4, 5, 6
 M_NODE_QUERY, M_HOST_STORE_ACK, M_EVENT_ACK, M_CHANNEL, M_GET_REQUEST, M_GROUP_SET = 7, 9, 10, 11, 13, 14
 M_DIAGNOSTICS = 16
+M_POLICY_SET = 17  # HIL-F5
+CTL_OP_TAG = 1 << 62  # member::k_op_tag: the root's control operations (lifecycle, policy, group set, stop)
 EV_MESSAGE, EV_OPERATION, EV_MEMBERSHIP, EV_GAP, EV_FAULT = 2, 3, 4, 7, 8
 EV_GROUP_PROGRESS = groups.EV_GROUP_PROGRESS
 EV_CHANNEL = chan_status.EV_CHANNEL
@@ -68,7 +70,7 @@ RECONCILE_RETRY_S = 2.0    # pause before an unfinished reconciliation is tried 
 JOIN_WAIT_S = 180.0        # a JOIN_DECIDE the root accepted must show durable ledger state within this time
 LEDGER_PREPARED = 2        # root EntryState: Prepared (reserved and stored); 3 Active .. 6 Blocked also imply an entry
 REQUEST_PENDING = 16       # GET_REQUEST state: waiting for the operator
-SIGNED_CONTROLS = ("REVOKE", "TRANSFER", "INSTALL_CONTROL", "POLICY_SET", "POWER_POLICY_SET",
+SIGNED_CONTROLS = ("REVOKE", "TRANSFER", "INSTALL_CONTROL", "POWER_POLICY_SET",
                    "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER")
 
 
@@ -426,6 +428,9 @@ class Bridge:
         if typ in ("CHANNEL_FREEZE", "CHANNEL_RECALCULATE"):
             action = 2 if typ == "CHANNEL_RECALCULATE" else int(bool(req["freeze"]))
             return Plan(item.operation, typ, M_CHANNEL, [action, rev], attempts=item.attempts)
+        if typ == "POLICY_SET":  # HIL-F5: the root's join mode, compare-and-set on its policy revision
+            return Plan(item.operation, typ, M_POLICY_SET, [mirror.JOIN_MODES.index(req["join_mode"]), rev],
+                        attempts=item.attempts)
         if typ == "GROUP_SET":
             members = sorted(bytes.fromhex(m) for m in req["members"])
             return Plan(item.operation, typ, M_GROUP_SET, [int(req["group_id"]), rev, members],
@@ -735,6 +740,8 @@ class Bridge:
         m = cbor_decode(res.result)
 
         def apply_nodes(conn: sqlite3.Connection) -> None:
+            if isinstance(m.get("policy"), list) and len(m["policy"]) == 2:  # HIL-F5: [revision, join mode]
+                mirror.put_policy(conn, info.domain, int(m["policy"][0]), int(m["policy"][1]))
             if m.get("channel", {}).get("current"):  # S17: what the root's coordinator reports (a member the ledger lists, by address)
                 mirror.put_channel(conn, info.domain, chan_status.status(
                     m["channel"], {a: bytes(d) for d, _, _, _, _, a in m["nodes"] if a}))
@@ -797,6 +804,8 @@ class Bridge:
             self._open_events.discard((boot, seq))  # the root settled it at HOST_STORE_ACK
         elif kind == EV_OPERATION:
             await self._on_operation_event(m)
+            if int(m.get("operation", 0)) & CTL_OP_TAG:  # a root control operation ended (e.g. POLICY_SET, HIL-F5):
+                await self._refresh_nodes()             # the state it changed is mirrored from NODE_QUERY
         elif kind in (EV_MEMBERSHIP, EV_CHANNEL, power_status.EV_POWER):  # (S17: channel state; S16: a schedule report)
             await self._refresh_nodes()
         elif kind == EV_GROUP_PROGRESS:

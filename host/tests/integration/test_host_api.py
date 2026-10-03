@@ -136,7 +136,6 @@ def test_message_validation_rejects_without_writing(tmp_path: Path, name: str) -
 
 
 def test_size_capability_and_destination_rules(tmp_path: Path) -> None:
-    import base64
     with running(make_settings(tmp_path)) as h:
         e = h.epoch()
         b64 = lambda n: base64.b64encode(b"x" * n).decode()  # noqa: E731
@@ -193,16 +192,17 @@ def test_control_rules_permissions_capabilities_and_revision(tmp_path: Path) -> 
         h.hub.set_root(True, ["SIGNED_TRANSFER"])
         assert ctl("9", **signed).status_code == 202
         # expected_revision is compared where the Host holds the current value
-        policy = signed_object(12, POLICY_OBJECT)
+        # HIL-F5: POLICY_SET takes the root's join mode; the SDK has no signed policy object (type 12) to carry.
+        assert ctl("10a", type="POLICY_SET", signed_cbor_b64=signed_object(12, POLICY_OBJECT)).status_code == 400
         h.db(lambda c: c.execute("UPDATE domains SET policy_revision=5"))
-        stale = ctl("10", type="POLICY_SET", signed_cbor_b64=policy)
+        stale = ctl("10", type="POLICY_SET", join_mode="PREAPPROVED")
         assert stale.status_code == 409 and stale.json()["details"]["current_revision"] == "5"
-        assert ctl("11", type="POLICY_SET", signed_cbor_b64=policy, expected_revision="5").status_code == 202
+        assert ctl("11", type="POLICY_SET", join_mode="PREAPPROVED", expected_revision="5").status_code == 202
         # request_id/content mismatch under one Idempotency-Key is a conflict, not a new command
-        assert ctl("11", type="POLICY_SET", signed_cbor_b64=policy, expected_revision="5",
+        assert ctl("11", type="POLICY_SET", join_mode="PREAPPROVED", expected_revision="5",
                    request_id="cd" * 16).status_code == 409
-        stored = rows(tmp_path / "host.db", "SELECT type,length(payload) FROM operations WHERE type='POLICY_SET'")
-        assert stored == [("POLICY_SET", len(base64.b64decode(policy)))]
+        stored = rows(tmp_path / "host.db", "SELECT type,payload FROM operations WHERE type='POLICY_SET'")
+        assert stored == [("POLICY_SET", None)]  # a typed request: nothing signed is stored
 
 
 def test_idempotency_replay_isolation_and_epochs(tmp_path: Path) -> None:

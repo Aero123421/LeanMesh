@@ -172,6 +172,7 @@ class Bridge final : public BridgeHook {
     void m_event_ack(Pending &p, ByteView params);
     void m_get_request(Pending &p, ByteView params);
     void m_channel(Pending &p, ByteView params); // [S17] CHANNEL_ACTION
+    void m_policy_set(Pending &p, ByteView params); // HIL-F5: 17 POLICY_SET (the root's join mode)
     void m_group_set(Pending &p, ByteView params);
     void m_group_targets(Pending &p, ByteView params);
     void m_unsupported(Pending &p, uint64_t method, ByteView params);

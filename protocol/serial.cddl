@@ -3,10 +3,12 @@ u64 = 0..18446744073709551615
 u32 = 0..4294967295
 id16 = bstr .size 16
 id32 = bstr .size 32
-request = [request-id: id16, method: 1..16, params: request-params]
+request = [request-id: id16, method: 1..17, params: request-params]
 request-params = nil / send / get-message / cancel / join-decide / install /
- node-query / group-query / host-ack / event-ack / channel-action / sleep-window / get-request / group-set / group-targets
+ node-query / group-query / host-ack / event-ack / channel-action / sleep-window / get-request / group-set / group-targets /
+ policy-set
  ; 16 DIAGNOSTICS takes nil (the root's own health, on request only)
+ ; 17 POLICY_SET: the root's join mode (lm_policy_set; 0 closed, 1 external, 2 preapproved), compare-and-set
 send = [destination: id32, message: id16, intent-hash: id32,
  app-port: 1..65534, flags: 0..63, root-term: u32, expires: u64,
  object-transfer: bool, payload: bstr .size (0..4096)]
@@ -34,3 +36,5 @@ ping = [nonce: id16, reply: bool]
 group-set = [group-id: u32, expected-revision: u64, members: [* 64 id32]]
 
 group-targets = [operation-boot: u64, operation-id: u64, snapshot-token: id16, offset: 0..64, limit: 1..16]
+
+policy-set = [join-mode: 0..2, expected-revision: u64]

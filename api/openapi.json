@@ -2420,6 +2420,134 @@
           }
         }
       }
+    },
+    "/v1/policy": {
+      "get": {
+        "operationId": "get_policy",
+        "description": "Read committed state; unknown response fields may be added.",
+        "parameters": [
+          {
+            "name": "domain_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id16"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or unknown critical field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Hash/revision/epoch conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor gap or expired query window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or payload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit with retry_after_ms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Root, storage or recovery unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Insufficient durable capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2862,6 +2990,15 @@
             "items": {
               "$ref": "#/components/schemas/DeviceId"
             }
+          },
+          "join_mode": {
+            "type": "string",
+            "enum": [
+              "CLOSED",
+              "EXTERNAL",
+              "PREAPPROVED"
+            ],
+            "description": "POLICY_SET only: the root's join mode (lm_policy_set). PREAPPROVED still admits only a device with a fleet-signed AssignmentTicket and a signed expected entry; expected_revision is the policy revision of GET /v1/policy."
           }
         },
         "required": [
@@ -3780,6 +3917,28 @@
                 }
               }
             }
+          }
+        }
+      },
+      "PolicyStatus": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "revision",
+          "join_mode"
+        ],
+        "properties": {
+          "revision": {
+            "$ref": "#/components/schemas/U63"
+          },
+          "join_mode": {
+            "type": "string",
+            "enum": [
+              "CLOSED",
+              "EXTERNAL",
+              "PREAPPROVED",
+              "UNKNOWN"
+            ]
           }
         }
       }
