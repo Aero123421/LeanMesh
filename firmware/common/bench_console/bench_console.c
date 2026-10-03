@@ -1,5 +1,6 @@
 /* BENCH / HIL ONLY: see include/bench_console.h. Moved out of firmware/hil_node/main/main.c unchanged in behaviour. */
 #include "bench_console.h"
+#include "bench_line.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -17,12 +18,27 @@
 #define CONSOLE_LINE_MAX 4096
 #define BLOB_MAX 1024
 
+/* A call returns after this many bytes even when the input never pauses and never ends a line. */
+#define CONSOLE_BYTES_PER_CALL 512
+
 static char s_line[CONSOLE_LINE_MAX];
-static size_t s_line_len;
+static bc_line_t s_asm = {.buf = s_line, .cap = sizeof s_line};
 static uint8_t s_blob[2][BLOB_MAX];
 static const char *s_role_name = "";
 
 void bc_out(const char *s) { usb_serial_jtag_write_bytes(s, strlen(s), pdMS_TO_TICKS(200)); }
+
+void bc_logf(const char *fmt, ...) {
+    if (!usb_serial_jtag_is_connected()) return; /* nobody can be reading */
+    char buf[384];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    /* No wait: a host that is attached but not reading (port not open) leaves the TX buffer full, and a write that waits
+       then costs its whole timeout. A full buffer drops the line. */
+    usb_serial_jtag_write_bytes(buf, strlen(buf), 0);
+}
 
 void bc_outf(const char *fmt, ...) {
     char buf[384];
@@ -58,20 +74,29 @@ void bc_console_init(void) {
     }
 }
 
+/* `ticks` is the whole budget of the call (not per byte): input that never pauses, or never ends a line, cannot keep the
+   caller inside. The line in progress stays in s_asm for the next call. portMAX_DELAY waits for a line without a time
+   bound, but still hands control back after CONSOLE_BYTES_PER_CALL bytes. */
 char *bc_console_line(TickType_t ticks) {
+    const TickType_t start = xTaskGetTickCount();
+    TickType_t wait = ticks;
     uint8_t c;
-    while (usb_serial_jtag_read_bytes(&c, 1, ticks) == 1) {
-        ticks = pdMS_TO_TICKS(20);
-        if (c == '\r' || c == '\n') {
-            if (s_line_len == 0) {
-                continue;
-            }
-            s_line[s_line_len] = '\0';
-            s_line_len = 0;
+    for (int taken = 0; taken < CONSOLE_BYTES_PER_CALL && usb_serial_jtag_read_bytes(&c, 1, wait) == 1; ++taken) {
+        switch (bc_line_feed(&s_asm, c)) {
+        case BC_LINE_READY:
             return s_line;
+        case BC_LINE_OVERFLOW:
+            bc_answer(LM_STATUS_INVALID_ARGUMENT); /* the line was too long: dropped whole, answered once */
+            break;
+        case BC_LINE_PENDING:
+            break;
         }
-        if (s_line_len + 1 < CONSOLE_LINE_MAX) {
-            s_line[s_line_len++] = (char)c;
+        if (ticks != portMAX_DELAY) {
+            const TickType_t used = xTaskGetTickCount() - start;
+            if (used >= ticks) {
+                break;
+            }
+            wait = ticks - used;
         }
     }
     return NULL;

@@ -9,6 +9,7 @@
 #include "lmtest.hpp"
 
 extern "C" {
+#include "bench_line.h"
 #include "field_proto.h"
 #include "field_render.h"
 }
@@ -276,6 +277,73 @@ LM_TEST("FIELD panel: the status line is white, in rows 0..7, and the glyph 使 
     LM_CHECK_EQ(first_row_pixels, 2);
     LM_CHECK(f[8][8 + 5] != 0 && f[8][8 + 10] != 0);
     LM_CHECK(!ascii(f, 8, 23, 8, 23).empty());
+}
+
+LM_TEST("FIELD message action: pings are counted and never answered with an application result, display goes to the panel") {
+    const uint8_t ping[5] = {1, 0, 0, 0, 7};
+    const uint8_t v2[5] = {2, 0, 0, 0, 7};
+    const uint8_t disp[6] = {1, 1, 0, 0, 0, 9};
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_PING, ping, sizeof ping), FIELD_ACT_PING_OK);
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_PING, v2, sizeof v2), FIELD_ACT_PING_UNKNOWN);   // counted apart, no result either
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_PING, ping, 4), FIELD_ACT_PING_UNKNOWN);
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_PING, nullptr, 0), FIELD_ACT_PING_UNKNOWN);
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_DISPLAY, disp, sizeof disp), FIELD_ACT_DISPLAY);
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_DISPLAY, ping, sizeof ping), FIELD_ACT_DISPLAY);  // the display path rejects what it cannot read
+    LM_CHECK_EQ(field_message_action(FIELD_PORT_TELEMETRY, ping, sizeof ping), FIELD_ACT_IGNORE);
+    LM_CHECK_EQ(field_message_action(0, ping, sizeof ping), FIELD_ACT_IGNORE);
+}
+
+// ---- bench console line assembly (firmware/common/bench_console/bench_line.c) ----
+
+struct LineFeed {
+    char buf[8];
+    bc_line_t l;
+    LineFeed() { bc_line_init(&l, buf, sizeof buf); }
+    // Feeds the text; returns the results other than PENDING, in order, as 'R' (ready, with the line appended) / 'O' (overflow).
+    std::string feed(const std::string &text) {
+        std::string out;
+        for (char c : text) {
+            const bc_line_result_t r = bc_line_feed(&l, static_cast<uint8_t>(c));
+            if (r == BC_LINE_READY) {
+                out += std::string("R[") + buf + "]";
+            } else if (r == BC_LINE_OVERFLOW) {
+                out += "O";
+            }
+        }
+        return out;
+    }
+};
+
+LM_TEST("FIELD console line: CR, LF and CR LF end a line, empty lines are skipped") {
+    LineFeed f;
+    LM_CHECK(f.feed("info\n") == std::string("R[info]"));
+    LM_CHECK(f.feed("a\r\nb\r") == std::string("R[a]R[b]"));
+    LM_CHECK(f.feed("\n\r\n\n") == std::string(""));
+}
+
+LM_TEST("FIELD console line: a partial line is kept between calls (the bytes arrive over several reads)") {
+    LineFeed f;
+    LM_CHECK(f.feed("sta") == std::string(""));
+    LM_CHECK(f.feed("tus") == std::string(""));
+    LM_CHECK(f.feed("\n") == std::string("R[status]"));
+}
+
+LM_TEST("FIELD console line: a line that does not fit is dropped whole and answered once at its newline") {
+    LineFeed f; // 8-byte buffer: a line holds at most 7 bytes
+    LM_CHECK(f.feed("1234567\n") == std::string("R[1234567]"));   // exactly full is a line
+    LM_CHECK(f.feed("12345678\n") == std::string("O"));            // one byte more: dropped, never run as "1234567"
+    LM_CHECK(f.feed("info\n") == std::string("R[info]"));          // the next line is clean
+    // Endless input without a newline keeps the buffer bounded and produces no line and no answer until the newline.
+    std::string flood(100000, 'x');
+    LM_CHECK(f.feed(flood) == std::string(""));
+    LM_CHECK(f.l.len < sizeof f.buf);
+    LM_CHECK(f.feed("\r\n") == std::string("O"));                  // CR LF answers once
+    LM_CHECK(f.feed("ok\n") == std::string("R[ok]"));
+}
+
+LM_TEST("FIELD console line: the tail of a dropped line is not a command") {
+    LineFeed f;
+    LM_CHECK(f.feed("keygenXXXXXXXXXXXX\nkeygen\n") == std::string("OR[keygen]"));
 }
 
 LM_TEST_MAIN()

@@ -1,0 +1,263 @@
+diff -ru a/src/ESP32-HUB75-MatrixPanel-I2S-DMA.h b/src/ESP32-HUB75-MatrixPanel-I2S-DMA.h
+--- a/src/ESP32-HUB75-MatrixPanel-I2S-DMA.h	2026-10-04 01:31:39
++++ b/src/ESP32-HUB75-MatrixPanel-I2S-DMA.h	2026-10-04 01:31:39
+@@ -479,14 +479,31 @@
+     ESP_LOGV("being()", "Completed flipDMABuffer()");		
+ 
+ 	// Start output output
+-	dma_bus.init();
++    // LEANMESH-HUB75-PATCH-2: a bus that did not come up is a begin() that failed (it used to return `initialized`, which
++    // only says that the buffers exist). The caller deletes the object: the destructor stops and frees what was set up.
++	if (!dma_bus.init())
++    {
++      ESP_LOGE("begin()", "dma_bus.init() failed");
++      initialized = false;
++      return false;
++    }
+     ESP_LOGV("being()", "Completed dma_bus.init()");	
+ 	
+-	dma_bus.dma_transfer_start();
++	if (!dma_bus.dma_transfer_start())
++    {
++      ESP_LOGE("begin()", "dma_bus.dma_transfer_start() failed");
++      initialized = false;
++      return false;
++    }
+     ESP_LOGV("being()", "Completed dma_bus.dma_transfer_start()");		
+ 
+     return initialized;
+   }
++
++  /* LEANMESH-HUB75-PATCH-2 (ESP32-S3 bus only): the frames the DMA has fed to the panel, and whether the last
++     flipDMABuffer() has been shown (see Bus_Parallel16::flip_shown). */
++  inline uint32_t dmaFramesDone() const { return dma_bus.frames_done(); }
++  inline bool dmaFlipShown() const { return dma_bus.flip_shown(); }
+ 
+   // Obj destructor
+   virtual ~MatrixPanel_I2S_DMA()
+diff -ru a/src/platforms/esp32s3/gdma_lcd_parallel16.cpp b/src/platforms/esp32s3/gdma_lcd_parallel16.cpp
+--- a/src/platforms/esp32s3/gdma_lcd_parallel16.cpp	2026-10-04 01:31:39
++++ b/src/platforms/esp32s3/gdma_lcd_parallel16.cpp	2026-10-04 01:31:39
+@@ -58,6 +58,16 @@
+   }  
+ */  
+ 
++  // LEANMESH-HUB75-PATCH-2: a failed GDMA call ends init() with false (the library used to log and go on).
++  #define HUB75_GDMA_CHECK(call)                                                           \
++    do {                                                                                   \
++      esp_err_t err_ = (call);                                                             \
++      if (err_ != ESP_OK) {                                                                \
++        ESP_LOGE("S3", "%s failed: %s", #call, esp_err_to_name(err_));                     \
++        return false;                                                                      \
++      }                                                                                    \
++    } while (0)
++
+   lcd_cam_dev_t* getDev()
+   {
+     return &LCD_CAM;
+@@ -80,6 +90,7 @@
+ 
+     // LCD_CAM peripheral isn't enabled by default -- MUST begin with this:
+     periph_module_enable(PERIPH_LCD_CAM_MODULE);
++    _lcd_cam_on = true;
+     periph_module_reset(PERIPH_LCD_CAM_MODULE);
+ 
+     // Reset LCD bus
+@@ -240,6 +251,8 @@
+     esp_err_t err = gdma_new_ahb_channel(&dma_chan_config, &dma_chan, NULL);
+     if (err != ESP_OK) {
+       ESP_LOGE("S3", "Failed to allocate AHB GDMA channel: %s", esp_err_to_name(err));
++      dma_chan = nullptr;
++      return false;
+     }
+ #elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
+     esp_err_t err = gdma_new_ahb_channel(&dma_chan_config, &dma_chan);
+@@ -249,7 +262,7 @@
+ #else
+     gdma_new_channel(&dma_chan_config, &dma_chan);
+ #endif
+-    gdma_connect(dma_chan, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_LCD, 0));
++    HUB75_GDMA_CHECK(gdma_connect(dma_chan, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_LCD, 0)));
+     static gdma_strategy_config_t strategy_config = {
+       .owner_check = false,
+       .auto_update_desc = false,
+@@ -257,7 +270,7 @@
+       .eof_till_data_popped = false
+ #endif
+     };
+-    gdma_apply_strategy(dma_chan, &strategy_config);
++    HUB75_GDMA_CHECK(gdma_apply_strategy(dma_chan, &strategy_config));
+ 
+ #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0) // gdma_transfer_config_t introduced in IDF 5.3
+     gdma_transfer_config_t transfer_config = {
+@@ -269,7 +282,7 @@
+       .access_ext_mem = false
+ #endif
+     };
+-    gdma_config_transfer(dma_chan, &transfer_config);
++    HUB75_GDMA_CHECK(gdma_config_transfer(dma_chan, &transfer_config));
+ #else
+     gdma_transfer_ability_t ability = {
+         .sram_trans_align = 32,
+@@ -286,7 +299,6 @@
+     };
+     gdma_register_tx_event_callbacks(dma_chan, &tx_cbs, NULL);
+ */
+-
+     // This uses a busy loop to wait for each DMA transfer to complete...
+     // but the whole point of DMA is that one's code can do other work in
+     // the interim. The CPU is totally free while the transfer runs!
+@@ -294,8 +306,14 @@
+ 
+     // After much experimentation, each of these steps is required to get
+     // a clean start on the next LCD transfer:
+-    gdma_reset(dma_chan);                 // Reset DMA to known state
++    HUB75_GDMA_CHECK(gdma_reset(dma_chan)); // Reset DMA to known state
+     esp_rom_delay_us(1000);
++
++    // LEANMESH-HUB75-PATCH-2: count the frames (the last descriptor of a buffer has suc_eof). Once per frame, no delay.
++    gdma_tx_event_callbacks_t tx_cbs = {};
++    tx_cbs.on_trans_eof = on_frame_end;
++    _frames = 0;
++    HUB75_GDMA_CHECK(gdma_register_tx_event_callbacks(dma_chan, &tx_cbs, this));
+      
+     LCD_CAM.lcd_user.lcd_dout        = 1; // Enable data out
+     LCD_CAM.lcd_user.lcd_update      = 1; // Update registers
+@@ -306,8 +324,50 @@
+  }
+ 
+ 
++  // LEANMESH-HUB75-PATCH-2: GDMA end-of-frame interrupt, once per frame.
++  bool IRAM_ATTR Bus_Parallel16::on_frame_end(gdma_channel_handle_t, gdma_event_data_t *, void *user)
++  {
++    Bus_Parallel16 *bus = static_cast<Bus_Parallel16 *>(user);
++    bus->_frames = bus->_frames + 1;
++    return false;
++  }
++
++  // LEANMESH-HUB75-PATCH-2: after a failed or finished bus the pins must not stay driven by the (stopped) LCD peripheral:
++  // OE (active low, d7) would hold a row lit. Every output pin becomes a plain GPIO output, low, OE high (outputs off).
++  void Bus_Parallel16::park_outputs(void)
++  {
++    for (int i = 0; i < 16; i++)
++    {
++      const int pin = _cfg.pin_data[i];
++      if (pin < 0) continue;
++      gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
++      gpio_set_level((gpio_num_t)pin, i == 7 ? 1 : 0);
++    }
++    if (_cfg.pin_wr >= 0)
++    {
++      gpio_set_direction((gpio_num_t)_cfg.pin_wr, GPIO_MODE_OUTPUT);
++      gpio_set_level((gpio_num_t)_cfg.pin_wr, 0);
++    }
++  }
++
+   void Bus_Parallel16::release(void)
+   {
++    // LEANMESH-HUB75-PATCH-2: stop the DMA before its descriptors and buffers go, free the channel and the peripheral.
++    if (dma_chan)
++    {
++      LCD_CAM.lcd_user.lcd_reset = 1;
++      LCD_CAM.lcd_user.lcd_update = 1;
++      gdma_stop(dma_chan);
++      gdma_disconnect(dma_chan);
++      gdma_del_channel(dma_chan);
++      dma_chan = nullptr;
++    }
++    if (_lcd_cam_on)
++    {
++      park_outputs();
++      periph_module_disable(PERIPH_LCD_CAM_MODULE);
++      _lcd_cam_on = false;
++    }
+     if (_i80_bus)
+     {
+       esp_lcd_del_i80_bus(_i80_bus);
+@@ -319,6 +379,11 @@
+       _dmadesc_a = nullptr;
+       _dmadesc_count = 0;
+     }
++    if (_dmadesc_b)
++    {
++      heap_caps_free(_dmadesc_b); // LEANMESH-HUB75-PATCH-2: was never freed
++      _dmadesc_b = nullptr;
++    }
+ 
+   }
+ 
+@@ -352,6 +417,7 @@
+       {
+         ESP_LOGE("S3", "ERROR: Couldn't malloc _dmadesc_b. Not enough memory.");
+         _double_dma_buffer = false;
++        return false; // LEANMESH-HUB75-PATCH-2: the caller links buffer b next: it must not run with no descriptors
+       }
+     }
+ 
+@@ -422,11 +488,16 @@
+ 
+   } // end create_dma_desc_link
+ 
+-  void Bus_Parallel16::dma_transfer_start()
++  bool Bus_Parallel16::dma_transfer_start()
+   {
+-    gdma_start(dma_chan, (intptr_t)&_dmadesc_a[0]); // Start DMA w/updated descriptor(s)
++    if (gdma_start(dma_chan, (intptr_t)&_dmadesc_a[0]) != ESP_OK) // Start DMA w/updated descriptor(s)
++    {
++      ESP_LOGE("S3", "gdma_start failed");
++      return false; // LEANMESH-HUB75-PATCH-2
++    }
+     esp_rom_delay_us(100);              // Must 'bake' a moment before...
+     LCD_CAM.lcd_user.lcd_start = 1;        // Trigger LCD DMA transfer
++    return true;
+     
+   } // end 
+ 
+@@ -443,7 +514,8 @@
+ 
+   void Bus_Parallel16::flip_dma_output_buffer(int back_buffer_id)
+   {
+-	  
++    _flip_mark = _frames; // LEANMESH-HUB75-PATCH-2: before the link changes, so no frame end of the new buffer is missed
++
+     if ( back_buffer_id == 1) // change across to everything 'b''
+     {
+        _dmadesc_b[_dmadesc_count-1].next =  (dma_descriptor_t *) &_dmadesc_b[0];  // setup loop     
+diff -ru a/src/platforms/esp32s3/gdma_lcd_parallel16.hpp b/src/platforms/esp32s3/gdma_lcd_parallel16.hpp
+--- a/src/platforms/esp32s3/gdma_lcd_parallel16.hpp	2026-10-04 01:31:39
++++ b/src/platforms/esp32s3/gdma_lcd_parallel16.hpp	2026-10-04 01:31:39
+@@ -145,17 +145,32 @@
+ 
+     void create_dma_desc_link(void *memory, size_t size, bool dmadesc_b = false);
+ 
+-    void dma_transfer_start();
++    // LEANMESH-HUB75-PATCH-2: false when the DMA channel could not be started.
++    bool dma_transfer_start();
+     void dma_transfer_stop();
+ 
+      void flip_dma_output_buffer(int back_buffer_id);
+ 
++    // LEANMESH-HUB75-PATCH-2: evidence that the DMA is running and that a flip reached the panel. The last descriptor
++    // of each buffer ends a frame (suc_eof): the GDMA end-of-frame interrupt counts the frames the LCD peripheral was
++    // fed. flip_shown(): since flip_dma_output_buffer() at least 3 frames have ended, which is one whole frame of the
++    // new buffer (the pass in progress and, if the flip lost the race for the link, one more pass of the old buffer
++    // come first; the next one is the new buffer).
++    uint32_t frames_done() const { return _frames; }
++    bool flip_shown() const { return (uint32_t)(_frames - _flip_mark) >= 3u; }
++
+   private:
+ 
+     config_t _cfg;
+ 
+     volatile lcd_cam_dev_t* _dev;   
+-    gdma_channel_handle_t dma_chan; 
++    gdma_channel_handle_t dma_chan = nullptr;
++    volatile uint32_t _frames = 0; // LEANMESH-HUB75-PATCH-2: counted in the GDMA end-of-frame interrupt
++    uint32_t _flip_mark = 0;
++    bool _lcd_cam_on = false;
++    static bool on_frame_end(gdma_channel_handle_t chan, gdma_event_data_t *event, void *user);
++    void park_outputs(void);
++
+ 
+     uint32_t _dmadesc_count  = 0;   // number of dma decriptors
+ 	

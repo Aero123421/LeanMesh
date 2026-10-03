@@ -92,6 +92,18 @@ bool field_display_decode(const uint8_t *in, size_t n, field_display_cmd_t *cmd)
     return true;
 }
 
+field_action_t field_message_action(uint16_t app_port, const uint8_t *in, size_t n) {
+    uint32_t round;
+    switch (app_port) {
+    case FIELD_PORT_PING:
+        return field_ping_decode(in, n, &round) ? FIELD_ACT_PING_OK : FIELD_ACT_PING_UNKNOWN;
+    case FIELD_PORT_DISPLAY:
+        return FIELD_ACT_DISPLAY;
+    default:
+        return FIELD_ACT_IGNORE;
+    }
+}
+
 uint32_t field_join_backoff_s(unsigned attempt) {
     static const uint8_t k_steps[] = {5, 10, 20, 40, 60};
     return attempt < sizeof k_steps ? k_steps[attempt] : 60u;

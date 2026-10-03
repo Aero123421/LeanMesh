@@ -15,7 +15,6 @@
 #include <string.h>
 
 #include "bench_console.h"
-#include "driver/usb_serial_jtag.h"
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -67,6 +66,9 @@
 #define LINK_TICK_MS 1000
 #define REPORT_RETRY_SLOTS 4
 #define REPORT_RETRY_MS 10000
+#define DISPLAY_INIT_RETRY_MS 60000 /* a panel that did not come up is asked again once a minute ... */
+#define DISPLAY_INIT_ATTEMPTS 10    /* ... this many times in all (boot included); then it stays a render fault until a restart */
+#define DRAW_RETRY_MS 10000         /* a frame that could not be shown is tried again at most this often (each try can wait) */
 
 static const char k_nvs_ns[] = "field";
 static const char k_nvs_display[] = "disp"; /* the display command last applied, in its own wire format */
@@ -101,10 +103,13 @@ static struct {
     lm_status_t last_send_status;
     uint32_t sent, refused;
     /* application results */
-    uint32_t pings, display_cmds, display_rejected;
+    uint32_t pings, pings_unknown, display_cmds, display_rejected;
     pending_report_t pending[REPORT_RETRY_SLOTS];
     /* display */
     bool disp_valid, disp_forbid, render_fault;
+    bool display_up; /* the panel driver is initialised */
+    unsigned display_init_tries;
+    uint64_t display_init_at_ms, draw_retry_ms;
     uint32_t disp_seq;
     field_view_t shown;
     bool shown_valid;
@@ -112,12 +117,9 @@ static struct {
 
 static uint8_t s_payload[LM_MAX_MESSAGE_BYTES];
 
-/* Log lines (not console answers) are written only while a USB host is attached: without one the TX buffer of the
-   USB-Serial/JTAG port fills up and every further write would wait for its timeout. */
-#define say(...)                                         \
-    do {                                                 \
-        if (usb_serial_jtag_is_connected()) bc_outf(__VA_ARGS__); \
-    } while (0)
+/* Log lines (not console answers) never wait: bc_logf drops them when no USB host is attached or the host does not read
+   (the port enumerated but not opened leaves the TX buffer full; a waiting write would cost its whole timeout). */
+#define say(...) bc_logf(__VA_ARGS__)
 
 static uint64_t now_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
 
@@ -210,14 +212,29 @@ static bool same_view(const field_view_t *a, const field_view_t *b) {
            a->state_valid == b->state_valid && a->forbid == b->forbid;
 }
 
-static void draw_if_changed(void) {
-    if (!field_display_present()) return;
+/* The panel comes up at boot and, when it did not, again every DISPLAY_INIT_RETRY_MS, DISPLAY_INIT_ATTEMPTS times in
+   all. Until it is up every display command is REJECTED and telemetry carries the render fault. */
+static void display_try_init(uint64_t now) {
+    if (!field_display_present() || g.display_up || g.display_init_tries >= DISPLAY_INIT_ATTEMPTS || now < g.display_init_at_ms) return;
+    ++g.display_init_tries;
+    g.display_init_at_ms = now + DISPLAY_INIT_RETRY_MS;
+    g.display_up = field_display_init();
+    g.render_fault = !g.display_up;
+    g.shown_valid = false; /* a new panel shows nothing yet */
+    say("FIELD panel init %u/%u: %s\n", g.display_init_tries, (unsigned)DISPLAY_INIT_ATTEMPTS, g.display_up ? "up" : "FAILED");
+}
+
+static void draw_if_changed(uint64_t now) {
+    if (!field_display_present() || !g.display_up) return;
     const field_view_t v = current_view();
     if (g.shown_valid && same_view(&v, &g.shown) && !g.render_fault) return;
+    if (g.render_fault && now < g.draw_retry_ms) return;
     g.render_fault = !field_display_show(&v);
     if (!g.render_fault) {
         g.shown = v;
         g.shown_valid = true;
+    } else {
+        g.draw_retry_ms = now + DRAW_RETRY_MS;
     }
 }
 
@@ -334,7 +351,8 @@ static void link_tick(uint64_t now) {
     }
     field_led_set(g.link == FIELD_LINK_REACHABLE ? FIELD_LED_ON : g.link == FIELD_LINK_JOINING ? FIELD_LED_BLINK : FIELD_LED_OFF);
     join_tick(now);
-    draw_if_changed();
+    display_try_init(now);
+    draw_if_changed(now);
     const bool reachable = g.link == FIELD_LINK_REACHABLE;
     if (reachable && !g.was_reachable) g.tele_at_ms = now; /* the first telemetry right after REACHABLE (also after a loss) */
     g.was_reachable = reachable;
@@ -352,10 +370,12 @@ static void display_command(const lm_event_t *e, const uint8_t *p, size_t n) {
     field_view_t v = current_view();
     v.state_valid = true;
     v.forbid = cmd.state == FIELD_DISPLAY_FORBID;
-    if (!field_display_show(&v)) {
+    display_try_init(now_ms()); /* a command is a reason to try a panel that is down (still at most once a minute) */
+    if (!g.display_up || !field_display_show(&v)) {
         g.render_fault = true;
+        g.draw_retry_ms = now_ms() + DRAW_RETRY_MS;
         ++g.display_rejected;
-        report(e, LM_OUTCOME_REJECTED); /* cannot draw */
+        report(e, LM_OUTCOME_REJECTED); /* the panel is not up, or there is no evidence that the frame went out */
         return;
     }
     g.render_fault = false;
@@ -370,18 +390,18 @@ static void display_command(const lm_event_t *e, const uint8_t *p, size_t n) {
 }
 
 static void on_message(const lm_event_t *e, size_t n) {
-    switch (e->app_port) {
-    case FIELD_PORT_PING: {
-        uint32_t round = 0;
-        const bool ok = field_ping_decode(s_payload, n, &round);
-        if (ok) ++g.pings;
-        report(e, ok ? LM_OUTCOME_APPLIED : LM_OUTCOME_REJECTED);
+    /* lm_event_t does not say which delivery class the message has; the port decides (211 RECEIVED, 212 APPLIED). */
+    switch (field_message_action(e->app_port, s_payload, n)) {
+    case FIELD_ACT_PING_OK:
+        ++g.pings; /* a ping is delivery RECEIVED (protocol 3.2): the SDK's end-to-end receipt is the answer, no result is reported */
         break;
-    }
-    case FIELD_PORT_DISPLAY:
+    case FIELD_ACT_PING_UNKNOWN:
+        ++g.pings_unknown;
+        break;
+    case FIELD_ACT_DISPLAY:
         display_command(e, s_payload, n);
         break;
-    default:
+    case FIELD_ACT_IGNORE:
         break; /* not a field message: nothing to report */
     }
 }
@@ -429,8 +449,8 @@ static void cmd_status(void) {
 
 static void cmd_field(void) {
     const field_telemetry_t *f = &g.last;
-    bc_outf("OK sent=%u refused=%u last_status=%u joins=%u pings=%u display_ok=%u display_rejected=%u render_fault=%u", (unsigned)g.sent,
-            (unsigned)g.refused, (unsigned)g.last_send_status, g.join_asks, (unsigned)g.pings, (unsigned)g.display_cmds,
+    bc_outf("OK sent=%u refused=%u last_status=%u joins=%u pings=%u pings_unknown=%u display_ok=%u display_rejected=%u render_fault=%u", (unsigned)g.sent,
+            (unsigned)g.refused, (unsigned)g.last_send_status, g.join_asks, (unsigned)g.pings, (unsigned)g.pings_unknown, (unsigned)g.display_cmds,
             (unsigned)g.display_rejected, (unsigned)g.render_fault);
     if (g.last_valid) {
         bc_outf(" seq=%u uptime=%u boot=%u reset=%u depth=%u rssi=%d tx=%u rx=%u rf_fail=%u busy=%u heap_min=%u dseq=%u flags=%u",
@@ -501,10 +521,8 @@ void field_app_run(uint16_t boot_count) {
        ALWAYS_RX. (hil_node waits 10 s for a `safe` line first; a field node does not wait.) */
     const bool always_rx = st == LM_STATUS_OK && bc_force_always_rx(g.ctx);
     /* The panel comes after the SDK's workspace: if memory is short the panel fails (render fault), not the mesh. */
-    if (field_display_present()) {
-        g.render_fault = !field_display_init();
-        if (!g.render_fault) draw_if_changed();
-    }
+    display_try_init(now_ms());
+    draw_if_changed(now_ms());
     bc_outf("FIELD %s: mesh start %s (%u) always_rx=%u boot=%u\n",
             NODE_FIELD_ROLE == FIELD_ROLE_DISPLAY ? "display" : NODE_FIELD_ROLE == FIELD_ROLE_RELAY ? "relay" : "leaf",
             st == LM_STATUS_OK ? "OK" : "FAILED", (unsigned)st, (unsigned)always_rx, (unsigned)g.boot_count);
