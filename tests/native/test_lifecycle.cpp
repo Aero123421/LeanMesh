@@ -1031,6 +1031,47 @@ LM_TEST("M01 sim: A off, the move to B commits; A reconciles later from the same
 // M04 (sim): a lost device. The fleet's RevokeObject (floors above its generations) reaches the roots; the device, which
 // never heard of it, is refused by its root, and its move to B is refused too where B knows the floor. Without that
 // knowledge B would accept (docs/07 §8: stale revocation information is the stated limit, not hidden).
+LM_TEST("M04 HIL-F6 sim: a send to a device its root revokes ends REJECTED (REVOKED); a new one is refused at once") {
+    // HIL 2026-10-03: the Host's durable send to a revoked leaf stayed SENDING (a send without a deadline is never
+    // given up). The root knows whom it revoked.
+    LNet n({Spec{}, Spec{Role::Leaf}});
+    n.boot(0);
+    n.boot(1);
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    n.link(0, 1, false); // the leaf is out of reach: the send waits
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_NODE;
+    std::memcpy(rq.destination.node.bytes, n.id(1).bytes.data(), 32);
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_DURABLE; // no deadline: before HIL-F6 it stayed open for good
+    rq.priority = LM_PRIORITY_NORMAL;
+    const uint8_t body[] = {'h', 'i'};
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, body, sizeof body, &op), LM_STATUS_OK);
+    n.run_ms(3000);
+    auto get = [&] {
+        lm_operation_t o{};
+        o.struct_size = sizeof(o);
+        o.abi_version = LM_ABI_VERSION;
+        LM_CHECK_EQ(lm_get_operation(n.ctx(0), op, &o), LM_STATUS_OK);
+        return o;
+    };
+    LM_CHECK(get().phase != LM_PHASE_FINAL);
+    const Bytes rv = n.net.fleet.revoke(n.id(1), 2, 2);
+    LM_CHECK_EQ(n.install(0, 11, rv), 0u);
+    LM_CHECK(n.until([&] { return get().phase == LM_PHASE_FINAL; }, 10'000));
+    const lm_operation_t o = get();
+    // Its frame left once before the link went down: it may have arrived, so INDETERMINATE (REJECTED only when it
+    // provably never left). Either way the reason is the revocation, and nothing stays open.
+    LM_CHECK(o.outcome == LM_OUTCOME_INDETERMINATE || o.outcome == LM_OUTCOME_REJECTED);
+    LM_CHECK_EQ(o.reason, static_cast<uint32_t>(LM_STATUS_REVOKED));
+    lm_operation_id_t op2 = 0;
+    LM_CHECK_EQ(lm_send(n.ctx(0), &rq, body, sizeof body, &op2), LM_STATUS_REVOKED); // refused, nothing exists
+}
+
 LM_TEST("M04 sim: a revoked (lost) device is refused by its root and by a root that knows the fleet floor") {
     DNet n(1, 83);
     const unsigned d = 2;

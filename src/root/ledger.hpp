@@ -574,6 +574,8 @@ struct NoLedger {
     [[nodiscard]] MonoTime deadline() const { return MonoTime::never(); }
     void stop() {}
     [[nodiscard]] bool job_pending() const { return false; }
+    [[nodiscard]] const Entry *find(const DeviceId &) const { return nullptr; } // no ledger off the root (HIL-F6 check)
+    [[nodiscard]] EntryState effective(const Entry &e) const { return e.state; }
     [[nodiscard]] bool responder_open() const { return false; }
     [[nodiscard]] bool link_admit(const DeviceId &, const member::MemberCredential &) const { return true; }
     [[nodiscard]] Status admission() const { return Status::Ok; }

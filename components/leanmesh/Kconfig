@@ -40,6 +40,15 @@ menu "LeanMesh"
             NVS security scheme and never creates those keys (that is provisioning: an eFuse write or the nvs_keys
             partition, the product's key custody); a missing key fails closed.
 
+    config LEANMESH_BENCH_PROVISIONING
+        bool "Bench/HIL only: on-board key generation and record provisioning (leanmesh_bench.h)"
+        default n
+        help
+            Links lmb_keygen / lmb_provision_leaf / lmb_provision_root for test boards: the device key is
+            generated on the board and the fleet-signed objects are written with the SDK's record layer before
+            lm_init (components/leanmesh/bench/leanmesh_bench.h). For firmware/hil_node. Never for a product:
+            a product's provisioning is its own key-custody process (docs/21, Issue #3).
+
     config LEANMESH_OBJECT_TRANSFER
         bool "Optional 4096 B object transfer (lm_send_object)"
         default n

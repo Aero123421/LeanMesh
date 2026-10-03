@@ -84,6 +84,20 @@ Status PeerRegistry::promote(PeerHandle transient, PeerHandle &regular_out) {
     return Status::Ok;
 }
 
+Status PeerRegistry::demote(PeerHandle regular, PeerHandle &transient_out) {
+    if (regular.cls != PeerClass::Regular || !valid(regular)) {
+        return Status::NotFound;
+    }
+    const Handle h = transient_.acquire();
+    if (h.is_none()) {
+        return Status::NoCapacity;
+    }
+    transient_.get(h)->mac = *mac_of(regular);
+    (void)regular_.release(regular.slot);
+    transient_out = PeerHandle{PeerClass::Transient, h};
+    return Status::Ok;
+}
+
 Status PeerRegistry::reapply(port::Radio &radio) const {
     Status first = Status::Ok;
     auto each = [&](const auto &pool) {

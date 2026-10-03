@@ -31,6 +31,10 @@ lm_add_test(test_codec SOURCES test_codec.cpp LABELS "unit;wire")
 lm_add_test(test_route SOURCES test_route.cpp LABELS "unit;integration;route;scenario")
 # CRYPTO slice: record layer, identity/COSE, EDHOC suite-3 handshake; the RFC 9529 replay is C. The
 # linker wraps the allocator so the test can measure PSA heap use (peak and leaks).
+# GNU ld --wrap and glibc malloc_usable_size have no macOS equivalent: the test runs on Linux (CI) only.
+if(APPLE)
+    message(STATUS "test_security skipped: it needs GNU ld --wrap (Linux only)")
+else()
 lm_add_test(test_security SOURCES test_security.cpp edhoc_rfc9529.c LABELS "unit;integration;crypto;scenario")
 target_include_directories(test_security PRIVATE
     "${LM_REPO_ROOT}/third_party/libedhoc/tests/host/rfc9529/support")
@@ -40,6 +44,7 @@ if(NOT LM_SANITIZE)
     target_compile_definitions(test_security PRIVATE LM_TEST_HEAP_WRAP=1)
     target_link_options(test_security PRIVATE
         -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free)
+endif()
 endif()
 # IDENTITY+LINK slice (S5): credential codecs/checks and link sessions between provisioned sim nodes.
 # The fleet issuer lm_fleet is TEST-ONLY (tools/lmfleet); nothing here reaches firmware.

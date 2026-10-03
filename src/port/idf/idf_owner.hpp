@@ -21,7 +21,9 @@ namespace lm::idf {
 
 class IdfOwner final : public OwnerCall {
   public:
-    static constexpr std::size_t k_stack_bytes = 4096; // AES-GCM per frame runs here (S2 measures)
+    // AES-GCM per frame runs here. 4096 B ran out on an ESP32-S3 leaf during its first Join and mesh attach
+    // (high-water mark down to 20 B free, HIL 2026-10-03): 8192 B until the measured depth sets the value.
+    static constexpr std::size_t k_stack_bytes = 8192;
     static constexpr UBaseType_t k_priority = 5;       // below the Wi-Fi task, above the app
     static constexpr std::size_t k_call_queue = 4;
 

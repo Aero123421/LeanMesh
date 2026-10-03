@@ -10,11 +10,6 @@
 #include "security/crypto.hpp"
 
 namespace lm::root {
-namespace {
-
-constexpr Duration k_busy_retry = Duration::from_ms(50);
-
-} // namespace
 
 // A LeaveRequest (type 27) arrives over an ordinary link session, so its origin is the authenticated
 // peer: a device can only leave itself. Anything else is not ours (false) or ignored (true).

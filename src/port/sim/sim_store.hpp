@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <map>
 #include <utility>
 #include <vector>
@@ -53,6 +54,11 @@ class SimStore final : public port::Store {
         if (offset < journal_.size()) {
             journal_[offset] ^= xor_mask;
         }
+    }
+    // Test bench: the whole store erased (esptool erase-flash): a board about to get a new identity.
+    void wipe() {
+        slots_.clear();
+        std::fill(journal_.begin(), journal_.end(), uint8_t{0xFF});
     }
     [[nodiscard]] bool cut_fired() const { return dead_; }
     void power_restore() { dead_ = false; cut_armed_ = false; }

@@ -163,10 +163,17 @@ void Delivery::durable_done(void *ctx, const DurableReq &req, Status st, MonoTim
                 if (Op *op = d->find_op(d->out_cancel_op_[rslot]); op != nullptr && op->phase != Phase::Final) {
                     // A retire that failed leaves the record alive: it may come back after a restart, so the send
                     // is neither "not sent" nor delivered as far as this node can tell (the retire is repeated).
-                    d->finalize(*op, retired ? LM_OUTCOME_CANCELLED_NOT_SENT : LM_OUTCOME_INDETERMINATE,
-                                retired ? 0U : static_cast<uint32_t>(st), now);
+                    const uint32_t why = d->out_cancel_reason_[rslot]; // HIL-F6: a revoked destination
+                    if (!retired) {
+                        d->finalize(*op, LM_OUTCOME_INDETERMINATE, static_cast<uint32_t>(st), now);
+                    } else if (why != 0) {
+                        d->finalize(*op, LM_OUTCOME_REJECTED, why, now);
+                    } else {
+                        d->finalize(*op, LM_OUTCOME_CANCELLED_NOT_SENT, 0, now);
+                    }
                 }
                 d->out_cancel_op_[rslot] = 0;
+                d->out_cancel_reason_[rslot] = 0;
             }
         }
         return;

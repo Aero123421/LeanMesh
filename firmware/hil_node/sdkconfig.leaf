@@ -1,0 +1,2 @@
+# LEAF/RELAY bench board: logs and the line console share the USB-Serial/JTAG port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

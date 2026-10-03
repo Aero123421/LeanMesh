@@ -95,7 +95,7 @@ LM_TEST("CBOR strict decoder rejects non-deterministic and unsupported encodings
         "a202010101",         // unsorted keys 2, 1
         "a1f40100",           // key false (and trailing)
         "a1f401",             // key false: not uint/nint/bstr/tstr
-        "a18101" "01",        // array as key
+        "a1810101",           // array as key
         "6180",               // lone UTF-8 continuation byte
         "62c0af",             // overlong '/'
         "63eda080",           // surrogate U+D800

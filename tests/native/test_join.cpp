@@ -1660,6 +1660,77 @@ LM_TEST("P8 sim: one membership object per role; the root's answers are unchange
     LM_CHECK(n.eng(0).role_job_pending() == false && n.eng(1).role_job_pending() == false);
 }
 
+LM_TEST("HIL-F3 sim: a board erased and given a new identity joins at once from the same MAC") {
+    JNet n(2);
+    LM_CHECK_EQ(n.join_device(1, 0x20, 1, 1), 0u);
+    n.run_ms(5000);
+    LM_CHECK(n.linked(0, 1));
+    const DeviceId old = n.id(1);
+    // The board is erased (esptool erase-flash) and provisioned with a new key: same node, same MAC.
+    n.node(1).power_cut();
+    n.node(1).store.wipe();
+    n.node(1).store.power_restore();
+    n.kits[1] = n.net.make_unjoined(101);
+    n.provision_unjoined(1);
+    n.boot(1);
+    // Re-provisioning a board takes minutes; 31 s keep the root's one-full-handshake-per-MAC gate (touched by the old
+    // device's last link handshake) out of this test: that interaction is HIL-F2's.
+    n.run_ms(31000);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(old) != nullptr); // the root still holds the old session
+    // HIL 2026-10-03: the root dropped every join carrier of a MAC that was an ordinary neighbour, for as long as the
+    // old session lived (up to its 1 h key lifetime). The new identity must join within one ordinary join.
+    LM_CHECK_EQ(n.join_device(1, 0x21, 1, 2), 0u);
+    LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
+    const root::Entry *e = n.ledger().find(n.id(1));
+    LM_CHECK(e != nullptr && e->state == root::EntryState::Active);
+    LM_CHECK(n.eng(0).link().neighbors().find_device(old) == nullptr); // the stale session went with the new identity
+    n.run_ms(5000);
+    LM_CHECK(n.linked(0, 1));
+    LM_CHECK_EQ(n.join_only_neighbors(0), 0u);
+}
+
+LM_TEST("HIL-F3 sim: join carriers from a live member's MAC are refused after verification and its session stays") {
+    JNet n(2);
+    LM_CHECK_EQ(n.join_device(1, 0x30, 1, 1), 0u);
+    n.run_ms(5000);
+    LM_CHECK(n.linked(0, 1));
+    const link::Neighbor *before = n.eng(0).link().neighbors().find_device(n.id(1));
+    LM_CHECK(before != nullptr);
+    const Sha256Digest ctx = before != nullptr ? before->cur.ctx_hash : Sha256Digest{};
+    // The member asks the root for a membership through the JOIN_ONLY handshake (its transfer path): same device.
+    n.run_ms(31000); // past the per-MAC handshake gate, so the refusal is the identity check's
+    lm_status_t st = 0;
+    const uint64_t op = n.join(1, 0x31, LM_JOIN_TRANSFER_CANDIDATE, &st, 30000);
+    if (st == LM_STATUS_OK) {
+        (void)n.wait_operation(1, op, 40000);
+    }
+    const link::Neighbor *after = n.eng(0).link().neighbors().find_device(n.id(1));
+    LM_CHECK(after != nullptr && after->cur.ctx_hash == ctx); // the ordinary session was never replaced
+    LM_CHECK_EQ(n.join_only_neighbors(0), 0u);
+    LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
+}
+
+LM_TEST("HIL-F2 sim: eight devices that ask at the same moment all join within their first join operation") {
+    // HIL 2026-10-03: three boards joined at once; one ended EXPIRED. The root runs one handshake at a time and drops
+    // the others' carriers; a joiner had already spent its one-full-handshake-per-peer gate (30 s) when it sent its
+    // CredI, so it could not ask again before its 30 s search ended.
+    constexpr unsigned k_devices = 8;
+    JNet n(1 + k_devices);
+    std::array<uint64_t, k_devices + 1> ops{};
+    for (unsigned i = 1; i <= k_devices; ++i) {
+        n.grant(i, 1, i); // one ExpectedSet revision per device
+    }
+    for (unsigned i = 1; i <= k_devices; ++i) {
+        lm_status_t st = 0;
+        ops[i] = n.join(i, static_cast<uint8_t>(0x40 + i), LM_JOIN_NEW, &st);
+        LM_CHECK_EQ(st, LM_STATUS_OK);
+    }
+    for (unsigned i = 1; i <= k_devices; ++i) {
+        LM_CHECK_EQ(n.wait_operation(i, ops[i], 60000), 0u);
+        LM_CHECK_EQ(n.membership(i).state, static_cast<uint32_t>(LM_ACTIVE));
+    }
+}
+
 LM_TEST("measure: sizeof of the join/membership state") {
     std::printf("  [measure] sizeof(Membership)=%zu Ledger=%zu (entries %zu x %zu) JoinPipe=%zu Exchange=%zu LinkLayer=%zu\n"
                 "            LocalIdentity=%zu Engine=%zu lm_context=%zu Neighbor=%zu\n",

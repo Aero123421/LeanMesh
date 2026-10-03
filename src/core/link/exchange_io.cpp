@@ -133,10 +133,11 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
 bool Exchange::start_responder(const Frag &f, const Origin &o, MonoTime now) {
     switch (o.family) {
     case Family::Join:
-        // [S8] Only the root answers, only while policy and a join slot allow it, and never for
-        // a MAC that already is an ordinary neighbour (a live member does not need to join).
+        // [S8] Only the root answers, only while policy and a join slot allow it. A MAC that is an ordinary
+        // neighbour may be a board erased and given a new identity (HIL-F3): whether it is that neighbour's device
+        // (a live member does not need to join: refused) is decided once its credential is verified (after_verify).
         if (s_.join.responder_open == nullptr || !s_.join.responder_open(s_.join.ctx) ||
-            s_.neighbors.find_mac(o.mac) != nullptr || !s_.identity.is_member()) {
+            !s_.identity.is_member()) {
             busy_drop(o.family);
             return false;
         }

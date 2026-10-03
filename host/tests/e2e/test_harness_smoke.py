@@ -33,7 +33,7 @@ def test_host_and_meshsim_pty_are_wired(meshsim: Callable[..., MeshSim],
                                         host_process: Callable[..., HostProcess]) -> None:
     sim = meshsim("--nodes", "2", "--clock", "realtime", "--serial-pty")
     pty = sim.ready["serial_pty"]
-    assert pty.startswith("/dev/pts/")
+    assert pty.startswith(("/dev/pts/", "/dev/ttys"))  # Linux / macOS pty names
     host = host_process(serial=pty)
     with host.client() as c:
         status = c.get("/v1/status", headers=host.auth).json()

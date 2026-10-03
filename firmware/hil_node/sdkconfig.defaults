@@ -1,0 +1,13 @@
+# BENCH / HIL ONLY (see CMakeLists.txt). Never a product configuration.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../config/partitions_4m.csv"
+# Bench boards have no eFuse key: the SDK partitions are plaintext (development acknowledgement, FIX8-D7).
+CONFIG_NVS_ENCRYPTION=n
+CONFIG_LEANMESH_ALLOW_PLAINTEXT_SECRETS=y
+# A bench RF approval: certified modules on the bench, JP, channel 1 (docs/03 §3: not a compliance statement).
+CONFIG_LEANMESH_RF_DEPLOYMENT_APPROVED=y
+CONFIG_LEANMESH_BENCH_PROVISIONING=y
+# The provisioning commands run on the main task: record jobs, COSE and PSA need more than the 3.5 KiB default.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

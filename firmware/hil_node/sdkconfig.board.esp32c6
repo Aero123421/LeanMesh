@@ -1,0 +1,2 @@
+# ESP32-C6FH4 bench boards here are Seeed XIAO ESP32C6: their RF switch needs GPIO3 low (on-board antenna: GPIO14 low).
+CONFIG_HIL_XIAO_C6_RF_SWITCH=y

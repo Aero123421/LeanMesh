@@ -72,6 +72,17 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
     if (dest == identity_.self() || dest.is_zero()) {
         return reply(Status::InvalidArgument);
     }
+    if constexpr (k_root_capable) {
+        // HIL-F6: the root knows who it revoked: a send to that device is refused at once instead of trying it forever
+        // (a durable send without a deadline is never given up). Other nodes learn of a revocation by the lease. The
+        // root's own control sends go on: the revocation notice itself is one.
+        if (engine_.config().role == Role::Root && rq.destination.kind == LM_DEST_NODE && !control) {
+            const root::Entry *e = engine_.ledger().find(dest);
+            if (e != nullptr && engine_.ledger().effective(*e) == root::EntryState::Blocked) {
+                return reply(Status::Revoked);
+            }
+        }
+    }
     if (host_tag_ != nullptr) { // [S13] a repeated SEND of the Host: same id and hash = the same operation
         if (const Op *known = find_op_by_message(dest, host_tag_->mid); known != nullptr) {
             return known->hash == host_tag_->hash ? reply(Status::Ok, known->id) : reply(Status::Conflict);
@@ -856,6 +867,33 @@ Reply Delivery::cancel(uint64_t op_id, MonoTime now) {
     a->next_at = a->round_at;
     op->phase = Phase::WaitingReceipt;
     return reply(Status::CancelTooLate, op_id);
+}
+
+void Delivery::end_sends_to(const DeviceId &dest, MonoTime now) {
+    constexpr uint32_t k_revoked = static_cast<uint32_t>(Status::Revoked);
+    for (Op &o : ops_) {
+        if (!o.used || o.report || o.phase == Phase::Final || o.active.is_none() || o.dest != dest ||
+            o.priority >= LM_PRIORITY_CONTROL) {
+            continue;
+        }
+        const Handle h = o.active;
+        Active *a = actives_.get(h);
+        if (a == nullptr || a->cancelled) {
+            continue;
+        }
+        if (!left_node(h, o)) {
+            if (a->durable) {
+                out_cancel_op_[a->jslot] = o.id;
+                out_cancel_reason_[a->jslot] = k_revoked;
+                retire_active(h, true, now);
+            } else {
+                finalize_active(h, LM_OUTCOME_REJECTED, k_revoked, now);
+            }
+            continue;
+        }
+        // It may have arrived before the revocation: INDETERMINATE, and nothing waits for a receipt of a revoked device.
+        finalize_active(h, LM_OUTCOME_INDETERMINATE, k_revoked, now);
+    }
 }
 
 Reply Delivery::get_operation(uint64_t op_id, lm_operation_t &out) {

@@ -272,6 +272,7 @@ void Delivery::stop() {
     out_j_ = {};
     out_retire_ = {};
     out_cancel_op_ = {};
+    out_cancel_reason_ = {};
     in_j_ = {};
     sessions_.clear();
     ready_ = false;
