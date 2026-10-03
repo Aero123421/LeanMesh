@@ -119,7 +119,7 @@ $PY -m leanmesh_fleet transfer --store /secure/fleet-a --environment production 
 |---|---|
 | `--source-domain` | 機器が**今いる** domain（非ゼロ16 B）。移設先と同じは拒否 |
 | `--root-delegation` | 移設先 root の RootDelegation。target domain はこれから取る。この object の SHA-256 が参加券に入る |
-| `--expected-old` / `--new-generation` | 機器の現在の assignment generation（1 以上）と、移設後の generation（それより大きい） |
+| `--expected-old` / `--new-generation` | 機器の現在の assignment generation（1 以上）と、移設後の generation（それより大きい）。後者は機器と B の root が持つ消費済み generation の floor より上であること（下回ると機器か root が拒否）。この版は inventory も floor も永続管理しない |
 | `--nonce HEX` | mode 0。機器が `lm_transfer_nonce_get` で出した 16 B。その機器・その nonce にだけ効く |
 | `--grant` | mode 1。暗号乱数の一回限り grant id。事前に発行でき、機器の nonce は要らない |
 | `--expected-revision` | 指定すると移設先 B の ExpectedSet 1 page（`expected-00.cose`）も発行（PREAPPROVED の root B 用） |
