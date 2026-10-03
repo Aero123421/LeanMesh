@@ -1,5 +1,7 @@
 # Changelog
 
+- Issue #3 の初回経路: `python -m leanmesh_fleet` によるオフライン fleet 鍵の新規生成・暗号化保管と、DeviceCredential / RootDelegation / 初回 AssignmentTicket / ExpectedSet の発行。通常 Host の署名権限・SDK wire 契約は変更なし。SDK/PSA 検証と sim Join を CI に追加。機器書込み、USB kit、他の lifecycle 発行 CLI、実機 custody は後続（[使い方](docs/sdk/fleet-issuer.md)）。
+
 ## Unreleased — ソフトウェア実装（feat/sdk-impl）
 
 仕様0.2に沿ったソフトウェア実装を追加した。**実機で認定された製品ではない。** 使い方は [docs/sdk/](docs/sdk/README.md)、判断の履歴は [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)、資源の現状は [ADR-002](decisions/ADR-002-budget-status.md)。
