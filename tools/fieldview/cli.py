@@ -59,7 +59,8 @@ def build(args: argparse.Namespace) -> tuple[Config, HostClient, Recorder]:
             raise SystemExit(f"no token: {exc} (--token-file or $LEANMESH_TOKEN)") from exc
     sock = args.socket or net_socket(args.net)
     cfg = Config(socket=sock, token=token, domain=domain, logs_dir=args.logs_dir, interval_s=args.interval,
-                 consumer=args.consumer, names=bench.get("names", {}), root_id=bench.get("root_id"))
+                 consumer=args.consumer, names=bench.get("names", {}), root_id=bench.get("root_id"),
+                 state_file=args.state_file, net=args.net)
     recorder = Recorder(session_dir(args.logs_dir))
     return cfg, HostClient(sock, token, domain), recorder
 

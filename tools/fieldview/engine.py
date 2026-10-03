@@ -51,6 +51,8 @@ class Config:
     names: dict[str, str] = field(default_factory=dict)
     root_id: str | None = None
     root_name: str = "root"
+    state_file: Path | None = None    # tools/hil's state file: names are read again when it changes (boards provisioned later)
+    net: str | None = None
     nodes_poll_s: float = 5.0
     summary_s: float = 10.0
     events_wait_ms: int = 15000
@@ -631,8 +633,27 @@ class FieldView:
                              f"{entry['result']}", p.device)
 
     # ---- nodes / topology ---------------------------------------------------------------------------------------
+    def _reload_names(self) -> None:
+        """Board names of boards provisioned after the start: the state file is read again when its mtime changes."""
+        path = self.cfg.state_file
+        if path is None:
+            return
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return
+        if mtime == getattr(self, "_state_mtime", None):
+            return
+        self._state_mtime = mtime
+        bench = load_bench(path, self.cfg.net)
+        if bench.get("names"):
+            self.cfg.names = bench["names"]
+        if bench.get("root_id"):
+            self.cfg.root_id = bench["root_id"]
+
     async def _nodes_loop(self) -> None:
         while True:
+            self._reload_names()
             st = await self.client.status()
             if st.ok:
                 self._note_status(st.body)

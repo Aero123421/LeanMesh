@@ -490,3 +490,19 @@ def test_load_bench_names_the_boards(tmp_path: Path) -> None:
     second = load_bench(path, "netB")
     assert second["domain"] == "bb" * 16 and second["root_id"] == "ee" * 32
     assert load_bench(tmp_path / "missing.json") == {}
+
+
+def test_names_of_boards_provisioned_after_the_start_are_read_again(tmp_path: Path) -> None:
+    # HIL 2026-10-04: boards provisioned while fieldview ran showed short ids only (the state file was read once).
+    import os
+
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"domain": DOMAIN, "root": {"device": "ff" * 32}, "leaves": {}}))
+    fv, rec = make_engine(tmp_path, [0.0], state_file=path)
+    fv._reload_names()
+    assert fv.name_of(DEV["b"]) == DEV["b"][:8]
+    path.write_text(json.dumps({"domain": DOMAIN, "root": {"device": "ff" * 32}, "leaves": {"late": {"device": DEV["b"]}}}))
+    os.utime(path, (1, 2))  # a different mtime even within the file system's resolution
+    fv._reload_names()
+    assert fv.name_of(DEV["b"]) == "late"
+    rec.close()
