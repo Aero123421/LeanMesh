@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import protocol as pr
-from .hostclient import HostClient, HostUnreachable, Reply
+from .hostclient import HostClient, HostUnreachable, Reply, SendUnknown
 from .recorder import Recorder, utc_text
 from .stats import PingTrack, TelemetryTrack
 from .topology import NodeView, build_tree, short_id
@@ -473,7 +473,7 @@ class FieldView:
         targets = sorted(self.active_nodes(), key=self.name_of)
         self.round_no += 1
         rnd = {"round": self.round_no, "t": utc_text(self.utcnow()), "nodes": len(targets), "alive": 0, "noanswer": 0,
-               "rejected": 0, "notsent": 0, "open": len(targets), "interval_s": interval_s}
+               "rejected": 0, "notsent": 0, "unknown": 0, "open": len(targets), "interval_s": interval_s}
         self.rounds.append(rnd)
         self._round_of[self.round_no] = rnd
         while len(self._round_of) > 40:
@@ -502,7 +502,11 @@ class FieldView:
 
         try:
             r = await self.client.post_message(body, max_wait=max_wait)
-        except HostUnreachable as exc:
+        except SendUnknown as exc:  # the answer is lost and the replays with the same key got none either
+            self.warn("post-unknown", "a POST /v1/messages got no answer: those pings are 'unknown' (see the ping log)")
+            self._ping_refused(device, rnd, pr.classify_post_unknown(str(exc)), key=exc.key)
+            return
+        except HostUnreachable as exc:  # failed before anything was sent
             self._ping_refused(device, rnd, pr.classify_post_error(None, exc=str(exc)))
             return
         if r.status == 0:
@@ -516,6 +520,7 @@ class FieldView:
                 self.warn("rate", f"the Host rate-limits us (HTTP 429, retry after {r.retry_after_ms} ms)")
             self._ping_refused(device, rnd, pr.classify_post_error(r.status, r.body))
             return
+        self.warn("post-unknown", None)
         op_id = str(r.body["id"])
         self.ping.setdefault(device, PingTrack()).accepted()
         p = Pending(op_id, "ping", device, rnd["round"], t_post,
@@ -525,11 +530,12 @@ class FieldView:
             self.final_hint.pop(op_id, None)
             self._fetch(p)
 
-    def _ping_refused(self, device: str, rnd: dict[str, Any], res: pr.PingResult) -> None:
+    def _ping_refused(self, device: str, rnd: dict[str, Any], res: pr.PingResult, key: str | None = None) -> None:
         self.ping.setdefault(device, PingTrack()).refused(rnd["round"], res)
         self._count_round(rnd, res)
+        extra = {"idempotency_key": key} if key else {}
         self.rec.log("ping", {"round": rnd["round"], "device": device, "name": self.name_of(device),
-                              "result": res.kind, "detail": res.detail, "op": None})
+                              "result": res.kind, "detail": res.detail, "op": None, **extra})
 
     def _ping_done(self, p: Pending, res: pr.PingResult, op: dict[str, Any]) -> None:
         self.ping.setdefault(p.device, PingTrack()).finish(p.round_no, res)
@@ -569,10 +575,14 @@ class FieldView:
             return pr.display_request(self.cfg.domain, self.epoch or "", device, state, seq, self.utcnow())
 
         r = Reply(0, {})
+        unknown: SendUnknown | None = None
         for _ in range(3):  # a 429 stops the budget for what the Host asked, then the next try goes out
             try:
                 r = await self.client.post_message(body, max_wait=5.0)
-            except HostUnreachable as exc:
+            except SendUnknown as exc:
+                unknown = exc
+                break
+            except HostUnreachable as exc:  # failed before anything was sent
                 r = Reply(0, {"code": "UNREACHABLE", "message": str(exc)})
                 break
             if r.status != 429:
@@ -581,6 +591,11 @@ class FieldView:
                  "posted": utc_text(self.utcnow()), "op": None, "arrived": False, "drawn": False,
                  "arrived_ms": None, "drawn_ms": None, "result": "pending", "detail": ""}
         self.display[device] = entry
+        if unknown is not None:  # the Host may have the command: neither "sent" nor "not sent"
+            res = pr.classify_post_unknown(str(unknown))
+            entry.update(result="unknown", detail=res.detail)
+            self.rec.log("display", {"event": "unknown", "idempotency_key": unknown.key, **entry})
+            return entry
         if not r.ok:
             entry.update(result="notsent", detail=f"HTTP {r.status} {r.code}".strip())
             self.rec.log("display", {"event": "refused", **entry})

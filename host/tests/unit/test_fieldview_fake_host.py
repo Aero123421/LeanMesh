@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.fieldview import protocol as pr  # noqa: E402
 from tools.fieldview.engine import Config, FieldView  # noqa: E402
-from tools.fieldview.hostclient import HostClient  # noqa: E402
+from tools.fieldview.hostclient import HostClient, HostUnreachable, SendUnknown  # noqa: E402
 from tools.fieldview.recorder import Recorder  # noqa: E402
 from tools.fieldview.web import make_app  # noqa: E402
 
@@ -59,9 +59,10 @@ async def view(fake: FakeHost, tmp: Path, **cfg: Any) -> AsyncIterator[FieldView
     cfg.setdefault("tick_s", 0.05)
     cfg.setdefault("summary_s", 0.3)
     rps = cfg.pop("rps", 14.0)
+    post_timeout = cfg.pop("post_timeout", 5.0)
     config = Config(socket=str(fake.socket), token=TOKEN, domain=DOMAIN, logs_dir=tmp, root_id=ROOT,
                     names={A: "relay-1", B: "leaf-1", C: "display-1"}, **cfg)
-    client = HostClient(config.socket, TOKEN, DOMAIN, rps=rps)
+    client = HostClient(config.socket, TOKEN, DOMAIN, rps=rps, post_timeout=post_timeout)
     rec = Recorder(tmp / f"rec{len(list(tmp.glob('rec*')))}")
     fv = FieldView(config, client, rec)
     await fv.start()
@@ -421,3 +422,93 @@ def test_the_page_and_its_api(fake: FakeHost, tmp_path: Path) -> None:
             await task
 
     asyncio.run(scenario())
+
+
+# ---- a POST whose answer is lost (review finding 3) -------------------------------------------------------------------
+
+def test_a_lost_post_answer_is_recovered_by_replaying_the_same_request(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.fault = {"mode": "after", "count": 1, "delay": 1.5}   # admitted, the answer never arrives in time
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, post_timeout=0.3) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            rnd = await fv.ping_round(3.0, max_wait=5.0)
+            await until(lambda: rnd["open"] == 0, "the round ends", 10)
+            assert (rnd["alive"], rnd["notsent"], rnd["unknown"]) == (1, 0, 0)
+            assert fv.ping[A].unknown == 0 and fv.ping[A].sent == 1
+
+    asyncio.run(scenario())
+    assert len(fake.posts) == 1 and fake.replays >= 1       # one admission; the retry got the stored operation
+    assert len({k for k in fake.keys}) == 1                 # the replay used the key of the first request
+
+
+def test_a_post_that_is_never_answered_is_unknown_not_notsent(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.add_node(C, parent_device_id=ROOT)
+    fake.fault = {"mode": "blackhole", "count": 20, "delay": 1.0}   # admitted; no answer, to the replays neither
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, post_timeout=0.2) as fv:
+            await until(lambda: len(fv.active_nodes()) == 2, "nodes")
+            rnd = await fv.ping_round(3.0, max_wait=5.0)
+            assert (rnd["unknown"], rnd["notsent"], rnd["noanswer"], rnd["alive"]) == (2, 0, 0, 0)
+            assert rnd["open"] == 0 and "post-unknown" in fv.warnings
+            for d in (A, C):
+                t = fv.ping[d]
+                assert (t.unknown, t.notsent, t.noanswer, t.sent, t.last.kind) == (1, 0, 0, 0, "unknown")
+            assert fv.pending == {}
+            telemetry(fake, C, 1, role=3)
+            await until(lambda: fv.display_nodes() == [C], "display known")
+            entry = await fv.send_display(C, "FORBID")
+            assert entry["result"] == "unknown" and entry["op"] is None
+            assert "may have been admitted" in entry["detail"]
+
+    asyncio.run(scenario())
+    assert fake.replays >= 4                                 # every unknown POST was replayed with its key
+    recs = lines(next(tmp_path.glob("rec*/ping.ndjson")))
+    unknown = [x for x in recs if x.get("result") == "unknown"]
+    assert len(unknown) == 2 and all(x["idempotency_key"] in fake.keys for x in unknown)
+    shown = [x for x in lines(next(tmp_path.glob("rec*/display.ndjson"))) if x["event"] == "unknown"]
+    assert len(shown) == 1 and shown[0]["idempotency_key"] in fake.keys
+
+
+def test_a_post_the_host_never_received_is_still_unknown_after_the_replays_fail(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.fault = {"mode": "before", "count": 10, "delay": 1.0}   # lost on the way: never admitted, but we cannot know
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, post_timeout=0.2) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            rnd = await fv.ping_round(3.0, max_wait=5.0)
+            assert (rnd["unknown"], rnd["notsent"]) == (1, 0)
+
+    asyncio.run(scenario())
+    assert fake.posts == []
+
+
+def test_failures_before_anything_was_sent_are_not_unknown(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        client = HostClient(str(tmp_path / "nothing.sock"), TOKEN, DOMAIN)
+        try:
+            with pytest.raises(HostUnreachable) as info:
+                await client.post_message({"x": 1}, max_wait=1.0)
+            assert not isinstance(info.value, SendUnknown) and info.value.maybe_sent is False
+        finally:
+            await client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_an_answer_is_the_end_of_the_doubt_a_refusal_is_not_unknown(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "refuse", "status": 507, "code": "NO_CAPACITY"}
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, post_timeout=0.2) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            rnd = await fv.ping_round(3.0)
+            assert (rnd["notsent"], rnd["unknown"]) == (1, 0)
+
+    asyncio.run(scenario())
+    assert fake.replays == 0

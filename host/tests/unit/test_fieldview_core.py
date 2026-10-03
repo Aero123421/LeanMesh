@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO))
 from tools.fieldview import protocol as pr  # noqa: E402
 from tools.fieldview import topology as topo  # noqa: E402
 from tools.fieldview.engine import Config, FieldView, load_bench, ping_load  # noqa: E402
+from tools.fieldview.hostclient import RateBucket  # noqa: E402
 from tools.fieldview.recorder import SUMMARY_COLUMNS, Recorder  # noqa: E402
 from tools.fieldview.stats import PingTrack, TelemetryTrack  # noqa: E402
 
@@ -506,3 +507,49 @@ def test_names_of_boards_provisioned_after_the_start_are_read_again(tmp_path: Pa
     fv._reload_names()
     assert fv.name_of(DEV["b"]) == "late"
     rec.close()
+
+
+# ---- the request-rate guard (review finding 6) --------------------------------------------------------------------------
+
+def test_the_rate_guard_enforces_its_total_wait_also_behind_the_lock() -> None:
+    """A request queued behind a long cooldown must give up at its own budget, and must not take a token that happens
+    to be free once it finally gets the lock."""
+    import asyncio
+    import time
+
+    async def scenario() -> None:
+        bucket = RateBucket(50.0, 4)
+        bucket.penalize(600)                                    # a 429 stops everything for 0.6 s
+        holder = asyncio.ensure_future(bucket.acquire(None))    # a request without budget limit holds the lock for that
+        await asyncio.sleep(0.05)
+        t0 = time.monotonic()
+        got = await bucket.acquire(0.2)                          # queued behind it, budget 0.2 s
+        assert got is False and time.monotonic() - t0 < 0.4     # gave up at its budget, not after the cooldown
+        assert await holder is True
+        t1 = time.monotonic()
+        assert await bucket.acquire(0.05) is True                # a free token is still taken by a fresh request
+        assert time.monotonic() - t1 < 0.1
+        assert bucket.refused == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_token_that_became_free_after_the_budget_is_not_taken() -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        bucket = RateBucket(100.0, 1)
+        bucket.tokens = 0.0
+        t = [0.0]
+        bucket.clock = lambda: t[0]
+        bucket.at = 0.0
+        bucket.blocked_until = 0.0
+        # the lock is free but the clock says the budget (0.1 s) ran out before the token check: refuse, keep the token
+        t[0] = 0.0
+        task = asyncio.ensure_future(bucket.acquire(0.1))
+        await asyncio.sleep(0)
+        t[0] = 5.0                                               # 5 s later a token has refilled ...
+        assert await task is False                               # ... but this request is long past its budget
+        assert bucket.tokens >= 0.99
+
+    asyncio.run(scenario())

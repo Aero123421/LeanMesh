@@ -182,7 +182,7 @@ def rtt_from_evidence(op: dict[str, Any]) -> int | None:
 
 @dataclass(frozen=True)
 class PingResult:
-    kind: str  # alive | noanswer | rejected | notsent
+    kind: str  # alive | noanswer | rejected | notsent | unknown | skipped
     detail: str = ""
     rtt_ms: int | None = None
     rtt_src: str | None = None  # "root" (evidence on the root clock) or "laptop" (POST to the final event)
@@ -217,11 +217,18 @@ def classify_ping(op: dict[str, Any], laptop_rtt_ms: int | None = None) -> PingR
 
 
 def classify_post_error(status: int | None, body: dict[str, Any] | None = None, exc: str = "") -> PingResult:
-    """A POST /v1/messages the Host refused (or never answered): not sent, with the Host's code as the detail."""
+    """A POST /v1/messages that provably did not get admitted: the Host refused it (a 4xx / 429 / 5xx answer) or the
+    request failed before it was sent (connect refused). Not sent, with the Host's code as the detail."""
     if status is None:
-        return PingResult("notsent", f"no answer from the Host: {exc}"[:120])
+        return PingResult("notsent", f"could not reach the Host: {exc}"[:120])
     code = (body or {}).get("code", "")
     return PingResult("notsent", f"HTTP {status} {code}".strip())
+
+
+def classify_post_unknown(exc: str) -> PingResult:
+    """A POST /v1/messages whose answer never came (also on the replays with the same Idempotency-Key): the Host may
+    have admitted it. Neither "sent and lost" nor "not sent"."""
+    return PingResult("unknown", f"no answer to the POST (it may have been admitted): {exc}"[:160])
 
 
 def event_payload(event: dict[str, Any]) -> bytes:

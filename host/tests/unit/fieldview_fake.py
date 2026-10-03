@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import threading
 import time
@@ -43,10 +44,21 @@ class FakeHost:
         self.ops: dict[str, dict[str, Any]] = {}
         self.responders: dict[str, dict[str, Any]] = {}   # device -> {"mode": ..., "rtt": s, "observed": bool}
         self.get_ops = 0
+        self.keys: dict[str, tuple[str, str]] = {}    # Idempotency-Key -> (request hash, operation id): a replay is stored
+        self.replays = 0
+        # failure injection on POST /v1/messages: {"mode": "after" | "before" | "blackhole", "count": n, "delay": s}.
+        # "after": the Host admits the request and then the answer is lost (a read timeout on the client); "before": the
+        # request is lost on the way and never admitted; "blackhole": admitted, and the answers to its replays are lost too.
+        self.fault: dict[str, Any] | None = None
         self.root_connected = True
         self.limiter = RateLimiter(20.0, 40, 100.0, 100)
         self.requests = 0
         self.epochs = 0
+        self.epoch_state: dict[str, str] = {}          # epoch id -> OPEN | CLOSED
+        self.epoch_keys: dict[str, tuple[str, str]] = {}   # Idempotency-Key -> (request_id, epoch id)
+        self.epoch_closes: list[str] = []              # every close call, in order
+        self.max_open_epochs = 64                       # the Host's MAX_OPEN_EPOCHS_PER_PRINCIPAL
+        self.epoch_fault = 0                            # epoch opens whose answer is lost after they were processed
         self._lock = threading.Lock()
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
@@ -166,12 +178,30 @@ class FakeHost:
             return {"items": list(self.nodes)}
 
         @app.post("/v1/epochs", status_code=201)
-        async def epoch() -> dict[str, str]:
+        async def epoch(request: Request) -> Any:
+            key, body = request.headers.get("idempotency-key", ""), await request.json()
+            if key in self.epoch_keys:  # ops.open_epoch: the same key + request_id returns the same epoch
+                want, stored = self.epoch_keys[key]
+                if want != body["request_id"]:
+                    return error(409, "CONFLICT", "Idempotency-Key reused with a different request")
+                return {"id": stored, "state": self.epoch_state[stored]}
+            if sum(1 for v in self.epoch_state.values() if v == "OPEN") >= self.max_open_epochs:
+                return error(429, "NO_CAPACITY", "open_epochs", retry_after_ms=1000)
             self.epochs += 1
-            return {"id": hex_id(0xE0 + self.epochs), "state": "OPEN"}
+            eid = hex_id(0xE0 + self.epochs)
+            self.epoch_state[eid] = "OPEN"
+            self.epoch_keys[key] = (body["request_id"], eid)
+            if self.epoch_fault > 0:
+                self.epoch_fault -= 1
+                await asyncio.sleep(2.0)
+            return {"id": eid, "state": "OPEN"}
 
         @app.post("/v1/epochs/{epoch_id}/close")
-        async def close(epoch_id: str) -> dict[str, str]:
+        async def close(epoch_id: str) -> Any:
+            if epoch_id not in self.epoch_state:
+                return error(404, "NOT_FOUND", "epoch not found")
+            self.epoch_closes.append(epoch_id)
+            self.epoch_state[epoch_id] = "CLOSED"
             return {"id": epoch_id, "state": "CLOSED"}
 
         @app.post("/v1/messages", status_code=202)
@@ -181,11 +211,34 @@ class FakeHost:
                 MessageRequest.model_validate(raw)  # the real admission rules (LATEST needs BEST_EFFORT, ...)
             except ValidationError as exc:
                 return error(400, "INVALID_ARGUMENT", str(exc.errors()[0]["msg"]))
+            key = request.headers.get("idempotency-key", "")
+            digest = json.dumps(raw, sort_keys=True)
+            fault = self.fault if self.fault and self.fault.get("count", 0) > 0 else None
+            if fault is not None:
+                fault["count"] -= 1
+                if fault["mode"] == "before":
+                    await asyncio.sleep(float(fault.get("delay", 2.0)))
+                    return error(503, "UNAVAILABLE", "lost on the way")
+            if key in self.keys:  # an exact replay returns the stored operation (api/routes.py: lookup before checks)
+                stored_hash, stored_op = self.keys[key]
+                if stored_hash != digest:
+                    return error(409, "CONFLICT", "Idempotency-Key reused with a different request")
+                self.replays += 1
+                op = self.ops[stored_op]
+                if fault is not None and fault["mode"] == "blackhole":  # the answer is lost again
+                    await asyncio.sleep(float(fault.get("delay", 2.0)))
+                return {k: op[k] for k in ("id", "state", "outcome", "evidence")}
+            if self.epoch_state.get(raw["client_epoch"]) != "OPEN":
+                return error(410, "EPOCH_CLOSED", "client epoch is closed; open a new epoch")
             self.posts.append(raw)
             resp = self.responders.get(raw["destination"]["device_id"], {})
             if resp.get("mode") == "refuse":
                 return error(resp.get("status", 507), resp.get("code", "NO_CAPACITY"), "refused")
             op = self._start_op(raw)
+            op["epoch"] = raw["client_epoch"]
+            self.keys[key] = (digest, op["id"])
+            if fault is not None and fault["mode"] in ("after", "blackhole"):
+                await asyncio.sleep(float(fault.get("delay", 2.0)))
             return {k: op[k] for k in ("id", "state", "outcome", "evidence")}
 
         @app.get("/v1/operations/{op_id}")
