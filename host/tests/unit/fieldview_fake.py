@@ -97,6 +97,14 @@ class FakeHost:
             "kind": "HOST_COMMITTED", "assurance": "SELF_REPORTED",
             "details": {"operation_id": op["id"], "state": op["state"], "outcome": op["outcome"]}})
 
+    def amend(self, op_id: str, outcome: str, *kinds: str) -> None:
+        """The Host learns something about an operation that already ended (a receipt that came after the deadline): its
+        outcome and evidence change, and an OPERATION_UPDATE event says so."""
+        op = self.ops[op_id]
+        op["outcome"] = outcome
+        op["evidence"].extend(self._evidence(k, assurance="END_VERIFIED") for k in kinds)
+        self._op_event(op)
+
     def _evidence(self, kind: str, mono: int | None = None, assurance: str = "SELF_REPORTED") -> dict[str, Any]:
         e: dict[str, Any] = {"kind": kind, "assurance": assurance, "observer": ROOT}
         if mono is not None:

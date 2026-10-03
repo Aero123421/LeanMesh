@@ -16,6 +16,9 @@ How it reads the Host (api/SEMANTICS.md, 'Cursor/consumer'):
     EPOCH_ROTATE_OPS requests; the old one serves only what is already in flight (a retry of a request keeps the epoch it
     was sent under) and is closed when that is final. The ids of the epochs this tool holds are kept in a small state
     file, so epochs a crashed run left open are closed at the next start (the Host allows 64 open per principal);
+  * what a finished operation shows LATER (a receipt that reached the Host after the deadline: the Host adds evidence to
+    an operation that already ended) is read again on its next event, a bounded number of times, and recorded as "late"
+    next to the on-time result, which stays as it was;
   * operation progress comes from OPERATION_UPDATE events: GET /v1/operations/{id} is called only for an operation whose
     event says it ended (a display command: at every change), plus a slow safety poll after its deadline."""
 
@@ -52,6 +55,9 @@ PENDING_MAX = 512             # open operations we follow at once
 GIVE_UP_S = 8.0               # after its deadline an operation is polled, and given up on after this
 PING_OPEN_MAX = 3             # open pings per node: a round that finds this many still open skips the node
 FINAL_HINTS = 4096
+FINISHED_KEEP = 2048          # finished operations remembered for late evidence
+LATE_READS_MAX = 3            # re-reads of one finished operation
+DEVICES_MAX = 256             # per-node tables: nodes that are not listed any more are forgotten beyond this
 EVENT_LOG_KEEP = 500
 LOSS_FACTOR = 3               # telemetry older than this many intervals = lost
 REQUEST_BUDGET_RPS = 14.0     # what fieldview allows itself of the Host's 20 req/s per principal
@@ -88,6 +94,23 @@ class Segment:
 
 
 @dataclass
+class Finished:
+    """What the engine remembers of an operation that ended: enough to read it again when the Host adds evidence."""
+    op_id: str
+    kind: str                         # "ping" | "display"
+    device: str
+    round_no: int
+    result: str                       # the on-time result (never rewritten)
+    kinds: frozenset[str]             # evidence seen when it ended
+    outcome: str
+    entry: dict[str, Any] | None = None
+    candidate: bool = False           # an on-time "no answer": late evidence may still show it was answered
+    reads: int = 0
+    checking: bool = False
+    last_read: float = 0.0
+
+
+@dataclass
 class Pending:
     op_id: str
     kind: str                         # "ping" | "display"
@@ -96,6 +119,7 @@ class Pending:
     t_post: float                     # monotonic, when the request went out
     deadline: float                   # monotonic, when the Host's deadline passes
     epoch: str = ""                   # the client epoch the request was sent under
+    entry: dict[str, Any] | None = None   # a display command's record (kept by operation id: see send_display)
     fetch_any: bool = False           # fetch at every change (display), not only at the end
     fetching: bool = False
     last_fetch: float = 0.0
@@ -163,6 +187,7 @@ class FieldView:
         self.warnings: dict[str, str] = {}
         self.host: dict[str, Any] = {"ok": None, "ready": None, "root_connected": None, "journal_id": None}
         self.pending: dict[str, Pending] = {}
+        self.finished: OrderedDict[str, Finished] = OrderedDict()
         self._open_pings: Counter[str] = Counter()   # per node: pings posted (or being posted) and not final
         self.final_hint: OrderedDict[str, None] = OrderedDict()
         self.round_no = 0
@@ -452,6 +477,11 @@ class FieldView:
             return
         p = self.pending.get(op_id)
         if p is None:
+            fin = self.finished.get(op_id)
+            if fin is not None:
+                if fin.candidate:
+                    self._late_check(fin)
+                return
             if state == "FINAL":  # the event may be faster than the POST answer that tells us the id
                 self.final_hint[op_id] = None
                 while len(self.final_hint) > FINAL_HINTS:
@@ -496,15 +526,82 @@ class FieldView:
         if p.kind == "ping":
             res = pr.classify_ping(op, elapsed_ms)
             self._ping_done(p, res, op)
+            self._remember(p, res.kind, op)
         else:
             self._display_done(p, op, elapsed_ms)
+            self._remember(p, str((p.entry or {}).get("result")), op)
 
     def _finish_unknown(self, p: Pending, why: str) -> None:
         self.pending.pop(p.op_id, None)
+        op = {"id": p.op_id, "outcome": "INDETERMINATE", "reason": why, "evidence": []}
         if p.kind == "ping":
             self._ping_done(p, pr.PingResult("noanswer", why), {"id": p.op_id})
+            self._remember(p, "noanswer", op)
         else:
-            self._display_done(p, {"id": p.op_id, "outcome": "INDETERMINATE", "reason": why, "evidence": []}, 0)
+            self._display_done(p, op, 0)
+            self._remember(p, str((p.entry or {}).get("result")), op)
+
+    def _remember(self, p: Pending, result: str, op: dict[str, Any]) -> None:
+        self.finished[p.op_id] = Finished(
+            p.op_id, p.kind, p.device, p.round_no, result, frozenset(pr.evidence_kinds(op)), str(op.get("outcome", "")),
+            p.entry, candidate=result == "noanswer")
+        while len(self.finished) > FINISHED_KEEP:
+            self.finished.popitem(last=False)
+
+    def _late_check(self, fin: Finished) -> None:
+        if fin.checking or fin.reads >= LATE_READS_MAX or self.mono() - fin.last_read < 1.0:
+            return
+        fin.checking = True
+        self._spawn(self._late_read(fin))
+
+    async def _late_read(self, fin: Finished) -> None:
+        """Read a finished "no answer" again after the Host reported news about it. The on-time result stays; an answer
+        that shows up now is recorded as "late" beside it (counted apart: noanswer + late)."""
+        try:
+            r = await self.client.operation(fin.op_id)
+        except HostUnreachable:
+            return
+        finally:
+            fin.checking, fin.reads, fin.last_read = False, fin.reads + 1, self.mono()
+        if not r.ok:
+            return
+        op = r.body
+        kinds, outcome = frozenset(pr.evidence_kinds(op)), str(op.get("outcome", ""))
+        if kinds == fin.kinds and outcome == fin.outcome:
+            return  # nothing new
+        fin.kinds, fin.outcome = kinds, outcome
+        name = self.name_of(fin.device)
+        if fin.kind == "ping":
+            res = pr.classify_ping(op)
+            if res.kind not in ("alive", "rejected"):
+                return
+            fin.candidate = False
+            self.ping.setdefault(fin.device, PingTrack()).late += 1
+            rnd = self._round_of.get(fin.round_no)
+            if rnd is not None:
+                rnd["late"] += 1
+            self.rec.log("ping", {"event": "late", "round": fin.round_no, "device": fin.device, "name": name,
+                                  "op": fin.op_id, "on_time": fin.result, "late_result": res.kind,
+                                  "rtt_ms": res.rtt_ms if res.rtt_src == "root" else None, "outcome": outcome,
+                                  "evidence": sorted(kinds)})
+            self.note("late", f"{name}: ping of round {fin.round_no} was '{fin.result}' on time, but the Host now shows "
+                              f"{res.kind} ({outcome})", fin.device)
+        elif fin.entry is not None:
+            entry = fin.entry
+            late = "drawn" if outcome == "APPLIED" or "APP_APPLIED" in kinds else (
+                "arrived" if "END_RECEIVED" in kinds else None)
+            if late is None or entry.get("late_result") == late:
+                return
+            entry["late_result"] = late
+            entry["arrived"] = entry["arrived"] or "END_RECEIVED" in kinds or "APP_APPLIED" in kinds
+            entry["drawn"] = entry["drawn"] or "APP_APPLIED" in kinds
+            if late == "drawn":
+                fin.candidate = False
+            self.rec.log("display", {"event": "late", "device": fin.device, "name": name, "op": fin.op_id,
+                                     "seq": entry["seq"], "on_time": fin.result, "late_result": late, "outcome": outcome,
+                                     "evidence": sorted(kinds)})
+            self.note("late", f"{name}: display command #{entry['seq']} was '{fin.result}' on time, but the Host now "
+                              f"shows it {late}", fin.device)
 
     async def _watch_pending(self) -> None:
         """Safety net for an operation whose final event never came: poll it after its deadline, give up later."""
@@ -705,7 +802,8 @@ class FieldView:
         targets = sorted(self.active_nodes(), key=self.name_of)
         self.round_no += 1
         rnd = {"round": self.round_no, "t": utc_text(self.utcnow()), "nodes": len(targets), "alive": 0, "noanswer": 0,
-               "rejected": 0, "notsent": 0, "unknown": 0, "skipped": 0, "open": len(targets), "interval_s": interval_s}
+               "rejected": 0, "notsent": 0, "unknown": 0, "skipped": 0, "late": 0, "open": len(targets),
+               "interval_s": interval_s}
         self.rounds.append(rnd)
         self._round_of[self.round_no] = rnd
         while len(self._round_of) > 40:
@@ -817,6 +915,8 @@ class FieldView:
             raise ValueError("that node does not report the display role in its telemetry")
         if state not in ("USABLE", "FORBID"):
             raise ValueError("state is USABLE or FORBID")
+        if len(self.pending) >= PENDING_MAX:
+            raise RuntimeError("too many open operations on the laptop")
         if await self.ensure_epoch() is None:
             raise RuntimeError("cannot open a client epoch")
         self.command_seq = (self.command_seq + 1) & 0xFFFFFFFF
@@ -857,7 +957,8 @@ class FieldView:
         entry["op"] = op_id
         self.rec.log("display", {"event": "posted", **entry})
         self.note("display", f"display {self.name_of(device)} -> {state} (seq {seq}) sent", device)
-        p = Pending(op_id, "display", device, 0, t_post, t_post + pr.DISPLAY_DEADLINE_S, epoch=epoch, fetch_any=True)
+        p = Pending(op_id, "display", device, 0, t_post, t_post + pr.DISPLAY_DEADLINE_S, epoch=epoch, entry=entry,
+                    fetch_any=True)
         self.pending[op_id] = p
         if op_id in self.final_hint:
             self.final_hint.pop(op_id, None)
@@ -865,8 +966,8 @@ class FieldView:
         return entry
 
     def _display_progress(self, p: Pending, op: dict[str, Any]) -> None:
-        entry = self.display.get(p.device)
-        if entry is None or entry.get("op") != p.op_id:
+        entry = p.entry  # every accepted command keeps its own record; self.display[device] is only what the page shows
+        if entry is None:
             return
         kinds = pr.evidence_kinds(op)
         elapsed = int((self.mono() - p.t_post) * 1000)
@@ -876,11 +977,11 @@ class FieldView:
                 entry[f"{flag}_ms"] = elapsed
                 self.rec.log("display", {"event": flag, "device": p.device, "name": self.name_of(p.device),
                                          "op": p.op_id, "seq": entry["seq"], "laptop_ms": elapsed,
-                                         "root_ms": pr.rtt_from_evidence(op)})
+                                         "root_ms": pr.rtt_from_evidence(op), "latest": self.display.get(p.device) is entry})
 
     def _display_done(self, p: Pending, op: dict[str, Any], elapsed_ms: int) -> None:
-        entry = self.display.get(p.device)
-        if entry is None or entry.get("op") != p.op_id:
+        entry = p.entry
+        if entry is None:
             return
         outcome = op.get("outcome", "")
         kinds = pr.evidence_kinds(op)
@@ -896,7 +997,7 @@ class FieldView:
         self.rec.log("display", {"event": "final", "device": p.device, "name": self.name_of(p.device), "op": p.op_id,
                                  "seq": entry["seq"], "outcome": outcome, "result": entry["result"],
                                  "detail": entry["detail"], "arrived": entry["arrived"], "drawn": entry["drawn"],
-                                 "evidence": sorted(kinds)})
+                                 "latest": self.display.get(p.device) is entry, "evidence": sorted(kinds)})
         self.note("display", f"display {self.name_of(p.device)} {entry['state']} (seq {entry['seq']}): "
                              f"{entry['result']}", p.device)
 
@@ -977,10 +1078,23 @@ class FieldView:
             if now - self._last_summary >= self.cfg.summary_s:
                 self._last_summary = now
                 self.rec.summary(self.summary_rows())
+            self._forget_stale_devices()
             w = self.rec.warning
             if w != self.recorder_warn_seen:
                 self.recorder_warn_seen = w
                 self.warn("records", None if w is None else f"records: {w}")
+
+    def _forget_stale_devices(self) -> None:
+        """The per-node tables follow what the Host lists; a node that is not listed any more (revoked, replaced) is
+        dropped, oldest first, once a table is beyond DEVICES_MAX (a Host holds at most 64 members)."""
+        tables: list[dict[str, Any]] = [self.tele, self.ping, self.node_state, self.display, self.first_listed]
+        for table in tables:
+            extra = len(table) - DEVICES_MAX
+            if extra > 0:
+                for d in [d for d in table if d not in self.api_nodes][:extra]:
+                    del table[d]
+        if len(self.silent_noted) > DEVICES_MAX:
+            self.silent_noted &= set(self.api_nodes)
 
     def _interval_of(self, device: str) -> float:
         t = self.tele.get(device)
@@ -1082,7 +1196,8 @@ class FieldView:
                         "rssi_dbm": r["rssi_dbm"],
                         "telemetry_loss_pct": None if r["loss_pct"] is None else f"{r['loss_pct']:.1f}",
                         "ping_sent": p["sent"], "ping_alive": p["alive"], "ping_lost": p["noanswer"],
-                        "ping_notsent": p["notsent"],
+                        "ping_notsent": p["notsent"], "ping_unknown": p["unknown"], "ping_skipped": p["skipped"],
+                        "ping_late": p["late"],
                         "ping_rtt_median_ms": None if p["rtt_median_ms"] is None else f"{p['rtt_median_ms']:.0f}",
                         "last_seen_age_s": None if r["age_s"] is None else f"{r['age_s']:.0f}"})
         return out

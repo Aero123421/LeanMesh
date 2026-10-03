@@ -758,3 +758,101 @@ def test_a_ping_is_alive_when_the_operation_ends_received(fake: FakeHost, tmp_pa
     assert post["delivery"] == "RECEIVED" and post["queue_mode"] == "FIFO" and post["storage"] == "VOLATILE"
     done = [x for x in lines(next(tmp_path.glob("rec*/ping.ndjson"))) if x.get("result") == "alive"]
     assert done[0]["outcome"] == "RECEIVED" and done[0]["evidence"] == ["END_RECEIVED", "ROOT_ACCEPTED", "ROOT_SENT"]
+
+
+# ---- late evidence, overlapping display commands, bounded tables (review findings 4, 5) --------------------------------
+
+def test_an_answer_the_host_shows_after_the_final_result_is_recorded_as_late_beside_it(
+        fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "silent", "after": 0.3}          # FINAL EXPIRED: no answer on time
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            rnd = await fv.ping_round(3.0)
+            await until(lambda: rnd["open"] == 0, "the round ends", 5)
+            assert (rnd["noanswer"], rnd["alive"], rnd["late"], fv.ping[A].noanswer, fv.ping[A].late) == (1, 0, 0, 1, 0)
+            (op_id,) = fake.ops
+            fake.amend(op_id, "RECEIVED", "END_RECEIVED")             # the receipt reached the Host after the deadline
+            await until(lambda: fv.ping[A].late == 1, "the late answer is seen", 5)
+            assert (rnd["noanswer"], rnd["alive"], rnd["late"]) == (1, 0, 1)   # the on-time result is not rewritten
+            assert fv.ping[A].noanswer == 1 and fv.ping[A].alive == 0 and fv.ping[A].last.kind == "noanswer"
+            assert any(e["kind"] == "late" and "noanswer" in e["text"] for e in fv.log)
+            gets = fake.get_ops
+            fake.amend(op_id, "RECEIVED", "APP_APPLIED")              # more news: not counted twice
+            await asyncio.sleep(0.5)
+            assert fv.ping[A].late == 1 and fake.get_ops == gets      # an answered operation is not read again
+
+    asyncio.run(scenario())
+    recs = lines(next(tmp_path.glob("rec*/ping.ndjson")))
+    late = [x for x in recs if x.get("event") == "late"]
+    assert len(late) == 1 and late[0]["on_time"] == "noanswer" and late[0]["late_result"] == "alive"
+    assert [x["result"] for x in recs if "result" in x and "event" not in x] == ["noanswer"]
+
+
+def test_an_operation_given_up_on_is_still_read_when_the_host_reports_it_later(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "silent", "after": 60.0}         # the Host does not finish it in time
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            rnd = await fv.ping_round(3.0)
+            (p,) = fv.pending.values()
+            p.deadline -= 20.0                                      # the safety net gives up (deadline + 8 s have passed)
+            await until(lambda: rnd["open"] == 0, "gave up", 5)
+            assert rnd["noanswer"] == 1
+            (op_id,) = fake.ops
+            fake.ops[op_id].update(state="FINAL")
+            fake.amend(op_id, "RECEIVED", "END_RECEIVED")
+            await until(lambda: fv.ping[A].late == 1, "late", 5)
+            assert fv.ping[A].noanswer == 1
+
+    asyncio.run(scenario())
+
+
+def test_overlapping_display_commands_each_keep_their_own_evidence_and_result(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(C, parent_device_id=ROOT)
+    fake.responders[C] = {"mode": "apply", "rtt": 0.6}
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            telemetry(fake, C, 1, role=3)
+            await until(lambda: fv.display_nodes() == [C], "display known")
+            first = await fv.send_display(C, "FORBID")
+            second = await fv.send_display(C, "USABLE")              # A is still in flight when B replaces it on the page
+            assert fv.display[C] is second and first["op"] != second["op"]
+            await until(lambda: first["result"] == "drawn" and second["result"] == "drawn", "both are drawn", 10)
+            assert first["arrived"] and first["drawn"] and second["arrived"] and second["drawn"]
+            assert fv.display[C] is second and fv.pending == {}
+
+    asyncio.run(scenario())
+    recs = lines(next(tmp_path.glob("rec*/display.ndjson")))
+    finals = {x["op"]: x for x in recs if x["event"] == "final"}
+    assert len(finals) == 2 and {x["result"] for x in finals.values()} == {"drawn"}
+    assert sorted(x["seq"] for x in finals.values()) == sorted(x["seq"] for x in recs if x["event"] == "posted")
+    assert sorted(x["latest"] for x in finals.values()) == [False, True]       # only the page's own view differs
+    for event in ("arrived", "drawn"):
+        assert len([x for x in recs if x["event"] == event]) == 2
+
+
+def test_the_tables_stay_bounded_in_a_long_session(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "FINISHED_KEEP", 20)
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "apply", "rtt": 0.01}
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            for _ in range(60):
+                await fv.ping_round(1.0)
+                await asyncio.sleep(0.06)
+            await until(lambda: not fv.pending, "all final", 5)
+            assert fv.ping[A].alive + fv.ping[A].skipped == 60 and fv.ping[A].alive >= 50
+            assert len(fv.finished) <= 20 and len(fv._round_of) <= 40 and len(fv.rounds) <= 30
+            assert len(fv.ping[A].history) <= 20 and len(fv.ping[A].rtts) <= 200
+            assert not fv._open_pings and not fv._epoch_users and len(fv.final_hint) <= 4096
+
+    asyncio.run(scenario())

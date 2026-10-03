@@ -20,7 +20,8 @@ from typing import Any
 
 FILES = ("telemetry", "ping", "display", "events")
 SUMMARY_COLUMNS = ("utc", "name", "device", "depth", "parent", "rssi_dbm", "telemetry_loss_pct", "ping_sent",
-                   "ping_alive", "ping_lost", "ping_notsent", "ping_rtt_median_ms", "last_seen_age_s")
+                   "ping_alive", "ping_lost", "ping_notsent", "ping_unknown", "ping_skipped", "ping_late",
+                   "ping_rtt_median_ms", "last_seen_age_s")
 QUEUE_MAX = 20000
 
 

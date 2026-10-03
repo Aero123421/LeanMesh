@@ -616,3 +616,39 @@ def test_skipped_pings_are_their_own_class() -> None:
     t.skip(2, pr.PingResult("skipped", "busy"))
     assert (t.sent, t.alive, t.skipped, t.notsent, t.noanswer) == (1, 1, 1, 0, 0)
     assert t.loss_pct == 0.0 and [k for _, k in t.history] == ["alive", "skipped"] and t.as_dict()["skipped"] == 1
+
+
+def test_per_node_tables_forget_unlisted_nodes_beyond_their_bound(tmp_path: Path) -> None:
+    """Telemetry names its origin, so the tables could grow with every node id ever seen (replaced boards, other
+    networks on the domain): beyond DEVICES_MAX the unlisted ones go, oldest first, the listed ones never."""
+    from tools.fieldview import engine as engine_mod
+
+    clock = [0.0]
+    fv, rec = make_engine(tmp_path, clock)
+    listed = [f"{i:02x}" * 32 for i in range(1, 4)]
+    fv._on_nodes([item(d, "ff" * 32, 1) for d in listed])
+    for i in range(engine_mod.DEVICES_MAX + 100):
+        device = f"{i + 16:04x}" * 16
+        fv._on_event(message_event(device, pr.encode_telemetry(seq=1), i), backlog=False)
+        fv.ping[device] = PingTrack()
+        fv.first_listed[device] = 0.0
+    for d in listed:
+        fv._on_event(message_event(d, pr.encode_telemetry(seq=1), 9999), backlog=False)
+    assert len(fv.tele) > engine_mod.DEVICES_MAX
+    fv._forget_stale_devices()
+    for table in (fv.tele, fv.ping, fv.first_listed):
+        assert len(table) <= engine_mod.DEVICES_MAX + len(listed)
+    assert all(d in fv.tele for d in listed)
+    rec.close()
+
+
+def test_the_finished_operation_history_is_bounded(tmp_path: Path) -> None:
+    from tools.fieldview import engine as engine_mod
+    from tools.fieldview.engine import Pending
+
+    fv, rec = make_engine(tmp_path, [0.0])
+    for i in range(engine_mod.FINISHED_KEEP + 500):
+        fv._remember(Pending(f"{i:032x}", "ping", DEV["a"], 1, 0.0, 3.0), "noanswer", op("EXPIRED", ev("ROOT_SENT")))
+    assert len(fv.finished) == engine_mod.FINISHED_KEEP
+    assert f"{0:032x}" not in fv.finished and f"{engine_mod.FINISHED_KEEP + 499:032x}" in fv.finished
+    rec.close()
