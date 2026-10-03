@@ -44,6 +44,7 @@ class FakeHost:
         self.ops: dict[str, dict[str, Any]] = {}
         self.responders: dict[str, dict[str, Any]] = {}   # device -> {"mode": ..., "rtt": s, "observed": bool}
         self.get_ops = 0
+        self.get_delay = 0.0                # seconds GET /v1/operations/{id} takes
         self.keys: dict[str, tuple[str, str]] = {}    # Idempotency-Key -> (request hash, operation id): a replay is stored
         self.replays = 0
         # failure injection on POST /v1/messages: {"mode": "after" | "before" | "blackhole", "count": n, "delay": s}.
@@ -244,6 +245,8 @@ class FakeHost:
         @app.get("/v1/operations/{op_id}")
         async def operation(op_id: str) -> Any:
             self.get_ops += 1
+            if self.get_delay:
+                await asyncio.sleep(self.get_delay)
             op = self.ops.get(op_id)
             if op is None:
                 return error(404, "NOT_FOUND", "operation not found")

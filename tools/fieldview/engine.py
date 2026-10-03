@@ -6,6 +6,10 @@ How it reads the Host (api/SEMANTICS.md, 'Cursor/consumer'):
   * the journal is read by cursor with long polls (GET /v1/events?after=&wait_ms=) as a registered consumer: after the
     records are queued the cursor is acknowledged (POST /v1/consumers/{name}/ack), so the Host keeps what we have not
     read (critical events are protected until every consumer acknowledged them) and a restart resumes where we stopped;
+  * the ACK follows the records, not the reading: a page is acknowledged only when its records are fsynced (the
+    recorder's barrier) and the operations it reports as FINAL have been read and recorded; when the recorder lost lines
+    the engine writes an explicit gap record first, and while it cannot write, nothing is acknowledged (the Host keeps
+    the events and a restart reads them again);
   * a CURSOR_GAP (410) or an EVENT_GAP event is shown and logged, never skipped quietly: the telemetry baseline restarts;
   * operation progress comes from OPERATION_UPDATE events: GET /v1/operations/{id} is called only for an operation whose
     event says it ended (a display command: at every change), plus a slow safety poll after its deadline."""
@@ -30,6 +34,9 @@ from .stats import PingTrack, TelemetryTrack
 from .topology import NodeView, build_tree, short_id
 
 ACK_EVERY_S = 2.0
+RECORD_SYNC_S = 5.0           # how long the engine waits for the recorder's fsync barrier
+SEGMENTS_MAX = 64             # unacknowledged pages kept apart (more are merged: the ack gets coarser, never wrong)
+HOLD_MAX_S = 20.0             # an ack waits at most this long for the operations of a page to be read
 EVENT_PAUSE_S = 0.1           # between two event reads: at most ~10 requests/s even under a flood
 PENDING_MAX = 512             # open operations we follow at once
 GIVE_UP_S = 8.0               # after its deadline an operation is polled, and given up on after this
@@ -57,6 +64,15 @@ class Config:
     summary_s: float = 10.0
     events_wait_ms: int = 15000
     tick_s: float = 1.0
+
+
+@dataclass
+class Segment:
+    """One page of events read but not yet acknowledged: its cursor, and the operations whose FINAL event is in it and
+    whose result is not read and recorded yet (the ack waits for them)."""
+    cursor: str
+    created: float
+    holds: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -132,7 +148,10 @@ class FieldView:
         self.live_events = 0
         self.other_messages = 0
         self.bad_telemetry = 0
-        self._ack_dirty = False
+        self._segments: deque[Segment] = deque()
+        self._page_holds: set[str] = set()
+        self._ack_lock = asyncio.Lock()
+        self._posting = 0                 # POSTs in flight: an operation event may be faster than their answer
         self._last_ack = 0.0
         self._tasks: list[asyncio.Task[None]] = []
         self._bg: set[asyncio.Task[None]] = set()
@@ -240,11 +259,12 @@ class FieldView:
             self.warn("host", None)
             page = r.body
             events = page.get("events", [])
+            self._page_holds = set()
             for ev in events:
                 self._on_event(ev, backlog)
             if events:
                 self.cursor = str(page["next_cursor"])
-                self._ack_dirty = True
+                self._add_segment(self.cursor, self._page_holds)
             elif backlog:
                 self._backlog = False  # an empty page without waiting: everything older than now has been taken
                 self.note("session", f"event backlog read: {self.backlog_events} events before this session")
@@ -252,19 +272,75 @@ class FieldView:
             if events and not backlog:
                 await asyncio.sleep(EVENT_PAUSE_S)
 
+    @property
+    def ack_pending(self) -> bool:
+        """Events were read that the Host has not been told about yet."""
+        return bool(self._segments)
+
+    def _add_segment(self, cursor: str, holds: set[str]) -> None:
+        if len(self._segments) >= SEGMENTS_MAX:  # a stuck ack must not grow without bound: the newest pages merge
+            last = self._segments[-1]
+            last.cursor, last.holds = cursor, last.holds | holds
+            return
+        self._segments.append(Segment(cursor, self.mono(), set(holds)))
+
+    def _hold_cleared(self, op_id: str, seg: Segment) -> bool:
+        if self.mono() - seg.created > HOLD_MAX_S:
+            return True
+        if op_id in self.pending:  # its result is still being read
+            return False
+        return not (op_id in self.final_hint and self._posting > 0)  # the answer of a POST in flight may name it
+
+    def _ackable(self) -> Segment | None:
+        """The last page of the leading run of pages that need nothing more before they are acknowledged."""
+        ready = None
+        for seg in self._segments:
+            if not all(self._hold_cleared(o, seg) for o in seg.holds):
+                break
+            ready = seg
+        return ready
+
+    async def _records_safe(self, through: str) -> bool:
+        """True when everything recorded so far is on disk and every lost line is covered by a gap record."""
+        if not await asyncio.to_thread(self.rec.sync, RECORD_SYNC_S):
+            self.warn("ack-records", "acknowledgement held: the records are not safely on disk")
+            return False
+        lost = self.rec.lost
+        if lost:
+            text = (f"{lost} record line(s) were lost (queue full or disk write failed) before the events up to "
+                    f"{through} were acknowledged: telemetry, ping and display records of that window are incomplete")
+            self.note("recorder-gap", text)
+            if not await asyncio.to_thread(self.rec.sync, RECORD_SYNC_S) or self.rec.lost != lost:
+                self.warn("ack-records", "acknowledgement held: the records are not safely on disk")
+                return False
+            self.rec.resolve_lost(lost)
+            self.warn("records-gap", f"records incomplete: {text}")
+        self.warn("ack-records", None)
+        return True
+
     async def _ack(self, force: bool = False) -> None:
-        if not self._ack_dirty or self.cursor is None:
+        if not self._segments or self.cursor is None:
             return
         if not force and self.mono() - self._last_ack < ACK_EVERY_S:
             return
-        journal, _, seq = self.cursor.partition(":")
-        r = await self.client.ack(self.cfg.consumer, journal, int(seq))
-        if r.ok:
-            self._ack_dirty, self._last_ack = False, self.mono()
-            self.warn("ack", None)
-        else:
+        async with self._ack_lock:
+            seg = self._ackable()
+            if seg is None:
+                return
             self._last_ack = self.mono()
-            self.warn("ack", f"consumer ACK failed: HTTP {r.status} {r.code}")
+            if not await self._records_safe(seg.cursor):
+                return
+            journal, _, seq = seg.cursor.partition(":")
+            r = await self.client.ack(self.cfg.consumer, journal, int(seq))
+            if r.ok:
+                while self._segments and self._segments[0] is not seg:
+                    self._segments.popleft()
+                if self._segments:
+                    self._segments.popleft()
+                self._last_ack = self.mono()
+                self.warn("ack", None)
+            else:
+                self.warn("ack", f"consumer ACK failed: HTTP {r.status} {r.code}")
 
     async def _cursor_gap(self, r: Reply) -> None:
         details = r.body.get("details") or {}
@@ -274,11 +350,13 @@ class FieldView:
         self.warn("gap", text)
         for t in self.tele.values():
             t.rebaseline()
+        self._segments.clear()
         journal, oldest = details.get("journal_id"), details.get("oldest_cursor")
         if journal and oldest:
             if journal != str(self.cursor).partition(":")[0]:  # another journal (a new database): register in it
                 await self.client.ack(self.cfg.consumer, str(journal), 0)
             self.cursor = str(oldest)
+            self._add_segment(self.cursor, set())
         else:
             self.cursor = None
 
@@ -344,7 +422,11 @@ class FieldView:
                 self.final_hint[op_id] = None
                 while len(self.final_hint) > FINAL_HINTS:
                     self.final_hint.popitem(last=False)
+                if self._posting:
+                    self._page_holds.add(op_id)
             return
+        if state == "FINAL":
+            self._page_holds.add(op_id)  # this page is not acknowledged before the result is read and recorded
         if state == "FINAL" or p.fetch_any:
             self._fetch(p)
 
@@ -500,6 +582,7 @@ class FieldView:
             t_post = self.mono()
             return pr.ping_request(self.cfg.domain, self.epoch or "", device, rnd["round"], interval_s, self.utcnow())
 
+        self._posting += 1
         try:
             r = await self.client.post_message(body, max_wait=max_wait)
         except SendUnknown as exc:  # the answer is lost and the replays with the same key got none either
@@ -509,6 +592,8 @@ class FieldView:
         except HostUnreachable as exc:  # failed before anything was sent
             self._ping_refused(device, rnd, pr.classify_post_error(None, exc=str(exc)))
             return
+        finally:
+            self._posting -= 1
         if r.status == 0:
             self.warn("rate", "the laptop's request budget is used up: pings were not sent (see 'not sent')")
             self._ping_refused(device, rnd, pr.PingResult("notsent", "local request budget (rate limit guard)"))
@@ -526,6 +611,8 @@ class FieldView:
         p = Pending(op_id, "ping", device, rnd["round"], t_post,
                     t_post + pr.ping_deadline_s(interval_s))
         self.pending[op_id] = p
+        self.rec.log("ping", {"event": "posted", "round": rnd["round"], "device": device, "name": self.name_of(device),
+                              "op": op_id, "epoch": self.epoch})
         if op_id in self.final_hint or r.body.get("state") == "FINAL":
             self.final_hint.pop(op_id, None)
             self._fetch(p)
@@ -576,17 +663,21 @@ class FieldView:
 
         r = Reply(0, {})
         unknown: SendUnknown | None = None
-        for _ in range(3):  # a 429 stops the budget for what the Host asked, then the next try goes out
-            try:
-                r = await self.client.post_message(body, max_wait=5.0)
-            except SendUnknown as exc:
-                unknown = exc
-                break
-            except HostUnreachable as exc:  # failed before anything was sent
-                r = Reply(0, {"code": "UNREACHABLE", "message": str(exc)})
-                break
-            if r.status != 429:
-                break
+        self._posting += 1
+        try:
+            for _ in range(3):  # a 429 stops the budget for what the Host asked, then the next try goes out
+                try:
+                    r = await self.client.post_message(body, max_wait=5.0)
+                except SendUnknown as exc:
+                    unknown = exc
+                    break
+                except HostUnreachable as exc:  # failed before anything was sent
+                    r = Reply(0, {"code": "UNREACHABLE", "message": str(exc)})
+                    break
+                if r.status != 429:
+                    break
+        finally:
+            self._posting -= 1
         entry = {"device": device, "name": self.name_of(device), "state": state, "seq": seq,
                  "posted": utc_text(self.utcnow()), "op": None, "arrived": False, "drawn": False,
                  "arrived_ms": None, "drawn_ms": None, "result": "pending", "detail": ""}
@@ -717,6 +808,8 @@ class FieldView:
             await asyncio.sleep(self.cfg.tick_s)
             self._check_lost()
             await self._watch_pending()
+            with contextlib.suppress(HostUnreachable):  # the events loop shows an unreachable Host
+                await self._ack()
             now = self.mono()
             if now - self._last_summary >= self.cfg.summary_s:
                 self._last_summary = now

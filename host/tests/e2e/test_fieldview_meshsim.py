@@ -124,7 +124,7 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
             await member.telemetry(seq=5, uptime_s=50, role=3, flags=0b011, display_seq=entry["seq"])
             await until(lambda: fv.tele[node].last.display_state == "FORBID", "reported display state")
             # the consumer's ACK reached the Host: a restart would resume after what was read
-            await until(lambda: fv._ack_dirty is False, "acknowledged", 10)
+            await until(lambda: not fv.ack_pending, "acknowledged", 10)
             found["cursor"] = fv.cursor
             found["warnings"] = fv.snapshot()["warnings"]
         finally:

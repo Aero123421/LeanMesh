@@ -24,6 +24,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 from tools.fieldview import protocol as pr  # noqa: E402
+from tools.fieldview import engine as engine_mod  # noqa: E402
 from tools.fieldview.engine import Config, FieldView  # noqa: E402
 from tools.fieldview.hostclient import HostClient, HostUnreachable, SendUnknown  # noqa: E402
 from tools.fieldview.recorder import Recorder  # noqa: E402
@@ -60,10 +61,11 @@ async def view(fake: FakeHost, tmp: Path, **cfg: Any) -> AsyncIterator[FieldView
     cfg.setdefault("summary_s", 0.3)
     rps = cfg.pop("rps", 14.0)
     post_timeout = cfg.pop("post_timeout", 5.0)
+    rec_dir = cfg.pop("rec_dir", None)
     config = Config(socket=str(fake.socket), token=TOKEN, domain=DOMAIN, logs_dir=tmp, root_id=ROOT,
                     names={A: "relay-1", B: "leaf-1", C: "display-1"}, **cfg)
     client = HostClient(config.socket, TOKEN, DOMAIN, rps=rps, post_timeout=post_timeout)
-    rec = Recorder(tmp / f"rec{len(list(tmp.glob('rec*')))}")
+    rec = Recorder(rec_dir or tmp / f"rec{len(list(tmp.glob('rec*')))}")
     fv = FieldView(config, client, rec)
     await fv.start()
     try:
@@ -129,7 +131,7 @@ def test_a_lost_place_is_shown_and_never_skipped_silently(fake: FakeHost, tmp_pa
             await until(lambda: A in fv.tele and fv.tele[A].received == 3, "three messages")
             await until(lambda: fake.acks.get("fieldview", 0) >= 3, "acknowledged")
             fv.cursor = f"{fake.journal}:1"  # the Host purged what we were about to read:
-            fv._ack_dirty = False
+            fv._segments.clear()
             for seq in (4, 5, 6):
                 telemetry(fake, A, seq)
             fake.purge(4)
@@ -512,3 +514,84 @@ def test_an_answer_is_the_end_of_the_doubt_a_refusal_is_not_unknown(fake: FakeHo
 
     asyncio.run(scenario())
     assert fake.replays == 0
+
+
+# ---- the ACK follows the records (review finding 1) -------------------------------------------------------------------
+
+def test_events_are_not_acknowledged_before_their_records_are_on_disk(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "ACK_EVERY_S", 0.1)
+    fake.add_node(A, parent_device_id=ROOT)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: not fv._backlog, "the backlog is read")
+            base = fake.acks.get("fieldview", 0)
+            fv.rec.sync = lambda timeout=5.0: False          # the disk does not confirm (fsync fails / hangs)
+            for seq in (1, 2, 3):
+                telemetry(fake, A, seq)
+            await until(lambda: A in fv.tele and fv.tele[A].received == 3, "telemetry read")
+            await asyncio.sleep(0.6)                          # several ack periods
+            assert fake.acks.get("fieldview", 0) == base       # nothing acknowledged
+            assert "ack-records" in fv.warnings and fv.ack_pending
+            del fv.rec.sync                                    # the disk is fine again
+            await until(lambda: fake.acks.get("fieldview") == len(fake.events), "the ack catches up")
+            assert "ack-records" not in fv.warnings and not fv.ack_pending
+
+    asyncio.run(scenario())
+
+
+def test_lost_record_lines_hold_the_ack_until_an_explicit_gap_record_is_on_disk(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "ACK_EVERY_S", 0.1)
+    fake.add_node(A, parent_device_id=ROOT)
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a file where the records directory should be")   # every write fails
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path, rec_dir=blocker / "sub") as fv:
+            await until(lambda: not fv._backlog, "the backlog is read")
+            for seq in (1, 2):
+                telemetry(fake, A, seq)
+            await until(lambda: A in fv.tele and fv.tele[A].received == 2, "telemetry read")
+            await asyncio.sleep(0.6)
+            assert fake.acks.get("fieldview", 0) == 0 and fv.rec.lost >= 2   # records lost: events stay with the Host
+            assert any("cannot" in w for w in fv.warnings.values())
+            blocker.unlink()                                                  # the disk comes back
+            (tmp_path / "blocked").mkdir()
+            (tmp_path / "blocked" / "sub").mkdir()
+            await until(lambda: fake.acks.get("fieldview") == len(fake.events), "acknowledged after the gap record", 10)
+            assert fv.rec.lost == 0 and "records-gap" in fv.warnings          # explicit and persistent
+
+    asyncio.run(scenario())
+    events = lines(tmp_path / "blocked" / "sub" / "events.ndjson")
+    gaps = [e for e in events if e["kind"] == "recorder-gap"]
+    assert len(gaps) == 1 and "record line(s) were lost" in gaps[0]["text"]
+
+
+def test_a_page_with_a_final_operation_is_not_acknowledged_before_its_result_is_read(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "ACK_EVERY_S", 0.1)
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "silent", "after": 0.3}
+    fake.get_delay = 1.0                                      # reading the result takes a second
+
+    def final_seq() -> int:
+        return next((i + 1 for i, e in enumerate(fake.events) if e["kind"] == "OPERATION_UPDATE"
+                     and e["evidence"]["details"]["state"] == "FINAL"), 0)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes() and not fv._backlog, "node")
+            rnd = await fv.ping_round(3.0)
+            seq = await until(final_seq, "the FINAL event")
+            await until(lambda: fv.cursor and int(fv.cursor.rpartition(":")[2]) >= seq, "the FINAL event is read")
+            await asyncio.sleep(0.5)                          # several ack periods; the GET is still on its way
+            assert fv.pending and rnd["open"] == 1
+            assert fake.acks.get("fieldview", 0) < seq        # the page of the FINAL event waits for the result
+            await until(lambda: rnd["open"] == 0, "the result is read", 10)
+            await until(lambda: fake.acks.get("fieldview", 0) >= seq, "then it is acknowledged")
+
+    asyncio.run(scenario())
+    rec = lines(next(tmp_path.glob("rec*/ping.ndjson")))
+    assert [x for x in rec if x.get("event") == "posted"] and any(x.get("result") == "noanswer" for x in rec)

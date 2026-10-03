@@ -553,3 +553,41 @@ def test_a_token_that_became_free_after_the_budget_is_not_taken() -> None:
         assert bucket.tokens >= 0.99
 
     asyncio.run(scenario())
+
+
+def test_the_recorder_counts_dropped_lines_as_lost_and_syncs_only_what_is_on_disk(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from tools.fieldview import recorder as recorder_mod
+
+    monkeypatch.setattr(recorder_mod, "QUEUE_MAX", 3)
+    gate = threading.Event()
+    rec = Recorder(tmp_path / "r")
+    original = rec._open
+    rec._open = lambda name: (gate.wait(5), original(name))[1]  # type: ignore[method-assign]  # a slow disk
+    for i in range(12):
+        rec.log("events", {"n": i})
+    assert rec.lost > 0 and rec.dropped == rec.lost and rec.warning and "queue is full" in rec.warning
+    dropped = rec.lost
+    gate.set()
+    assert rec.sync(5.0) is True
+    written = [json.loads(x)["n"] for x in (tmp_path / "r" / "events.ndjson").read_text().splitlines()]
+    assert len(written) + dropped == 12                    # nothing is silently missing: lost counts the rest
+    rec.resolve_lost(dropped)
+    assert rec.lost == 0
+    rec.close()
+
+
+def test_recorder_sync_fails_when_the_writer_cannot_confirm(tmp_path: Path) -> None:
+    import threading
+
+    rec = Recorder(tmp_path / "r")
+    release = threading.Event()
+    original = rec._open
+    rec._open = lambda name: (release.wait(5), original(name))[1]  # type: ignore[method-assign]  # a hung disk
+    rec.log("events", {"a": 1})
+    assert rec.sync(0.2) is False                          # the barrier did not come back in time: not safe
+    release.set()
+    assert rec.sync(5.0) is True
+    rec.close()
