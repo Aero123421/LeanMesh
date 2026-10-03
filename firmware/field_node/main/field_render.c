@@ -7,7 +7,7 @@
 /* 16x16 glyphs of the five characters 使 用 可 禁 止, one uint16 per row, bit 15 = leftmost pixel.
    Source: the Shinonome 16 dot font (kanjic.bit) of the Electronic Font Open Laboratory (efont), public domain
    (their LICENSE: "all font data ... are provided as Public Domain"). The rows were taken unchanged from the generated
-   Shinonome 16x16 pack of the owner's KGuard repository (firmware/pico-hub75/src/fonts_hybrid.hpp). */
+   Shinonome 16x16 pack of the owner's display-board repository (firmware/pico-hub75/src/fonts_hybrid.hpp). */
 typedef struct {
     uint16_t rows[16];
 } glyph16_t;
