@@ -21,7 +21,8 @@ sys.path.insert(0, str(REPO))
 
 from tools.fieldview import protocol as pr  # noqa: E402
 from tools.fieldview import topology as topo  # noqa: E402
-from tools.fieldview.engine import Config, FieldView, load_bench, ping_load  # noqa: E402
+from tools.fieldview.engine import Config, FieldView, load_bench, open_ops_max, ping_load  # noqa: E402
+from tools.fieldview.hostclient import RateBucket  # noqa: E402
 from tools.fieldview.recorder import SUMMARY_COLUMNS, Recorder  # noqa: E402
 from tools.fieldview.stats import PingTrack, TelemetryTrack  # noqa: E402
 
@@ -173,23 +174,28 @@ def op(outcome: str, *kinds: dict, reason: str | None = None) -> dict:
 
 
 def test_alive_with_rtt_from_the_root_clock() -> None:
+    """§3.2: a ping is delivery RECEIVED; alive = the operation ended RECEIVED, RTT = END_RECEIVED - ROOT_SENT."""
+    r = pr.classify_ping(op("RECEIVED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040)), 900)
+    assert r == pr.PingResult("alive", "", 40, "root")
+    # an APPLIED operation still measures to its END_RECEIVED, not to the application's answer
     r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040), ev("APP_APPLIED", 1062)), 900)
-    assert r == pr.PingResult("alive", "", 62, "root")
+    assert r == pr.PingResult("alive", "", 40, "root")
 
 
-def test_rtt_falls_back_to_end_received_when_app_applied_has_no_time() -> None:
-    r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040), ev("APP_APPLIED")), 900)
-    assert (r.kind, r.rtt_ms, r.rtt_src) == ("alive", 40, "root")
+def test_a_display_command_still_measures_to_the_drawing() -> None:
+    operation = op("APPLIED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040), ev("APP_APPLIED", 1062))
+    assert pr.rtt_from_evidence(operation) == 62
+    assert pr.rtt_from_evidence(operation, ("END_RECEIVED", "APP_APPLIED")) == 40
 
 
 def test_rtt_falls_back_to_the_laptop_when_the_host_reports_no_time() -> None:
-    r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT"), ev("APP_APPLIED")), 321)
+    r = pr.classify_ping(op("RECEIVED", ev("ROOT_SENT"), ev("END_RECEIVED")), 321)
     assert (r.kind, r.rtt_ms, r.rtt_src) == ("alive", 321, "laptop")
-    assert pr.classify_ping(op("APPLIED", ev("APP_APPLIED")), None).rtt_ms is None
+    assert pr.classify_ping(op("RECEIVED", ev("END_RECEIVED")), None).rtt_ms is None
 
 
 def test_a_negative_root_time_difference_is_not_an_rtt() -> None:
-    r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT", 2000), ev("APP_APPLIED", 1000)), 50)
+    r = pr.classify_ping(op("RECEIVED", ev("ROOT_SENT", 2000), ev("END_RECEIVED", 1000)), 50)
     assert (r.rtt_ms, r.rtt_src) == (50, "laptop")
 
 
@@ -197,7 +203,8 @@ def test_a_negative_root_time_difference_is_not_an_rtt() -> None:
     (op("EXPIRED", ev("ROOT_ACCEPTED"), ev("ROOT_SENT")), "noanswer"),                      # left the root, silence
     (op("INDETERMINATE", ev("ROOT_ACCEPTED"), ev("ROOT_SENT")), "noanswer"),
     (op("INDETERMINATE", ev("HOST_SEND_OUTCOME_UNKNOWN"), reason="unknown"), "noanswer"),   # unknown is not "not sent"
-    (op("RECEIVED", ev("ROOT_SENT"), ev("END_RECEIVED")), "noanswer"),                       # arrived, never answered
+    (op("RECEIVED", ev("ROOT_SENT"), ev("END_RECEIVED")), "alive"),                          # a ping ends RECEIVED
+    (op("INDETERMINATE", ev("ROOT_SENT"), ev("END_RECEIVED")), "alive"),                     # the receipt is evidence
     (op("EXPIRED", ev("HOST_DEADLINE_EXPIRED"), reason="deadline passed before first transmission"), "notsent"),
     (op("EXPIRED", ev("ROOT_ACCEPTED")), "notsent"),                                         # the root never sent it
     (op("REJECTED", ev("HOST_REFUSED"), reason="TIME_UNCERTAIN"), "notsent"),
@@ -238,19 +245,19 @@ def test_ping_counters_keep_not_sent_apart_from_no_answer() -> None:
 # ---- request bodies -------------------------------------------------------------------------------------------------
 
 def test_ping_request_body_is_exact() -> None:
-    body = pr.ping_request(DOMAIN, EPOCH, DEV["a"], 258, 5.0, NOW)
+    body = pr.ping_request(DOMAIN, EPOCH, DEV["a"], 258, NOW)
     assert body == {
         "domain_id": DOMAIN, "client_epoch": EPOCH, "destination": {"kind": "node", "device_id": DEV["a"]},
-        "app_port": 211, "payload_b64": "AQAAAQI=", "delivery": "APPLIED", "storage": "VOLATILE",
+        "app_port": 211, "payload_b64": "AQAAAQI=", "delivery": "RECEIVED", "storage": "VOLATILE",
         "queue_mode": "FIFO", "priority": "NORMAL",
         "deadline": {"mode": "utc", "expires_at": "2026-10-04T12:00:03.250Z"}}
     assert pr.ping_payload(258) == bytes([1, 0, 0, 1, 2])
 
 
-def test_ping_deadline_is_the_interval_but_never_more_than_3_s() -> None:
-    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 1.0, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:01.250Z"
-    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 2.5, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:02.750Z"
-    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 60.0, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:03.250Z"
+def test_ping_deadline_is_3_s_whatever_the_loop_interval() -> None:
+    """§3.2: a receipt inherits the message's deadline, so a 1 s ping looked dead on two hops: fixed 3 s."""
+    assert pr.PING_DEADLINE_S == 3.0
+    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:03.250Z"
 
 
 def test_display_request_body_is_exact() -> None:
@@ -266,7 +273,7 @@ def test_display_request_body_is_exact() -> None:
 
 
 def test_bodies_pass_the_real_host_admission_rules() -> None:
-    for body in (pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 5.0, NOW),
+    for body in (pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW),
                  pr.display_request(DOMAIN, EPOCH, DEV["b"], "USABLE", 1, NOW)):
         MessageRequest.model_validate(body)
 
@@ -274,10 +281,10 @@ def test_bodies_pass_the_real_host_admission_rules() -> None:
 def test_the_latest_form_of_the_protocol_text_is_refused_by_the_host() -> None:
     """docs/field/protocol.md §3.2 / §3.3 say APPLIED + LATEST + coalesce_key; the Host admits LATEST only with
     BEST_EFFORT + VOLATILE (api/models.py), so fieldview sends FIFO. This pins the reason."""
-    body = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 5.0, NOW), "queue_mode": "LATEST", "coalesce_key": "211"}
+    body = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW), "queue_mode": "LATEST", "coalesce_key": "211"}
     with pytest.raises(ValidationError, match="LATEST requires BEST_EFFORT"):
         MessageRequest.model_validate(body)
-    fifo_with_key = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 5.0, NOW), "coalesce_key": "211"}
+    fifo_with_key = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW), "coalesce_key": "211"}
     with pytest.raises(ValidationError, match="coalesce_key"):
         MessageRequest.model_validate(fifo_with_key)
 
@@ -287,6 +294,9 @@ def test_load_estimate_of_a_ping_loop() -> None:
     assert need == 23.0 and fit == pytest.approx(20 / 11)
     assert ping_load(10, 5.0)[0] == 7.0
     assert ping_load(0, 1.0) == (3.0, 1.0)
+    # overlapping rounds (3 s deadline, 1 s loop): the rate per second is the same, what grows is the number of open pings
+    assert open_ops_max(4, 1.0) == 12 and open_ops_max(4, 2.0) == 8 and open_ops_max(4, 10.0) == 4
+    assert open_ops_max(500, 1.0) == 512
 
 
 # ---- topology -------------------------------------------------------------------------------------------------------
@@ -505,4 +515,140 @@ def test_names_of_boards_provisioned_after_the_start_are_read_again(tmp_path: Pa
     os.utime(path, (1, 2))  # a different mtime even within the file system's resolution
     fv._reload_names()
     assert fv.name_of(DEV["b"]) == "late"
+    rec.close()
+
+
+# ---- the request-rate guard (review finding 6) --------------------------------------------------------------------------
+
+def test_the_rate_guard_enforces_its_total_wait_also_behind_the_lock() -> None:
+    """A request queued behind a long cooldown must give up at its own budget, and must not take a token that happens
+    to be free once it finally gets the lock."""
+    import asyncio
+    import time
+
+    async def scenario() -> None:
+        bucket = RateBucket(50.0, 4)
+        bucket.penalize(600)                                    # a 429 stops everything for 0.6 s
+        holder = asyncio.ensure_future(bucket.acquire(None))    # a request without budget limit holds the lock for that
+        await asyncio.sleep(0.05)
+        t0 = time.monotonic()
+        got = await bucket.acquire(0.2)                          # queued behind it, budget 0.2 s
+        assert got is False and time.monotonic() - t0 < 0.4     # gave up at its budget, not after the cooldown
+        assert await holder is True
+        t1 = time.monotonic()
+        assert await bucket.acquire(0.05) is True                # a free token is still taken by a fresh request
+        assert time.monotonic() - t1 < 0.1
+        assert bucket.refused == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_token_that_became_free_after_the_budget_is_not_taken() -> None:
+    import asyncio
+
+    async def scenario() -> None:
+        bucket = RateBucket(100.0, 1)
+        bucket.tokens = 0.0
+        t = [0.0]
+        bucket.clock = lambda: t[0]
+        bucket.at = 0.0
+        bucket.blocked_until = 0.0
+        # the lock is free but the clock says the budget (0.1 s) ran out before the token check: refuse, keep the token
+        t[0] = 0.0
+        task = asyncio.ensure_future(bucket.acquire(0.1))
+        await asyncio.sleep(0)
+        t[0] = 5.0                                               # 5 s later a token has refilled ...
+        assert await task is False                               # ... but this request is long past its budget
+        assert bucket.tokens >= 0.99
+
+    asyncio.run(scenario())
+
+
+def test_the_recorder_counts_dropped_lines_as_lost_and_syncs_only_what_is_on_disk(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from tools.fieldview import recorder as recorder_mod
+
+    monkeypatch.setattr(recorder_mod, "QUEUE_MAX", 3)
+    gate = threading.Event()
+    rec = Recorder(tmp_path / "r")
+    original = rec._open
+    rec._open = lambda name: (gate.wait(5), original(name))[1]  # type: ignore[method-assign]  # a slow disk
+    for i in range(12):
+        rec.log("events", {"n": i})
+    assert rec.lost > 0 and rec.dropped == rec.lost and rec.warning and "queue is full" in rec.warning
+    dropped = rec.lost
+    gate.set()
+    assert rec.sync(5.0) is True
+    written = [json.loads(x)["n"] for x in (tmp_path / "r" / "events.ndjson").read_text().splitlines()]
+    assert len(written) + dropped == 12                    # nothing is silently missing: lost counts the rest
+    rec.resolve_lost(dropped)
+    assert rec.lost == 0
+    rec.close()
+
+
+def test_recorder_sync_fails_when_the_writer_cannot_confirm(tmp_path: Path) -> None:
+    import threading
+
+    rec = Recorder(tmp_path / "r")
+    release = threading.Event()
+    original = rec._open
+    rec._open = lambda name: (release.wait(5), original(name))[1]  # type: ignore[method-assign]  # a hung disk
+    rec.log("events", {"a": 1})
+    assert rec.sync(0.2) is False                          # the barrier did not come back in time: not safe
+    release.set()
+    assert rec.sync(5.0) is True
+    rec.close()
+
+
+def test_a_display_that_only_arrived_is_not_alive_but_a_ping_that_arrived_is() -> None:
+    arrived = op("EXPIRED", ev("ROOT_SENT"), ev("END_RECEIVED"))   # END_RECEIVED, never drawn
+    assert pr.classify_ping(arrived).kind == "alive"                # a ping asks for the receipt only
+    assert pr.classify_ping(arrived, arrival_is_alive=False).kind == "noanswer"
+    assert pr.classify_ping(op("APPLIED", ev("END_RECEIVED"), ev("APP_APPLIED")), arrival_is_alive=False).kind == "alive"
+
+
+def test_skipped_pings_are_their_own_class() -> None:
+    t = PingTrack()
+    t.accepted()
+    t.finish(1, pr.PingResult("alive", "", 40, "root"))
+    t.skip(2, pr.PingResult("skipped", "busy"))
+    assert (t.sent, t.alive, t.skipped, t.notsent, t.noanswer) == (1, 1, 1, 0, 0)
+    assert t.loss_pct == 0.0 and [k for _, k in t.history] == ["alive", "skipped"] and t.as_dict()["skipped"] == 1
+
+
+def test_per_node_tables_forget_unlisted_nodes_beyond_their_bound(tmp_path: Path) -> None:
+    """Telemetry names its origin, so the tables could grow with every node id ever seen (replaced boards, other
+    networks on the domain): beyond DEVICES_MAX the unlisted ones go, oldest first, the listed ones never."""
+    from tools.fieldview import engine as engine_mod
+
+    clock = [0.0]
+    fv, rec = make_engine(tmp_path, clock)
+    listed = [f"{i:02x}" * 32 for i in range(1, 4)]
+    fv._on_nodes([item(d, "ff" * 32, 1) for d in listed])
+    for i in range(engine_mod.DEVICES_MAX + 100):
+        device = f"{i + 16:04x}" * 16
+        fv._on_event(message_event(device, pr.encode_telemetry(seq=1), i), backlog=False)
+        fv.ping[device] = PingTrack()
+        fv.first_listed[device] = 0.0
+    for d in listed:
+        fv._on_event(message_event(d, pr.encode_telemetry(seq=1), 9999), backlog=False)
+    assert len(fv.tele) > engine_mod.DEVICES_MAX
+    fv._forget_stale_devices()
+    for table in (fv.tele, fv.ping, fv.first_listed):
+        assert len(table) <= engine_mod.DEVICES_MAX + len(listed)
+    assert all(d in fv.tele for d in listed)
+    rec.close()
+
+
+def test_the_finished_operation_history_is_bounded(tmp_path: Path) -> None:
+    from tools.fieldview import engine as engine_mod
+    from tools.fieldview.engine import Pending
+
+    fv, rec = make_engine(tmp_path, [0.0])
+    for i in range(engine_mod.FINISHED_KEEP + 500):
+        fv._remember(Pending(f"{i:032x}", "ping", DEV["a"], 1, 0.0, 3.0), "noanswer", op("EXPIRED", ev("ROOT_SENT")))
+    assert len(fv.finished) == engine_mod.FINISHED_KEEP
+    assert f"{0:032x}" not in fv.finished and f"{engine_mod.FINISHED_KEEP + 499:032x}" in fv.finished
     rec.close()

@@ -122,25 +122,23 @@ def utc_deadline(now: datetime, seconds: float) -> dict[str, str]:
     return {"mode": "utc", "expires_at": when.strftime("%Y-%m-%dT%H:%M:%S.") + f"{when.microsecond // 1000:03d}Z"}
 
 
-def ping_deadline_s(interval_s: float) -> float:
-    """§3.2: min(loop interval, 3 s); a ping is never kept."""
-    return min(float(interval_s), 3.0)
+PING_DEADLINE_S = 3.0   # §3.2: fixed, whatever the loop interval (a receipt inherits the deadline; 1 s was too short)
 
 
-def _message(domain: str, epoch: str, device: str, port: int, payload: bytes,
-             deadline: dict[str, str]) -> dict[str, Any]:
-    # §3.2 / §3.3 ask for queue_mode LATEST + coalesce_key, but the Host admits LATEST only for BEST_EFFORT + VOLATILE
-    # (api/models.py; SEMANTICS 'Message': APPLIED is not LATEST) and refuses a coalesce_key with FIFO. An APPLIED
-    # request is therefore FIFO without a key; the finite deadline is what keeps an old one from lingering.
+def _message(domain: str, epoch: str, device: str, port: int, payload: bytes, deadline: dict[str, str],
+             delivery: str) -> dict[str, Any]:
+    # §3.2 / §3.3 once asked for queue_mode LATEST + coalesce_key, but the Host admits LATEST only for BEST_EFFORT +
+    # VOLATILE (api/models.py; SEMANTICS 'Message') and refuses a coalesce_key with FIFO. A RECEIVED / APPLIED request is
+    # therefore FIFO without a key; the finite deadline is what keeps an old one from lingering.
     return {"domain_id": domain, "client_epoch": epoch, "destination": {"kind": "node", "device_id": device},
-            "app_port": port, "payload_b64": base64.b64encode(payload).decode(), "delivery": "APPLIED",
+            "app_port": port, "payload_b64": base64.b64encode(payload).decode(), "delivery": delivery,
             "storage": "VOLATILE", "queue_mode": "FIFO", "priority": "NORMAL", "deadline": deadline}
 
 
-def ping_request(domain: str, epoch: str, device: str, round_no: int, interval_s: float,
-                 now: datetime) -> dict[str, Any]:
-    return _message(domain, epoch, device, PING_PORT, ping_payload(round_no),
-                    utc_deadline(now, ping_deadline_s(interval_s)))
+def ping_request(domain: str, epoch: str, device: str, round_no: int, now: datetime) -> dict[str, Any]:
+    """§3.2: delivery RECEIVED (one end-to-end receipt), VOLATILE, FIFO, 3 s UTC deadline."""
+    return _message(domain, epoch, device, PING_PORT, ping_payload(round_no), utc_deadline(now, PING_DEADLINE_S),
+                    "RECEIVED")
 
 
 DISPLAY_DEADLINE_S = 10.0
@@ -149,7 +147,7 @@ DISPLAY_DEADLINE_S = 10.0
 def display_request(domain: str, epoch: str, device: str, state: str, command_seq: int,
                     now: datetime) -> dict[str, Any]:
     return _message(domain, epoch, device, DISPLAY_PORT, display_payload(state, command_seq),
-                    utc_deadline(now, DISPLAY_DEADLINE_S))
+                    utc_deadline(now, DISPLAY_DEADLINE_S), "APPLIED")
 
 
 # ---- operation evidence -----------------------------------------------------------------------------------------
@@ -170,11 +168,12 @@ def _mono(op: dict[str, Any], *kinds: str) -> int | None:
     return None
 
 
-def rtt_from_evidence(op: dict[str, Any]) -> int | None:
-    """§3.2: APP_APPLIED.observed_mono_ms - ROOT_SENT.observed_mono_ms, both on the root's clock; END_RECEIVED when
-    APP_APPLIED has no time. None when the Host reports no time (the bridge does not fill observed_mono_ms yet)."""
+def rtt_from_evidence(op: dict[str, Any], end_kinds: tuple[str, ...] = ("APP_APPLIED", "END_RECEIVED")) -> int | None:
+    """The end evidence's observed_mono_ms - ROOT_SENT.observed_mono_ms, both on the root's clock (the first of
+    `end_kinds` that has a time). A ping measures to END_RECEIVED (§3.2), a display command to APP_APPLIED. None when the
+    Host reports no time (the bridge does not fill observed_mono_ms yet)."""
     sent = _mono(op, "ROOT_SENT")
-    end = _mono(op, "APP_APPLIED", "END_RECEIVED")
+    end = _mono(op, *end_kinds)
     if sent is None or end is None or end < sent:
         return None
     return end - sent
@@ -182,24 +181,30 @@ def rtt_from_evidence(op: dict[str, Any]) -> int | None:
 
 @dataclass(frozen=True)
 class PingResult:
-    kind: str  # alive | noanswer | rejected | notsent
+    kind: str  # alive | noanswer | rejected | notsent | unknown | skipped (late evidence: stats.PingTrack.late)
     detail: str = ""
     rtt_ms: int | None = None
     rtt_src: str | None = None  # "root" (evidence on the root clock) or "laptop" (POST to the final event)
 
 
-def classify_ping(op: dict[str, Any], laptop_rtt_ms: int | None = None) -> PingResult:
+def classify_ping(op: dict[str, Any], laptop_rtt_ms: int | None = None, *, arrival_is_alive: bool = True) -> PingResult:
     """One finished ping operation -> alive / no answer / rejected by the node / not sent.
 
-    alive      APPLIED (APP_APPLIED evidence): the node's application answered.
+    alive      the operation ended RECEIVED (END_RECEIVED evidence: the node's SDK acknowledged the ping end to end;
+               §3.2). APPLIED (APP_APPLIED) and a late END_RECEIVED / APP_APPLIED in the evidence count too.
     rejected   the node answered, but REJECTED (APP_REJECTED / DESTINATION_REFUSED): reachable, so not RF loss.
     noanswer   it left the root (ROOT_SENT) and nothing came back before the deadline: EXPIRED / INDETERMINATE / ...
     notsent    it never left: the Host or the root refused or expired it (HOST_*, BUSY, NO_CAPACITY, TIME_UNCERTAIN ...),
-               cancelled, superseded. Local, never RF loss."""
+               cancelled, superseded. Local, never RF loss.
+
+    `arrival_is_alive` False is for a display command, whose arrival (END_RECEIVED) is not yet "drawn": only the outcome
+    APPLIED is then an answer."""
     outcome, kinds = op.get("outcome", ""), evidence_kinds(op)
     reason = str(op.get("reason", ""))
-    if outcome == "APPLIED":
-        rtt = rtt_from_evidence(op)
+    answered = outcome in ("RECEIVED", "APPLIED") if arrival_is_alive else outcome == "APPLIED"
+    rejected = bool(kinds & {"APP_REJECTED", "DESTINATION_REFUSED"})
+    if answered or (arrival_is_alive and not rejected and kinds & {"END_RECEIVED", "APP_APPLIED"}):
+        rtt = rtt_from_evidence(op, ("END_RECEIVED", "APP_APPLIED"))
         if rtt is not None:
             return PingResult("alive", "", rtt, "root")
         return PingResult("alive", "", laptop_rtt_ms, "laptop" if laptop_rtt_ms is not None else None)
@@ -217,11 +222,18 @@ def classify_ping(op: dict[str, Any], laptop_rtt_ms: int | None = None) -> PingR
 
 
 def classify_post_error(status: int | None, body: dict[str, Any] | None = None, exc: str = "") -> PingResult:
-    """A POST /v1/messages the Host refused (or never answered): not sent, with the Host's code as the detail."""
+    """A POST /v1/messages that provably did not get admitted: the Host refused it (a 4xx / 429 / 5xx answer) or the
+    request failed before it was sent (connect refused). Not sent, with the Host's code as the detail."""
     if status is None:
-        return PingResult("notsent", f"no answer from the Host: {exc}"[:120])
+        return PingResult("notsent", f"could not reach the Host: {exc}"[:120])
     code = (body or {}).get("code", "")
     return PingResult("notsent", f"HTTP {status} {code}".strip())
+
+
+def classify_post_unknown(exc: str) -> PingResult:
+    """A POST /v1/messages whose answer never came (also on the replays with the same Idempotency-Key): the Host may
+    have admitted it. Neither "sent and lost" nor "not sent"."""
+    return PingResult("unknown", f"no answer to the POST (it may have been admitted): {exc}"[:160])
 
 
 def event_payload(event: dict[str, Any]) -> bytes:

@@ -103,18 +103,19 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
                 await member.telemetry(seq=seq, uptime_s=seq * 10, role=3, chip=1, depth=1, rssi=-71)
             await until(lambda: node in fv.tele and fv.tele[node].received == 3, "three telemetry messages")
             assert (fv.tele[node].lost, fv.tele[node].last.parent_rssi_dbm) == (1, -71)
-            # ping: the member's application answers APPLIED
+            # ping: delivery RECEIVED, the SDK's end-to-end receipt makes it alive (END_RECEIVED)
             rnd = await fv.ping_round(5.0)
             await until(lambda: rnd["open"] == 0, "the ping ends")
             ping = fv.ping[node]
             found["alive"] = (ping.last.kind, ping.last.rtt_ms, ping.last.rtt_src)
             assert ping.last.kind == "alive" and ping.last.rtt_ms is not None
-            # ping: the application stays silent: it left the root and nothing came back
+            # ping: the application stays silent. A RECEIVED ping does not need it (§3.2: the node application's liveness
+            # is shown by its telemetry), so the node is still alive
             member.mode = "ignore"
             rnd = await fv.ping_round(3.0)
-            await until(lambda: rnd["open"] == 0, "the silent ping ends", 40)
-            found["silent"] = (ping.last.kind, ping.last.detail)
-            assert ping.last.kind == "noanswer", ping.last
+            await until(lambda: rnd["open"] == 0, "the ping of a silent application ends", 40)
+            found["app_silent"] = (ping.last.kind, ping.last.detail)
+            assert ping.last.kind == "alive", ping.last
             # display: the member reports role 3 in its telemetry; it has the frame, then draws it
             member.mode = "apply"
             entry = await fv.send_display(node, "FORBID")
@@ -124,7 +125,7 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
             await member.telemetry(seq=5, uptime_s=50, role=3, flags=0b011, display_seq=entry["seq"])
             await until(lambda: fv.tele[node].last.display_state == "FORBID", "reported display state")
             # the consumer's ACK reached the Host: a restart would resume after what was read
-            await until(lambda: fv._ack_dirty is False, "acknowledged", 10)
+            await until(lambda: not fv.ack_pending, "acknowledged", 10)
             found["cursor"] = fv.cursor
             found["warnings"] = fv.snapshot()["warnings"]
         finally:
@@ -136,7 +137,7 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
     found = asyncio.run(scenario())
     print("fieldview e2e:", found)
     assert found["warnings"] == []
-    # what the real Host was sent: FIFO APPLIED with a UTC deadline (the LATEST form would have been refused)
+    # what the real Host was sent: FIFO RECEIVED / APPLIED with a UTC deadline (the LATEST form would have been refused)
     ops = [r for r in (tmp_path / "fieldview" / "ping.ndjson").read_text().splitlines() if '"result"' in r]
     assert len(ops) == 2
     acked = db_rows(b.host.db, "SELECT name, ack_sequence FROM consumers")  # the Host kept our place

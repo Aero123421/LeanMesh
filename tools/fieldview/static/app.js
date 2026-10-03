@@ -123,9 +123,11 @@ function drawNodes(st) {
     const rtt = p.rtt_median_ms === null ? "" : ` · ${p.rtt_median_ms.toFixed(0)} ms` +
       (p.last && p.last.rtt_src === "laptop" ? "*" : "");
     const dots = h("span", { class: "dots" }, p.history.map((k) => h("span", { class: k, title: k })));
-    const pingCell = p.sent + p.notsent === 0 ? "-" : [
+    const extra = [["not sent", p.notsent], ["unknown", p.unknown], ["skipped", p.skipped], ["late", p.late]]
+      .filter(([, n]) => n).map(([k, n]) => ` · ${k} ${n}`).join("");
+    const pingCell = p.sent + p.notsent + p.unknown + p.skipped === 0 ? "-" : [
       h("span", { class: lastKind ? "r-" + lastKind : "" }, `${p.alive}/${p.sent}`),
-      ` lost ${pct(p.loss_pct)}${rtt}`, p.notsent ? ` · not sent ${p.notsent}` : "", " ", dots];
+      ` lost ${pct(p.loss_pct)}${rtt}`, extra, " ", dots];
     const dsp = n.display_state === null || n.display_state === undefined ? "-" :
       `${n.display_state} #${fmt(n.display_seq)}${n.render_fault ? " FAULT" : ""}`;
     const q = n.recent_loss_pct;
@@ -140,8 +142,9 @@ function drawNodes(st) {
       td(`${n.reboots}` + (n.boot_count === null ? "" : ` (#${n.boot_count})`), "num"),
       td(n.tx_frames === null && n.rx_frames === null ? "-" : `tx ${fmt(n.tx_frames)} rx ${fmt(n.rx_frames)} rf ${fmt(n.rf_failures)} busy ${fmt(n.local_busy)}`, "",
          n.min_heap_bytes ? "min heap " + n.min_heap_bytes + " B" : ""),
-      td(pingCell, "", answered ? `answered ${answered}, no answer ${p.noanswer}, rejected ${p.rejected}, not sent ${p.notsent}` +
-         (p.last ? `\nlast: ${p.last.kind} ${p.last.detail}` : "") : ""),
+      td(pingCell, "", `answered ${answered}, no answer ${p.noanswer} (late answers ${p.late}), rejected ${p.rejected}, ` +
+         `not sent ${p.notsent}, unknown ${p.unknown}, skipped (busy) ${p.skipped}` +
+         (p.last ? `\nlast: ${p.last.kind} ${p.last.detail}` : "")),
       td(dsp));
   });
   $("nodes").tBodies[0].replaceChildren(...rows);
@@ -151,12 +154,14 @@ function drawNodes(st) {
 function drawPing(st) {
   const p = st.ping;
   $("ping-status").textContent = (p.running ? `Loop running every ${p.interval_s} s. ` : "Loop stopped. ") +
-    `${p.nodes} ACTIVE node(s), round ${p.round}, ${p.open} operation(s) open. ` +
+    `${p.nodes} ACTIVE node(s), round ${p.round}, ${p.open} operation(s) open` +
+    (p.running ? ` (at most ${p.open_max}; a node with 3 open pings is skipped). ` : ". ") +
     "RTT marked * is measured by the laptop (the Host gave no root time).";
   $("ping-start").disabled = p.running; $("ping-stop").disabled = !p.running;
   const rows = [...p.rounds].reverse().map((r) => h("tr", {},
     td(r.round), td(utcShort(r.t)), td(r.nodes), td(r.alive, "r-alive"), td(r.noanswer, "r-noanswer"),
-    td(r.rejected, "r-rejected"), td(r.notsent, "r-notsent"), td(r.open)));
+    td(r.rejected, "r-rejected"), td(r.notsent, "r-notsent"), td(r.unknown, "r-unknown"), td(r.skipped, "r-skipped"),
+    td(r.late, "r-late"), td(r.open)));
   $("rounds").tBodies[0].replaceChildren(...rows);
 }
 
@@ -184,7 +189,7 @@ function drawDisplay(st) {
     lines.push(h("div", {}, `Last command: ${cmd.state} #${cmd.seq} sent ${utcShort(cmd.posted)} UTC`));
     lines.push(h("div", {}, "arrived (END_RECEIVED) ", mark(cmd.arrived, cmd.arrived_ms), " · drawn (APP_APPLIED) ", mark(cmd.drawn, cmd.drawn_ms),
       " · result ", h("b", { class: cmd.result === "drawn" ? "r-alive" : cmd.result === "pending" ? "" : "r-noanswer" }, cmd.result),
-      cmd.detail ? " " + cmd.detail : ""));
+      cmd.detail ? " " + cmd.detail : "", cmd.late_result ? ` · later the Host showed it ${cmd.late_result}` : ""));
     lines.push(h("div", { class: "note" }, match ? "The telemetry flags show this command." : "The telemetry flags do not show this command (yet)."));
   }
   box.replaceChildren(...lines);
