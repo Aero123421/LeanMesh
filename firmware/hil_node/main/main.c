@@ -7,7 +7,7 @@
  *   not provisioned  keygen | prov-leaf <trust88> <device_cose> <ticket> | prov-root <trust88> <device_cose>
  *                    <delegation> <host_id>                                        (hex arguments)
  *   leaf/relay, provisioned (mesh running)
- *                    status | join | send root <text> | send <device_id hex> <text> | op <id> | stop | start
+ *                    status | join [noretry] | send root <text> | send <device_id hex> <text> | op <id> | stop | start
  * A provisioned ROOT starts the mesh and leaves the port to the Host's USB session: it has no console then.
  * Events of a leaf/relay are printed as "EV ..." lines. No product logic, no polling inside the SDK: this app polls
  * its own event queue every 50 ms while it waits for console input.
@@ -285,8 +285,9 @@ static lm_status_t join_once(void) {
     return st;
 }
 
-static void cmd_join(void) {
-    s_join_retries = 5;
+static void cmd_join(char *save) {
+    const char *arg = strtok_r(NULL, " ", &save);
+    s_join_retries = arg != NULL && strcmp(arg, "noretry") == 0 ? 0 : 5; /* noretry: the SDK's own result */
     s_join_again_at = 0;
     lm_status_t st = join_once();
     if (st != LM_STATUS_OK) {
@@ -426,7 +427,7 @@ static void run_command(char *line) {
     } else if (strcmp(cmd, "status") == 0) {
         cmd_status();
     } else if (strcmp(cmd, "join") == 0) {
-        cmd_join();
+        cmd_join(save);
     } else if (strcmp(cmd, "send") == 0) {
         cmd_send(save);
     } else if (strcmp(cmd, "power") == 0) {
