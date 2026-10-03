@@ -64,18 +64,33 @@ PYTHONPATH=host ~/.cache/leanmesh/host-venv/bin/python tools/hil/hil.py init
 
 | # | 内容 | 状態 |
 |---|---|---|
-| F1 | owner task の stack 4096 B が不足（S3 で約 4.1 KB 使用、空き 20 B まで低下）。Join 後に mesh attach が進まない | 8192 B に変更（`src/port/idf/idf_owner.hpp`） |
-| F2 | 同時に複数台が Join すると EXPIRED。探索は最大 30 s（`membership_ops.cpp`）で、1 相手 30 s の handshake gate と同じ長さ。最初の handshake が Root の single slot に断られると、同じ探索内でやり直せない。docs/07 §3 の「失敗後 1〜60 s backoff」は Discovery にはあるが、join operation が 30 s で終わる | 未修正。試験ファームはアプリ側で 5 回まで再申請 |
-| F3 | **同じ MAC から鍵を作り直した機器は、Root がその MAC の旧 neighbour session を持つ間（最大 1 h）Join できない**（`exchange_io.cpp:139` が Join carrier を無条件に捨てる）。Root の再起動で解消 | 未修正 |
+| F1 | owner task の stack 4096 B が不足（S3 で約 4.1 KB 使用、空き 20 B まで低下）。Join 後に mesh attach が進まない | **修正** 8192 B（`8cf0ae6`）。task 別の実測は下表 |
+| F2 | 同時に複数台が Join すると EXPIRED。1-hop initiator が CredI 送信時に 1 相手 30 s の handshake gate を消費していたため、Root の single slot に CredI を捨てられると、同じ探索（最大 30 s）内でやり直せなかった | **修正** gate は message_1（双方の公開鍵演算の開始）で消費（`61a52f0`）。sim で 8 台同時 Join が全台成功（修正前は 2/8 が EXPIRED）、実機で 2 台同時・アプリ再申請なしで両方成功 |
+| F3 | 同じ MAC から鍵を作り直した機器は、Root がその MAC の旧 neighbour session を持つ間（最大 1 h）Join できない（`exchange_io.cpp` が Join carrier を無条件に捨てていた） | **修正**（`802ef1b`）判断を検証後へ移し、同じ device なら拒否、EDHOC で別 device と証明されたら旧 session を置換。実機で消去から 27 s で承認待ち（Root 再起動なし）。**残る制限**: 旧 identity を neighbour に持つ relay を経由する Join は、その session が切れるまで通らない（relay は joiner を検証できない） |
 | F4 | XIAO ESP32C6 は RF スイッチ（GPIO3 low、GPIO14 でアンテナ選択）を設定しないと電波が極端に弱い。MacFailed が続き attach できない | ボード設定を追加（`firmware/hil_node/sdkconfig.board.esp32c6`）。docs/03 §5 の board overlay の実例 |
 | F5 | Host の POLICY_SET は signed type 12 を要求するが SDK は type 12 を UNSUPPORTED にする。Host から join_mode を変える手段が無い | 未修正（CommissioningWindow で代替できる） |
-| F6 | 失効済みの機器宛ての DURABLE 送信が SENDING のまま終わらない | 未修正 |
+| F6 | 失効済みの機器宛ての DURABLE 送信が SENDING のまま終わらない | **修正**（`54f702a`）Root は失効時にその機器宛ての送信を終わらせ（未送出は REJECTED、送出済みは INDETERMINATE、理由 REVOKED）、新しい送信は REVOKED で拒否。実機で 0.7 s で終了、次の送信は ROOT_REFUSED |
 | F7 | WINDOWED_RX の自動 light sleep で USB-Serial/JTAG が止まり、console も esptool も届かない。電源の入れ直しでも直後に眠る。BOOT ボタンでのダウンロードモードと全消去が必要だった | 試験ファームに起動 10 s の safe（ALWAYS_RX に戻す）を追加。製品側の扱いは未定 |
-| F8 | USB リセット後の reset reason が UNKNOWN | `idf_health.cpp` に ESP_RST_USB / JTAG / CPU_LOCKUP / PWR_GLITCH を追加 |
+| F8 | USB リセット後の reset reason が UNKNOWN | **修正**（`53ed918`）。実機で EXTERNAL と表示 |
 | F9 | Root 再起動後、member の追随に 138 s（3 × hello 上限 32 s 前後の不在判定による） | 仕様どおり。実用上は長い |
 
 調べて問題でなかったもの: WINDOWED_RX 中の flash commit（約 4 分で 21 回）は power policy の保存と DURABLE メッセージの journal で、受信窓ごとの書込みではなかった。
 F4 を直した後の Relay / Leaf の MacFailed は 0。
+
+### SDK task の stack（再接続と送受信の後、`hil.py cmd debug`）
+
+| ボード | lm_owner 空き / 8192 | lm_worker 空き / 10240 |
+|---|---:|---:|
+| Leaf C3 | 4356 | 7448 |
+| Leaf C6 | 4228 | 7708 |
+| Root S3 | SDK task の最小空き 3164〜4508（task 別は未測定: Root は console が無い） | |
+
+worker は Join 時の深さと Xtensa（S3）の task 別値が未測定のため据え置き。
+
+## 修正の過程で見つかったこと
+
+- F6 の最初の修正は native（root を含む SIM profile）では通ったが、LEAF/RELAY の IDF build を壊していた（`NoLedger` に `find` が無い）。SDK を変えたら IDF の LEAF / RELAY / ROOT を build してから commit する。
+- `test_serial` が `ctest -j6` で 1 回だけ失敗し、単独と再実行では通った（実時間に依存する試験の可能性。原因は未調査）。
 
 ## 未検証
 
