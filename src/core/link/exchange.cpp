@@ -61,7 +61,8 @@ Status Exchange::start_1hop(Mode mode, const MacAddr &mac, MonoTime now) {
     }
     LM_TRY(acquire_link_peer(mac));
     begin_common(mode, true, now);
-    s_.gate.touch(mac, now); // we chose to spend a full handshake on this peer
+    // The gate is spent in start_hs(), when EDHOC work begins on both sides (HIL-F2): a CredI the busy responder
+    // dropped cost it nothing, and the asker may try again within its search.
     s_.engine.random(MutByteView{xid_});
     phase_ = Phase::SendCred;
     expect_ = ObjKind::CredR;
@@ -337,7 +338,13 @@ bool Exchange::lease_exempt() const { return k_root_capable && s_.engine.config(
 
 // Starts EDHOC with the verified peer's CCS as the only acceptable credential. The initiator
 // composes message_1, the responder processes the received one.
-void Exchange::start_hs(sec::HsRole role, ByteView msg1, MonoTime /*now*/) {
+void Exchange::start_hs(sec::HsRole role, ByteView msg1, MonoTime now) {
+    if (role == sec::HsRole::Initiator && mode_ != Mode::End) {
+        // docs/06 §8 one full handshake per peer per 30 s: message_1 is where the public-key work starts for us and,
+        // once it arrives, for the responder (resp_message_1 spends its gate there too). The credential exchange
+        // before it is cheap and slot-bounded on both sides. (End mode spends its own gate when it starts.)
+        s_.gate.touch(mac_, now);
+    }
     const ByteView peers[1] = {ByteView{peer_state_.ccs.data(), peer_state_.ccs_len}};
     Status st = hs_.begin(role, s_.identity.key(), s_.identity.ccs(), peers, 1);
     if (st == Status::Ok) {

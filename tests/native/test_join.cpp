@@ -1710,6 +1710,27 @@ LM_TEST("J08 HIL-F3: join carriers from a live member's MAC are refused after ve
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
 }
 
+LM_TEST("J09 HIL-F2: four devices that ask at the same moment all join within their first join operation") {
+    // HIL 2026-10-03: three boards joined at once; one ended EXPIRED. The root runs one handshake at a time and drops
+    // the others' carriers; a joiner had already spent its one-full-handshake-per-peer gate (30 s) when it sent its
+    // CredI, so it could not ask again before its 30 s search ended.
+    constexpr unsigned k_devices = 8;
+    JNet n(1 + k_devices);
+    std::array<uint64_t, k_devices + 1> ops{};
+    for (unsigned i = 1; i <= k_devices; ++i) {
+        n.grant(i, 1, i); // one ExpectedSet revision per device
+    }
+    for (unsigned i = 1; i <= k_devices; ++i) {
+        lm_status_t st = 0;
+        ops[i] = n.join(i, static_cast<uint8_t>(0x40 + i), LM_JOIN_NEW, &st);
+        LM_CHECK_EQ(st, LM_STATUS_OK);
+    }
+    for (unsigned i = 1; i <= k_devices; ++i) {
+        LM_CHECK_EQ(n.wait_operation(i, ops[i], 60000), 0u);
+        LM_CHECK_EQ(n.membership(i).state, static_cast<uint32_t>(LM_ACTIVE));
+    }
+}
+
 LM_TEST("measure: sizeof of the join/membership state") {
     std::printf("  [measure] sizeof(Membership)=%zu Ledger=%zu (entries %zu x %zu) JoinPipe=%zu Exchange=%zu LinkLayer=%zu\n"
                 "            LocalIdentity=%zu Engine=%zu lm_context=%zu Neighbor=%zu\n",
