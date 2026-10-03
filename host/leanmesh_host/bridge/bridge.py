@@ -66,6 +66,8 @@ EVENT_QUEUE = 256          # bounded hand-over from the serial thread; overflow 
 POLL_BATCH = 16
 MAX_OP_MAP = 4096          # per-boot operation maps (FIX11-D4): as many as open operations; the oldest entry is dropped, and the
                            # fallback is a GET_MESSAGE by MessageId (numbers) or a repeated, idempotent CANCEL
+NODES_REFRESH_S = 10.0     # NODE_QUERY again when no event refreshed the node list for this long: the root reports no event
+                           # for a node that re-attaches under another parent, so `parent_device_id` / `root_depth` age at most this
 DIAG_MIN_INTERVAL_S = 1.0  # one DIAGNOSTICS exchange per second at most, however many clients ask (S19)
 RECONCILE_RETRY_S = 2.0    # pause before an unfinished reconciliation is tried again
 JOIN_WAIT_S = 180.0        # a JOIN_DECIDE the root accepted must show durable ledger state within this time
@@ -73,6 +75,21 @@ LEDGER_PREPARED = 2        # root EntryState: Prepared (reserved and stored); 3 
 REQUEST_PENDING = 16       # GET_REQUEST state: waiting for the operator
 SIGNED_CONTROLS = ("REVOKE", "TRANSFER", "INSTALL_CONTROL", "POWER_POLICY_SET",
                    "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER")  # (LEDGER_RESTORE also carries a signed object, but is run by LedgerSync)
+
+
+def tree_extras(nodes: list[Any], tree: Any, root: bytes) -> dict[int, dict[str, Any]]:
+    """NODE_QUERY `tree` rows [address, parent address, depth] -> per member address: `root_depth` (1 = a direct child of
+    the root) and `parent_device_id` (the root's own DeviceId at depth 1, else the DeviceId the node rows give that parent
+    address). A parent the rows do not name is left out; a member without a row has no approved parent: nothing is stated."""
+    device_of = {int(row[5]): bytes(row[0]) for row in nodes if row[5]}
+    out: dict[int, dict[str, Any]] = {}
+    for address, parent, depth in tree:
+        extras: dict[str, Any] = {"root_depth": int(depth)}
+        owner = root if int(depth) == 1 else device_of.get(int(parent))
+        if owner is not None:
+            extras["parent_device_id"] = owner.hex()
+        out[int(address)] = extras
+    return out
 
 
 @dataclass
@@ -134,6 +151,7 @@ class Bridge:
         self._next_poll = 0.0
         self._poll_gap = POLL_S
         self._poll_now = False
+        self._next_nodes = float("inf")  # monotonic time of the next timed NODE_QUERY (armed by every refresh, never while down)
         # EVENT_ACK is cumulative at the root (FIX2-D9): it may only cover events this Host finished. Every
         # event seen (or dropped on overflow) is "open" until its handling succeeded; the ACK sent never
         # reaches the lowest open sequence number.
@@ -169,6 +187,7 @@ class Bridge:
         answered CAPABILITIES (never guessed)."""
         self.hub.set_root(connected, ())
         self.ready = False
+        self._next_nodes = float("inf")
         self._ready_evt.clear()
         self._gen = gen if connected else 0
         self._session.set()
@@ -206,6 +225,8 @@ class Bridge:
                     await self._reconcile()
                 await self._cancels()
                 await self._poll_open()
+                if time.monotonic() >= self._next_nodes:
+                    await self._refresh_nodes()  # the tree can change without an event (a node re-attaches under another parent)
                 await self.groups.sync(self)
                 await self.ledger.maybe_pull()
                 if not progressed:
@@ -226,8 +247,9 @@ class Bridge:
     async def _idle(self) -> None:
         """Waits for a commit (new operation, cancel), the next poll of open operations or the next attempt of a
         request the root refused for a moment (FIX5: a transient refusal was retried only at an unrelated wake-up;
-        with nothing else open the loop slept without a timeout). No timer runs while nothing is open or waiting."""
-        due = min(self._next_poll, self._next_reconcile if self._need_reconcile else float("inf"),
+        with nothing else open the loop slept without a timeout). The only timer that runs while nothing is open is the
+        NODE_QUERY refresh every NODES_REFRESH_S (below), and only while the root session is up."""
+        due = min(self._next_poll, self._next_nodes, self._next_reconcile if self._need_reconcile else float("inf"),
                   self.ledger.due if self.ledger.due is not None else float("inf"))
         retry_utc_ms = await self.hub.read(_next_attempt)
         if retry_utc_ms is not None:
@@ -759,6 +781,7 @@ class Bridge:
     async def _refresh_nodes(self) -> None:
         link, info = self.link, self.info
         assert link is not None and info is not None
+        self._next_nodes = time.monotonic() + NODES_REFRESH_S  # armed first: a failed exchange is not retried in a tight loop
         if info.time_ms is None or time.monotonic() - info.fetched > CAPS_MAX_AGE_S:
             fresh = await self._caps(link)  # the root clock ages the power reports it relays (power_state)
             if fresh is not None and fresh.boot == info.boot:
@@ -774,11 +797,12 @@ class Bridge:
             if m.get("channel", {}).get("current"):  # S17: what the root's coordinator reports (a member the ledger lists, by address)
                 mirror.put_channel(conn, info.domain, chan_status.status(
                     m["channel"], {a: bytes(d) for d, _, _, _, _, a in m["nodes"] if a}))
+            tree = tree_extras(m["nodes"], m.get("tree", ()), info.root)
             for device, ag, mg, state, confirmed, address in m["nodes"]:
                 mirror.upsert_node(conn, info.domain, device, assignment_generation=ag,
                                    membership_generation=mg, membership=mapping.MEMBERSHIP.get(state, "UNKNOWN"),
                                    connectivity="UNKNOWN", confirmed=bool(confirmed),
-                                   short_address=address or None)
+                                   short_address=address or None, extras=tree.get(address) if address else None)
             hi = info.root_now_hi()
             offset = hi - power_now_ms() if hi is not None else None
             mirror.sync_power(conn, info.domain, [(bytes(row[0]), *power_status.snapshot(row, offset))

@@ -16,7 +16,7 @@ from ..api.errors import ApiError, invalid, not_found
 from ..power_state import now_ms
 from ..power_state import resolve as resolve_power
 
-_NODE_EXTRAS = ("root_depth", "last_authenticated_rx_mono_ms", "parent_rssi_dbm")
+_NODE_EXTRAS = ("parent_device_id", "root_depth", "last_authenticated_rx_mono_ms", "parent_rssi_dbm")
 
 
 # ---- writers (bridge) ---------------------------------------------------------------------------

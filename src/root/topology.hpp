@@ -116,6 +116,11 @@ class Topology {
     [[nodiscard]] Status path_revision(ShortAddr node, PathRevision &out) const;
     // Approved parent of an Active member (NotFound otherwise); the root itself has none.
     [[nodiscard]] Status parent_of(ShortAddr node, ShortAddr &parent) const;
+    // Where an Active member stands in the approved tree right now: its parent (the root's own address for a
+    // direct child) and its depth (1 = direct child of the root). Only a member whose whole ancestry is Active and
+    // inside its lease has a position (NoRoute otherwise: the same test a path from the root applies; NotFound:
+    // not admitted or the root). Reporting only (the Host's node list); no routing decision reads it.
+    [[nodiscard]] Status position_of(ShortAddr node, uint64_t now_root_ms, ShortAddr &parent, uint8_t &depth) const;
 
     [[nodiscard]] Status begin_drain(ShortAddr relay, uint64_t now);
     [[nodiscard]] Status drain_status(ShortAddr relay, uint64_t now) const;
