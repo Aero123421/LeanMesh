@@ -23,9 +23,11 @@ class SimPm final : public port::Pm {
     port::WakeInfo boot_info() override;
     void retain(ByteView state) override;
     [[nodiscard]] port::SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, port::WakeInfo &woke) override;
+    [[nodiscard]] bool may_sleep(uint8_t) override { return !veto; }
 
     // ---- bench ----
     bool supported = true;        // false: sleep() answers Unsupported (a port without the capability)
+    bool veto = false;            // HIL-F7: may_sleep() holds automatic sleeps back (a maintenance link is attached)
     bool ram_complete = true;     // reported by a light wake
     bool elapsed_known = true;    // reported by a light/deep wake (false: RTC continuity unknown)
     uint8_t take_fail = 0;        // lock bits whose acquire fails (the level does not change)

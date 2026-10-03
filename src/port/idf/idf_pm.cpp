@@ -123,6 +123,11 @@ void IdfPm::retain(ByteView state) {
     g_rtc.check = check_of(g_rtc);
 }
 
+// leanmesh_idf.h: optional; an application that does not define it never holds a sleep back.
+extern "C" bool lm_idf_sleep_veto(uint8_t sleep_kind) __attribute__((weak));
+
+bool IdfPm::may_sleep(uint8_t kind) { return lm_idf_sleep_veto == nullptr || !lm_idf_sleep_veto(kind); }
+
 port::SleepStart IdfPm::sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, port::WakeInfo &woke) {
     if ((sources & LM_WAKE_TIMER) != 0 && duration_ms != 0) {
         if (esp_sleep_enable_timer_wakeup(duration_ms * 1000ULL) != ESP_OK) {

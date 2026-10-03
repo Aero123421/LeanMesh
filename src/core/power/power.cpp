@@ -14,6 +14,7 @@ namespace {
 
 constexpr Duration k_ticket_life = Duration::from_ms(gen::defaults::power_limits::sleep_ticket_ms);
 constexpr Duration k_busy_retry = Duration::from_ms(50); // a window that cannot close yet looks again
+constexpr Duration k_veto_retry = Duration::from_s(1);    // HIL-F7: a held-back sleep without a known next window
 constexpr Duration k_lock_retry = Duration::from_ms(200); // a PM lock the port did not confirm is asked for again
 constexpr uint64_t k_hour_ms = 3600000ULL;
 constexpr uint64_t k_day_ms = 86400000ULL;
@@ -69,7 +70,7 @@ void Power::stop() {
     loaded_ = prep_active_ = ep_extra_ = false; // policy_job_ stays: a running job still owns rec_ (zombie rule)
     ticket_ = Ticket{};
     poll_ = Poll{};
-    window_end_ = next_window_ = ep_end_ = overrun_at_ = wake_at_ = MonoTime::never();
+    window_end_ = next_window_ = ep_end_ = overrun_at_ = wake_at_ = held_window_at_ = MonoTime::never();
     search_next_ = MonoTime{};
     ep_over_ = auto_ = false;
     acct_at_ = MonoTime::never();
@@ -840,6 +841,14 @@ void Power::on_timer(MonoTime now) {
 
 // WINDOWED_RX: when the receive window closes and nothing is in flight, the engine sleeps until the next window.
 void Power::windowed_timer(MonoTime now) {
+    if (!held_window_at_.is_never() && now >= held_window_at_) { // HIL-F7: the window after a held-back sleep
+        held_window_at_ = MonoTime::never();
+        if (policy_.mode == k_windowed_rx && st_ == State::Running) {
+            next_window_ = (next_window_ > now ? next_window_ : now) + Duration::from_ms(policy_.wake_interval_ms);
+            begin_episode(kWindow, now);
+            return;
+        }
+    }
     if (window_end_.is_never() || now < window_end_ || st_ == State::Quiescing || st_ == State::SleepReady) {
         return;
     }
@@ -858,6 +867,15 @@ void Power::windowed_timer(MonoTime now) {
     if (waiting || !quiet_now() || engine_.delivery().hop().in_use() != 0 || engine_.link().exchange().busy()) {
         window_end_ = now + k_busy_retry; // in flight: the window stays open, the episode budget still runs
         window_closed_ = false;
+        return;
+    }
+    if (port::Pm *pm = engine_.pm(); pm != nullptr && !pm->may_sleep(LM_SLEEP_LIGHT)) {
+        // HIL-F7: the platform holds the node awake (a maintenance link, a button: leanmesh_idf.h). Nothing is stopped:
+        // the radio and the sessions stay, and the next window still opens on time (held_window_at_), polls the parent
+        // and asks again when it closes. A held-back sleep is neither a fault nor a lost window.
+        ++stats_.sleep_vetoed;
+        window_end_ = MonoTime::never();
+        held_window_at_ = next_window_ > now ? next_window_ : now + k_veto_retry;
         return;
     }
     SleepRequest r;
@@ -887,6 +905,7 @@ MonoTime Power::deadline() const {
     }
     if (sleepy_mode() && !asleep()) {
         d = earliest(d, ep_over_ ? MonoTime::never() : ep_end_);
+        d = earliest(d, held_window_at_);
         d = earliest(d, overrun_at_);
         d = earliest(d, poll_.retry);
         d = earliest(d, search_due());

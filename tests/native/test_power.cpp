@@ -804,6 +804,34 @@ LM_TEST("GS06 sim: an unknown wake time is never called unreachable; a finite co
     LM_CHECK(n.until([&] { return n.has(0, hist, lm::delivery::ev::end_received); }, 150'000, 50)); // the origin asks again (backoff)
 }
 
+LM_TEST("HIL-F7 sim: a platform veto holds a WINDOWED_RX node awake with its radio on, without churn; lifted, it sleeps again") {
+    // Bench 2026-10-03: a WINDOWED_RX C3 light-slept and its USB-Serial/JTAG port went with it (no console, no esptool).
+    // Pm::may_sleep lets the board hold the automatic sleep back (leanmesh_idf.h): nothing is stopped and restarted.
+    PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
+    n.form();
+    n.node(2).pm.veto = true;
+    n.apply_policy(2, k_windowed);
+    n.run_ms(12'000);
+    const uint64_t sleeps0 = n.node(2).pm.sleep_calls();
+    const uint64_t steps0 = n.eng(2).stats().steps;
+    const uint64_t restarts0 = n.eng(2).stats().radio_restarts;
+    n.run_ms(30'000);
+    LM_CHECK_EQ(n.node(2).pm.sleep_calls(), sleeps0);              // never entered
+    LM_CHECK(!n.asleep(2));
+    LM_CHECK(n.eng(2).power().stats().sleep_vetoed >= 5u);        // asked at every window close (5 s)
+    LM_CHECK(n.eng(2).stats().steps - steps0 < 2000u);            // no 50 ms churn of stop/start attempts
+    LM_CHECK_EQ(n.eng(2).stats().radio_restarts, restarts0);
+    LM_CHECK(n.ready(2));
+    // Still WINDOWED_RX on the wire: the parent holds a downlink for the next authenticated poll, as for any windowed
+    // node (it does not know the board is awake), so it arrives within one interval.
+    const auto m = n.send(0, 2, LM_RECEIVED, payload_of(7), 60'000);
+    LM_CHECK_EQ(m.st, LM_STATUS_OK);
+    Bytes got;
+    LM_CHECK(n.until([&] { return n.pop_message(2, got); }, 5000 + 250 + 1000));
+    n.node(2).pm.veto = false;
+    LM_CHECK(n.until([&] { return n.node(2).pm.sleep_calls() > sleeps0; }, 8000)); // windows sleep again
+}
+
 LM_TEST("LP02 sim: WINDOWED_RX cycles by itself, receives only after an authenticated poll, and is radio-off in between") {
     PNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Leaf}});
     n.form();
