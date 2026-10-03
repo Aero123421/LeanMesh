@@ -9,11 +9,12 @@
 #include "core/member/credentials.hpp"
 #include "fleet.hpp"
 #include "port/sim/sim_node.hpp"
+#include "security/crypto.hpp"
 
 namespace meshsim {
 namespace {
 
-std::string hex(const lm::fleet::Bytes &v) {
+std::string hex(lm::ByteView v) {
     static const char *const k = "0123456789abcdef";
     std::string s;
     for (uint8_t b : v) {
@@ -22,6 +23,7 @@ std::string hex(const lm::fleet::Bytes &v) {
     }
     return s;
 }
+std::string hex(const lm::fleet::Bytes &v) { return hex(lm::ByteView{v.data(), v.size()}); }
 
 // <node> of a booted node, or 64 hex digits of any DeviceId (a device the simulation does not run).
 bool parse_device(Sim &sim, const std::string &s, lm::DeviceId &out) {
@@ -89,6 +91,44 @@ std::string cmd_lc_object(Sim &sim, const Args &a) {
         return object_json(lm::member::k_type_commissioning_window, net.fleet.window(net.domain, w));
     }
     return error("usage: lc-object revoke ... | lc-object window ... (see cmd_lifecycle.cpp)");
+}
+
+// root-replace [term] [handover term]: the root board is replaced (docs/21 section 8, issue #5). The old root is gone - node 0 loses its RAM and
+// its whole Flash - and the same board comes back as a NEW root device: its own identity, the fleet's delegation of generation
+// 2 and its own credential (the term before `term`, so its first boot publishes `term`), and no ledger. It still has to be paired
+// with the Host (`serial-pair 0`) and started (`serial-reset`). The reply carries the fleet's RootHandover old -> new, the object a
+// real fleet signs for this exchange. TEST-ONLY: the fleet keys are public seeds.
+std::string cmd_root_replace(Sim &sim, const Args &a) {
+    uint64_t term = 2;
+    uint64_t named = 0; // the first term the handover names (default: the one the root publishes)
+    if (a.size() > 3 || (a.size() >= 2 && (!parse_u64(a[1], term) || term < 2 || term > 1000)) ||
+        (a.size() == 3 && (!parse_u64(a[2], named) || named < 1 || named > 1000))) {
+        return error("usage: root-replace [first term 2..1000] [term the handover names 1..1000]");
+    }
+    named = named != 0 ? named : term;
+    lm::fleet::Network &net = fleet_network(sim);
+    lm::fleet::Bytes delegation;
+    constexpr uint32_t k_replacement_index = 1500; // (fleet device indices: roots 1000.., nodes by index, Host kits 2000..)
+    const lm::fleet::NodeKit root = net.make_new_root(k_replacement_index, 2, static_cast<uint32_t>(term), delegation);
+    lm::sim::SimNode &n = sim.world.node(0);
+    n.power_cut();
+    n.store.wipe();
+    const lm::Status st = lm::fleet::provision_replacement_root(n.store, net, root, delegation);
+    if (st != lm::Status::Ok) {
+        return error(std::string("provision failed: ") + lm::status_name(st));
+    }
+    lm::member::RootHandover h;
+    h.id[0] = 0x48;
+    h.old_root = net.root.id;
+    h.new_root = root.kit.id;
+    h.old_generation = 1;
+    h.new_generation = 2;
+    h.new_term = lm::RootTerm{static_cast<uint32_t>(named)};
+    if (lm::sec::sha256(lm::ByteView{delegation.data(), delegation.size()}, h.new_delegation_hash) != lm::Status::Ok) {
+        return error("hash failed");
+    }
+    return "{\"ok\":true,\"old_root\":\"" + hex(net.root.id.view()) + "\",\"new_root\":\"" + hex(root.kit.id.view()) +
+           "\",\"term\":" + std::to_string(term) + ",\"handover\":\"" + hex(net.fleet.handover(net.domain, h)) + "\"}";
 }
 
 // job-latency <node> <us>: every job of the node's worker takes this long (virtual execution time) from now on; the

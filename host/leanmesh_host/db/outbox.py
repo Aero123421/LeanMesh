@@ -108,6 +108,21 @@ def claim(conn: sqlite3.Connection, cfg: Settings, adapter_incarnation: bytes,
     return items
 
 
+def claim_one(conn: sqlite3.Connection, op: bytes, adapter_incarnation: bytes) -> int | None:
+    """Takes ONE named QUEUED entry that is due, as `claim` does (external_write_possible=1 before bytes leave). For the
+    operation the bridge runs itself before it is ready (a LEDGER_RESTORE onto a replacement root). Its attempt number, or
+    None: it is not due any more."""
+    row = conn.execute("SELECT b.attempts FROM outbox b JOIN operations o ON o.id=b.operation WHERE b.operation=? "
+                       "AND b.state='QUEUED' AND b.external_write_possible=0 AND o.state!='FINAL' "
+                       "AND (b.next_attempt_utc_ms IS NULL OR b.next_attempt_utc_ms<=?)", (op, now_ms())).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE outbox SET state='SENDING', adapter_incarnation=?, external_write_possible=1, "
+                 "attempts=attempts+1 WHERE operation=?", (adapter_incarnation, op))
+    conn.execute("UPDATE operations SET state='SENDING' WHERE id=?", (op,))
+    return int(row[0]) + 1
+
+
 def expire_unsent(conn: sqlite3.Connection, cfg: Settings, limit: int = 64) -> int:
     """Only UTC deadlines whose outbox proves no external write. Bounded, indexed, offline-safe."""
     rows = conn.execute(

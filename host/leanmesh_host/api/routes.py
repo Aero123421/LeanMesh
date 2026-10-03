@@ -16,7 +16,7 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..auth import Principal
-from ..db import mirror, ops
+from ..db import ledger_backup, mirror, ops
 from ..events import journal
 from ..events.hub import Hub
 from ..wire import WireError, cbor_decode
@@ -145,6 +145,28 @@ def _check_signed_object(p: Principal, body: ControlRequest, signed: bytes, doma
         raise invalid("the signed object is about another device than device_id")
 
 
+def _restore_inputs(body: ControlRequest, signed: bytes | None,
+                    domain: bytes) -> tuple[bytes, bytes, ledger_backup.Backup | None]:
+    """LEDGER_RESTORE: (old root, new root) of the RootHandover it carries, and the backup it supplies, if any. The shape of both is
+    checked here (400); the signatures are the replacement root's to verify, the sequence and the roots are checked against what
+    the Host holds in the admission transaction."""
+    assert signed is not None  # the control rule requires signed_cbor_b64
+    try:
+        data = cbor_decode(decode_control_body(decode_cose_sign1(signed).payload, "signed").data)
+        old_root, new_root = bytes(data[1]), bytes(data[2])
+    except (WireError, IndexError, TypeError) as exc:
+        raise invalid("the signed object is not a RootHandover") from exc
+    supplied = None
+    if body.backup_b64 is not None:
+        try:
+            supplied = ledger_backup.decode_blob(codec.decode_b64(body.backup_b64, "backup"))
+        except (ledger_backup.BackupError, ValueError) as exc:
+            raise invalid(f"the backup is not usable: {exc}") from exc
+        if supplied.domain != domain:
+            raise invalid("the backup is of another domain")
+    return old_root, new_root, supplied
+
+
 @router.post("/control", status_code=202)
 async def submit_control(body: ControlRequest, request: Request, idempotency_key: IdemKey,
                          p: Principal = require(*WRITE_PERMISSIONS)) -> dict[str, Any]:
@@ -154,11 +176,12 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
         raise ApiError(503, "UNSUPPORTED", "remote LEAVE has no authenticated serial method")
     rule = CONTROL_RULES[body.type]
     domain = codec.hex_bytes(body.domain_id, 16)
-    request_doc, digest = _dump(body, "signed_cbor_b64")
+    request_doc, digest = _dump(body, "signed_cbor_b64", "backup_b64")
     signed = codec.decode_b64(body.signed_cbor_b64) if body.signed_cbor_b64 else None
     if signed is not None:
         _check_signed_object(p, body, signed, domain)
     expected = codec.parse_u63(body.expected_revision)
+    restore = _restore_inputs(body, signed, domain) if body.type == "LEDGER_RESTORE" else None
     target = bytes.fromhex(body.device_id) if body.device_id else None
     # The Host checks base64/size/permission/revision it can know. Signatures, delegation and
     # target-side rules are verified by the root; its rejection arrives as REJECTED evidence.
@@ -172,6 +195,8 @@ async def submit_control(body: ControlRequest, request: Request, idempotency_key
             raise ApiError(503, "UNSUPPORTED", "control type needs a capability the root has not enabled",
                            required_capability=rule.capability[0])
         current = None
+        if restore is not None:
+            ledger_backup.admit_restore(conn, domain, restore[0], restore[1], restore[2], expected)
         if body.type == "POLICY_SET":
             current = conn.execute("SELECT policy_revision FROM domains WHERE id=?", (domain,)).fetchone()[0]
         elif body.type == "POWER_POLICY_SET":
@@ -249,6 +274,14 @@ async def get_policy(request: Request, domain_id: Domain, _: Principal = require
     """HIL-F5: the root's join mode and policy revision (the expected_revision of POLICY_SET)."""
     domain = codec.hex_bytes(domain_id, 16, "domain_id")
     return await _hub(request).read(lambda conn: mirror.get_policy(conn, domain))
+
+
+@router.get("/ledger/backup")
+async def get_ledger_backup(request: Request, domain_id: Domain, _: Principal = require("CONFIGURE")) -> dict[str, Any]:
+    """Issue #5: the newest backup of the root's ledger the Host holds (taken from the root after its ledger changed): its
+    facts and the blob a LEDGER_RESTORE can carry. CONFIGURE: it lists the members and their credentials."""
+    domain = codec.hex_bytes(domain_id, 16, "domain_id")
+    return await _hub(request).read(lambda conn: ledger_backup.view(conn, domain))
 
 
 @router.get("/lifecycle/requests")

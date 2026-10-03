@@ -2548,6 +2548,134 @@
           }
         }
       }
+    },
+    "/v1/ledger/backup": {
+      "get": {
+        "operationId": "get_ledger_backup",
+        "description": "The newest backup of the root's member ledger the Host holds for the domain (CONFIGURE: it lists the members and their credentials). The Host asks the root for a fresh one after its ledger changed; one per domain, the highest sequence wins and a lower one never replaces it. backup_b64 is what POST /v1/control LEDGER_RESTORE can carry.",
+        "parameters": [
+          {
+            "name": "domain_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id16"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LedgerBackup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or unknown critical field",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown domain, or no backup has been taken yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Hash/revision/epoch conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Cursor gap or expired query window",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or payload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit with retry_after_ms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Root, storage or recovery unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "Insufficient durable capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2934,7 +3062,7 @@
           },
           "type": {
             "type": "string",
-            "description": "LEAVE is reserved; current Host bridge returns 503 UNSUPPORTED before admission.",
+            "description": "LEAVE is reserved; current Host bridge returns 503 UNSUPPORTED before admission. LEDGER_RESTORE (issue #5) restores the root's ledger onto a replacement root: signed_cbor_b64 is the fleet's RootHandover (type 31) that names that root, expected_revision is the sequence of the backup restored (409 with details.current_revision when the Host holds another); needs CONFIGURE and TRANSFER.",
             "enum": [
               "JOIN_DECISION",
               "LEAVE",
@@ -2947,7 +3075,8 @@
               "GROUP_SET",
               "POWER_POLICY_SET",
               "COMMISSIONING_WINDOW_SET",
-              "ROOT_HANDOVER"
+              "ROOT_HANDOVER",
+              "LEDGER_RESTORE"
             ]
           },
           "device_id": {
@@ -2999,6 +3128,12 @@
               "PREAPPROVED"
             ],
             "description": "POLICY_SET only: the root's join mode (lm_policy_set). PREAPPROVED still admits only a device with a fleet-signed AssignmentTicket and a signed expected entry; expected_revision is the policy revision of GET /v1/policy."
+          },
+          "backup_b64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "maxLength": 65536,
+            "description": "LEDGER_RESTORE only, optional: a backup (GET /v1/ledger/backup backup_b64) to restore instead of the one the Host holds; it must be at least as new (expected_revision is its sequence) and becomes the held one."
           }
         },
         "required": [
@@ -3939,6 +4074,52 @@
               "PREAPPROVED",
               "UNKNOWN"
             ]
+          }
+        }
+      },
+      "LedgerBackup": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "domain_id",
+          "sequence",
+          "root_device_id",
+          "root_term",
+          "records",
+          "taken_at",
+          "backup_b64"
+        ],
+        "properties": {
+          "domain_id": {
+            "$ref": "#/components/schemas/Id16"
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/U63",
+            "description": "The root's backup sequence number: persisted by the root before it signs, never repeats nor goes back, continued by a replacement root. LEDGER_RESTORE takes it as expected_revision."
+          },
+          "root_device_id": {
+            "$ref": "#/components/schemas/DeviceId",
+            "description": "The root that signed the backup."
+          },
+          "root_term": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "records": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 68
+          },
+          "taken_at": {
+            "type": "string",
+            "description": "RFC 3339 UTC: when the Host stored it."
+          },
+          "backup_b64": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "maxLength": 65536,
+            "description": "CBOR [1, signed header (control type 34), [[record id, state, payload, next], ...]]. The Host checked that the records are the ones the header names (hash chain); the root that is restored from it verifies the signature."
           }
         }
       }

@@ -40,6 +40,9 @@
 //                                           counters of node i; on the root also the approved tree size (cmd_mesh.cpp)
 //   diag <node> [heap <bytes>]              lm_diagnostics_get + capabilities with validity bits (cmd_diag.cpp)
 //   lc-object revoke|window ...             a fleet- or root-signed lifecycle object as hex (cmd_lifecycle.cpp)
+//   root-replace [term] [handover term]     TEST-ONLY: node 0 becomes the replacement root of the domain (issue #5): its
+//                                           store is wiped and provisioned with a new root identity (delegation generation
+//                                           2, first term `term`, NO ledger); the fleet's RootHandover old -> new as hex
 //   app-equipment <node> [fail] / app-battery <node> <mv> <pct>   run the example applications of examples/apps
 //                                           (cmd_apps.cpp) on a node
 //   quit
@@ -135,6 +138,7 @@ std::string cmd_wake(Sim &sim, const Args &a);
 std::string cmd_diag(Sim &sim, const Args &a);
 // Commands of the lifecycle slice (cmd_lifecycle.cpp): signed revoke / commissioning-window objects; a slow worker.
 std::string cmd_lc_object(Sim &sim, const Args &a);
+std::string cmd_root_replace(Sim &sim, const Args &a);
 std::string cmd_job_latency(Sim &sim, const Args &a);
 // Commands running the example applications (cmd_apps.cpp).
 std::string cmd_app_equipment(Sim &sim, const Args &a);

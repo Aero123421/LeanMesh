@@ -43,6 +43,7 @@ from . import channel as chan_status
 from . import diag as diag_status
 from . import power as power_status
 from . import groups, mapping
+from .ledger import LedgerSync
 from .mapping import status_name
 
 log = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ JOIN_WAIT_S = 180.0        # a JOIN_DECIDE the root accepted must show durable l
 LEDGER_PREPARED = 2        # root EntryState: Prepared (reserved and stored); 3 Active .. 6 Blocked also imply an entry
 REQUEST_PENDING = 16       # GET_REQUEST state: waiting for the operator
 SIGNED_CONTROLS = ("REVOKE", "TRANSFER", "INSTALL_CONTROL", "POWER_POLICY_SET",
-                   "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER")
+                   "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER")  # (LEDGER_RESTORE also carries a signed object, but is run by LedgerSync)
 
 
 @dataclass
@@ -112,6 +113,7 @@ class Plan:
     request_id: bytes | None = None  # JOIN_DECISION: the root's pending request
     group: bool = False              # MESSAGE to a group: the root's per-target results are mirrored
     approve: bool = False
+    payload: bytes | None = None     # LEDGER_RESTORE: the RootHandover the operator signed
 
 
 class Bridge:
@@ -144,6 +146,7 @@ class Bridge:
         self._cancel_taken: OrderedDict[bytes, None] = OrderedDict()  # operations whose CANCEL the root accepted (idempotent: not repeated)
         self._diag: tuple[float, dict[str, Any], int] | None = None  # (at, body, serial generation) of the last DIAGNOSTICS
         self._diag_lock = asyncio.Lock()
+        self.ledger = LedgerSync(self)         # issue #5: backup of the root's ledger, restore onto a replacement root
 
     # ---- wiring ------------------------------------------------------------------------------
     def attach(self, link: SerialLink) -> None:
@@ -204,6 +207,7 @@ class Bridge:
                 await self._cancels()
                 await self._poll_open()
                 await self.groups.sync(self)
+                await self.ledger.maybe_pull()
                 if not progressed:
                     await self._idle()
             except asyncio.CancelledError:
@@ -223,7 +227,8 @@ class Bridge:
         """Waits for a commit (new operation, cancel), the next poll of open operations or the next attempt of a
         request the root refused for a moment (FIX5: a transient refusal was retried only at an unrelated wake-up;
         with nothing else open the loop slept without a timeout). No timer runs while nothing is open or waiting."""
-        due = min(self._next_poll, self._next_reconcile if self._need_reconcile else float("inf"))
+        due = min(self._next_poll, self._next_reconcile if self._need_reconcile else float("inf"),
+                  self.ledger.due if self.ledger.due is not None else float("inf"))
         retry_utc_ms = await self.hub.read(_next_attempt)
         if retry_utc_ms is not None:
             due = min(due, time.monotonic() + max(0.0, (retry_utc_ms - now_ms()) / 1000))
@@ -254,11 +259,18 @@ class Bridge:
         old = self.info
         if old is not None and old.boot != info.boot:  # the root restarted: its operation numbers are void
             self._forget_boot()
+            self.ledger.ops.clear()
         self._open_events = {e for e in self._open_events if e[0] == info.boot}
         self._ack_top = {b: v for b, v in self._ack_top.items() if b == info.boot}
         self._ack_sent = {b: v for b, v in self._ack_sent.items() if b == info.boot}
         self.info = info
 
+        # A root that is not the one the domain is bound to is accepted only after a handover from the bound root to it. A
+        # LEDGER_RESTORE the operator queued for exactly that change carries the fleet's handover and a backup of the old
+        # root's ledger: it runs first, and its success is what binds the new root (issue #5).
+        if await self.ledger.restore_new_root(link, info):
+            info = await self._caps(link) or info  # the root's term and clock after the restore
+            self.info = info
         if not await self.hub.write(lambda conn: self._register_root(conn, info)):
             log.error("another root claims domain %s: the bridge stays down", info.domain.hex())
             return
@@ -267,6 +279,7 @@ class Bridge:
         self._need_reconcile = True
         self.ready = True
         self._ready_evt.set()
+        self.ledger.new_session()
         self.hub.outbox_ready.set()
 
     def _register_root(self, conn: sqlite3.Connection, info: RootInfo) -> bool:
@@ -333,8 +346,7 @@ class Bridge:
             fresh = await self._caps(link)
             if fresh is not None and fresh.boot == self.info.boot:
                 self.info = fresh
-        incarnation = hashlib.sha256(self.info.root + self.info.boot.to_bytes(8, "big")
-                                     + self._gen.to_bytes(4, "big")).digest()[:16]
+        incarnation = self.incarnation(self.info)
 
         def claim_batch(conn: sqlite3.Connection) -> list[Plan]:
             plans = [self._plan(conn, item) for item in outbox.claim(conn, self.cfg, incarnation, 8, domain)]
@@ -344,6 +356,15 @@ class Bridge:
         for plan in plans:
             await self._execute(link, plan)
         return True
+
+    def incarnation(self, info: RootInfo) -> bytes:
+        """Which root boot on which serial session an outbox claim was made for."""
+        return hashlib.sha256(info.root + info.boot.to_bytes(8, "big") + self._gen.to_bytes(4, "big")).digest()[:16]
+
+    def finish(self, conn: sqlite3.Connection, op: bytes, outcome: str, assurance: str, kind: str, reason: str, *,
+               observer: bytes | None = None) -> None:
+        """The end of an operation the bridge ran by itself (LedgerSync): one piece of evidence, then FINAL."""
+        self._finish(conn, op, outcome, assurance, kind, reason, observer=observer)
 
     def _plan(self, conn: sqlite3.Connection, item: outbox.OutboxItem) -> Plan | None:
         """Runs inside the claim transaction. A request the root can never take is finished here; a
@@ -431,6 +452,8 @@ class Bridge:
         if typ == "POLICY_SET":  # HIL-F5: the root's join mode, compare-and-set on its policy revision
             return Plan(item.operation, typ, M_POLICY_SET, [mirror.JOIN_MODES.index(req["join_mode"]), rev],
                         attempts=item.attempts)
+        if typ == "LEDGER_RESTORE":  # issue #5: three root steps and the records, run by LedgerSync (expected_revision = the backup's sequence)
+            return Plan(item.operation, typ, 0, rev, attempts=item.attempts, payload=item.payload)
         if typ == "GROUP_SET":
             members = sorted(bytes.fromhex(m) for m in req["members"])
             return Plan(item.operation, typ, M_GROUP_SET, [int(req["group_id"]), rev, members],
@@ -458,6 +481,12 @@ class Bridge:
         conn.execute("DELETE FROM meta WHERE key IN (?,?)", (f"send:{op.hex()}", f"join:{op.hex()}"))
 
     async def _execute(self, link: SerialLink, plan: Plan) -> None:
+        if plan.typ == "LEDGER_RESTORE":
+            info = self.info
+            assert info is not None and plan.payload is not None
+            await self.ledger.run_restore(link, info, plan.op, plan.payload, int(plan.params), plan.attempts, bind=False)
+            await self._refresh_nodes()
+            return
         try:
             res = await link.request(plan.method, plan.params)
         except SessionChanged as exc:
@@ -776,7 +805,18 @@ class Bridge:
     async def _event_loop(self) -> None:
         while True:
             payload, gen = await self._events.get()
-            await self._ready_evt.wait()  # nothing is committed before the root identity is known
+            if not self._ready_evt.is_set():
+                # Nothing is committed before the root identity is known - except while a restore onto a replacement root runs
+                # (it is what makes that root the domain's): then only its own events are served, no mirror, no inbox.
+                waits = [asyncio.ensure_future(self._ready_evt.wait()), asyncio.ensure_future(self.ledger.restore_evt.wait())]
+                try:
+                    await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for w in waits:
+                        w.cancel()
+                if not self._ready_evt.is_set():
+                    await self._restore_event(payload, gen)
+                    continue
             if self.link is None or gen != self.link.gen:
                 continue  # an old session's record: the root sends unsettled events again
             try:
@@ -787,6 +827,29 @@ class Bridge:
                 log.info("event acknowledgement interrupted (%s): the root sends it again", exc)
             except Exception:  # not acknowledged, so the root delivers it again
                 log.exception("root event not processed")
+
+    async def _restore_event(self, payload: bytes, gen: int) -> None:
+        """While a LEDGER_RESTORE runs before the bridge is ready: the end of the root's operations is noted for the restore
+        and acknowledged (the root keeps an event until then and would stop at 8), nothing else is done with them."""
+        link, info = self.link, self.info
+        if link is None or info is None or gen != link.gen:
+            return
+        boot, seq, kind, body = cbor_decode(payload)
+        if boot != info.boot:
+            return
+        m = cbor_decode(body) if body else {}
+        if kind == EV_OPERATION and int(m.get("operation", 0)) & CTL_OP_TAG:
+            self.ledger.ops.note(int(m["operation"]), int(m["reason"]))
+        self._open_events.discard((boot, seq))
+        self._ack_top[boot] = max(self._ack_top.get(boot, 0), seq)
+        upto = self._ack_top[boot]
+        lowest = min((q for b, q in self._open_events if b == boot), default=None)
+        if lowest is not None:
+            upto = min(upto, lowest - 1)
+        if upto > self._ack_sent.get(boot, 0):
+            res = await link.request(M_EVENT_ACK, [boot, upto])
+            if res.status == mapping.OK:
+                self._ack_sent[boot] = upto
 
     async def _handle_event(self, payload: bytes) -> None:
         link, info = self.link, self.info
@@ -803,11 +866,17 @@ class Bridge:
                 return  # not committed: no HOST_STORE_ACK, no EVENT_ACK, and no later ACK may cover it
             self._open_events.discard((boot, seq))  # the root settled it at HOST_STORE_ACK
         elif kind == EV_OPERATION:
+            op = int(m.get("operation", 0))
+            if op & CTL_OP_TAG:
+                self.ledger.ops.note(op, int(m["reason"]))  # (a backup / restore step of this Host waits for it)
             await self._on_operation_event(m)
-            if int(m.get("operation", 0)) & CTL_OP_TAG:  # a root control operation ended (e.g. POLICY_SET, HIL-F5):
-                await self._refresh_nodes()             # the state it changed is mirrored from NODE_QUERY
+            if op & CTL_OP_TAG and op not in self.ledger.ops.own:  # a root control operation ended (e.g. POLICY_SET, HIL-F5):
+                await self._refresh_nodes()                         # the state it changed is mirrored from NODE_QUERY
+                self.ledger.changed()                               # ... and may have changed the ledger: a fresh backup
         elif kind in (EV_MEMBERSHIP, EV_CHANNEL, power_status.EV_POWER):  # (S17: channel state; S16: a schedule report)
             await self._refresh_nodes()
+            if kind == EV_MEMBERSHIP:
+                self.ledger.changed()
         elif kind == EV_GROUP_PROGRESS:
             self.groups.touched(int(m["operation"]))
         elif kind == EV_GAP:
