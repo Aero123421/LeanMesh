@@ -197,12 +197,50 @@ Status join(const std::string &dir, const Input &in) {
     return Status::Expired;
 }
 
+// A RootHandover (control 31) issued by the Python tool, checked by the SDK's own rules: the fleet signed it, it is a valid
+// handover (another root, a higher generation), and it names exactly the replacement root of `newdeleg.cose` (its delegation
+// hash and generation) - what a replacement root verifies (Ledger::rs_handover_job) and a member accepts.
+Status handover(const std::string &dir) {
+    Bytes public_key, fleet, deleg, cose;
+    if (!read(dir, "fleet.pub", public_key) || public_key.size() != 65 || public_key[0] != 4 ||
+        !read(dir, "fleet.id", fleet) || fleet.size() != 16 || !read(dir, "newdeleg.cose", deleg) ||
+        !read(dir, "handover.cose", cose)) {
+        return Status::InvalidArgument;
+    }
+    sec::PublicKey key;
+    std::copy_n(public_key.begin() + 1, 32, key.x.begin());
+    std::copy_n(public_key.begin() + 33, 32, key.y.begin());
+    FleetId fid;
+    std::copy_n(fleet.begin(), 16, fid.bytes.begin());
+    member::TrustAnchor trust;
+    LM_TRY(member::make_trust_anchor(fid, key, 0, trust));
+    member::RootDelegation d;
+    LM_TRY(member::check_root_delegation(trust, view(deleg), d));
+    member::Envelope env;
+    ByteView data;
+    LM_TRY(member::open_signed(view(cose), trust.key, member::k_type_root_handover, env, data));
+    member::RootHandover h;
+    LM_TRY(member::decode_handover(data, h));
+    LM_TRY(member::check_handover(h));
+    Sha256Digest hash{};
+    LM_TRY(sec::sha256(view(deleg), hash));
+    LM_TRY(member::handover_to(h, d.root, d.generation, hash));
+    return env.domain == d.domain && env.revision == d.generation ? Status::Ok : Status::AuthRejected;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc != 3 || (std::string(argv[1]) != "verify" && std::string(argv[1]) != "join")) return 2;
+    if (argc != 3 || (std::string(argv[1]) != "verify" && std::string(argv[1]) != "join" &&
+                      std::string(argv[1]) != "handover")) {
+        return 2;
+    }
     Input in;
     Status status = sec::crypto_init();
+    if (status == Status::Ok && std::string(argv[1]) == "handover") {
+        std::cout << status_name(handover(argv[2])) << '\n';
+        return 0;
+    }
     if (status == Status::Ok) status = verify(argv[2], in);
     if (status == Status::Ok && std::string(argv[1]) == "join") status = join(argv[2], in);
     std::cout << status_name(status) << '\n';

@@ -356,3 +356,74 @@ def test_cli_refuses_unprotected_stdin_password_before_creating_store(tmp_path):
                  input=(PASSWORD.decode() + "\n") * 2)
     assert result.returncode == 1 and not (tmp_path / "fleet").exists()
     assert "GetPassWarning" not in result.stderr and PASSWORD.decode() not in result.stderr
+
+
+def test_root_handover_is_issued_for_the_replacement_root_and_the_sdk_accepts_it(tmp_path, fleet, objects):
+    """Issue #5: the fleet's RootHandover for a root exchange. The SDK's own rules (another root, a higher generation, the
+    new delegation's hash and generation) accept it; every refusal of the issuer is checked."""
+    issuer = fleet[2]
+    domain = bytes.fromhex("12" * 16)
+    old_root = keys.key_id(objects[0].public_key())
+    replacement = ec.generate_private_key(ec.SECP256R1())
+    new_delegation = issuer.root(replacement.public_key(), domain, 2, 15)
+    cose = issuer.handover(old_root, new_delegation, 1, 2)
+    got_domain, revision, data = issuer.open(cose, 31, 1024)
+    assert got_domain == domain and revision == 2
+    assert data[1:] == [old_root, keys.key_id(replacement.public_key()), 1, 2, sha256(new_delegation).digest(), 2, 1]
+    folder = tmp_path / "ho"
+    folder.mkdir(mode=0o700)
+    files = {"fleet.pub": issuer.key.public_key().public_bytes(serialization.Encoding.X962,
+                                                             serialization.PublicFormat.UncompressedPoint),
+             "fleet.id": issuer.fleet, "newdeleg.cose": new_delegation, "handover.cose": cose}
+    for name, value in files.items():
+        (folder / name).write_bytes(value)
+    native = Path(os.environ.get("LEANMESH_NATIVE_BUILD", Path.home() / ".cache/leanmesh/native"))
+    binary = Path(os.environ.get("LEANMESH_ISSUER_DRIVER", native / "tests/native/issuer_driver"))
+
+    def sdk() -> str:
+        return subprocess.run([str(binary), "handover", str(folder)], capture_output=True, text=True,
+                              timeout=60).stdout.strip()
+
+    assert sdk() == "OK"
+    # the same object for another replacement delegation (a different hash), or tampered, is refused by the SDK
+    other = issuer.root(replacement.public_key(), domain, 3, 15)
+    (folder / "newdeleg.cose").write_bytes(other)
+    assert sdk() == "NETWORK_MISMATCH"
+    (folder / "newdeleg.cose").write_bytes(new_delegation)
+    (folder / "handover.cose").write_bytes(cose[:-1] + bytes([cose[-1] ^ 1]))
+    assert sdk() == "AUTH_REJECTED"
+    with pytest.raises(ValueError):  # the old root is the new root
+        issuer.handover(keys.key_id(replacement.public_key()), new_delegation, 1, 2)
+    with pytest.raises(ValueError):  # the new delegation generation is not above the old one
+        issuer.handover(old_root, new_delegation, 2, 2)
+    with pytest.raises(ValueError):
+        issuer.handover(old_root, new_delegation, 1, 0)
+    with pytest.raises(ValueError):
+        issuer.handover(old_root, new_delegation, 1, 2**32)
+    with pytest.raises(ValueError):
+        issuer.handover(old_root[:31], new_delegation, 1, 2)
+
+
+def test_cli_issues_a_root_handover(tmp_path):
+    password = tmp_path / "passphrase"
+    keys.write_new(password, PASSWORD + b"\n")
+    store = tmp_path / "fleet"
+    common = ["--store", store, "--environment", "test", "--password-file", password]
+    assert cli("init", *common).returncode == 0
+    root = ec.generate_private_key(ec.SECP256R1())
+    spare = ec.generate_private_key(ec.SECP256R1())
+    pub = tmp_path / "spare.pem"
+    pub.write_bytes(spare.public_key().public_bytes(serialization.Encoding.PEM,
+                                                    serialization.PublicFormat.SubjectPublicKeyInfo))
+    delegation = tmp_path / "deleg2.cose"
+    assert cli("root", *common, "--public-key", pub, "--generation", 2, "--output", delegation,
+               "--domain", "12" * 16, "--permissions", 15).returncode == 0
+    out = tmp_path / "handover.cose"
+    r = cli("handover", *common, "--old-root", keys.key_id(root.public_key()).hex(), "--new-root-delegation", delegation,
+            "--old-generation", 1, "--new-term", 2, "--output", out)
+    assert r.returncode == 0, r.stderr
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600 and json.loads(r.stdout)["sha256"] == sha256(out.read_bytes()).hexdigest()
+    bad = cli("handover", *common, "--old-root", "00" * 31, "--new-root-delegation", delegation, "--old-generation", 1,
+              "--new-term", 2, "--output", tmp_path / "bad.cose")
+    assert bad.returncode == 1 and not (tmp_path / "bad.cose").exists()
+

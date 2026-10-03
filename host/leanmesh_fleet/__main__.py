@@ -29,7 +29,7 @@ def bounded_read(path: Path, limit: int) -> bytes:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Offline LM1 fleet issuer: initial Join objects")
     sub = p.add_subparsers(dest="command", required=True)
-    for command in ("init", "device", "root", "admit"):
+    for command in ("init", "device", "root", "admit", "handover"):
         q = sub.add_parser(command)
         q.add_argument("--store", type=Path, required=True)
         q.add_argument("--environment", choices=("production", "test"), required=True)
@@ -43,6 +43,14 @@ def parser() -> argparse.ArgumentParser:
         if command == "root":
             q.add_argument("--domain", required=True, help="nonzero 16-byte hex domain")
             q.add_argument("--permissions", type=int, required=True, help="approve1/revoke2/channel4/groups8")
+        if command == "handover":
+            q.add_argument("--old-root", required=True, help="DeviceId of the root that failed (64 hex)")
+            q.add_argument("--new-root-delegation", type=Path, required=True,
+                           help="the RootDelegation of the replacement root (generation above the old one)")
+            q.add_argument("--old-generation", type=int, required=True)
+            q.add_argument("--new-term", type=int, required=True, help="first root term the replacement root publishes")
+            q.add_argument("--recovery-mode", type=int, choices=(0, 1), default=1)
+            q.add_argument("--output", type=Path, required=True)
         if command == "admit":
             q.add_argument("--device-credential", type=Path, action="append", required=True)
             q.add_argument("--root-delegation", type=Path, required=True)
@@ -79,6 +87,12 @@ def run(a: argparse.Namespace) -> None:
             cose = issuer.device(public, a.serial, a.generation)
         else:
             cose = issuer.root(public, bytes.fromhex(a.domain), a.generation, a.permissions)
+        keys.write_new(a.output, cose)
+        print(json.dumps({"output": str(a.output), "sha256": sha256(cose).hexdigest()}))
+        return
+    if a.command == "handover":
+        cose = issuer.handover(bytes.fromhex(a.old_root), bounded_read(a.new_root_delegation, 448),
+                               a.old_generation, a.new_term, a.recovery_mode)
         keys.write_new(a.output, cose)
         print(json.dumps({"output": str(a.output), "sha256": sha256(cose).hexdigest()}))
         return
