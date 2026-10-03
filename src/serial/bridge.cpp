@@ -244,7 +244,7 @@ void Bridge::on_record(SerialKind kind, uint8_t lane, uint32_t frame_bytes, Byte
     wire::CborReader r{payload};
     (void)r.array(3, 3);
     const ByteView id = r.bstr(16, 16);
-    const uint64_t method = r.uint_in(1, 16);
+    const uint64_t method = r.uint_in(1, 17); // protocol/serial.cddl: 1..17 (17 POLICY_SET, HIL-F5)
     const ByteView params = r.skip_item();
     if (kind != SerialKind::Request || r.finish() != Status::Ok) {
         ++stats_.malformed; // the Host sends nothing but well-formed REQUESTs; anything else is not answered
@@ -373,7 +373,7 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
             const root::Entry &e = led.entry(i);
             n += (node_state(led, e, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
         }
-        w.map(5);
+        w.map(6);
         key(w, "nodes");
         w.array(n);
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
@@ -419,6 +419,21 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
             w.uint(mp.earliest_s);
             w.uint(mp.latest_s);
             w.uint(mp.reported_s);
+        }
+        // Deterministic CBOR: keys by length, then bytewise (nodes, power, policy, channel, pending, revision).
+        key(w, "policy"); // HIL-F5: [revision, join mode] of lm_policy_get, the compare-and-set base of POLICY_SET
+        {
+            lm_policy_t pol{};
+            pol.struct_size = sizeof(pol);
+            pol.abi_version = LM_ABI_VERSION;
+            Command pc;
+            pc.kind = CommandKind::PolicyGet;
+            pc.response = &pol;
+            pc.response_size = sizeof(pol);
+            const bool known = engine_.execute(pc, usb_.now()).status == Status::Ok;
+            w.array(2);
+            w.uint(known ? pol.revision : 0);
+            w.uint(known ? pol.join_mode : 0);
         }
         key(w, "channel"); // [S17] the coordinator's view; sets are short addresses of the members
         put_channel(w, engine_.coordinator().view());

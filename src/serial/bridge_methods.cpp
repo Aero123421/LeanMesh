@@ -1,4 +1,4 @@
-// Bridge: the 15 serial methods (docs/19 §4, protocol/serial.cddl). Every method first validates its
+// Bridge: the serial methods (docs/19 §4, protocol/serial.cddl). Every method first validates its
 // params against the CDDL bounds (a malformed request is INVALID_ARGUMENT and touches nothing), then
 // calls the core through Engine::execute(). Methods whose module has not landed answer UNSUPPORTED:
 // the operation does not exist, it is never acknowledged and never faked (docs/19 §7).
@@ -19,7 +19,8 @@ constexpr uint64_t k_u32_max = 0xFFFFFFFFULL;
 enum Method : uint64_t {
     kCapabilities = 1, kSend, kGetMessage, kCancel, kJoinDecide, kInstall, kNodeQuery, kGroupSnapshot,
     kHostStoreAck, kEventAck, kChannelAction, kSleepWindow, kGetRequest, kGroupSet, kGroupTargets,
-    kDiagnostics // [S19] 16: not in the spec's table of 15; additive (protocol/serial.cddl, docs/19)
+    kDiagnostics, // [S19] 16: not in the spec's table of 15; additive (protocol/serial.cddl, docs/19)
+    kPolicySet    // HIL-F5 17: the root's join mode through lm_policy_set (additive)
 };
 
 template <std::size_t N> void take(wire::CborReader &r, std::array<uint8_t, N> &out) {
@@ -93,6 +94,8 @@ void Bridge::handle(Pending &p, uint64_t method, ByteView params) {
         return m_group_set(p, params);
     case kGroupTargets:
         return m_group_targets(p, params);
+    case kPolicySet:
+        return m_policy_set(p, params);
     default:
         return m_unsupported(p, method, params);
     }
@@ -457,6 +460,38 @@ void Bridge::m_channel(Pending &p, ByteView params) {
     p.status = rep.status;
     if (rep.status == Status::Ok && rep.operation_id != 0) {
         p.has_op = true; // FIX12-D5: a freeze / unfreeze not yet durable: the OPERATION event ends it
+        p.op = rep.operation_id;
+        p.result = Result::Ack;
+    }
+}
+
+// HIL-F5: POLICY_SET [join-mode, expected-revision]. The Host is the root's application (D5): the paired Host's
+// authenticated session plus its CONFIGURE token stand where lm_policy_set's caller stands. The mode never lowers a
+// docs/06 condition: PREAPPROVED still needs a fleet-signed ticket and a signed expected entry (docs/10 §5). The root
+// commits the mode before it applies it; the OPERATION event ends the operation (FIX8-D12). No change: OK, no operation.
+void Bridge::m_policy_set(Pending &p, ByteView params) {
+    wire::CborReader r{params};
+    (void)r.array(2, 2);
+    const uint64_t mode = r.uint_in(0, 2);
+    const uint64_t revision = r.uint_in(0, ~uint64_t{0});
+    if (r.finish() != Status::Ok) {
+        p.status = Status::InvalidArgument;
+        return;
+    }
+    PolicySetRequest rq{};
+    rq.policy.struct_size = sizeof(rq.policy);
+    rq.policy.abi_version = LM_ABI_VERSION;
+    const Reply got = run(CommandKind::PolicyGet, nullptr, 0, ByteView{}, &rq.policy, sizeof(rq.policy));
+    if (got.status != Status::Ok) {
+        p.status = got.status;
+        return;
+    }
+    rq.policy.join_mode = static_cast<uint32_t>(mode); // one field per call: the others stay what they are
+    rq.expected_revision = revision;
+    const Reply rep = run(CommandKind::PolicySet, &rq, sizeof(rq));
+    p.status = rep.status;
+    if (rep.status == Status::Ok && rep.operation_id != 0) {
+        p.has_op = true;
         p.op = rep.operation_id;
         p.result = Result::Ack;
     }

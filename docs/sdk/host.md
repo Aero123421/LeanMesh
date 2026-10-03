@@ -34,7 +34,7 @@ LEANMESH_SERIAL=/dev/ttyACM0 LEANMESH_USB_KIT=/etc/leanmesh/usb-kit.cbor \
                  "permissions": ["READ", "SEND", "CONFIGURE"]}]}
 ```
 
-権限は `READ SEND APPROVE REVOKE TRANSFER CONFIGURE UPDATE_FIRMWARE`。署名済みobject（`signed_cbor_b64`）を運ぶ操作は、HTTPの操作type**ではなくobjectの中のtype**の権限を要求します（例: `INSTALL_CONTROL` でRevokeObjectを渡すには `REVOKE`）。型付き操作（`REVOKE`/`TRANSFER`/`POLICY_SET`/`POWER_POLICY_SET`/`COMMISSIONING_WINDOW_SET`/`ROOT_HANDOVER`）はobjectのtype・domain・対象`device_id`が要求と一致しなければ、commit前に400です。署名そのものはrootが検証します。tokenは `echo -n "$TOKEN" | sha256sum`。ファイルから消したprincipalは無効化されます（行は履歴のため残る）。
+権限は `READ SEND APPROVE REVOKE TRANSFER CONFIGURE UPDATE_FIRMWARE`。署名済みobject（`signed_cbor_b64`）を運ぶ操作は、HTTPの操作type**ではなくobjectの中のtype**の権限を要求します（例: `INSTALL_CONTROL` でRevokeObjectを渡すには `REVOKE`）。型付き操作（`REVOKE`/`TRANSFER`/`POWER_POLICY_SET`/`COMMISSIONING_WINDOW_SET`/`ROOT_HANDOVER`）はobjectのtype・domain・対象`device_id`が要求と一致しなければ、commit前に400です。署名そのものはrootが検証します。tokenは `echo -n "$TOKEN" | sha256sum`。ファイルから消したprincipalは無効化されます（行は履歴のため残る）。
 groupへのSENDは対象全員について権限を照合します。
 
 ## 2. 主なendpoint
@@ -50,7 +50,7 @@ groupへのSENDは対象全員について権限を照合します。
 | `POST /v1/messages` | SEND | 送信（202） |
 | `POST /v1/control` | 型による | JOIN_DECISION / LEAVE（503 UNSUPPORTED） / REVOKE / TRANSFER / INSTALL_CONTROL / POLICY_SET / CHANNEL_FREEZE / CHANNEL_RECALCULATE / GROUP_SET / POWER_POLICY_SET / COMMISSIONING_WINDOW_SET / ROOT_HANDOVER |
 | `GET /v1/operations/{id}`、`POST .../cancel`、`GET .../targets` | READ / 書込み | 状態と証拠 / 取消 / group個別結果（16件/page） |
-| `GET /v1/nodes[/{device_id}[/power]]`、`/v1/channel`、`/v1/lifecycle/requests` | READ | rootの報告のmirror（`domain_id` クエリ必須） |
+| `GET /v1/nodes[/{device_id}[/power]]`、`/v1/channel`、`/v1/policy`、`/v1/lifecycle/requests` | READ | rootの報告のmirror（`domain_id` クエリ必須）。`/v1/policy` は rootの join mode と policy revision |
 | `GET /v1/events`、`GET /v1/events/stream`、`POST /v1/consumers/{name}/ack` | READ | event journal（§4） |
 
 ## 3. 送信とidempotency
@@ -105,3 +105,14 @@ curl -s --unix-socket $S -H "$H" http://localhost/v1/operations/<operation>
 この挙動は `host/tests/e2e/test_bridge_meshsim.py` が、Hostを `kill -9` 相当で落として検証しています（sim上）。
 
 `root_app`宛先と遠隔LEAVEはこのHost/bridgeでは未対応で、503 `UNSUPPORTED`を返してoperationを作りません。UTC期限の未送信outboxはroot未接続でも期限処理します。LATESTは満杯でも同一streamの未送信値をatomicに置換できます。dispatchの優先枠と公平性は[API semantics](../../api/SEMANTICS.md)参照。
+
+## 6. join mode の変更（POLICY_SET）
+
+`POST /v1/control` の `POLICY_SET` は `join_mode`（`CLOSED` / `EXTERNAL` / `PREAPPROVED`）を取り、`expected_revision` は `GET /v1/policy` の `revision` です（古ければ 409 か rootの CONFLICT）。rootは `lm_policy_set` として記録をcommitしてから適用し、その OPERATION event で操作が `APPLIED` になります。`PREAPPROVED` でも、fleet署名の参加券と署名済み expected entry が揃わない機器は入れません（docs/10 §5）。
+
+```sh
+curl -s --unix-socket $S -H "$H" "http://localhost/v1/policy?domain_id=$D"    # {"join_mode":"EXTERNAL","revision":"0"}
+curl -s --unix-socket $S -H "$H" -H "Idempotency-Key: pol-1" -H 'Content-Type: application/json' \
+  -d "{\"domain_id\":\"$D\",\"client_epoch\":\"$E\",\"expected_revision\":\"0\",\"type\":\"POLICY_SET\",
+       \"join_mode\":\"PREAPPROVED\",\"request_id\":\"$(openssl rand -hex 16)\"}" http://localhost/v1/control
+```

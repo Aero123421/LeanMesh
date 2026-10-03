@@ -360,6 +360,18 @@ def cmd_revoke(a: argparse.Namespace) -> None:
           + ",".join(e["kind"] for e in r.get("evidence", [])))
 
 
+def cmd_policy(a: argparse.Namespace) -> None:
+    """Shows the root's join mode (GET /v1/policy) or sets it (POLICY_SET, compare-and-set on its revision)."""
+    state = load_state()
+    cur = host_call("GET", f"/v1/policy?domain_id={state['domain']}")
+    print("policy:", cur)
+    if a.mode:
+        r = host_control(state, {"type": "POLICY_SET", "join_mode": a.mode, "expected_revision": cur["revision"]})
+        print(f"POLICY_SET {a.mode}: {r.get('state')} {r.get('outcome')} {r.get('reason', '')}")
+        time.sleep(1)
+        print("policy:", host_call("GET", f"/v1/policy?domain_id={state['domain']}"))
+
+
 def cmd_host_env(_a: argparse.Namespace) -> None:
     state = load_state()
     port = (state.get("root") or {}).get("port", "<root port>")
@@ -390,6 +402,8 @@ def main() -> int:
     q.add_argument("--seconds", type=float, default=10.0)
     sub.add_parser("host-env")
     sub.add_parser("approve")
+    q = sub.add_parser("policy")
+    q.add_argument("mode", nargs="?", choices=("CLOSED", "EXTERNAL", "PREAPPROVED"))
     q = sub.add_parser("revoke")
     q.add_argument("name")
     q.add_argument("--assignment-floor", type=int, default=2)
@@ -411,7 +425,7 @@ def main() -> int:
     {"init": cmd_init, "provision": cmd_provision, "cmd": cmd_cmd, "wait": cmd_wait, "monitor": cmd_monitor,
      "host-env": cmd_host_env, "approve": cmd_approve,
      "host-send": cmd_host_send, "expected": cmd_expected, "window": cmd_window,
-     "revoke": cmd_revoke}[a.command](a)
+     "revoke": cmd_revoke, "policy": cmd_policy}[a.command](a)
     return 0
 
 

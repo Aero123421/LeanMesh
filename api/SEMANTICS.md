@@ -11,7 +11,8 @@ OpenAPIは形、本文は横断制約。実装は両方を満たす。u63はJSON
 - LEAVE: schemaには予約されているが、このHost bridgeでは未対応。権限確認後、DB受理前に503/UNSUPPORTED。端末のローカルlm_leaveとは別機能。
 - REVOKE: device_id、署名revoke object必須。網側拒否と端末消去は別evidence。
 - TRANSFER: device_id、署名AssignmentTicket必須。source/target/generation/nonce検査。
-- INSTALL_CONTROL/POLICY_SET: signed_cbor_b64必須。typeとsender権限を検査。
+- INSTALL_CONTROL: signed_cbor_b64必須。typeとsender権限を検査。
+- POLICY_SET: `join_mode`（CLOSED/EXTERNAL/PREAPPROVED）必須、CONFIGURE権限。rootのpolicy revisionに対するCAS（`GET /v1/policy` の `revision`）で、rootが`lm_policy_set`としてcommitしてから適用する（serial method 17、HIL-F5）。PREAPPROVEDでもfleet署名ticketと署名済みexpected entryの要件は外れない。署名付きpolicy object（type 12）はSDKが未対応で、この操作では使わない。
 - CHANNEL_FREEZE: freeze boolean必須。committed planの取消にはならない。
 - CHANNEL_RECALCULATE: root coordinatorへの再評価要求だけ。成功したと偽ってchannelを直接書かない。
 不要なmode-specific fieldは400。不正署名403、古いrevision409、unknown mandatory capability503/UNSUPPORTED。error.detailsにはcurrent_revision/required_capability等だけを載せ、secretを返さない。

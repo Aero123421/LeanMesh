@@ -244,6 +244,13 @@ async def get_channel(request: Request, domain_id: Domain, _: Principal = requir
     return await _hub(request).read(lambda conn: mirror.get_channel(conn, domain))
 
 
+@router.get("/policy")
+async def get_policy(request: Request, domain_id: Domain, _: Principal = require("READ")) -> dict[str, Any]:
+    """HIL-F5: the root's join mode and policy revision (the expected_revision of POLICY_SET)."""
+    domain = codec.hex_bytes(domain_id, 16, "domain_id")
+    return await _hub(request).read(lambda conn: mirror.get_policy(conn, domain))
+
+
 @router.get("/lifecycle/requests")
 async def list_lifecycle(request: Request, domain_id: Domain,
                          _: Principal = require("READ")) -> dict[str, Any]:

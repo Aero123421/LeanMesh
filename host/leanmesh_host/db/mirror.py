@@ -143,6 +143,25 @@ def get_power(conn: sqlite3.Connection, domain: bytes, device: bytes) -> dict[st
     return resolve_power(json.loads(row[0]), now_ms())
 
 
+JOIN_MODES = ("CLOSED", "EXTERNAL", "PREAPPROVED")  # lm_policy_t.join_mode 0..2
+
+
+def put_policy(conn: sqlite3.Connection, domain: bytes, revision: int, join_mode: int) -> None:
+    """HIL-F5: the root's policy as NODE_QUERY reports it; domains.policy_revision is the POLICY_SET CAS base."""
+    conn.execute("UPDATE domains SET policy_revision=? WHERE id=?", (revision, domain))
+    mode = JOIN_MODES[join_mode] if 0 <= join_mode < len(JOIN_MODES) else "UNKNOWN"
+    conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (f"policy:{domain.hex()}", canonical_json({"revision": str(revision), "join_mode": mode}).encode()))
+
+
+def get_policy(conn: sqlite3.Connection, domain: bytes) -> dict[str, Any]:
+    _require_domain(conn, domain)
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (f"policy:{domain.hex()}",)).fetchone()
+    if row is None:
+        raise ApiError(503, "ROOT_UNAVAILABLE", "policy has not been reported by a root")
+    return json.loads(bytes(row[0]))
+
+
 def get_channel(conn: sqlite3.Connection, domain: bytes) -> dict[str, Any]:
     _require_domain(conn, domain)
     row = conn.execute("SELECT value FROM meta WHERE key=?", (f"channel:{domain.hex()}",)).fetchone()

@@ -579,3 +579,41 @@ def test_status_names_match_the_registry() -> None:
     codes = json.loads((REPO_ROOT / "protocol" / "registry.json").read_text())["status_codes"]
     table = dict(codes) if isinstance(codes, dict) else {c["name"]: c["value"] for c in codes}
     assert all(mapping.STATUS_NAMES[v] == k for k, v in table.items()) and len(mapping.STATUS_NAMES) == len(table)
+
+
+@pytest.mark.e2e
+@pytest.mark.scenario("J04")
+def test_host_sets_the_root_join_mode_and_a_preapproved_device_joins_without_a_decision(
+        bench: Callable[..., Bench]) -> None:
+    """HIL-F5: POLICY_SET reaches the root's lm_policy_set (serial method 17). The Host mirrors the root's policy
+    (GET /v1/policy) and checks the revision before anything is committed; the root commits the mode before it
+    applies it. PREAPPROVED still admits only a device with a fleet-signed ticket and a signed expected entry."""
+    b = bench(41, join=False, mode="external")
+    b.start_host()
+    wait_for(lambda: b.status().get("root_connected"), 25, "root_connected")
+    b.domain = wait_for(lambda: (r := db_rows(b.host.db, "SELECT id FROM domains")) and bytes(r[0][0]).hex(), 20,
+                        "domain")
+
+    def policy() -> dict | None:  # type: ignore[type-arg]
+        assert b.host is not None
+        with b.host.client() as c:
+            r = c.get("/v1/policy", params={"domain_id": b.domain}, headers=b.host.auth)
+        return r.json() if r.status_code == 200 else None  # 503 until the root has reported it
+
+    pol = wait_for(policy, 20, "the root's policy at the Host")
+    assert pol["join_mode"] == "EXTERNAL"
+    # A stale revision is refused by the Host before anything is written (its CAS base is the root's report).
+    b.post("/v1/control", {"domain_id": b.domain, "client_epoch": b.epoch or b.open_epoch(), "type": "POLICY_SET",
+                           "request_id": __import__("os").urandom(16).hex(), "join_mode": "PREAPPROVED",
+                           "expected_revision": str(int(pol["revision"]) + 7)}, expect=409)
+    op = _control(b, "POLICY_SET", join_mode="PREAPPROVED", expected_revision=pol["revision"])
+    o = wait_for(lambda: (x := b.operation(op["id"]))["state"] == "FINAL" and x, 20, "POLICY_SET applied")
+    assert o["outcome"] == "APPLIED"
+    after = wait_for(lambda: (p := policy()) and p["join_mode"] == "PREAPPROVED" and p, 20, "PREAPPROVED mirrored")
+    assert int(after["revision"]) == int(pol["revision"]) + 1
+    # A device the fleet granted joins with no JOIN_DECISION at all.
+    assert b.sim.ok("grant 1 1 1")["status"] == "OK"
+    time.sleep(0.5)
+    assert b.sim.ok("join 1 97")["status"] == "OK"
+    b.await_active(1)
+    assert b.get("/v1/lifecycle/requests", domain_id=b.domain)["items"] == []
