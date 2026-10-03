@@ -1710,7 +1710,7 @@ LM_TEST("HIL-F3 sim: join carriers from a live member's MAC are refused after ve
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
 }
 
-LM_TEST("HIL-F2 sim: four devices that ask at the same moment all join within their first join operation") {
+LM_TEST("HIL-F2 sim: eight devices that ask at the same moment all join within their first join operation") {
     // HIL 2026-10-03: three boards joined at once; one ended EXPIRED. The root runs one handshake at a time and drops
     // the others' carriers; a joiner had already spent its one-full-handshake-per-peer gate (30 s) when it sent its
     // CredI, so it could not ask again before its 30 s search ended.
