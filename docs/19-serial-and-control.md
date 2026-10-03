@@ -1,6 +1,6 @@
 # 19 Serial操作と制御の署名境界
 ## 1. Wire上の二種類のcontrol
-`control-body`の型/CBOR規則は共通。永続的な認可/構成objectだけCOSE_Sign1で署名する。対象typeは1/2/3/4/5/11/12/19/21/26/29/30/31/32/34（うち19 channel-planと21 recovery-beaconは署名形式の定義のみで、本版のchannel planは署名せずroot↔memberのend session内のcompact recordで運ぶ。lm_install_controlは19/21をUNSUPPORTEDにする: FIX10-D11、docs/05 §6）。type22は旧group snapshot予約で新規送信しない。root/fleetの権限と世代を検証する。時間同期/neighbor probe/配送receipt/route requestを送るたびにP-256署名しない。
+`control-body`の型/CBOR規則は共通。永続的な認可/構成objectだけCOSE_Sign1で署名する。対象typeは1/2/3/4/5/11/12/19/21/26/29/30/31/32/34（うち19 channel-planと21 recovery-beaconは署名形式の定義のみで、本版のchannel planは署名せずroot↔memberのend session内のcompact recordで運ぶ。lm_install_controlは19/21をUNSUPPORTEDにする: FIX10-D11、docs/05 §6。34 LedgerBackupはserial 18〜22（§9）だけで運び、lm_install_controlはUNSUPPORTED）。type22は旧group snapshot予約で新規送信しない。root/fleetの権限と世代を検証する。時間同期/neighbor probe/配送receipt/route requestを送るたびにP-256署名しない。
 その他のtypeは検証済みlink/end sessionのAEAD内で運ぶ。issuerはそのsessionの完全Identityと一致しなければ拒否。typeごとのauthority条件（RouteLease/TimeResponseはroot、JoinStoredは対象Device等）も検査する。preauthでは署名済みcredential/hintまたはEDHOC carrier以外を受けない。signed objectを要求する場面にunsigned controlを代入してはならない。
 
 ## 2. hashの自己参照を避ける

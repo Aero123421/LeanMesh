@@ -1,5 +1,6 @@
 # Changelog
 
+- Issue #5: rootの台帳（member ledger）のbackupと交換rootへの復元。rootはsigned backup（control type 34、秘密を含まない一貫した断面）を作り、Hostが変更後に自動で取って保持する（`GET /v1/ledger/backup`）。旧rootが故障したら、fleet署名のRootHandoverと保持したbackupで `POST /v1/control` `LEDGER_RESTORE`（serial 18〜22）がrecordを1件ずつhash chain検証してから交換rootへ書き、manifestを最後に書いて準備完了にする。memberは台帳が既にあるのでjoinし直さない。Host DBはadditive migration（`ledger_backups`）。実機のFlash電源断・USB・複数hopでのmember追従は未検証（simulationのみ、[12章 §5](docs/12-storage.md)、[21章 §8](docs/21-lifecycle-operations.md)）。
 - Issue #3 の初回経路: `python -m leanmesh_fleet` によるオフライン fleet 鍵の新規生成・暗号化保管と、DeviceCredential / RootDelegation / 初回 AssignmentTicket / ExpectedSet の発行。通常 Host の署名権限・SDK wire 契約は変更なし。SDK/PSA 検証と sim Join を CI に追加。機器書込み、USB kit、他の lifecycle 発行 CLI、実機 custody は後続（[使い方](docs/sdk/fleet-issuer.md)）。
 
 ## Unreleased — ソフトウェア実装（feat/sdk-impl）

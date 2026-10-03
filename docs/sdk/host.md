@@ -48,8 +48,9 @@ groupへのSENDは対象全員について権限を照合します。
 | `GET /v1/diagnostics` | READ | rootの診断。要求時のみ問い合わせ（1回/秒まで） |
 | `POST /v1/epochs`、`POST /v1/epochs/{id}/close` | 書込み権限 | `client_epoch` の発行/終了 |
 | `POST /v1/messages` | SEND | 送信（202） |
-| `POST /v1/control` | 型による | JOIN_DECISION / LEAVE（503 UNSUPPORTED） / REVOKE / TRANSFER / INSTALL_CONTROL / POLICY_SET / CHANNEL_FREEZE / CHANNEL_RECALCULATE / GROUP_SET / POWER_POLICY_SET / COMMISSIONING_WINDOW_SET / ROOT_HANDOVER |
+| `POST /v1/control` | 型による | JOIN_DECISION / LEAVE（503 UNSUPPORTED） / REVOKE / TRANSFER / INSTALL_CONTROL / POLICY_SET / CHANNEL_FREEZE / CHANNEL_RECALCULATE / GROUP_SET / POWER_POLICY_SET / COMMISSIONING_WINDOW_SET / ROOT_HANDOVER / LEDGER_RESTORE（§7） |
 | `GET /v1/operations/{id}`、`POST .../cancel`、`GET .../targets` | READ / 書込み | 状態と証拠 / 取消 / group個別結果（16件/page） |
+| `GET /v1/ledger/backup` | CONFIGURE | そのdomainのrootの台帳backup（最新のsequence 1つ、`backup_b64`付き。§7）。Hostがrootから自動で取る |
 | `GET /v1/nodes[/{device_id}[/power]]`、`/v1/channel`、`/v1/policy`、`/v1/lifecycle/requests` | READ | rootの報告のmirror（`domain_id` クエリ必須）。`/v1/policy` は rootの join mode と policy revision |
 | `GET /v1/events`、`GET /v1/events/stream`、`POST /v1/consumers/{name}/ack` | READ | event journal（§4） |
 
@@ -116,3 +117,28 @@ curl -s --unix-socket $S -H "$H" -H "Idempotency-Key: pol-1" -H 'Content-Type: a
   -d "{\"domain_id\":\"$D\",\"client_epoch\":\"$E\",\"expected_revision\":\"0\",\"type\":\"POLICY_SET\",
        \"join_mode\":\"PREAPPROVED\",\"request_id\":\"$(openssl rand -hex 16)\"}" http://localhost/v1/control
 ```
+
+## 7. 台帳のbackupとrootの交換（LEDGER_RESTORE）
+
+Hostはrootの台帳（member ledger）の署名付きbackupを自動で取り、SQLiteにdomainごとの最新sequenceを1つ保持します（変更後の`LEANMESH_BACKUP_DEBOUNCE_S`（既定5秒）後、取得間隔は`LEANMESH_BACKUP_MIN_INTERVAL_S`（既定30秒）以上、いずれも1秒未満にできません。定期pollingはしません）。backupには秘密鍵は入りません。内容と信頼の連鎖は[12章 §5](../12-storage.md)と[21章 §8](../21-lifecycle-operations.md)。
+
+```sh
+curl -s --unix-socket $S -H "$H" "http://localhost/v1/ledger/backup?domain_id=$D"
+# {"domain_id":..,"sequence":"7","root_device_id":..,"root_term":3,"records":5,"taken_at":"..Z","backup_b64":".."}
+```
+
+旧rootが故障したら、新しいDeviceIdとfleet署名のdelegation（上位generation）の交換rootを用意し、fleetが旧→新の**RootHandover**（type 31）を署名します。交換rootをUSBでHostにつなぎ（`serial-pair`相当のpairingも交換rootに行う）、次を送ります。`expected_revision`は復元するbackupの`sequence`、`signed_cbor_b64`はそのRootHandoverです。
+
+```sh
+curl -s --unix-socket $S -H "$H" -H "Idempotency-Key: restore-1" -H 'Content-Type: application/json' \
+  -d "{\"domain_id\":\"$D\",\"client_epoch\":\"$E\",\"type\":\"LEDGER_RESTORE\",\"expected_revision\":\"7\",
+       \"signed_cbor_b64\":\"$HANDOVER_B64\",\"request_id\":\"$(openssl rand -hex 16)\"}" http://localhost/v1/control
+# 202 {"id":"<operation>","state":"HOST_COMMITTED",...}   -> GET /v1/operations/<id>: FINAL / APPLIED
+```
+
+- 権限は`CONFIGURE`と`TRANSFER`（運ぶ署名objectがRootHandoverだから）。保持しているbackupの代わりに使う場合は`backup_b64`（`GET /v1/ledger/backup`の値）を足します。保持より古いsequenceは409、壊れたbackupは400です。
+- 交換rootが接続した時点でHostがdomainに結び付けているrootと違っても、この要求が先に処理され、**成功した場合に限り**新しいrootがdomainのrootになります（成功が無ければ従来どおり`ROOT_MISMATCH`でbridgeは上がりません）。要求はroot接続の前後どちらに送っても構いません。
+- 結果：`APPLIED`=rootが台帳を載せて準備完了。`REJECTED`（`ROOT_REFUSED`、理由=rootのstatus名。例: `NETWORK_MISMATCH`=handoverが別のroot/delegation/まだ届いていないtermを名指し、`AUTH_REJECTED`=署名が合わない、`CONFLICT`=そのrootは既に台帳を持つ）。`INDETERMINATE`=途中で切れた、またはrootが書込みを保証できない：rootに台帳が無ければ同じ要求を（同じrequest_idの再送ではなく新しいIdempotency-Keyで）やり直せます。
+- 復元されるのは最後に取れたbackupまでです（以後の入会・失効は含まれません）。member機器はその後、各自のRootHandover保存と再認証で新rootに従い、新しいticketや承認は要りません（台帳が既に載せています）。
+- backupが無ければ交換rootはRECOVERY_REQUIREDのまま止まります（空の台帳で再開しない）。
+
