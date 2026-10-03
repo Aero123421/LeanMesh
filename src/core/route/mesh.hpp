@@ -52,6 +52,21 @@ class Mesh {
     void stop();
     void on_beacon(const MacAddr &src, ByteView body, MonoTime now);
     void on_route_frame(const link::RxInfo &info, ByteView plain, MonoTime now);
+    // Every received radio frame, on the owner (the driver callback only carried the RSSI along): the RSSI of the last
+    // frame from a candidate's radio address is kept with that candidate. A frame the driver gave no RSSI for clears it
+    // (an older frame's value is never shown as the last one's). The source address is not authenticated: a diagnostic
+    // value, no decision reads it.
+    void on_radio_rx(const port::RadioRx &rx);
+    // lm_diagnostics_get: RSSI of the last frame received from the current parent (false: no parent, or none heard
+    // with an RSSI since this device was first heard). Valid only while a parent is approved (never the root).
+    [[nodiscard]] bool parent_rssi(int16_t &dbm) const {
+        if (parent_ < 0 || state_ != State::Ready) {
+            return false;
+        }
+        const Cand &p = cands_[static_cast<std::size_t>(parent_)];
+        dbm = p.rssi_dbm;
+        return p.rssi_valid;
+    }
     void on_link_up(const DeviceId &peer, MonoTime now);
     void on_tx_outcome(const TxOutcome &o, MonoTime now);
     [[nodiscard]] static bool is_mesh_tag(uint32_t tag) { return (tag & 0xFFFF0000U) == k_tag_mesh; }
@@ -166,6 +181,8 @@ class Mesh {
         uint8_t n = 0;         // its root path entries (root first, itself last)
         std::array<uint16_t, k_max_root_path> path{};
         MonoTime heard{};
+        bool rssi_valid = false; // RSSI of the last frame heard from `mac` (unknown is not 0 dBm)
+        int8_t rssi_dbm = 0;
         bool unproven = false; // an end session through this link failed: prove the link before relying on it (ARCH2-D2)
         MonoTime avoid_until{};
         MonoTime probe_wait = MonoTime::never();

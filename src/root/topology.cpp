@@ -428,6 +428,19 @@ Status Topology::parent_of(ShortAddr node, ShortAddr &parent) const {
     return Status::Ok;
 }
 
+Status Topology::position_of(ShortAddr node, uint64_t now, ShortAddr &parent, uint8_t &depth) const {
+    const uint8_t idx = find_addr(node.value());
+    if (idx == k_none || idx == k_root) {
+        return Status::NotFound;
+    }
+    Chain path{};
+    std::size_t len = 0;
+    LM_TRY(chain(idx, &now, path, len)); // root first, the member last: len >= 2 for a member
+    parent = ShortAddr{path[len - 2]};
+    depth = static_cast<uint8_t>(len - 1);
+    return Status::Ok;
+}
+
 Status Topology::begin_drain(ShortAddr relay, uint64_t now) {
     const uint8_t idx = find_addr(relay.value());
     if (idx == k_none || idx == k_root) {

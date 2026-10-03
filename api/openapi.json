@@ -3176,9 +3176,14 @@
           "confirmed": {
             "type": "boolean"
           },
+          "parent_device_id": {
+            "description": "The node's approved parent in the root's tree: the root's own DeviceId for a direct child of the root, else the parent node's DeviceId. Absent when the node has no approved parent (admitted but not attached, or its lease ran out) or the root did not report one. Reported by the root's NODE_QUERY; the Host refreshes it on membership events and at least every 10 s.",
+            "$ref": "#/components/schemas/DeviceId"
+          },
           "root_depth": {
+            "description": "Hops from the root in the approved tree: 1 = a direct child of the root. Absent when the node has no approved parent. Reported with parent_device_id.",
             "type": "integer",
-            "minimum": 0,
+            "minimum": 1,
             "maximum": 20
           },
           "last_authenticated_rx_mono_ms": {

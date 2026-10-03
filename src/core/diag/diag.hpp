@@ -40,14 +40,17 @@ inline constexpr uint64_t tx_depth = 1ULL << 18;
 inline constexpr uint64_t channel = 1ULL << 19;  // current channel, epoch, pending channel
 inline constexpr uint64_t root_term = 1ULL << 20;
 inline constexpr uint64_t interval = 1ULL << 21;
+inline constexpr uint64_t parent_rssi = 1ULL << 22; // RSSI of the last frame received from the current parent
 // app
 inline constexpr uint64_t events = 1ULL << 32;   // application event queue: pending, lost
 inline constexpr uint64_t operations = 1ULL << 33;
 // The bits whose values the C struct lm_diagnostics_t carries. events/operations exist only in the serial/Host
 // maps (the struct has no field for them), so lm_diagnostics_get never sets them (FIX7-D12).
 inline constexpr uint64_t abi_bits = reset_reason | heap | stack | owner_cpu | rx_ring | counters | peers | tx_depth |
-                                     channel | root_term | interval;
-// Not measurable by this build, so they are never set: parent RSSI (not tracked), energy (no meter).
+                                     channel | root_term | interval | parent_rssi;
+// Not measurable by this build, so they are never set: energy (no meter). parent_rssi is set only on a node with an
+// approved mesh parent whose driver reported an RSSI (never on the root, never on the simulated medium unless a test
+// gives the link one); it is carried by lm_diagnostics_t only (the root's serial/Host map has no parent to report).
 } // namespace valid
 
 struct Snapshot {
@@ -63,6 +66,7 @@ struct Snapshot {
     uint32_t regular_peers = 0, transient_peers = 0, tx_depth = 0, radio_state = 0;
     uint64_t tx_frames = 0, rx_frames = 0, link_retries = 0, rf_failures = 0, local_busy = 0;
     uint64_t interval_us = 0;
+    int16_t parent_rssi_dbm = 0;  // valid::parent_rssi
     uint64_t mac_unknown = 0;     // TX results neither success nor loss (watchdog)
     // app
     uint32_t events_pending = 0;

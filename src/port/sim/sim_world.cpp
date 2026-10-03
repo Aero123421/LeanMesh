@@ -147,7 +147,7 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
     rx.radio.kind = port::RadioEvent::Kind::Rx;
     rx.radio.rx.src = sender.radio.mac();
     rx.radio.rx.broadcast = dst.is_broadcast();
-    rx.radio.rx.rssi_valid = false; // the medium has no RF model; RSSI stays unknown
+    rx.radio.rx.rssi_valid = false; // set per receiver below from the link (unknown unless a test sets it)
     rx.radio.rx.len = static_cast<uint8_t>(frame.size());
     for (std::size_t i = 0; i < frame.size(); ++i) {
         rx.radio.rx.bytes[i] = frame[i];
@@ -179,6 +179,8 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
         rx.node = j;
         rx.at_us = now_us_ + air + lp.delay_us;
         rx.radio.rx.at = MonoTime{}; // stamped with the receiver clock on delivery
+        rx.radio.rx.rssi_valid = lp.rssi_valid;
+        rx.radio.rx.rssi_dbm = lp.rssi_dbm;
         push(rx);
         if (!dst.is_broadcast()) {
             acked = !lost(static_cast<uint16_t>(lp.ack_loss_permille + noise(from, sender.radio.channel())));
