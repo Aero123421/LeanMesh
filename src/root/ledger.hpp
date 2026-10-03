@@ -40,6 +40,7 @@
 #include "core/profile.hpp"
 #include "core/time.hpp"
 #include "leanmesh.h"
+#include "root/backup.hpp"
 #include "store/record.hpp"
 
 namespace lm {
@@ -234,6 +235,46 @@ class Ledger {
     // RootHandover (31) named this root the old one: it acts as root no more (admits and renews nobody). FIX5-D1: from
     // the moment the verified object names it, before (and whatever) the commit that makes it survive a restart.
     [[nodiscard]] bool retired() const { return retired_; }
+    // ---- [ISSUE5] backup and restore of the ledger (ledger_backup.cpp, docs/12 §5, docs/21 §8) ----
+    // Backup: a consistent cut of the durable ledger (the records of backup.hpp) is read, the next sequence number is made
+    // durable, and the header is signed with this root's key; the OPERATION event `op` ends it. Ok there: the backup can be
+    // read page by page until the ledger changes (Conflict then: make another one) or another begins. Busy: a join, an
+    // install or a repair holds the ledger's memory, or the previous backup is still being made (the caller asks again);
+    // RecoveryRequired: no ledger to back up (failed, retired), or its writes are not all durable yet, or the sequence
+    // record cannot be read (nothing is signed on a number that might repeat).
+    [[nodiscard]] Status backup_begin(uint64_t op, MonoTime now);
+    struct BackupPage {
+        uint32_t index = 0;  // 0: the signed header; 1..count: the records in backup.hpp's order
+        uint32_t count = 0;  // records in the backup
+        uint16_t id = 0;     // record id (0 for the header)
+        uint8_t state = 0;   // record state byte
+        ByteView data;       // header COSE / record payload: valid until the next call of the ledger
+    };
+    // One page of the backup `seq`. Busy: the record is being read (ask again for the same index); NotFound: no backup;
+    // Conflict: another sequence, or the ledger changed since the cut (the backup is dropped).
+    [[nodiscard]] Status backup_get(uint64_t seq, uint32_t index, BackupPage &out, MonoTime now);
+    [[nodiscard]] uint64_t backup_seq() const { return bk_seq_; } // the last sequence number made durable (0: none yet)
+    // The count of durable ledger writes of this boot (a backup is cut at one value of it).
+    [[nodiscard]] uint64_t change_point() const { return change_; }
+    // Restore onto a root whose ledger does not exist (RECOVERY_REQUIRED, no manifest), in three steps, each one operation:
+    //  1. restore_handover: the fleet's RootHandover that names THIS root (its delegation, its term) as the new one. The
+    //     manifest must be absent (Conflict: this root has a ledger), records of an earlier unfinished restore are cleared.
+    //  2. restore_header: the old root's signed header: fleet -> its delegation -> its signature; same domain; the root
+    //     and delegation generation of the handover's old side.
+    //  3. restore_element, index 0.. in order: each record is checked against the hash chain and then written; the last
+    //     one is the manifest, written after the sequence number, and the ledger is loaded: the operation ends Ok when it
+    //     is ready. Before the manifest is durable the root is still RECOVERY_REQUIRED (a cut leaves nothing else).
+    [[nodiscard]] Status restore_handover(ByteView handover_cose, uint64_t op, MonoTime now);
+    [[nodiscard]] Status restore_header(ByteView cose, uint64_t op, MonoTime now);
+    struct RestoreElement {
+        uint32_t index = 0;
+        uint16_t id = 0;
+        uint8_t state = 0;
+        ByteView payload;
+        Sha256Digest next{};
+    };
+    [[nodiscard]] Status restore_element(const RestoreElement &e, uint64_t op, MonoTime now);
+    [[nodiscard]] bool restoring() const { return rs_.phase != RsPhase::Idle; }
     struct Stats {
         uint64_t requests = 0;
         uint64_t refused = 0;
@@ -323,6 +364,17 @@ class Ledger {
         CommitDirty,   // [FIX8-D1] maintenance: an entry whose (stricter) RAM state is ahead of its record
         CommitGroups,  // [FIX8-D10] the group registry
         CommitPolicy,  // [FIX8-D12] the join mode
+        BkScan,        // [ISSUE5] backup: one record read and chained (reverse canonical order)
+        BkSeq,         // ... the new sequence number durable
+        BkSign,        // ... the header signed
+        BkPage,        // ... one record read for a page
+        RsHandover,    // restore: the fleet's handover checked
+        RsProbe,       // ... no manifest, records of an earlier attempt cleared
+        RsHeader,      // ... the old root's header checked
+        RsElem,        // ... one record checked against the chain and written
+        RsFloors,      // ... the merged revocation floors written
+        RsSeq,         // ... the sequence number made at least the backup's
+        RsManifest,    // ... the manifest written
     };
 
     struct VerifyArgs { // copied at submit: the worker never reads owner-mutable state
@@ -457,6 +509,62 @@ class Ledger {
     [[nodiscard]] uint32_t hint() const;
     [[nodiscard]] Entry *find_mut(const DeviceId &d);
 
+    // ---- [ISSUE5] backup export and restore (ledger_backup.cpp) ----
+    enum class BkPhase : uint8_t { Idle, Scan, Seq, Sign, Ready };
+    struct Backup {
+        BkPhase phase = BkPhase::Idle;
+        uint64_t op = 0;
+        uint64_t seq = 0;       // the backup being made / held
+        uint64_t change = 0;    // change_ at the cut
+        std::size_t pos = 0;    // candidate records scanned (the canonical order reversed)
+        Sha256Digest chain{};   // H of the records scanned so far (zero before the last one)
+        uint64_t entries = 0;
+        uint8_t extras = 0;
+        uint64_t used = 0;      // the manifest's used-slot bitmap
+        std::size_t cose_len = 0;
+        // the page cache: one record
+        uint32_t page_index = 0;      // 0: empty
+        bool page_loading = false;
+        Status page_status = Status::Ok;
+        uint16_t page_id = 0;
+        uint8_t page_state = 0;
+        std::size_t page_len = 0;
+    };
+    enum class RsPhase : uint8_t { Idle, Handover, Probe, HeaderWait, Header, Elements, Element, Seq, Manifest, Loading };
+    struct Restore {
+        RsPhase phase = RsPhase::Idle;
+        uint64_t op = 0;
+        member::RootHandover ho;
+        backup::Header hdr;
+        uint64_t own_seq = 0;  // the sequence number this root's own record holds (a backup below it is older than what it knew)
+        Sha256Digest expect{}; // what the next record's chain link must equal
+        Sha256Digest next{};   // the `next` the record in flight came with
+        uint32_t index = 0;    // the next record
+        uint16_t id = 0;       // the record in flight
+        uint8_t state = 0;
+        std::size_t len = 0;
+        MonoTime deadline = MonoTime::never();
+    };
+    static Status bk_scan_job(port::JobEnv &env, void *arg);
+    static Status bk_sign_job(port::JobEnv &env, void *arg);
+    static Status bk_page_job(port::JobEnv &env, void *arg);
+    static Status rs_handover_job(port::JobEnv &env, void *arg);
+    static Status rs_probe_job(port::JobEnv &env, void *arg);
+    static Status rs_header_job(port::JobEnv &env, void *arg);
+    static Status rs_elem_job(port::JobEnv &env, void *arg);
+    static Status rs_seq_job(port::JobEnv &env, void *arg);
+    void bk_step(Step step, Status s, MonoTime now);
+    void bk_fail(Status s);
+    void bk_scanned(MonoTime now);
+    [[nodiscard]] bool backup_ready() const; // the ledger is quiet enough to be cut (nothing is ahead of its records)
+    void rs_step(Step step, Status s, MonoTime now);
+    void rs_fail(Status s);
+    void rs_wait(MonoTime now, Status s);                  // a step ended Ok: memory back, the next one is asked for
+    [[nodiscard]] Status rs_begin(Step step, JobClass cls, port::JobFn fn, uint64_t op); // takes the memory, runs the job
+    void rs_merge_floors(MonoTime now);
+    void rs_write_manifest(MonoTime now);
+    void rs_loaded(Status s);
+
     Engine &engine_;
     Stats stats_;
     JoinMode mode_ = JoinMode::External;
@@ -561,6 +669,19 @@ class Ledger {
     uint64_t policy_op_ = 0;
     bool policy_pending_ = false;
     bool policy_doubt_ = false;
+    // [ISSUE5]
+    uint64_t change_ = 0;       // durable ledger writes started this boot (every Commit job of the ledger counts)
+    uint64_t bk_seq_ = 0;       // the last backup sequence number made durable
+    bool bk_seq_ok_ = false;    // ... and its record could be read (an unreadable one stops signing)
+    uint64_t load_seq_ = 0;     // the load job's reading of it
+    bool load_seq_ok_ = false;
+    Backup bk_;
+    Restore rs_;
+    sec::KeyHandle bk_key_;     // the root's key and the header's envelope, for the signing job
+    member::Envelope bk_env_;
+    backup::Header bk_hdr_;
+    std::array<uint8_t, backup::k_cose_max> bk_cose_{};          // the signed header held / the COSE a restore step checks
+    std::array<uint8_t, store::k_max_payload> bk_page_{};        // the cached page / the record a restore step writes
 };
 
 // Leaf/relay builds carry no root code (docs/02 §4): the Engine holds this empty stand-in instead, so
@@ -594,6 +715,23 @@ struct NoLedger {
     [[nodiscard]] bool retired() const { return false; }
     [[nodiscard]] Status decide(const JoinDecision &, MonoTime) { return Status::Unsupported; }
     [[nodiscard]] bool pending_join(std::size_t, PendingJoin &) const { return false; }
+    // [ISSUE5] a node without a ledger has nothing to back up and no ledger to restore
+    struct BackupPage {};
+    struct RestoreElement {
+        uint32_t index = 0;
+        uint16_t id = 0;
+        uint8_t state = 0;
+        ByteView payload;
+        Sha256Digest next{};
+    };
+    [[nodiscard]] Status backup_begin(uint64_t, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] Status backup_get(uint64_t, uint32_t, BackupPage &, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] Status restore_handover(ByteView, uint64_t, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] Status restore_header(ByteView, uint64_t, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] Status restore_element(const RestoreElement &, uint64_t, MonoTime) { return Status::Unsupported; }
+    [[nodiscard]] uint64_t backup_seq() const { return 0; }
+    [[nodiscard]] uint64_t change_point() const { return 0; }
+    [[nodiscard]] bool restoring() const { return false; }
 };
 
 using LedgerType = std::conditional_t<k_root_capable, Ledger, NoLedger>;

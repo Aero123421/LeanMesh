@@ -31,6 +31,7 @@ inline constexpr uint8_t k_type_expected_set = 5;
 inline constexpr uint8_t k_type_revoke = 11;
 inline constexpr uint8_t k_type_commissioning_window = 30; // [S18]
 inline constexpr uint8_t k_type_root_handover = 31;        // [S18]
+inline constexpr uint8_t k_type_ledger_backup = 34;        // [ISSUE5] the root-signed header of a ledger backup
 
 // RootDelegation permission bits (control.cddl note 2).
 inline constexpr uint8_t k_perm_approve = 1;

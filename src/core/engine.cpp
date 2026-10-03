@@ -781,6 +781,44 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
         }
         return r;
     }
+    case CommandKind::RootLedgerBackup: { // [ISSUE5] begin / read a page of the root's ledger backup
+        if (!is_root() || cmd.request == nullptr || cmd.request_size != sizeof(LedgerBackupRequest)) {
+            return Reply{is_root() ? Status::InvalidArgument : Status::Unsupported, 0, 0};
+        }
+        const auto &rq = *static_cast<const LedgerBackupRequest *>(cmd.request);
+        if (rq.get == 0) {
+            const uint64_t op = next_control_op();
+            const Status s = ledger().backup_begin(op, now);
+            if (s == Status::Ok) {
+                note_ctl_op(op, false, LM_OUTCOME_PENDING, 0); // queryable until its event is taken
+            }
+            return Reply{s, s == Status::Ok ? op : 0, 0};
+        }
+        if (cmd.response == nullptr || cmd.response_size != sizeof(root::LedgerType::BackupPage)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        return Reply{ledger().backup_get(rq.seq, rq.index, *static_cast<root::LedgerType::BackupPage *>(cmd.response), now),
+                     0, 0};
+    }
+    case CommandKind::RootLedgerRestore: { // [ISSUE5] restore a ledger onto this replacement root, one step per command
+        if (!is_root() || cmd.request == nullptr || cmd.request_size != sizeof(LedgerRestoreRequest)) {
+            return Reply{is_root() ? Status::InvalidArgument : Status::Unsupported, 0, 0};
+        }
+        const auto &rq = *static_cast<const LedgerRestoreRequest *>(cmd.request);
+        const uint64_t op = next_control_op();
+        Status s = Status::InvalidArgument;
+        if (rq.step == 0) {
+            s = ledger().restore_handover(cmd.payload, op, now);
+        } else if (rq.step == 1) {
+            s = ledger().restore_header(cmd.payload, op, now);
+        } else if (rq.step == 2) {
+            s = ledger().restore_element(rq.element, op, now);
+        }
+        if (s == Status::Ok) {
+            note_ctl_op(op, false, LM_OUTCOME_PENDING, 0);
+        }
+        return Reply{s, s == Status::Ok ? op : 0, 0};
+    }
     case CommandKind::GetMessage: { // [SLICE:S15] the Host's group send is found by its MessageId, too
         const Reply r = delivery_.execute(cmd, now);
         return r.status == Status::NotFound ? group_.execute(cmd, now) : r;
