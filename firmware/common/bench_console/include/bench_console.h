@@ -19,9 +19,14 @@ extern "C" {
 /* Every byte goes through the USB-Serial/JTAG driver, so logs and answers never interleave mid-line. */
 void bc_out(const char *s);
 void bc_outf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* A log line that never waits: dropped when no USB host is attached (no SOF) or the TX buffer is full. For a loop that must
+   not stall on a host that is attached but not reading. Answers to a command use bc_out / bc_outf. */
+void bc_logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void bc_out_hex(const uint8_t *b, size_t n);
 void bc_console_init(void);
-/* One complete line (without CR/LF), or NULL after `ticks` without one. The pointer stays valid until the next call. */
+/* One complete line (without CR/LF), or NULL when none ended within `ticks` in total (a time budget for the whole call, not
+   per byte) or within 512 bytes of input; a partial line is kept for the next call. The pointer stays valid until the
+   next call. A line longer than 4095 bytes is dropped whole and answered "ERR <INVALID_ARGUMENT>" at its CR/LF. */
 char *bc_console_line(TickType_t ticks);
 /* Hex token -> bytes. Returns the length, or -1. */
 int bc_unhex(const char *tok, uint8_t *dst, size_t cap);
