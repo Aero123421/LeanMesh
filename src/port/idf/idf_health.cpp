@@ -16,16 +16,20 @@ port::ResetReason map_reset(esp_reset_reason_t r) {
     case ESP_RST_SW:
         return port::ResetReason::Software;
     case ESP_RST_PANIC:
+    case ESP_RST_CPU_LOCKUP: // double exception
         return port::ResetReason::Panic;
     case ESP_RST_INT_WDT:
     case ESP_RST_TASK_WDT:
     case ESP_RST_WDT:
         return port::ResetReason::Watchdog;
     case ESP_RST_BROWNOUT:
+    case ESP_RST_PWR_GLITCH:
         return port::ResetReason::Brownout;
     case ESP_RST_DEEPSLEEP:
         return port::ResetReason::DeepSleepWake;
     case ESP_RST_EXT:
+    case ESP_RST_USB:  // the USB-Serial/JTAG reset a connected PC triggers (S3/C3/C5/C6, HIL 2026-10-03)
+    case ESP_RST_JTAG:
         return port::ResetReason::External;
     default:
         return port::ResetReason::Unknown; // ESP_RST_UNKNOWN and causes this map does not name
