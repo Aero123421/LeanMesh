@@ -23,6 +23,8 @@ NORMAL/APPLIEDのdeadlineはroot_termとexpires_root_msで表す。送信前にr
 frameは送信Nodeの現在root_termを載せるので、期限のroot_termはNodeの現在termでなければならない（異なればTIME_UNCERTAIN、既に受付済みなら未送出はEXPIRED・送出済みはINDETERMINATE、ARCH2-D1）。アプリは`lm_root_time_get`で現在termの推定を得る。
 再送round、path変更、Host再起動で元の期限を延長しない。root再起動で時刻termが変わった既送信commandはINDETERMINATE。新termへ自動で同じ有効時間を付け直さない。Hostがtrusted UTCの元deadlineを保持している場合だけ、同一application operationの別transport attemptを明示的に作り、アプリ冪等性で照合する。UTC不明のままdowntimeを0と仮定しない。
 
+**rootが届け先を扱わなくなった時（HIL-F6, #16）。** rootの台帳が届け先を失効（Blocked）または離脱（Left：自分の離脱、移設のreconcile）とした時点で、そのDeviceId宛ての開いた送信（rootのcontrol送信を除く）を終える：一度も出ていなければREJECTED、出たかもしれなければINDETERMINATE。理由は失効ならREVOKED、離脱ならNOT_FOUND。新しい送信は受付でその理由で拒否する。再起動後にjournalから戻った送信も、台帳のloadと回復の両方が済んだ時点で同じく終える。他のnodeはleaseで知る。再加入してACTIVEに戻れば再び送れる。
+
 ## 6. link/E2E retry
 1hopはMAC result + link-auth HOP_ACCEPT。HOP_ACCEPTはreceiverが転送/受信bufferを確保してから返す。ACKそのものにACKを返さない。初回含め3link attempts、origin全体3E2E rounds、同じdeadline内。
 link RTO初期80ms、SRTT+4*RTTVARを20〜500msへclamp。driver callback待ちとHOP_ACK待ちを別状態にし、callback前の早いACKも照合して保持。E2E timeoutは残りhop*link p95*往復係数+queue budgetから計算し、下位の正常retry中に上位retryを重ねない。RECEIPT自体もlink retryするがreceipt-of-receiptは出さない。

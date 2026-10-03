@@ -1087,6 +1087,73 @@ LM_TEST("M04 HIL-F6 sim: a send to a device its root revokes ends REJECTED (REVO
     LM_CHECK_EQ(lm_send(n.ctx(0), &rq, body, sizeof body, &op2), LM_STATUS_REVOKED); // refused, nothing exists
 }
 
+namespace {
+// A durable send without a deadline from node `from` to `to` (it is never given up on its own).
+lm_status_t durable_send(lm_context_t *ctx, const DeviceId &to, lm_operation_id_t &op) {
+    lm_send_request_t rq{};
+    rq.struct_size = sizeof(rq);
+    rq.abi_version = LM_ABI_VERSION;
+    rq.destination.kind = LM_DEST_NODE;
+    std::memcpy(rq.destination.node.bytes, to.bytes.data(), 32);
+    rq.app_port = 100;
+    rq.delivery = LM_RECEIVED;
+    rq.storage = LM_DURABLE;
+    rq.priority = LM_PRIORITY_NORMAL;
+    const uint8_t body[] = {'h', 'i'};
+    return lm_send(ctx, &rq, body, sizeof body, &op);
+}
+lm_operation_t operation(lm_context_t *ctx, lm_operation_id_t op) {
+    lm_operation_t o{};
+    o.struct_size = sizeof(o);
+    o.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_get_operation(ctx, op, &o), LM_STATUS_OK);
+    return o;
+}
+} // namespace
+
+LM_TEST("M01 #16 sim: a send to a device that moved away ends when its old root reconciles; a new one is refused") {
+    // HIL 2026-10-03: after A reconciled a member that moved to B, a Host send from A to it stayed SENDING for good.
+    DNet n(1, 86);
+    const unsigned d = 2;
+    n.eng(1).ledger().set_join_mode(root::JoinMode::Preapproved);
+    const Bytes ab = n.transfer_ticket(d, n.a, n.b, 1, 2);
+    LM_CHECK_EQ(n.expect(1, n.b, d, 2, ab, 1), 0u);
+    LM_CHECK_EQ(n.install(d, 3, ab), 0u);
+    LM_CHECK(n.transfer(d, n.b, 0x48));
+    n.node(d).power_cut(); // out of A's reach for good: nothing A sends to it can arrive
+    n.node(d).store.power_restore();
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(durable_send(n.ctx(0), n.id(d), op), LM_STATUS_OK); // A still lists it ACTIVE: accepted
+    n.run_ms(3000);
+    LM_CHECK(operation(n.ctx(0), op).phase != LM_PHASE_FINAL);
+    LM_CHECK_EQ(n.install(0, 3, ab), 0u); // A learns of the move from the same fleet ticket
+    LM_CHECK(n.eng(0).ledger().find(n.id(d))->state == root::EntryState::Left);
+    LM_CHECK(n.until([&] { return operation(n.ctx(0), op).phase == LM_PHASE_FINAL; }, 10'000));
+    const lm_operation_t o = operation(n.ctx(0), op);
+    LM_CHECK(o.outcome == LM_OUTCOME_INDETERMINATE || o.outcome == LM_OUTCOME_REJECTED);
+    LM_CHECK_EQ(o.reason, static_cast<uint32_t>(LM_STATUS_NOT_FOUND));
+    lm_operation_id_t op2 = 0;
+    LM_CHECK_EQ(durable_send(n.ctx(0), n.id(d), op2), LM_STATUS_NOT_FOUND); // refused, nothing exists
+    n.reboot(0); // what the ledger loads at boot refuses it as well
+    LM_CHECK_EQ(durable_send(n.ctx(0), n.id(d), op2), LM_STATUS_NOT_FOUND);
+}
+
+LM_TEST("M04 #16 sim: the root refuses a send to a member that left") {
+    LNet n({Spec{}, Spec{Role::Leaf}});
+    n.boot(0);
+    n.boot(1);
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    lm_operation_id_t lop = 0;
+    LM_CHECK_EQ(lm_leave(n.ctx(1), LM_LEAVE_IMMEDIATE, 0, &lop), LM_STATUS_OK);
+    n.node(1).notify();
+    LM_CHECK(n.until([&] {
+        const root::Entry *e = n.eng(0).ledger().find(n.id(1));
+        return e != nullptr && e->state == root::EntryState::Left;
+    }, 10'000));
+    lm_operation_id_t op = 0;
+    LM_CHECK_EQ(durable_send(n.ctx(0), n.id(1), op), LM_STATUS_NOT_FOUND);
+}
+
 LM_TEST("M04 sim: a revoked (lost) device is refused by its root and by a root that knows the fleet floor") {
     DNet n(1, 83);
     const unsigned d = 2;

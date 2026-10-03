@@ -606,6 +606,7 @@ void Ledger::handle_step(Step step, Status s, MonoTime now) {
             // refused at once and made Blocked durably by maintenance.
             recon_fails_ = 0;
             block_below_floors(now);
+            engine_.delivery().end_refused_sends(now); // #16: sends the journal recovered to a revoked / left device
             if (man_dirty_ || dirty_ != 0) {
                 maintenance(now); // make the repaired used bits durable
             }

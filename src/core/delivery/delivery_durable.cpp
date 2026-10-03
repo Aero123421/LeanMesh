@@ -286,6 +286,7 @@ void Delivery::recover_next(MonoTime now) {
     }
     recovering_ = false;
     ready_ = true;
+    end_refused_sends(now); // #16: a recovered send to a device the root no longer serves ends (once the ledger is loaded)
     kick_all_waiting(now);
     flush_events(now);
 }
