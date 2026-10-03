@@ -17,6 +17,7 @@ class IdfPm final : public port::Pm {
     port::WakeInfo boot_info() override;
     void retain(ByteView state) override;
     [[nodiscard]] port::SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, port::WakeInfo &woke) override;
+    [[nodiscard]] bool may_sleep(uint8_t kind) override; // lm_idf_sleep_veto() of the application, if it has one
 
     // Locks that could not be created or taken (a build without CONFIG_PM_ENABLE takes none): diagnostics.
     [[nodiscard]] uint32_t lock_failures() const { return failures_; }

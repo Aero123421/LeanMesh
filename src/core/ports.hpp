@@ -207,6 +207,12 @@ class Pm {
     // wake arrives later (simulation: the owner wakes itself at its deadline or Engine::power_wake()).
     // LM_SLEEP_DEEP does not return on hardware. duration_ms 0 = no timer wake.
     [[nodiscard]] virtual SleepStart sleep(uint8_t kind, uint8_t sources, uint64_t duration_ms, WakeInfo &woke) = 0;
+    // HIL-F7: whether the platform lets an automatic sleep (a WINDOWED_RX window that closes) begin now. False keeps
+    // the node awake with its radio on; the owner asks again later. Asked before the radio is stopped. Default: yes.
+    [[nodiscard]] virtual bool may_sleep(uint8_t kind) {
+        (void)kind;
+        return true;
+    }
 
   protected:
     ~Pm() = default;

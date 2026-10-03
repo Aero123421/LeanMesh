@@ -92,6 +92,7 @@ struct Stats {
     uint64_t wake_denied = 0, ticket_stale = 0, sessions_kept = 0, sessions_dropped = 0;
     uint64_t parked_expired = 0, polls_served = 0, polls_refused = 0, flash_commits = 0, reports_sent = 0;
     uint64_t reports_rx = 0, sleep_refused = 0, lock_faults = 0;
+    uint64_t sleep_vetoed = 0; // HIL-F7: automatic sleeps the platform held back (Pm::may_sleep)
 };
 
 class Power {
@@ -307,6 +308,7 @@ class Power {
     uint64_t prep_gen_ = 0;
     // window and poll (device side)
     MonoTime window_end_ = MonoTime::never(), next_window_ = MonoTime::never(), cont_start_ = MonoTime::never();
+    MonoTime held_window_at_ = MonoTime::never(); // HIL-F7: the next window of a node the platform held awake
     Poll poll_;
     MacAddr poll_mac_; // the neighbour the last poll went to
     // budgets and accounting

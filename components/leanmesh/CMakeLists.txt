@@ -43,7 +43,7 @@ endif()
 
 idf_component_register(
     SRCS ${LM_COMMON_SOURCES} ${lm_role_sources} ${LM_PORT_IDF_SOURCES} ${LM_EDHOC_SOURCES} ${lm_bench_sources}
-    INCLUDE_DIRS "${LM_COMPONENT_REPO}/api" ${lm_bench_include}
+    INCLUDE_DIRS "${LM_COMPONENT_REPO}/api" "${CMAKE_CURRENT_LIST_DIR}/include" ${lm_bench_include}
     PRIV_INCLUDE_DIRS "${LM_COMPONENT_REPO}/src" "${lm_gen}" ${LM_EDHOC_PUBLIC_INCLUDE}
                       ${LM_EDHOC_PRIVATE_INCLUDE}
     PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash nvs_sec_provider esp_partition esp_wifi esp_event
