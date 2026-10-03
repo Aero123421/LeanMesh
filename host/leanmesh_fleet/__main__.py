@@ -128,6 +128,7 @@ def run(a: argparse.Namespace) -> None:
                      "mode": 1 if a.nonce is None else 0, "expected_revision": a.expected_revision})
         print(json.dumps({"output_dir": str(a.output_dir), "objects": len(files),
                           "target_domain": target.hex(), "mode": 1 if a.nonce is None else 0}))
+        return
     if a.command == "handover":
         cose = issuer.handover(bytes.fromhex(a.old_root), bounded_read(a.new_root_delegation, 448),
                                a.old_generation, a.new_term, a.recovery_mode)

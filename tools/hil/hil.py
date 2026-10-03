@@ -300,8 +300,8 @@ def cmd_provision(a: argparse.Namespace) -> None:
             net["old_root"] = {**net["root"], "generation": generation - 1}
         require_ok(board.command(line, seconds=30), "prov-root")
         net["root"] = {"device": device.hex(), "port": a.port}
-        net["root_generation"] = generation
-        if a.replacement:
+        if a.replacement:  # (a first root is generation 1: its network keeps the original layout)
+            net["root_generation"] = generation
             net["replacement_first_term"] = a.first_term
     else:
         if net["root"] is None:
