@@ -50,6 +50,7 @@ EPOCH_CLOSE_RETRY_S = 10.0
 EVENT_PAUSE_S = 0.1           # between two event reads: at most ~10 requests/s even under a flood
 PENDING_MAX = 512             # open operations we follow at once
 GIVE_UP_S = 8.0               # after its deadline an operation is polled, and given up on after this
+PING_OPEN_MAX = 3             # open pings per node: a round that finds this many still open skips the node
 FINAL_HINTS = 4096
 EVENT_LOG_KEEP = 500
 LOSS_FACTOR = 3               # telemetry older than this many intervals = lost
@@ -102,10 +103,18 @@ class Pending:
 
 
 def ping_load(nodes: int, interval_s: float) -> tuple[float, float]:
-    """(requests/s a ping loop needs, the interval that fits the budget): per round one POST and one GET per node."""
+    """(requests/s a ping loop needs, the interval that fits the budget): per ping one POST and one GET (at its final
+    event), so rounds that overlap (a 3 s deadline under a 1 s loop) cost no more per second than rounds that do not -
+    what overlaps is the number of OPEN operations, see open_ops_max."""
     need = 2.0 * nodes / interval_s + POLL_OVERHEAD_RPS
     fit = 2.0 * nodes / max(REQUEST_BUDGET_RPS - POLL_OVERHEAD_RPS, 1.0)
     return need, max(1.0, fit)
+
+
+def open_ops_max(nodes: int, interval_s: float) -> int:
+    """Most pings that can be open at once: the rounds that fit in the deadline (up to PING_OPEN_MAX per node)."""
+    rounds = min(PING_OPEN_MAX, max(1, -(-int(pr.PING_DEADLINE_S * 1000) // int(interval_s * 1000))))
+    return min(nodes * rounds, PENDING_MAX)
 
 
 def load_bench(path: Path, net: str | None = None) -> dict[str, Any]:
@@ -154,6 +163,7 @@ class FieldView:
         self.warnings: dict[str, str] = {}
         self.host: dict[str, Any] = {"ok": None, "ready": None, "root_connected": None, "journal_id": None}
         self.pending: dict[str, Pending] = {}
+        self._open_pings: Counter[str] = Counter()   # per node: pings posted (or being posted) and not final
         self.final_hint: OrderedDict[str, None] = OrderedDict()
         self.round_no = 0
         self.rounds: deque[dict[str, Any]] = deque(maxlen=30)
@@ -521,7 +531,8 @@ class FieldView:
                 warning = (f"{n} nodes every {interval:g} s need about {need:.0f} requests/s; the Host allows 20 per "
                            f"principal: use {fit:.1f} s or more")
         return {"running": self.loop_interval is not None, "interval_s": self.loop_interval, "round": self.round_no,
-                "nodes": n, "warning": warning, "rounds": list(self.rounds)[-10:], "open": len(self.pending)}
+                "nodes": n, "warning": warning, "rounds": list(self.rounds)[-10:], "open": len(self.pending),
+                "open_max": 0 if interval is None else open_ops_max(n, interval)}
 
     # ---- client epochs ------------------------------------------------------------------------------------------
     def _load_epoch_file(self) -> None:
@@ -694,7 +705,7 @@ class FieldView:
         targets = sorted(self.active_nodes(), key=self.name_of)
         self.round_no += 1
         rnd = {"round": self.round_no, "t": utc_text(self.utcnow()), "nodes": len(targets), "alive": 0, "noanswer": 0,
-               "rejected": 0, "notsent": 0, "unknown": 0, "open": len(targets), "interval_s": interval_s}
+               "rejected": 0, "notsent": 0, "unknown": 0, "skipped": 0, "open": len(targets), "interval_s": interval_s}
         self.rounds.append(rnd)
         self._round_of[self.round_no] = rnd
         while len(self._round_of) > 40:
@@ -706,46 +717,71 @@ class FieldView:
             for d in targets:
                 self._ping_refused(d, rnd, pr.PingResult("notsent", "no client epoch"))
             return rnd
-        await asyncio.gather(*(self._ping_one(d, rnd, interval_s, max_wait) for d in targets))
+        await asyncio.gather(*(self._ping_one(d, rnd, max_wait) for d in targets))
         return rnd
 
-    async def _ping_one(self, device: str, rnd: dict[str, Any], interval_s: float, max_wait: float) -> None:
+    def _open_ping(self, device: str, delta: int) -> None:
+        n = self._open_pings[device] + delta
+        if n > 0:
+            self._open_pings[device] = n
+        else:
+            self._open_pings.pop(device, None)
+
+    async def _ping_one(self, device: str, rnd: dict[str, Any], max_wait: float) -> None:
         if len(self.pending) >= PENDING_MAX:
             self._ping_refused(device, rnd, pr.PingResult("notsent", "too many open operations on the laptop"))
             return
+        if self._open_pings[device] >= PING_OPEN_MAX:  # a slow or dead node must not pile up requests on the Host
+            res = pr.PingResult("skipped", f"busy: {PING_OPEN_MAX} pings of this node are still open")
+            self.ping.setdefault(device, PingTrack()).skip(rnd["round"], res)
+            self._count_round(rnd, res)
+            self.rec.log("ping", {"round": rnd["round"], "device": device, "name": self.name_of(device),
+                                  "result": "skipped", "detail": res.detail, "op": None})
+            return
+        self._open_ping(device, +1)
+        registered = False
+        try:
+            registered = await self._ping_post(device, rnd, max_wait)
+        finally:
+            if not registered:
+                self._open_ping(device, -1)  # refused, unknown or failed: nothing of it stays open on our side
+
+    async def _ping_post(self, device: str, rnd: dict[str, Any], max_wait: float) -> bool:
+        """POST one ping; True when the Host accepted it (it is then followed as an operation until it is final)."""
 
         def build(epoch: str) -> dict[str, Any]:
-            return pr.ping_request(self.cfg.domain, epoch, device, rnd["round"], interval_s, self.utcnow())
+            return pr.ping_request(self.cfg.domain, epoch, device, rnd["round"], self.utcnow())
 
         try:
             r, epoch, t_post = await self._post(build, max_wait)
         except SendUnknown as exc:  # the answer is lost and the replays with the same key got none either
             self.warn("post-unknown", "a POST /v1/messages got no answer: those pings are 'unknown' (see the ping log)")
             self._ping_refused(device, rnd, pr.classify_post_unknown(str(exc)), key=exc.key)
-            return
+            return False
         except HostUnreachable as exc:  # failed before anything was sent
             self._ping_refused(device, rnd, pr.classify_post_error(None, exc=str(exc)))
-            return
+            return False
         if r.status == 0:
             self.warn("rate", "the laptop's request budget is used up: pings were not sent (see 'not sent')")
             self._ping_refused(device, rnd, pr.PingResult("notsent", "local request budget (rate limit guard)"))
-            return
+            return False
         if not r.ok:
             self._epoch_refused(r, epoch)
             if r.status == 429:
                 self.warn("rate", f"the Host rate-limits us (HTTP 429, retry after {r.retry_after_ms} ms)")
             self._ping_refused(device, rnd, pr.classify_post_error(r.status, r.body))
-            return
+            return False
         self.warn("post-unknown", None)
         op_id = str(r.body["id"])
         self.ping.setdefault(device, PingTrack()).accepted()
-        p = Pending(op_id, "ping", device, rnd["round"], t_post, t_post + pr.ping_deadline_s(interval_s), epoch=epoch)
+        p = Pending(op_id, "ping", device, rnd["round"], t_post, t_post + pr.PING_DEADLINE_S, epoch=epoch)
         self.pending[op_id] = p
         self.rec.log("ping", {"event": "posted", "round": rnd["round"], "device": device, "name": self.name_of(device),
                               "op": op_id, "epoch": epoch})
         if op_id in self.final_hint or r.body.get("state") == "FINAL":
             self.final_hint.pop(op_id, None)
             self._fetch(p)
+        return True
 
     def _ping_refused(self, device: str, rnd: dict[str, Any], res: pr.PingResult, key: str | None = None) -> None:
         self.ping.setdefault(device, PingTrack()).refused(rnd["round"], res)
@@ -755,6 +791,7 @@ class FieldView:
                               "result": res.kind, "detail": res.detail, "op": None, **extra})
 
     def _ping_done(self, p: Pending, res: pr.PingResult, op: dict[str, Any]) -> None:
+        self._open_ping(p.device, -1)
         self.ping.setdefault(p.device, PingTrack()).finish(p.round_no, res)
         rnd = self._round_of.get(p.round_no)
         if rnd is not None:
@@ -854,7 +891,7 @@ class FieldView:
         elif kinds & {"APP_REJECTED", "DESTINATION_REFUSED"}:
             entry.update(result="rejected", detail="the display answered REJECTED (it could not draw)")
         else:
-            res = pr.classify_ping(op)
+            res = pr.classify_ping(op, arrival_is_alive=False)
             entry.update(result=res.kind, detail=res.detail)
         self.rec.log("display", {"event": "final", "device": p.device, "name": self.name_of(p.device), "op": p.op_id,
                                  "seq": entry["seq"], "outcome": outcome, "result": entry["result"],

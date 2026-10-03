@@ -111,6 +111,7 @@ class PingTrack:
     rejected: int = 0
     notsent: int = 0     # refused / never left: counted apart, never RF loss
     unknown: int = 0     # the POST's answer was lost: possibly admitted, counted apart from both
+    skipped: int = 0     # not asked: this node still had its maximum of open pings (busy), counted apart
     last: PingResult | None = None
     last_round: int = 0
     rtts: deque[int] = field(default_factory=lambda: deque(maxlen=RTT_KEEP))
@@ -145,6 +146,11 @@ class PingTrack:
         else:
             self.notsent += 1
 
+    def skip(self, round_no: int, result: PingResult) -> None:
+        self.last, self.last_round = result, round_no
+        self.history.append((round_no, "skipped"))
+        self.skipped += 1
+
     @property
     def loss_pct(self) -> float | None:
         answered = self.alive + self.noanswer + self.rejected
@@ -156,7 +162,8 @@ class PingTrack:
 
     def as_dict(self) -> dict[str, Any]:
         return {"sent": self.sent, "alive": self.alive, "noanswer": self.noanswer, "rejected": self.rejected,
-                "notsent": self.notsent, "unknown": self.unknown, "loss_pct": self.loss_pct, "rtt_median_ms": self.rtt_median_ms,
+                "notsent": self.notsent, "unknown": self.unknown, "skipped": self.skipped,
+                "loss_pct": self.loss_pct, "rtt_median_ms": self.rtt_median_ms,
                 "last": None if self.last is None else {"kind": self.last.kind, "detail": self.last.detail,
                                                         "rtt_ms": self.last.rtt_ms, "rtt_src": self.last.rtt_src,
                                                         "round": self.last_round},

@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.fieldview import protocol as pr  # noqa: E402
 from tools.fieldview import topology as topo  # noqa: E402
-from tools.fieldview.engine import Config, FieldView, load_bench, ping_load  # noqa: E402
+from tools.fieldview.engine import Config, FieldView, load_bench, open_ops_max, ping_load  # noqa: E402
 from tools.fieldview.hostclient import RateBucket  # noqa: E402
 from tools.fieldview.recorder import SUMMARY_COLUMNS, Recorder  # noqa: E402
 from tools.fieldview.stats import PingTrack, TelemetryTrack  # noqa: E402
@@ -174,23 +174,28 @@ def op(outcome: str, *kinds: dict, reason: str | None = None) -> dict:
 
 
 def test_alive_with_rtt_from_the_root_clock() -> None:
+    """§3.2: a ping is delivery RECEIVED; alive = the operation ended RECEIVED, RTT = END_RECEIVED - ROOT_SENT."""
+    r = pr.classify_ping(op("RECEIVED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040)), 900)
+    assert r == pr.PingResult("alive", "", 40, "root")
+    # an APPLIED operation still measures to its END_RECEIVED, not to the application's answer
     r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040), ev("APP_APPLIED", 1062)), 900)
-    assert r == pr.PingResult("alive", "", 62, "root")
+    assert r == pr.PingResult("alive", "", 40, "root")
 
 
-def test_rtt_falls_back_to_end_received_when_app_applied_has_no_time() -> None:
-    r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040), ev("APP_APPLIED")), 900)
-    assert (r.kind, r.rtt_ms, r.rtt_src) == ("alive", 40, "root")
+def test_a_display_command_still_measures_to_the_drawing() -> None:
+    operation = op("APPLIED", ev("ROOT_SENT", 1000), ev("END_RECEIVED", 1040), ev("APP_APPLIED", 1062))
+    assert pr.rtt_from_evidence(operation) == 62
+    assert pr.rtt_from_evidence(operation, ("END_RECEIVED", "APP_APPLIED")) == 40
 
 
 def test_rtt_falls_back_to_the_laptop_when_the_host_reports_no_time() -> None:
-    r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT"), ev("APP_APPLIED")), 321)
+    r = pr.classify_ping(op("RECEIVED", ev("ROOT_SENT"), ev("END_RECEIVED")), 321)
     assert (r.kind, r.rtt_ms, r.rtt_src) == ("alive", 321, "laptop")
-    assert pr.classify_ping(op("APPLIED", ev("APP_APPLIED")), None).rtt_ms is None
+    assert pr.classify_ping(op("RECEIVED", ev("END_RECEIVED")), None).rtt_ms is None
 
 
 def test_a_negative_root_time_difference_is_not_an_rtt() -> None:
-    r = pr.classify_ping(op("APPLIED", ev("ROOT_SENT", 2000), ev("APP_APPLIED", 1000)), 50)
+    r = pr.classify_ping(op("RECEIVED", ev("ROOT_SENT", 2000), ev("END_RECEIVED", 1000)), 50)
     assert (r.rtt_ms, r.rtt_src) == (50, "laptop")
 
 
@@ -198,7 +203,8 @@ def test_a_negative_root_time_difference_is_not_an_rtt() -> None:
     (op("EXPIRED", ev("ROOT_ACCEPTED"), ev("ROOT_SENT")), "noanswer"),                      # left the root, silence
     (op("INDETERMINATE", ev("ROOT_ACCEPTED"), ev("ROOT_SENT")), "noanswer"),
     (op("INDETERMINATE", ev("HOST_SEND_OUTCOME_UNKNOWN"), reason="unknown"), "noanswer"),   # unknown is not "not sent"
-    (op("RECEIVED", ev("ROOT_SENT"), ev("END_RECEIVED")), "noanswer"),                       # arrived, never answered
+    (op("RECEIVED", ev("ROOT_SENT"), ev("END_RECEIVED")), "alive"),                          # a ping ends RECEIVED
+    (op("INDETERMINATE", ev("ROOT_SENT"), ev("END_RECEIVED")), "alive"),                     # the receipt is evidence
     (op("EXPIRED", ev("HOST_DEADLINE_EXPIRED"), reason="deadline passed before first transmission"), "notsent"),
     (op("EXPIRED", ev("ROOT_ACCEPTED")), "notsent"),                                         # the root never sent it
     (op("REJECTED", ev("HOST_REFUSED"), reason="TIME_UNCERTAIN"), "notsent"),
@@ -239,19 +245,19 @@ def test_ping_counters_keep_not_sent_apart_from_no_answer() -> None:
 # ---- request bodies -------------------------------------------------------------------------------------------------
 
 def test_ping_request_body_is_exact() -> None:
-    body = pr.ping_request(DOMAIN, EPOCH, DEV["a"], 258, 5.0, NOW)
+    body = pr.ping_request(DOMAIN, EPOCH, DEV["a"], 258, NOW)
     assert body == {
         "domain_id": DOMAIN, "client_epoch": EPOCH, "destination": {"kind": "node", "device_id": DEV["a"]},
-        "app_port": 211, "payload_b64": "AQAAAQI=", "delivery": "APPLIED", "storage": "VOLATILE",
+        "app_port": 211, "payload_b64": "AQAAAQI=", "delivery": "RECEIVED", "storage": "VOLATILE",
         "queue_mode": "FIFO", "priority": "NORMAL",
         "deadline": {"mode": "utc", "expires_at": "2026-10-04T12:00:03.250Z"}}
     assert pr.ping_payload(258) == bytes([1, 0, 0, 1, 2])
 
 
-def test_ping_deadline_is_the_interval_but_never_more_than_3_s() -> None:
-    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 1.0, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:01.250Z"
-    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 2.5, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:02.750Z"
-    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 60.0, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:03.250Z"
+def test_ping_deadline_is_3_s_whatever_the_loop_interval() -> None:
+    """§3.2: a receipt inherits the message's deadline, so a 1 s ping looked dead on two hops: fixed 3 s."""
+    assert pr.PING_DEADLINE_S == 3.0
+    assert pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW)["deadline"]["expires_at"] == "2026-10-04T12:00:03.250Z"
 
 
 def test_display_request_body_is_exact() -> None:
@@ -267,7 +273,7 @@ def test_display_request_body_is_exact() -> None:
 
 
 def test_bodies_pass_the_real_host_admission_rules() -> None:
-    for body in (pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 5.0, NOW),
+    for body in (pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW),
                  pr.display_request(DOMAIN, EPOCH, DEV["b"], "USABLE", 1, NOW)):
         MessageRequest.model_validate(body)
 
@@ -275,10 +281,10 @@ def test_bodies_pass_the_real_host_admission_rules() -> None:
 def test_the_latest_form_of_the_protocol_text_is_refused_by_the_host() -> None:
     """docs/field/protocol.md §3.2 / §3.3 say APPLIED + LATEST + coalesce_key; the Host admits LATEST only with
     BEST_EFFORT + VOLATILE (api/models.py), so fieldview sends FIFO. This pins the reason."""
-    body = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 5.0, NOW), "queue_mode": "LATEST", "coalesce_key": "211"}
+    body = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW), "queue_mode": "LATEST", "coalesce_key": "211"}
     with pytest.raises(ValidationError, match="LATEST requires BEST_EFFORT"):
         MessageRequest.model_validate(body)
-    fifo_with_key = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, 5.0, NOW), "coalesce_key": "211"}
+    fifo_with_key = {**pr.ping_request(DOMAIN, EPOCH, DEV["a"], 1, NOW), "coalesce_key": "211"}
     with pytest.raises(ValidationError, match="coalesce_key"):
         MessageRequest.model_validate(fifo_with_key)
 
@@ -288,6 +294,9 @@ def test_load_estimate_of_a_ping_loop() -> None:
     assert need == 23.0 and fit == pytest.approx(20 / 11)
     assert ping_load(10, 5.0)[0] == 7.0
     assert ping_load(0, 1.0) == (3.0, 1.0)
+    # overlapping rounds (3 s deadline, 1 s loop): the rate per second is the same, what grows is the number of open pings
+    assert open_ops_max(4, 1.0) == 12 and open_ops_max(4, 2.0) == 8 and open_ops_max(4, 10.0) == 4
+    assert open_ops_max(500, 1.0) == 512
 
 
 # ---- topology -------------------------------------------------------------------------------------------------------
@@ -591,3 +600,19 @@ def test_recorder_sync_fails_when_the_writer_cannot_confirm(tmp_path: Path) -> N
     release.set()
     assert rec.sync(5.0) is True
     rec.close()
+
+
+def test_a_display_that_only_arrived_is_not_alive_but_a_ping_that_arrived_is() -> None:
+    arrived = op("EXPIRED", ev("ROOT_SENT"), ev("END_RECEIVED"))   # END_RECEIVED, never drawn
+    assert pr.classify_ping(arrived).kind == "alive"                # a ping asks for the receipt only
+    assert pr.classify_ping(arrived, arrival_is_alive=False).kind == "noanswer"
+    assert pr.classify_ping(op("APPLIED", ev("END_RECEIVED"), ev("APP_APPLIED")), arrival_is_alive=False).kind == "alive"
+
+
+def test_skipped_pings_are_their_own_class() -> None:
+    t = PingTrack()
+    t.accepted()
+    t.finish(1, pr.PingResult("alive", "", 40, "root"))
+    t.skip(2, pr.PingResult("skipped", "busy"))
+    assert (t.sent, t.alive, t.skipped, t.notsent, t.noanswer) == (1, 1, 1, 0, 0)
+    assert t.loss_pct == 0.0 and [k for _, k in t.history] == ["alive", "skipped"] and t.as_dict()["skipped"] == 1

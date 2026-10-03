@@ -131,7 +131,10 @@ class FakeHost:
             loop.call_later(0.01, step, "WAITING_RECEIPT", "PENDING", ev("ROOT_ACCEPTED", 0), ev("ROOT_SENT", 5))
             if op["port"] == 212:  # a display: it has the frame first, draws it a little later
                 loop.call_later(rtt / 2, step, "WAITING_RECEIPT", "PENDING", ev("END_RECEIVED", int(rtt * 500)))
-            loop.call_later(rtt, step, "FINAL", "APPLIED", ev("APP_APPLIED", 5 + int(rtt * 1000)))
+            if op["port"] == 211:  # a ping is delivery RECEIVED: it ends with the end-to-end receipt, no application answer
+                loop.call_later(rtt, step, "FINAL", "RECEIVED", ev("END_RECEIVED", 5 + int(rtt * 1000)))
+            else:
+                loop.call_later(rtt, step, "FINAL", "APPLIED", ev("APP_APPLIED", 5 + int(rtt * 1000)))
         elif mode == "silent":  # left the root, nothing came back: expires at the deadline
             loop.call_later(0.01, step, "WAITING_RECEIPT", "PENDING", ev("ROOT_ACCEPTED", 0), ev("ROOT_SENT", 5))
             loop.call_later(float(resp.get("after", 1.0)), step, "FINAL", "EXPIRED",

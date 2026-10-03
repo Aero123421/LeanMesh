@@ -151,7 +151,7 @@ def test_a_ping_round_classifies_every_node_and_measures_rtt(fake: FakeHost, tmp
         fake.add_node(d, parent_device_id=ROOT, root_depth=1)
     fake.add_node(F, membership="REVOKED", parent_device_id=ROOT)  # not ACTIVE: not pinged
     fake.responders = {
-        A: {"mode": "apply", "rtt": 0.06, "observed": True},   # root clock evidence: RTT = APP_APPLIED - ROOT_SENT
+        A: {"mode": "apply", "rtt": 0.06, "observed": True},   # root clock evidence: RTT = END_RECEIVED - ROOT_SENT
         B: {"mode": "apply", "rtt": 0.10},                      # no time in the evidence: laptop RTT
         C: {"mode": "silent", "after": 1.0},                    # left the root, no answer
         D: {"mode": "unsent", "after": 1.0},                    # expired before it could leave
@@ -181,10 +181,10 @@ def test_a_ping_round_classifies_every_node_and_measures_rtt(fake: FakeHost, tmp
                            fv.name_of(D): "notsent", fv.name_of(E): "notsent"}
 
     asyncio.run(scenario())
-    # what went on the wire: FIFO APPLIED, UTC deadline min(interval, 3 s), round in the payload
+    # what went on the wire: RECEIVED, FIFO, a UTC deadline of 3 s whatever the interval, round in the payload
     assert len(fake.posts) == 5
     for post in fake.posts:
-        assert post["app_port"] == 211 and post["delivery"] == "APPLIED" and post["queue_mode"] == "FIFO"
+        assert post["app_port"] == 211 and post["delivery"] == "RECEIVED" and post["queue_mode"] == "FIFO"
         assert post["deadline"]["mode"] == "utc" and "coalesce_key" not in post
         assert pr.ping_payload(1) == base64.b64decode(post["payload_b64"])
 
@@ -604,16 +604,17 @@ def test_epochs_rotate_and_the_old_one_is_closed_when_its_operations_are_final(
     monkeypatch.setattr(engine_mod, "EPOCH_ROTATE_OPS", 3)
     monkeypatch.setattr(engine_mod, "EPOCH_CLOSE_MARGIN_S", 0.1)
     fake.add_node(A, parent_device_id=ROOT)
-    fake.responders[A] = {"mode": "apply", "rtt": 1.0}                  # operations stay open for a second
+    fake.add_node(C, parent_device_id=ROOT)
+    fake.responders[A] = fake.responders[C] = {"mode": "apply", "rtt": 1.0}   # operations stay open for a second
     e1, e2 = hex_id(0xE1), hex_id(0xE2)
 
     async def scenario() -> None:
         async with view(fake, tmp_path) as fv:
-            await until(lambda: fv.active_nodes(), "node")
-            for _ in range(3):
+            await until(lambda: len(fv.active_nodes()) == 2, "nodes")
+            for _ in range(2):
                 await fv.ping_round(3.0)
             assert fake.epochs == 1 and fv.epoch == e1
-            rnd = await fv.ping_round(3.0)                               # the epoch has served 3 requests: a new one
+            rnd = await fv.ping_round(3.0)                               # the epoch has served 4 requests: a new one
             assert fake.epochs == 2 and fv.epoch == e2
             await asyncio.sleep(0.4)
             assert fake.epoch_state[e1] == "OPEN"                         # its operations are still in flight
@@ -621,7 +622,7 @@ def test_epochs_rotate_and_the_old_one_is_closed_when_its_operations_are_final(
             assert fake.epoch_state[e2] == "OPEN"
 
     asyncio.run(scenario())
-    assert [p["client_epoch"] for p in fake.posts] == [e1, e1, e1, e2]
+    assert [p["client_epoch"] for p in fake.posts] == [e1, e1, e1, e1, e2, e2]
     assert set(fake.epoch_state.values()) == {"CLOSED"}                   # a graceful stop closes the last one too
 
 
@@ -705,3 +706,55 @@ def test_a_replayed_request_keeps_its_epoch_and_holds_it_open_across_a_rotation(
     asyncio.run(scenario())
     assert fake.replays >= 1
     assert {op["epoch"] for op in fake.ops.values()} <= {e1, e2} and fake.posts[0]["client_epoch"] == e1
+
+
+# ---- pings: RECEIVED, 3 s, at most 3 open per node (review finding 7) -------------------------------------------------
+
+def test_a_node_with_three_open_pings_is_skipped_not_piled_up(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.add_node(B, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "silent", "after": 2.0}          # a dead node: its pings stay open until the deadline
+    fake.responders[B] = {"mode": "apply", "rtt": 0.02}
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: len(fv.active_nodes()) == 2, "nodes")
+            rounds = []
+            for _ in range(5):                                        # a loop whose pings to A last 2 s
+                rounds.append(await fv.ping_round(1.0))
+                await asyncio.sleep(0.3)
+            posted_to_a = [p for p in fake.posts if p["destination"]["device_id"] == A]
+            assert len(posted_to_a) == 3                              # the 4th and 5th round did not post to A
+            assert [r["skipped"] for r in rounds] == [0, 0, 0, 1, 1]
+            assert fv.ping[A].skipped == 2 and fv.ping[A].last.kind == "skipped" and "busy" in fv.ping[A].last.detail
+            assert fv._open_pings[A] == 3 and fv.ping_status()["open"] <= 3 + 2
+            # skipped is its own class: not sent, not lost, nothing counted as RF loss
+            assert (fv.ping[A].notsent, fv.ping[A].noanswer, fv.ping[A].unknown) == (0, 0, 0)
+            await until(lambda: all(r["open"] == 0 for r in rounds), "all rounds end", 10)
+            assert fv.ping[A].noanswer == 3 and fv.ping[A].sent == 3 and fv.ping[B].alive == 5
+            assert fv._open_pings == {}                               # nothing stays counted open
+            rnd = await fv.ping_round(1.0)                            # free again
+            assert rnd["skipped"] == 0 and len([p for p in fake.posts if p["destination"]["device_id"] == A]) == 4
+            await until(lambda: rnd["open"] == 0, "the round ends", 10)
+
+    asyncio.run(scenario())
+    skipped = [x for x in lines(next(tmp_path.glob("rec*/ping.ndjson"))) if x.get("result") == "skipped"]
+    assert len(skipped) == 2 and all(x["op"] is None for x in skipped)
+
+
+def test_a_ping_is_alive_when_the_operation_ends_received(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(A, parent_device_id=ROOT)
+    fake.responders[A] = {"mode": "apply", "rtt": 0.05, "observed": True}
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: fv.active_nodes(), "node")
+            rnd = await fv.ping_round(1.0)
+            await until(lambda: rnd["open"] == 0, "the round ends")
+            assert (rnd["alive"], fv.ping[A].last.rtt_ms, fv.ping[A].last.rtt_src) == (1, 50, "root")
+
+    asyncio.run(scenario())
+    (post,) = fake.posts
+    assert post["delivery"] == "RECEIVED" and post["queue_mode"] == "FIFO" and post["storage"] == "VOLATILE"
+    done = [x for x in lines(next(tmp_path.glob("rec*/ping.ndjson"))) if x.get("result") == "alive"]
+    assert done[0]["outcome"] == "RECEIVED" and done[0]["evidence"] == ["END_RECEIVED", "ROOT_ACCEPTED", "ROOT_SENT"]
