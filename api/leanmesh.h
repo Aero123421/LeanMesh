@@ -202,6 +202,9 @@ typedef struct {
  int16_t parent_rssi_dbm;
  uint16_t reserved;
 } lm_diagnostics_t;
+/* validity_bits: parent_rssi_dbm is the RSSI (dBm) of the last frame received from the node's current mesh parent.
+   Clear: no approved parent (always on a root), or the radio driver reported no RSSI for that frame. Unknown is not 0 dBm. */
+#define LM_DIAGNOSTICS_VALID_PARENT_RSSI (UINT64_C(1) << 22u)
 typedef struct {
  uint64_t id, state_generation, expires_mono_ms;
 } lm_sleep_ticket_t;

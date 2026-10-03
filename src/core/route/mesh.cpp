@@ -178,6 +178,15 @@ bool Mesh::parent_link(MacAddr &mac, DeviceId &dev) const {
     return true;
 }
 
+void Mesh::on_radio_rx(const port::RadioRx &rx) {
+    for (Cand &c : cands_) {
+        if (c.used && c.mac == rx.src) {
+            c.rssi_valid = rx.rssi_valid;
+            c.rssi_dbm = static_cast<int8_t>(std::clamp<int>(rx.rssi_dbm, INT8_MIN, INT8_MAX));
+        }
+    }
+}
+
 // After a sleep: candidates were not heard because nobody listened, an interrupted attach starts its step over,
 // and when the sessions were dropped (fresh EDHOC) the registered parent is asked for again at once. Lease renewal
 // and Trickle stay on their own (absolute) timers: they run at this wake, not for it (docs/20 §11).
