@@ -1660,7 +1660,7 @@ LM_TEST("P8 sim: one membership object per role; the root's answers are unchange
     LM_CHECK(n.eng(0).role_job_pending() == false && n.eng(1).role_job_pending() == false);
 }
 
-LM_TEST("J08 HIL-F3: a board erased and given a new identity joins at once from the same MAC") {
+LM_TEST("HIL-F3 sim: a board erased and given a new identity joins at once from the same MAC") {
     JNet n(2);
     LM_CHECK_EQ(n.join_device(1, 0x20, 1, 1), 0u);
     n.run_ms(5000);
@@ -1689,7 +1689,7 @@ LM_TEST("J08 HIL-F3: a board erased and given a new identity joins at once from 
     LM_CHECK_EQ(n.join_only_neighbors(0), 0u);
 }
 
-LM_TEST("J08 HIL-F3: join carriers from a live member's MAC are refused after verification and its session stays") {
+LM_TEST("HIL-F3 sim: join carriers from a live member's MAC are refused after verification and its session stays") {
     JNet n(2);
     LM_CHECK_EQ(n.join_device(1, 0x30, 1, 1), 0u);
     n.run_ms(5000);
@@ -1710,7 +1710,7 @@ LM_TEST("J08 HIL-F3: join carriers from a live member's MAC are refused after ve
     LM_CHECK_EQ(n.membership(1).state, static_cast<uint32_t>(LM_ACTIVE));
 }
 
-LM_TEST("J09 HIL-F2: four devices that ask at the same moment all join within their first join operation") {
+LM_TEST("HIL-F2 sim: four devices that ask at the same moment all join within their first join operation") {
     // HIL 2026-10-03: three boards joined at once; one ended EXPIRED. The root runs one handshake at a time and drops
     // the others' carriers; a joiner had already spent its one-full-handshake-per-peer gate (30 s) when it sent its
     // CredI, so it could not ask again before its 30 s search ended.
