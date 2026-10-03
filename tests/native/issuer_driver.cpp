@@ -417,6 +417,8 @@ Status transfer(const std::string &dir, const Input &in, bool nonce_mode) {
     }
     note("root A has no session with the device");
     return rig.in_domain(leaf, mv.delegation.domain, mv.ticket.new_generation) ? Status::Ok : fail("B membership lost");
+}
+
 // A RootHandover (control 31) issued by the Python tool, checked by the SDK's own rules: the fleet signed it, it is a valid
 // handover (another root, a higher generation), and it names exactly the replacement root of `newdeleg.cose` (its delegation
 // hash and generation) - what a replacement root verifies (Ledger::rs_handover_job) and a member accepts.
