@@ -275,6 +275,20 @@ struct LNet {
     }
 };
 
+// A backup the old root made (ISSUE5, below): a signed header and the records of its hash chain, as the Host holds them.
+struct BkRecord {
+    uint16_t id = 0;
+    uint8_t state = 0;
+    Bytes payload;
+    Sha256Digest next{}; // the chain link after it
+};
+struct BkImage {
+    Bytes header; // the signed COSE
+    root::backup::Header hdr;
+    uint64_t seq = 0;
+    std::vector<BkRecord> records;
+};
+
 // Two domains of one fleet: root A (node 0) and root B (node 1), each with its own ledger; devices 2.. are provisioned
 // members of A (address = node + 1). The mesh is off: joins and sessions are one hop, as on the join slice's bench.
 // Root time is set by hand on every node (term 1, the roots' own clocks agree: they booted together).
@@ -319,14 +333,13 @@ struct DNet {
         run_ms(100);
         set_time();
     }
-    // Handover: the new root device gets its own delegation and credential; `backup`: the old root's ledger copied
-    // from its store now (a verified backup), else none. `boot`: powered on at once.
-    void provision_new_root(bool backup) {
-        LM_CHECK_OK(fleet::provision_replacement_root(node(1).store, a, kits[1], deleg2));
-        if (backup) {
-            LM_CHECK_OK(fleet::copy_ledger(node(0).store, node(1).store));
-        }
-    }
+    // Handover: the new root device gets its own delegation and credential and NO ledger (RECOVERY_REQUIRED once it runs).
+    // Its ledger comes from the old root's signed backup (take_backup, before that root retires or fails) restored onto it
+    // (restore_new_root, once it runs): the verified path of docs/12 section 5, not a copy of the old root's store.
+    void provision_new_root() { LM_CHECK_OK(fleet::provision_replacement_root(node(1).store, a, kits[1], deleg2)); }
+    BkImage taken_;
+    void take_backup();                          // the old root (node 0) makes a backup and the Host pulls it
+    void restore_new_root(uint32_t term = 2);    // the handover naming `term` and that backup restored onto node 1
     member::RootHandover handover(uint32_t new_term = 2) {
         member::RootHandover h;
         h.id[0] = 0x48;
@@ -1297,14 +1310,16 @@ LM_TEST("LC08 sim: planned root handover - old root retires, members re-authenti
     for (unsigned d = 2; d < 4; ++d) {
         before[d] = n.eng(d).identity().member().membership.value();
     }
+    n.take_backup(); // the planned exchange: the backup is made before the old root drains
     LM_CHECK_EQ(n.install(0, 31, ho), 0u); // the old root retires
     LM_CHECK(n.eng(0).ledger().retired());
     for (unsigned d = 2; d < 4; ++d) {
         LM_CHECK_EQ(n.install(d, 31, ho), 0u); // stored at every member (its own evidence)
     }
-    n.provision_new_root(true);
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root();
     n.set_time(2, 1);
     LM_CHECK_EQ(n.install(1, 31, ho), 0u); // the new root recognises itself; nothing changes
     LM_CHECK_EQ(n.eng(1).ledger().count(root::EntryState::Active), 2u);
@@ -1343,7 +1358,7 @@ LM_TEST("LC08 sim: planned root handover - old root retires, members re-authenti
 LM_TEST("LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term must rise, a verified backup works") {
     {
         DNet n(1, 86, DNet::Kind::Handover);
-        n.provision_new_root(false);
+        n.provision_new_root();
         n.node(0).power_cut(); // failed, never retired
         n.boot(1);
         n.run_ms(300);
@@ -1356,10 +1371,12 @@ LM_TEST("LC09 sim: failed old root - no backup is RECOVERY_REQUIRED, the term mu
     }
     {
         DNet n(1, 87, DNet::Kind::Handover);
-        n.provision_new_root(true);
+        n.take_backup();
+        n.provision_new_root();
         n.node(0).power_cut();
         n.boot(1);
         n.run_ms(300);
+        n.restore_new_root();
         const Bytes stale = n.a.fleet.handover(n.a.domain, n.handover(1)); // term 1: not above the known term
         // The new root cannot tell which of its boots' terms the fleet named (ARCH2-D1: one term per boot); it only
         // refuses a term it has not reached. The floor is the device's check: above the term it knows.
@@ -1383,11 +1400,13 @@ LM_TEST("LC10 sim: old root reappears - refused by moved members, the unreached 
     // each of its boots publishes one more (ARCH2-D1), and it retires only on a new term above its own (FIX5-D4). Here it
     // comes back once (term 2), so the new root starts at term 3.
     DNet n(2, 88, DNet::Kind::Handover, 3);
-    n.provision_new_root(true);
+    n.take_backup();
+    n.provision_new_root();
     n.node(0).power_cut();
     n.node(0).store.power_restore();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root(3);
     const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover(3));
     const uint64_t m3 = n.eng(3).identity().member().membership.value();
     LM_CHECK_EQ(n.install(2, 31, ho), 0u);
@@ -1643,13 +1662,15 @@ CutRun handover_cut(unsigned target, uint64_t k, CutMode mode) {
     DNet n(1, 400 + k * 5 + target, DNet::Kind::Handover);
     const unsigned d = 2;
     const Bytes ho = n.a.fleet.handover(n.a.domain, n.handover());
+    n.take_backup();
     if (n.install(0, 31, ho) != 0 || n.install(d, 31, ho) != 0) {
         out.why = "setup";
         return out;
     }
-    n.provision_new_root(true);
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root();
     n.set_time(2, 1);
     const uint64_t m0 = n.eng(d).identity().member().membership.value();
     SimStore &st = n.node(target).store;
@@ -2120,9 +2141,11 @@ LM_TEST("LC08 FIX5 sim: a same-root, non-increasing or stale-term handover is re
     LM_CHECK_EQ(n.install(0, 31, stale), static_cast<uint32_t>(LM_STATUS_CONFLICT));
     LM_CHECK(!n.eng(0).ledger().retired());
     LM_CHECK_EQ(n.eng(0).ledger().admission(), Status::Ok);
-    n.provision_new_root(true);
+    n.take_backup();
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
+    n.restore_new_root();
     n.set_time(2, 1);
     member::RootHandover down = n.handover();
     down.old_generation = 3; // the new delegation (generation 2) is not above the old one
@@ -2898,19 +2921,6 @@ namespace {
 
 using BkLedger = root::LedgerType;
 
-struct BkRecord {
-    uint16_t id = 0;
-    uint8_t state = 0;
-    Bytes payload;
-    Sha256Digest next{}; // the chain link after it
-};
-struct BkImage {
-    Bytes header; // the signed COSE
-    root::backup::Header hdr;
-    uint64_t seq = 0;
-    std::vector<BkRecord> records;
-};
-
 uint32_t u(Status s) { return static_cast<uint32_t>(s); }
 
 // The status of the OPERATION event of `op` at node i (0xFFFF: none within the wait).
@@ -3032,9 +3042,17 @@ Status restore_all(DNet &n, unsigned i, const Bytes &handover, const BkImage &im
     return Status::Ok;
 }
 
+void DNet::take_backup() { LM_CHECK_EQ(u(pull_backup(*this, 0, taken_)), 0u); }
+
+void DNet::restore_new_root(uint32_t term) {
+    LM_CHECK(eng(1).ledger().failed()); // RECOVERY_REQUIRED: it has no ledger of its own
+    const Bytes ho = a.fleet.handover(a.domain, handover(term));
+    LM_CHECK_EQ(u(restore_all(*this, 1, ho, taken_)), 0u);
+}
+
 // The replacement root of a Handover net: provisioned (no ledger), powered on, its ledger failed (RECOVERY_REQUIRED).
 void start_replacement_root(DNet &n) {
-    n.provision_new_root(false);
+    n.provision_new_root();
     n.boot(1);
     n.run_ms(300);
     n.set_time(2, 1);
@@ -3372,7 +3390,7 @@ LM_TEST("ISSUE5 sim: a backup older than the sequence the root has seen is refus
         BkImage bk;
         LM_CHECK_EQ(u(pull_backup(n, 0, bk)), 0u); // sequence 1
         n.node(0).power_cut();
-        n.provision_new_root(false);
+        n.provision_new_root();
         {
             auto job = std::make_unique<store::RecordJob>();
             job->arm(store::RecordJob::Op::Commit, store::rec::ledger_backup_seq, 0, 8);

@@ -130,10 +130,9 @@ class Network {
 // Alone (a member made after the root's provisioning) its manifest bit is repaired when the root loads.
 [[nodiscard]] Status register_member(sim::SimStore &root_store, const NodeKit &node, uint16_t *slot = nullptr);
 // [S18] A replacement root (a handover): its own delegation and credential; no ledger of its own - it gets the old
-// root's from a verified backup (copy_ledger), or it is RECOVERY_REQUIRED (docs/12 §5, docs/21 §8).
+// root's from its signed backup, restored through the root's own verified path (issue #5), or it is RECOVERY_REQUIRED
+// (docs/12 §5, docs/21 §8). (The sim-only copy of the old root's store that stood here as "the backup" is gone.)
 [[nodiscard]] Status provision_replacement_root(sim::SimStore &store, const Network &net, const NodeKit &node,
                                                 const Bytes &delegation_cose);
-// [S18] Bench: the ledger records (manifest and entries) of one root's store copied into another's (the backup).
-[[nodiscard]] Status copy_ledger(sim::SimStore &from, sim::SimStore &to);
 
 } // namespace lm::fleet
