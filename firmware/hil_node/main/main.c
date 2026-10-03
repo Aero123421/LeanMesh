@@ -28,6 +28,7 @@
 #include "freertos/task.h"
 #include "leanmesh.h"
 #include "leanmesh_bench.h"
+#include "leanmesh_idf.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -388,7 +389,8 @@ static void cmd_power(char *save) {
             p.max_rx_window_ms = 1500;
             p.awake_budget_ms = 15000;
         } else if (strcmp(mode, "always") == 0) {
-            p.mode = LM_POWER_ALWAYS_RX;
+            p.mode = LM_POWER_ALWAYS_RX; /* ALWAYS_RX has no windows: their fields must be 0 (policy.cpp validate) */
+            p.wake_interval_ms = p.rx_window_ms = p.max_rx_window_ms = 0;
         } else {
             answer(LM_STATUS_INVALID_ARGUMENT);
             return;
@@ -473,6 +475,13 @@ static lm_status_t start_mesh(void) {
     return lm_start(s_ctx);
 }
 
+/* HIL-F7: a board on a PC's USB-Serial/JTAG port does not light-sleep (light sleep stops that port: no console, no
+   esptool). Off the PC (a power bank) WINDOWED_RX sleeps as configured. */
+bool lm_idf_sleep_veto(uint8_t sleep_kind) {
+    (void)sleep_kind;
+    return usb_serial_jtag_is_connected();
+}
+
 /* Board overlay (Kconfig HIL_XIAO_C6_*): the antenna path before the radio ever starts. */
 static void board_init(void) {
 #if CONFIG_HIL_XIAO_C6_RF_SWITCH
@@ -527,6 +536,7 @@ void app_main(void) {
             }
             const uint64_t rev = p.revision;
             p.mode = LM_POWER_ALWAYS_RX;
+            p.wake_interval_ms = p.rx_window_ms = p.max_rx_window_ms = 0; /* (was missing: INVALID_ARGUMENT) */
             p.revision = rev + 1;
             (void)lm_power_policy_set(s_ctx, &p, rev, &op);
         }
