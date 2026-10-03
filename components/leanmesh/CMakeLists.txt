@@ -7,7 +7,8 @@ get_filename_component(LM_COMPONENT_REPO "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOL
 if(CMAKE_BUILD_EARLY_EXPANSION)
     # Requirement scan (script mode): declare dependencies only, generate nothing.
     idf_component_register(PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash nvs_sec_provider esp_partition esp_wifi
-                  esp_event esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support app_update)
+                  esp_event esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support app_update
+                  bootloader_support)
     return()
 endif()
 
@@ -32,13 +33,21 @@ else()
     set(lm_role_sources "")
 endif()
 
+# Bench/HIL provisioning (leanmesh_bench.h): only when the build asks for it; never in the SDK source lists.
+set(lm_bench_sources "")
+set(lm_bench_include "")
+if(CONFIG_LEANMESH_BENCH_PROVISIONING)
+    set(lm_bench_sources "${LM_COMPONENT_REPO}/src/port/idf/idf_bench.cpp")
+    set(lm_bench_include "${CMAKE_CURRENT_LIST_DIR}/bench")
+endif()
+
 idf_component_register(
-    SRCS ${LM_COMMON_SOURCES} ${lm_role_sources} ${LM_PORT_IDF_SOURCES} ${LM_EDHOC_SOURCES}
-    INCLUDE_DIRS "${LM_COMPONENT_REPO}/api"
+    SRCS ${LM_COMMON_SOURCES} ${lm_role_sources} ${LM_PORT_IDF_SOURCES} ${LM_EDHOC_SOURCES} ${lm_bench_sources}
+    INCLUDE_DIRS "${LM_COMPONENT_REPO}/api" ${lm_bench_include}
     PRIV_INCLUDE_DIRS "${LM_COMPONENT_REPO}/src" "${lm_gen}" ${LM_EDHOC_PUBLIC_INCLUDE}
                       ${LM_EDHOC_PRIVATE_INCLUDE}
     PRIV_REQUIRES mbedtls esp_timer esp_system nvs_flash nvs_sec_provider esp_partition esp_wifi esp_event
-                  esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support app_update)
+                  esp_netif freertos esp_driver_usb_serial_jtag esp_pm esp_hw_support app_update bootloader_support)
 
 set_source_files_properties(${LM_EDHOC_SOURCES} PROPERTIES COMPILE_OPTIONS "${LM_EDHOC_OPTIONS}")
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LM_BUILD_PROFILE_${lm_profile}
