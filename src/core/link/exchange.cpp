@@ -254,6 +254,13 @@ void Exchange::after_verify(MonoTime now) {
             start_hs(sec::HsRole::Initiator, ByteView{}, now);
             return;
         }
+        // HIL-F3: the verified joiner is the device of the ordinary neighbour at this MAC: a live member does not
+        // join again (its link session serves it). Refused before any EDHOC work is spent on it.
+        if (const Neighbor *n = s_.neighbors.find_mac(mac_); n != nullptr && n->device == peer_state_.dc.device) {
+            count(Count::CredRejected);
+            abort(Status::Conflict);
+            return;
+        }
         const Status st = build_join_response();
         if (st != Status::Ok) {
             abort(st);

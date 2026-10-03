@@ -124,8 +124,26 @@ Status Exchange::make_join_context(sec::SessionContext &ctx) const {
 }
 
 Status Exchange::install_join_session(MonoTime now) {
+    // HIL-F3: an ordinary neighbour still holds this MAC while another device, now proven by EDHOC, speaks from it: the
+    // board was erased and given a new identity. The old session is stale (as install_session() decides for links); the
+    // join entry takes over its driver registration, which this exchange has been using, as a transient one: the
+    // device's first ordinary handshake shares a join entry's transient peer (acquire is idempotent per class).
+    if (Neighbor *stale = s_.neighbors.find_mac(mac_); stale != nullptr) {
+        if (stale->device == peer_state_.dc.device || peer_transient_) {
+            return Status::Conflict; // the same device (refused in after_verify), or two registrations of one MAC
+        }
+        PeerHandle transient;
+        LM_TRY(s_.engine.peers().demote(stale->peer, transient)); // NoCapacity: the old session stays, the joiner retries
+        const ShortAddr addr = stale->address;
+        stale->peer = PeerHandle{};
+        s_.neighbors.remove(*stale);
+        ++s_.stats.sessions_replaced;
+        s_.engine.delivery().invalidate_addr(addr); // routes to or through the address it held are stale
+        peer_ = transient;
+        peer_transient_ = true; // owned by this exchange from here (handed to the join entry below)
+    }
     if (!peer_transient_) {
-        return Status::RecoveryRequired; // join peers are always transient registrations
+        return Status::RecoveryRequired; // join peers are transient registrations (or the one taken over above)
     }
     Neighbor *n = s_.neighbors.acquire();
     if (n == nullptr) {

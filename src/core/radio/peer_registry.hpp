@@ -41,6 +41,9 @@ class PeerRegistry {
     // Join/repair handoff: a transient peer becomes a regular neighbour without touching the driver.
     // NoCapacity keeps the transient reservation so the caller can retry or release it.
     [[nodiscard]] Status promote(PeerHandle transient, PeerHandle &regular_out);
+    // The reverse, without touching the driver (HIL-F3): a regular neighbour's peer becomes the transient one of a
+    // JOIN_ONLY session (a new identity at that MAC). NoCapacity keeps the regular reservation.
+    [[nodiscard]] Status demote(PeerHandle regular, PeerHandle &transient_out);
     // After a radio re-initialisation the driver is empty: register every live peer again.
     [[nodiscard]] Status reapply(port::Radio &radio) const;
     // Radio stopped: forget nothing (owners keep their handles) but there is no driver state.
