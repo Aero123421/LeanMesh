@@ -7,7 +7,9 @@
  *   not provisioned  keygen | prov-leaf <trust88> <device_cose> <ticket> | prov-root <trust88> <device_cose>
  *                    <delegation> <host_id>                                        (hex arguments)
  *   leaf/relay, provisioned (mesh running)
- *                    status | join [noretry] | send root <text> | send <device_id hex> <text> | op <id> | stop | start
+ *                    status | join [transfer] [noretry] | send root <text> | send <device_id hex> <text> | op <id> | stop | start
+ *                    nonce | ticket <hex>        (transfer, docs/07 §8: the device's transfer nonce; install a fleet-signed
+ *                                                 AssignmentTicket, control type 3; then "join transfer")
  * A provisioned ROOT starts the mesh and leaves the port to the Host's USB session: it has no console then.
  * Events of a leaf/relay are printed as "EV ..." lines. No product logic, no polling inside the SDK: this app polls
  * its own event queue every 50 ms while it waits for console input.
@@ -269,13 +271,15 @@ static void cmd_status(void) {
 
 /* join: a new join, asked again by the app when the SDK ends it as EXPIRED/BUSY/RATE_LIMITED (up to 5 times, 2..6 s
    apart). The SDK caps one search at 30 s (membership_ops.cpp), which equals its one-full-handshake-per-peer gate:
-   a joiner whose first handshake a busy root dropped cannot ask that root again within the same search. */
+   a joiner whose first handshake a busy root dropped cannot ask that root again within the same search.
+   join transfer: the same for LM_JOIN_TRANSFER_CANDIDATE (a member looks for the root its installed ticket names). */
 static lm_operation_id_t s_join_op;
 static int s_join_retries;
 static TickType_t s_join_again_at;
+static uint32_t s_join_mode = LM_JOIN_NEW;
 
 static lm_status_t join_once(void) {
-    lm_join_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION, .mode = LM_JOIN_NEW};
+    lm_join_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION, .mode = s_join_mode};
     esp_fill_random(r.request_id.bytes, sizeof r.request_id.bytes);
     lm_status_t st = lm_join(s_ctx, &r, &s_join_op);
     if (st == LM_STATUS_OK) {
@@ -287,8 +291,18 @@ static lm_status_t join_once(void) {
 }
 
 static void cmd_join(char *save) {
-    const char *arg = strtok_r(NULL, " ", &save);
-    s_join_retries = arg != NULL && strcmp(arg, "noretry") == 0 ? 0 : 5; /* noretry: the SDK's own result */
+    s_join_mode = LM_JOIN_NEW;
+    s_join_retries = 5;
+    for (const char *arg = strtok_r(NULL, " ", &save); arg != NULL; arg = strtok_r(NULL, " ", &save)) {
+        if (strcmp(arg, "noretry") == 0) {
+            s_join_retries = 0; /* the SDK's own result */
+        } else if (strcmp(arg, "transfer") == 0) {
+            s_join_mode = LM_JOIN_TRANSFER_CANDIDATE;
+        } else {
+            answer(LM_STATUS_INVALID_ARGUMENT);
+            return;
+        }
+    }
     s_join_again_at = 0;
     lm_status_t st = join_once();
     if (st != LM_STATUS_OK) {
@@ -317,6 +331,36 @@ static void join_timer(void) {
         lm_status_t st = join_once();
         if (st != LM_STATUS_OK) outf("JOIN again refused: %u\n", (unsigned)st);
     }
+}
+
+/* nonce: the device's outstanding transfer nonce (docs/07 §8; RAM only: a restart voids it). A mode-0 ticket names it. */
+static void cmd_nonce(void) {
+    uint8_t nonce[16];
+    lm_status_t st = lm_transfer_nonce_get(s_ctx, nonce);
+    if (st != LM_STATUS_OK) {
+        answer(st);
+        return;
+    }
+    out("OK nonce=");
+    out_hex(nonce, sizeof nonce);
+    out("\n");
+}
+
+/* ticket <hex>: install a fleet-signed AssignmentTicket (control type 3) for this member's transfer. How the install
+   ended is its operation (`op <id>`, EV kind=3). */
+static void cmd_ticket(char *save) {
+    int n = unhex(strtok_r(NULL, " ", &save), s_blob[2], BLOB_MAX);
+    if (n <= 0) {
+        answer(LM_STATUS_INVALID_ARGUMENT);
+        return;
+    }
+    lm_operation_id_t op = 0;
+    lm_status_t st = lm_install_control(s_ctx, 3, s_blob[2], (size_t)n, &op);
+    if (st != LM_STATUS_OK) {
+        answer(st);
+        return;
+    }
+    outf("OK op=%llu\n", (unsigned long long)op);
 }
 
 static void cmd_send(char *save) {
@@ -430,6 +474,10 @@ static void run_command(char *line) {
         cmd_status();
     } else if (strcmp(cmd, "join") == 0) {
         cmd_join(save);
+    } else if (strcmp(cmd, "nonce") == 0) {
+        cmd_nonce();
+    } else if (strcmp(cmd, "ticket") == 0) {
+        cmd_ticket(save);
     } else if (strcmp(cmd, "send") == 0) {
         cmd_send(save);
     } else if (strcmp(cmd, "power") == 0) {

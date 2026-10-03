@@ -2,6 +2,8 @@
 
 - Issue #3 の初回経路: `python -m leanmesh_fleet` によるオフライン fleet 鍵の新規生成・暗号化保管と、DeviceCredential / RootDelegation / 初回 AssignmentTicket / ExpectedSet の発行。通常 Host の署名権限・SDK wire 契約は変更なし。SDK/PSA 検証と sim Join を CI に追加。機器書込み、USB kit、他の lifecycle 発行 CLI、実機 custody は後続（[使い方](docs/sdk/fleet-issuer.md)）。
 
+- 移設参加券の発行: `python -m leanmesh_fleet transfer`（`Issuer.transfer`）。source domain A から target domain B（B root の RootDelegation で指定）への AssignmentTicket（mode 0 = 機器の `lm_transfer_nonce_get`、mode 1 = 一回限り grant）と、B の ExpectedSet 1 page を発行する。SDK の wire・検証は変更なし。Python 発行の ticket で sim の機器が A（root 停止）→ B へ移り、古い/再使用 ticket を拒否する試験と、実機ベンチ用の console `nonce` / `ticket` / `join transfer`・`hil.py transfer` を追加（[使い方](docs/sdk/fleet-issuer.md)、[ベンチ](docs/hil/transfer-two-roots.md)）。実機の移設は未検証。
+
 ## Unreleased — ソフトウェア実装（feat/sdk-impl）
 
 仕様0.2に沿ったソフトウェア実装を追加した。**実機で認定された製品ではない。** 使い方は [docs/sdk/](docs/sdk/README.md)、判断の履歴は [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)、資源の現状は [ADR-002](decisions/ADR-002-budget-status.md)。
