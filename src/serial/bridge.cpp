@@ -244,7 +244,7 @@ void Bridge::on_record(SerialKind kind, uint8_t lane, uint32_t frame_bytes, Byte
     wire::CborReader r{payload};
     (void)r.array(3, 3);
     const ByteView id = r.bstr(16, 16);
-    const uint64_t method = r.uint_in(1, 17); // protocol/serial.cddl: 1..17 (17 POLICY_SET, HIL-F5)
+    const uint64_t method = r.uint_in(1, 22); // protocol/serial.cddl: 1..22 (17 POLICY_SET, HIL-F5; 18..22 ledger backup/restore, ISSUE5)
     const ByteView params = r.skip_item();
     if (kind != SerialKind::Request || r.finish() != Status::Ok) {
         ++stats_.malformed; // the Host sends nothing but well-formed REQUESTs; anything else is not answered
@@ -516,6 +516,28 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
         key(w, "evidence_bits");
         w.uint(p.snap.evidence_bits);
         break;
+    case Result::BackupPage: { // ISSUE5: read again from the ledger's cached page (nothing is copied; one request at a time)
+        LedgerBackupRequest rq;
+        rq.get = 1;
+        rq.seq = p.backup.seq;
+        rq.index = p.backup.index;
+        root::LedgerType::BackupPage pg;
+        if (run(CommandKind::RootLedgerBackup, &rq, sizeof(rq), ByteView{}, &pg, sizeof(pg)).status != Status::Ok) {
+            return 0; // another request moved the page meanwhile: reported, never a made-up page
+        }
+        w.map(5); // keys by length, then bytewise
+        key(w, "id");
+        w.uint(pg.id);
+        key(w, "data");
+        w.bytes(pg.data);
+        key(w, "count");
+        w.uint(pg.count);
+        key(w, "index");
+        w.uint(pg.index);
+        key(w, "state");
+        w.uint(pg.state);
+        break;
+    }
     }
     return w.finish() == Status::Ok ? w.size() : 0;
 }

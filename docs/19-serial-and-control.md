@@ -1,6 +1,6 @@
 # 19 Serial操作と制御の署名境界
 ## 1. Wire上の二種類のcontrol
-`control-body`の型/CBOR規則は共通。永続的な認可/構成objectだけCOSE_Sign1で署名する。対象typeは1/2/3/4/5/11/12/19/21/26/29/30/31/32（うち19 channel-planと21 recovery-beaconは署名形式の定義のみで、本版のchannel planは署名せずroot↔memberのend session内のcompact recordで運ぶ。lm_install_controlは19/21をUNSUPPORTEDにする: FIX10-D11、docs/05 §6）。type22は旧group snapshot予約で新規送信しない。root/fleetの権限と世代を検証する。時間同期/neighbor probe/配送receipt/route requestを送るたびにP-256署名しない。
+`control-body`の型/CBOR規則は共通。永続的な認可/構成objectだけCOSE_Sign1で署名する。対象typeは1/2/3/4/5/11/12/19/21/26/29/30/31/32/34（うち19 channel-planと21 recovery-beaconは署名形式の定義のみで、本版のchannel planは署名せずroot↔memberのend session内のcompact recordで運ぶ。lm_install_controlは19/21をUNSUPPORTEDにする: FIX10-D11、docs/05 §6）。type22は旧group snapshot予約で新規送信しない。root/fleetの権限と世代を検証する。時間同期/neighbor probe/配送receipt/route requestを送るたびにP-256署名しない。
 その他のtypeは検証済みlink/end sessionのAEAD内で運ぶ。issuerはそのsessionの完全Identityと一致しなければ拒否。typeごとのauthority条件（RouteLease/TimeResponseはroot、JoinStoredは対象Device等）も検査する。preauthでは署名済みcredential/hintまたはEDHOC carrier以外を受けない。signed objectを要求する場面にunsigned controlを代入してはならない。
 
 ## 2. hashの自己参照を避ける
@@ -13,7 +13,7 @@ headerは09の18B。kind: HELLO1 / EDHOC2 / REQUEST3 / RESPONSE4 / EVENT5 / CRED
 
 ## 4. Serial method
 1 CAPABILITIES / 2 SEND / 3 GET_MESSAGE / 4 CANCEL / 5 JOIN_DECIDE / 6 INSTALL_CONTROL / 7 NODE_QUERY / 8 GROUP_SNAPSHOT / 9 HOST_STORE_ACK / 10 EVENT_ACK / 11 CHANNEL_ACTION / 12 SLEEP_WINDOW / 13 GET_REQUEST / 14 GROUP_SET。
-16 DIAGNOSTICS（params=nil。rootの診断snapshotとfeature表を返す。Hostが要求した時だけ実行し、周期pollingは行わない）。17 POLICY_SET（`[join-mode, expected-revision]`。rootの`lm_policy_set`でjoin modeを1項目だけCAS変更し、commit後のOPERATION eventで完了する。NODE_QUERYの結果は`policy`=[revision, join mode]を含む。HIL-F5）。未知methodはUNSUPPORTED。SENDは宛先fullIdentity・MessageId・intent_hash・app_port・flags・root_term・expiry・bytesを含む。HostはrootアプリのIdentityとして送信し、勝手な他端末originは指定できない。
+16 DIAGNOSTICS（params=nil。rootの診断snapshotとfeature表を返す。Hostが要求した時だけ実行し、周期pollingは行わない）。17 POLICY_SET（`[join-mode, expected-revision]`。rootの`lm_policy_set`でjoin modeを1項目だけCAS変更し、commit後のOPERATION eventで完了する。NODE_QUERYの結果は`policy`=[revision, join mode]を含む。HIL-F5）。18〜22は台帳のbackupとrestore（§9）。未知methodはUNSUPPORTED。SENDは宛先fullIdentity・MessageId・intent_hash・app_port・flags・root_term・expiry・bytesを含む。HostはrootアプリのIdentityとして送信し、勝手な他端末originは指定できない。
 INSTALL_CONTROLは署名bytesの配送であり、API受理でDevice適用済みにはしない。JOIN_DECIDEはrequestの本人/credential hashを再照合。EVENT_ACKは受信通知の進捗でありHOST_STORE_ACKとは別。後者だけHost永続保存を証明する。
 
 ## 5. credits / retry
@@ -33,3 +33,16 @@ RESPONSE result bstrは次の型をCBOR化したもの。CAPABILITIES/NODE_QUERY
 ## 8. spec0.2 Power/Group追加
 Serial NODE_QUERYはpower snapshotも返せる。INSTALL_CONTROLに29/30/31を載せ、別の非認証の管理口を作らない。RF Power poll/grantは直結peer向けで、Serialに1窓ごと中継する必要はない。GROUP_SNAPSHOTはtype32のsnapshotを返す。page0のtoken=nilで集合を確定し、後続pageは同tokenを必須とする。RF側の同等要求はAEADで保護したcontrol33（GroupSnapshotRequest）。originはsessionのIdentityであり、他人のorigin指定を受けない。
 GROUP_TARGETS=15を追加し、operation_idとsnapshot_token、offset/limit（最大16）を渡す。応答はOpenAPI GroupTargetsPageのCBOR map。未知operation、違うtoken、再起動で無効なlocal operationには正しいエラーを返し、全台成功を捏造しない。
+
+## 9. 台帳のbackupとrestore（methods 18〜22、issue #5）
+rootの台帳（member ledger）を署名付きbackupとして取り出し、故障したrootの代わりの**交換rootへ復元**する。内容、整合性、順序は[12章 §5](12-storage.md)と[21章 §8](21-lifecycle-operations.md)、署名headerは`protocol/control.cddl`のtype 34。ここはserial上の手順だけを定める。いずれもHostがpairされたrootのapplicationとして呼ぶ。
+
+**backup（pull）**
+- 18 LEDGER_BACKUP_BEGIN（params nil）。rootは台帳をFlashから読んで一貫した断面を取り、次のsequence番号をdurableにしてからheaderへ署名する。受理（operation id）が返り、完了はOPERATION event（reason 0）。BUSY=joinやinstallが台帳のmemoryを持っている／前のbackupを作成中（待ってやり直す）。RECOVERY_REQUIRED=台帳が無い・退役済み・durableでない書込みが残っている・sequence recordが読めない（署名しない）。
+- 19 LEDGER_BACKUP_GET（`[seq, index]`）。index 0はsigned header（seq 0は「今保持しているbackupのheader」。sequenceはheaderの中にある）。index 1..countは正規順のrecord。resultは`{id, data, count, index, state}`のmap。recordは1回のFlash読みなので、読み終わるまでBUSY（同じindexをやり直す）。CONFLICT=その後に台帳が書かれた、または別のbackupが作られた（断面は破棄され、もう一度BEGINから）。NOT_FOUND=保持しているbackupが無い。HostはBEGIN→event→index 0..count→chain検証→DB保存とし、検証に失敗したbackupは保存しない。
+
+**restore（push、交換root）**
+- 20 LEDGER_RESTORE_HANDOVER（`[handover COSE]`）：交換rootを新rootと名指すfleet署名のRootHandover（type31）。台帳が無い（manifestが無くRECOVERY_REQUIRED）rootだけが受ける（台帳があればCONFLICT）。以前の中断したrestoreが残したrecordはここで中和される。
+- 21 LEDGER_RESTORE_HEADER（`[header COSE]`）：旧rootのsigned header。fleet trust → headerの中の旧RootDelegation → 旧rootの署名、domain一致、handoverのold_root・old generation一致、sequenceが交換root自身の知るsequence以上であることを検査する。
+- 22 LEDGER_RESTORE_RECORD（`[index, id, state, payload, next]`）：recordをheaderの順に1件ずつ。各recordはheaderのhash chainで検証されてから書かれ、最後のmanifestはsequence recordの後に書かれる。台帳はその後ロードされ、最後のrecordのOPERATION eventはroot準備完了（ready）で終わる。
+各手順は受理（operation id）とOPERATION eventで終わる。manifestがdurableになるまでrootはRECOVERY_REQUIREDのままで、途中で電源が切れても「台帳なし」か「完全な台帳」のどちらかしか残らない。HostはCONFLICT/AUTH_REJECTED等をそのままoperationの結果にし、成功を推定しない。
