@@ -304,6 +304,10 @@ class Delivery {
     // [FIX8-D5] A committed leave (docs/07 §6): every open send ends now, the pools stay. A send that may have left is
     // INDETERMINATE; one that provably did not is cancelled exactly (durable: once its retire is durable, FIX9-D3).
     void end_open_sends(MonoTime now);
+    // HIL-F6: the root revoked `dest`: every open send to it ends now (the revocation notice, a control send, goes on).
+    // One that provably never left is REJECTED (REVOKED), a durable one once its retire is durable (FIX9-D3); one that
+    // may have left ends INDETERMINATE (REVOKED) at once.
+    void end_sends_to(const DeviceId &dest, MonoTime now);
     void flush_events(MonoTime now);
 
     // ---- [S13] root <-> Host bridge (delivery_host.cpp) ----
@@ -591,6 +595,7 @@ class Delivery {
     std::array<bool, k_actives> out_j_{};   // journal slots of durable sends (held until the retire is durable)
     std::array<bool, k_actives> out_retire_{}; // retire of that slot still to be written
     std::array<uint64_t, k_actives> out_cancel_op_{}; // op id whose CANCELLED_NOT_SENT waits for that slot's retire
+    std::array<uint32_t, k_actives> out_cancel_reason_{}; // non-zero: that op ends REJECTED with this reason instead
     std::array<bool, k_in_entries> in_j_{}; // journal slots of durable receptions
 
     FragState frag_;

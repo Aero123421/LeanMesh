@@ -227,6 +227,7 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
                 }
             }
             if (e.state == EntryState::Blocked) {
+                engine_.delivery().end_sends_to(device, now); // HIL-F6: no send to it stays open forever
                 engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_MEMBER_REVOKED, 0, &device);
             }
         } else {
