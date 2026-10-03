@@ -1,0 +1,38 @@
+menu "Field node"
+    config FIELD_HUB75
+        bool "Display build: draw the display state on a 64x32 HUB75 panel (ESP32-S3 only, checked at configure time)"
+        default n
+        help
+            The Seengreat RGB Matrix HUB75 S3 board (ESP32-S3-WROOM-1-N16R8) with a 64x32 FM6124 panel. Needs
+            CONFIG_LEANMESH_PROFILE_RELAY (the display relays: mains powered). Pulls the panel library
+            ESP32-HUB75-MatrixPanel-DMA (MIT) in as a managed component (main/idf_component.yml).
+
+    config FIELD_HUB75_BRIGHTNESS
+        int "Display build: panel brightness (1..255)"
+        depends on FIELD_HUB75
+        range 1 255
+        default 96
+        help
+            Passed to setBrightness8 of the panel library. The panel is bright: a low value is plenty on a desk.
+
+    choice FIELD_LED
+        prompt "Status LED"
+        default FIELD_LED_ACTIVE_LOW if IDF_TARGET_ESP32C6
+        default FIELD_LED_NONE
+
+        config FIELD_LED_NONE
+            bool "none"
+        config FIELD_LED_ACTIVE_LOW
+            bool "plain GPIO, on = low"
+        config FIELD_LED_ACTIVE_HIGH
+            bool "plain GPIO, on = high"
+    endchoice
+
+    config FIELD_LED_GPIO
+        int "Status LED GPIO"
+        depends on !FIELD_LED_NONE
+        default 15
+        help
+            15 is the user LED (active low) of the Seeed XIAO ESP32C6. Blinking: joining, on: reachable, off: not a
+            member / lost.
+endmenu
