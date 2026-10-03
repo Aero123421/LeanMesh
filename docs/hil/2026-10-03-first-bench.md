@@ -68,11 +68,11 @@ PYTHONPATH=host ~/.cache/leanmesh/host-venv/bin/python tools/hil/hil.py init
 | F2 | 同時に複数台が Join すると EXPIRED。1-hop initiator が CredI 送信時に 1 相手 30 s の handshake gate を消費していたため、Root の single slot に CredI を捨てられると、同じ探索（最大 30 s）内でやり直せなかった | **修正** gate は message_1（双方の公開鍵演算の開始）で消費（`61a52f0`）。sim で 8 台同時 Join が全台成功（修正前は 2/8 が EXPIRED）、実機で 2 台同時・アプリ再申請なしで両方成功 |
 | F3 | 同じ MAC から鍵を作り直した機器は、Root がその MAC の旧 neighbour session を持つ間（最大 1 h）Join できない（`exchange_io.cpp` が Join carrier を無条件に捨てていた） | **修正**（`802ef1b`）判断を検証後へ移し、同じ device なら拒否、EDHOC で別 device と証明されたら旧 session を置換。実機で消去から 27 s で承認待ち（Root 再起動なし）。**残る制限**: 旧 identity を neighbour に持つ relay を経由する Join は、その session が切れるまで通らない（relay は joiner を検証できない） |
 | F4 | XIAO ESP32C6 は RF スイッチ（GPIO3 low、GPIO14 でアンテナ選択）を設定しないと電波が極端に弱い。MacFailed が続き attach できない | ボード設定を追加（`firmware/hil_node/sdkconfig.board.esp32c6`）。docs/03 §5 の board overlay の実例 |
-| F5 | Host の POLICY_SET は signed type 12 を要求するが SDK は type 12 を UNSUPPORTED にする。Host から join_mode を変える手段が無い | 未修正（CommissioningWindow で代替できる） |
+| F5 | Host の POLICY_SET は signed type 12 を要求するが SDK は type 12 を UNSUPPORTED にする。Host から join_mode を変える手段が無い | **修正**（`82f2174`）serial method 17 POLICY_SET → root の `lm_policy_set`、`GET /v1/policy`。実機で Host から PREAPPROVED（revision 0→1）、新しい C6 が承認なしで 7 s で Join |
 | F6 | 失効済みの機器宛ての DURABLE 送信が SENDING のまま終わらない | **修正**（`54f702a`）Root は失効時にその機器宛ての送信を終わらせ（未送出は REJECTED、送出済みは INDETERMINATE、理由 REVOKED）、新しい送信は REVOKED で拒否。実機で 0.7 s で終了、次の送信は ROOT_REFUSED |
-| F7 | WINDOWED_RX の自動 light sleep で USB-Serial/JTAG が止まり、console も esptool も届かない。電源の入れ直しでも直後に眠る。BOOT ボタンでのダウンロードモードと全消去が必要だった | 試験ファームに起動 10 s の safe（ALWAYS_RX に戻す）を追加。製品側の扱いは未定 |
+| F7 | WINDOWED_RX の自動 light sleep で USB-Serial/JTAG が止まり、console も esptool も届かない。電源の入れ直しでも直後に眠る。BOOT ボタンでのダウンロードモードと全消去が必要だった | **手段を追加**（`Pm::may_sleep` / `lm_idf_sleep_veto`）。試験ファームは USB 接続中は眠らない（実機で WINDOWED_RX 中も console 10/10 応答）と起動 10 s の safe。safe が効かなかった原因は試験ファームの誤り（ALWAYS_RX に window 値を残して INVALID_ARGUMENT）で修正済み。**遠隔の POWER_POLICY_SET（signed type 29）は SDK 未実装**（root が UNSUPPORTED） |
 | F8 | USB リセット後の reset reason が UNKNOWN | **修正**（`53ed918`）。実機で EXTERNAL と表示 |
-| F9 | Root 再起動後、member の追随に 138 s（3 × hello 上限 32 s 前後の不在判定による） | 仕様どおり。実用上は長い |
+| F9 | Root 再起動後、member の追随に 138 s（3 × hello 上限 32 s 前後の不在判定による） | **修正**（`fe3a7ed`）親の beacon の新しい term で再接続（30 s に 1 回まで）。実機で 11.7 s / 19.5 s |
 
 調べて問題でなかったもの: WINDOWED_RX 中の flash commit（約 4 分で 21 回）は power policy の保存と DURABLE メッセージの journal で、受信窓ごとの書込みではなかった。
 F4 を直した後の Relay / Leaf の MacFailed は 0。
