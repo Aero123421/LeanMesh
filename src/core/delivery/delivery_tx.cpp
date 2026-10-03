@@ -73,13 +73,12 @@ Reply Delivery::send_impl(const lm_send_request_t &rq, ByteView payload, MonoTim
         return reply(Status::InvalidArgument);
     }
     if constexpr (k_root_capable) {
-        // HIL-F6: the root knows who it revoked: a send to that device is refused at once instead of trying it forever
-        // (a durable send without a deadline is never given up). Other nodes learn of a revocation by the lease. The
-        // root's own control sends go on: the revocation notice itself is one.
-        if (engine_.config().role == Role::Root && rq.destination.kind == LM_DEST_NODE && !control) {
-            const root::Entry *e = engine_.ledger().find(dest);
-            if (e != nullptr && engine_.ledger().effective(*e) == root::EntryState::Blocked) {
-                return reply(Status::Revoked);
+        // HIL-F6 / #16: the root knows who it revoked and who left: a send to that device is refused at once instead of
+        // trying it forever (a durable send without a deadline is never given up). Other nodes learn of a revocation by
+        // the lease. The root's own control sends go on: the revocation notice itself is one.
+        if (rq.destination.kind == LM_DEST_NODE && !control) {
+            if (const Status no = refused_dest(dest); no != Status::Ok) {
+                return reply(no);
             }
         }
     }
@@ -869,8 +868,37 @@ Reply Delivery::cancel(uint64_t op_id, MonoTime now) {
     return reply(Status::CancelTooLate, op_id);
 }
 
-void Delivery::end_sends_to(const DeviceId &dest, MonoTime now) {
-    constexpr uint32_t k_revoked = static_cast<uint32_t>(Status::Revoked);
+Status Delivery::refused_dest(const DeviceId &dest) {
+    if constexpr (k_root_capable) {
+        if (engine_.config().role == Role::Root) {
+            const root::Entry *e = engine_.ledger().find(dest);
+            const root::EntryState s = e != nullptr ? engine_.ledger().effective(*e) : root::EntryState::Free;
+            if (s == root::EntryState::Blocked) {
+                return Status::Revoked;
+            }
+            if (s == root::EntryState::Left) {
+                return Status::NotFound; // #16: left, or moved to another domain (reconciled from its ticket)
+            }
+        }
+    }
+    (void)dest;
+    return Status::Ok;
+}
+
+void Delivery::end_refused_sends(MonoTime now) {
+    for (const Op &o : ops_) {
+        if (!o.used || o.report || o.phase == Phase::Final || o.active.is_none() || o.priority >= LM_PRIORITY_CONTROL) {
+            continue;
+        }
+        const DeviceId dest = o.dest; // (end_sends_to finishes this op and any other to the same device)
+        if (const Status no = refused_dest(dest); no != Status::Ok) {
+            end_sends_to(dest, now, no);
+        }
+    }
+}
+
+void Delivery::end_sends_to(const DeviceId &dest, MonoTime now, Status reason) {
+    const auto k_reason = static_cast<uint32_t>(reason);
     for (Op &o : ops_) {
         if (!o.used || o.report || o.phase == Phase::Final || o.active.is_none() || o.dest != dest ||
             o.priority >= LM_PRIORITY_CONTROL) {
@@ -884,15 +912,15 @@ void Delivery::end_sends_to(const DeviceId &dest, MonoTime now) {
         if (!left_node(h, o)) {
             if (a->durable) {
                 out_cancel_op_[a->jslot] = o.id;
-                out_cancel_reason_[a->jslot] = k_revoked;
+                out_cancel_reason_[a->jslot] = k_reason;
                 retire_active(h, true, now);
             } else {
-                finalize_active(h, LM_OUTCOME_REJECTED, k_revoked, now);
+                finalize_active(h, LM_OUTCOME_REJECTED, k_reason, now);
             }
             continue;
         }
-        // It may have arrived before the revocation: INDETERMINATE, and nothing waits for a receipt of a revoked device.
-        finalize_active(h, LM_OUTCOME_INDETERMINATE, k_revoked, now);
+        // It may have arrived before: INDETERMINATE, and nothing waits for a receipt of a device the root no longer serves.
+        finalize_active(h, LM_OUTCOME_INDETERMINATE, k_reason, now);
     }
 }
 

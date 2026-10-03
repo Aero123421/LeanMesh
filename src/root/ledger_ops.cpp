@@ -133,6 +133,7 @@ void Ledger::leave_committed(Status s, MonoTime now) {
     ++stats_.left;
     const DeviceId device = e.device;
     forget_member(device, e.address);
+    engine_.delivery().end_sends_to(device, now, Status::NotFound); // #16: no send to a member that left stays open
     engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
     release(-2);
     cover(job_slot_index_, now);

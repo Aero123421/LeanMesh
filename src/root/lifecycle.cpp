@@ -227,12 +227,13 @@ void Ledger::lc_step(Step step, Status s, MonoTime now) {
                 }
             }
             if (e.state == EntryState::Blocked) {
-                engine_.delivery().end_sends_to(device, now); // HIL-F6: no send to it stays open forever
+                engine_.delivery().end_sends_to(device, now, Status::Revoked); // HIL-F6: no send to it stays open forever
                 engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_MEMBER_REVOKED, 0, &device);
             }
         } else {
             ++stats_.reconciled;
             forget_member(device, addr);
+            engine_.delivery().end_sends_to(device, now, Status::NotFound); // #16: it moved to another domain
             engine_.emit_event(LM_EVENT_MEMBERSHIP, LM_UNASSIGNED, 0, &device);
         }
         const std::size_t slot = lc_.slot;
@@ -434,6 +435,7 @@ void Ledger::lc_entry_failed(MonoTime now) {
     if (lc_.was_active) {
         const Entry &e = entries_[lc_.slot];
         forget_member(e.device, e.address);
+        engine_.delivery().end_sends_to(e.device, now, lc_.to == EntryState::Left ? Status::NotFound : Status::Revoked);
         engine_.emit_event(LM_EVENT_MEMBERSHIP, lc_.to == EntryState::Left ? LM_UNASSIGNED : LM_MEMBER_REVOKED, 0,
                            &e.device);
     }

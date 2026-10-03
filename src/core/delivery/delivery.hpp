@@ -304,10 +304,14 @@ class Delivery {
     // [FIX8-D5] A committed leave (docs/07 §6): every open send ends now, the pools stay. A send that may have left is
     // INDETERMINATE; one that provably did not is cancelled exactly (durable: once its retire is durable, FIX9-D3).
     void end_open_sends(MonoTime now);
-    // HIL-F6: the root revoked `dest`: every open send to it ends now (the revocation notice, a control send, goes on).
-    // One that provably never left is REJECTED (REVOKED), a durable one once its retire is durable (FIX9-D3); one that
-    // may have left ends INDETERMINATE (REVOKED) at once.
-    void end_sends_to(const DeviceId &dest, MonoTime now);
+    // HIL-F6 / #16: the root no longer serves `dest` - REVOKED: it revoked it; NOT_FOUND: it left or moved to another
+    // domain - and every open send to it ends now (control sends, such as the revocation notice, go on). One that
+    // provably never left is REJECTED (reason), a durable one once its retire is durable (FIX9-D3); one that may have
+    // left ends INDETERMINATE (reason) at once.
+    void end_sends_to(const DeviceId &dest, MonoTime now, Status reason);
+    // #16: the same for every device the root's ledger no longer serves; run when the ledger has loaded and when the
+    // journal's sends are recovered (whichever comes last finds both).
+    void end_refused_sends(MonoTime now);
     void flush_events(MonoTime now);
 
     // ---- [S13] root <-> Host bridge (delivery_host.cpp) ----
@@ -468,6 +472,8 @@ class Delivery {
     void finalize_active(Handle h, uint8_t outcome, uint32_t reason, MonoTime now);
     void round_ended(Handle h, Active &a, Op &op, MonoTime now, bool link_failed);
     [[nodiscard]] bool left_node(Handle h, const Op &op) const;
+    // HIL-F6 / #16 (root): REVOKED for a device the ledger holds revoked, NOT_FOUND for one that left; Ok otherwise.
+    [[nodiscard]] Status refused_dest(const DeviceId &dest);
     [[nodiscard]] uint8_t refused_outcome(Handle h, const Op &op) const;
     [[nodiscard]] Duration retry_delay(const Active &a) const;
     void on_frame_done(const FrameDone &f, HopEnd end, MonoTime now);
