@@ -1,0 +1,40 @@
+--- a/src/platforms/esp32s3/gdma_lcd_parallel16.cpp	2026-10-04 00:09:47
++++ b/src/platforms/esp32s3/gdma_lcd_parallel16.cpp	2026-10-04 00:09:47
+@@ -224,6 +224,10 @@
+ 
+ 
+     // Allocate DMA channel and connect it to the LCD peripheral
++#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
++    // IDF 6: the alloc config has no direction/sibling members; a TX-only channel is asked with a NULL RX handle.
++    static gdma_channel_alloc_config_t dma_chan_config = {};
++#else
+     static gdma_channel_alloc_config_t dma_chan_config = {
+       .sibling_chan = NULL,
+       .direction = GDMA_CHANNEL_DIRECTION_TX,
+@@ -231,7 +235,13 @@
+         .reserve_sibling = 0
+       }
+     };
+-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
++#endif
++#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
++    esp_err_t err = gdma_new_ahb_channel(&dma_chan_config, &dma_chan, NULL);
++    if (err != ESP_OK) {
++      ESP_LOGE("S3", "Failed to allocate AHB GDMA channel: %s", esp_err_to_name(err));
++    }
++#elif ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 4, 0)
+     esp_err_t err = gdma_new_ahb_channel(&dma_chan_config, &dma_chan);
+     if (err != ESP_OK) {
+       ESP_LOGE("S3", "Failed to allocate AHB GDMA channel: %s", esp_err_to_name(err));
+@@ -242,7 +252,10 @@
+     gdma_connect(dma_chan, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_LCD, 0));
+     static gdma_strategy_config_t strategy_config = {
+       .owner_check = false,
+-      .auto_update_desc = false
++      .auto_update_desc = false,
++#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
++      .eof_till_data_popped = false
++#endif
+     };
+     gdma_apply_strategy(dma_chan, &strategy_config);
+ 
