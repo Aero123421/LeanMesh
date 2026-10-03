@@ -1,0 +1,14 @@
+menu "HIL bench board"
+    config HIL_XIAO_C6_RF_SWITCH
+        bool "Seeed XIAO ESP32C6: enable the RF switch (GPIO3 low) and select the on-board antenna (GPIO14 low)"
+        default n
+        help
+            The XIAO ESP32C6 routes its antenna through an RF switch powered by GPIO3 (low = on); GPIO14 selects
+            the on-board ceramic antenna (low) or the U.FL connector (high). Without this the radio runs without
+            its antenna path. Board overlay for bench builds only (docs/03 §5: board differences stay out of core).
+
+    config HIL_XIAO_C6_EXTERNAL_ANTENNA
+        bool "Use the U.FL connector instead of the on-board antenna (GPIO14 high)"
+        depends on HIL_XIAO_C6_RF_SWITCH
+        default n
+endmenu

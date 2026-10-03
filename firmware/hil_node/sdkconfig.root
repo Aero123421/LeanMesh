@@ -1,0 +1,5 @@
+# ROOT bench board: the USB-Serial/JTAG port carries the Host's binary session (docs/19), so no log text goes there.
+CONFIG_LEANMESH_PROFILE_ROOT=y
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
