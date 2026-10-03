@@ -40,3 +40,6 @@ systemdは専用user/group、Restart=on-failure、RuntimeDirectory、StateDirect
 ## 9. spec0.2追加
 GET `/v1/nodes/{device_id}/power`、GET `/v1/operations/{operation_id}/targets`を追加。変更操作は既存 `/v1/control` に集約する。新しいdaemon、ORM、job brokerを追加しない。power状態は`node_power`、個別group結果は`group_targets`へ既存writerで保存する。sleep待ちtaskをtarget数だけ作らず、既存の期限/待機キューへ入れる。
 自動channelとmembershipの実行主体はroot MCUのまま。Pythonがstopしてもrootの既存policy/有限lease内通信は継続可能だが、Host自身へのDURABLE受信・外部承認は保留になる。
+
+## 10. 台帳backup（issue #5）
+Hostはrootの台帳のsigned backupを変更後に1回取り（debounce、最短間隔、失敗は有限回の延ばしbackoff。何も変わらない間はpollingしない）、`ledger_backups`にdomainごとの最新sequence 1行だけを保持する（低いsequenceで置き換えない）。既存DBへの導入はadditive migration（`CREATE TABLE IF NOT EXISTS`の文だけを起動時に実行）。`LEDGER_RESTORE`はrootが接続中のdomain rootと違う場合でも、その交換を運ぶ要求（fleet署名のRootHandover＋保持backup）が先に実行され、成功した場合に限りbridgeはその新rootをdomainに結び付ける（[12章 §5](12-storage.md)、[21章 §8](21-lifecycle-operations.md)、[sdk/host.md §7](sdk/host.md)）。

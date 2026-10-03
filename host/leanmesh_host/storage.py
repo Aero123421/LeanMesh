@@ -273,6 +273,8 @@ def _open(db_path: Path, schema_path: Path) -> sqlite3.Connection:
         ).fetchone()
         if exists is None:
             _apply_schema(conn, schema_path.read_text())
+        else:
+            _apply_additive(conn, schema_path.read_text())
         return conn
     except BaseException as exc:
         try:
@@ -282,19 +284,45 @@ def _open(db_path: Path, schema_path: Path) -> sqlite3.Connection:
         raise
 
 
-def _apply_schema(conn: sqlite3.Connection, schema_sql: str) -> None:
-    """Creates all tables and the durable journal_id in ONE transaction (PRAGMAs are set above)."""
+def _statements(schema_sql: str) -> list[str]:
     statements: list[str] = []
     current = ""
     for line in schema_sql.splitlines(keepends=True):
-        if not current and line.lstrip().upper().startswith("PRAGMA"):
-            continue
+        text = line.strip()
+        if not current and (not text or text.upper().startswith("PRAGMA") or text.startswith("--")):
+            continue  # between statements: blank lines, comments, PRAGMAs (set by the connection)
         current += line
         if sqlite3.complete_statement(current):
             statements.append(current)
             current = ""
     if current.strip():
         raise StorageFault("schema.sql ends with an incomplete statement")
+    return statements
+
+
+_ADDITIVE = ("CREATE TABLE IF NOT EXISTS", "CREATE INDEX IF NOT EXISTS")
+
+
+def _apply_additive(conn: sqlite3.Connection, schema_sql: str) -> None:
+    """An existing database gains what the schema added after it was made (docs/12: additive migration, never a re-run of
+    schema.sql): only the statements written `CREATE TABLE/INDEX IF NOT EXISTS`, in one transaction. Nothing is altered or
+    dropped, so an older Host can still open the database."""
+    wanted = [s for s in _statements(schema_sql) if s.lstrip().upper().startswith(_ADDITIVE)]
+    if not wanted:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for stmt in wanted:
+            conn.execute(stmt)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def _apply_schema(conn: sqlite3.Connection, schema_sql: str) -> None:
+    """Creates all tables and the durable journal_id in ONE transaction (PRAGMAs are set above)."""
+    statements = _statements(schema_sql)
     conn.execute("BEGIN IMMEDIATE")
     try:
         for stmt in statements:

@@ -5,8 +5,16 @@ Run with the Host venv:  PYTHONPATH=host ~/.cache/leanmesh/host-venv/bin/python 
   init                                   new TEST fleet (fresh random key, encrypted store), domain, Host key + kit
   init --name netB                       a second network (domain, Host key + kit) under the SAME fleet
   provision root --port P [--net netB]   the board makes its key, the fleet signs, the board writes its records
+  provision root --replacement --first-term N --port P
+                                         a REPLACEMENT root of a failed one (issue #5): delegation generation + 1, credential
+                                         one term below N, no ledger (RECOVERY_REQUIRED until restored)
   provision leaf --port P [--name N] [--net netB]
                                          same for a leaf: DeviceCredential + initial ticket (+ ExpectedSet page)
+  handover --term N                      the fleet's RootHandover old root -> replacement root (after `provision root --replacement`)
+  backup                                 the Host's newest ledger backup (GET /v1/ledger/backup): sequence, records, root
+  restore [--sequence S]                 LEDGER_RESTORE of that backup onto the replacement root through the Host
+  install --port P [--file F]            a member board stores an object (default objects/handover.cose, control 31); then
+                                         `cmd --port P "join transfer"` makes it follow the replacement root
   transfer <leaf> --to netB [--grant] [--preapproved]
                                          move an ACTIVE leaf to another network (docs/07 §8): nonce from the board,
                                          ticket from the fleet, install, `join transfer`, wait for the new domain
@@ -271,15 +279,30 @@ def cmd_provision(a: argparse.Namespace) -> None:
     domain = bytes.fromhex(net["domain"])
     trust = trust88(meta).hex()
     if a.role == "root":
-        if net["root"] is not None:
+        if a.replacement:
+            if net["root"] is None or a.first_term < 2:
+                raise SystemExit("--replacement needs a root provisioned before it and --first-term >= 2")
+            if net["root"]["device"] == device.hex():
+                raise SystemExit("a replacement root is another device than the one it replaces")
+            generation = net.get("root_generation", 1) + 1
+        elif net["root"] is not None:
             raise SystemExit(f"network {net.label} has a root already")
+        else:
+            generation = 1
         dc = iss.device(public, f"hil-root-{net.tag}{device.hex()[:8]}", 1)
-        delegation = iss.root(public, domain, 1, 15)
-        put_object(f"{net.tag}root-device.cose", dc)
-        put_object(f"{net.tag}root-delegation.cose", delegation)
+        delegation = iss.root(public, domain, generation, 15)
+        kind = "replacement-root" if a.replacement else "root"
+        put_object(f"{net.tag}{kind}-device.cose", dc)
+        put_object(f"{net.tag}{kind}-delegation.cose", delegation)
         line = f"prov-root {trust} {dc.hex()} {delegation.hex()} {net['host_id']}"
+        if a.replacement:
+            line += f" {a.first_term}"
+            net["old_root"] = {**net["root"], "generation": generation - 1}
         require_ok(board.command(line, seconds=30), "prov-root")
         net["root"] = {"device": device.hex(), "port": a.port}
+        net["root_generation"] = generation
+        if a.replacement:
+            net["replacement_first_term"] = a.first_term
     else:
         if net["root"] is None:
             raise SystemExit("provision the root first (its delegation names the domain the ticket is for)")
@@ -306,6 +329,13 @@ def cmd_provision(a: argparse.Namespace) -> None:
 
 def cmd_cmd(a: argparse.Namespace) -> None:
     print(Board(a.port).command(a.line, seconds=a.timeout))
+
+
+def cmd_install(a: argparse.Namespace) -> None:
+    """lm_install_control on a member board: a stored object file (default the fleet's RootHandover, control 31) - the
+    member's own evidence that the domain's root changed. Afterwards `cmd --port P "join transfer"` follows the new root."""
+    cose = (OBJECTS / a.file).read_bytes()
+    print(Board(a.port).command(f"install {a.type} {cose.hex()}", seconds=a.timeout))
 
 
 def cmd_wait(a: argparse.Namespace) -> None:
@@ -494,6 +524,43 @@ def cmd_policy(a: argparse.Namespace) -> None:
         print("policy:", host_call(net, "GET", f"/v1/policy?domain_id={net['domain']}"))
 
 
+def cmd_handover(a: argparse.Namespace) -> None:
+    """The fleet's RootHandover (control 31) old root -> the replacement root `provision root --replacement` set up."""
+    net = Net(load_state(), a.net)
+    if net.get("old_root") is None:
+        raise SystemExit("provision the replacement root first (provision root --replacement --first-term N)")
+    iss, _ = issuer()
+    cose = iss.handover(bytes.fromhex(net["old_root"]["device"]),
+                        (OBJECTS / f"{net.tag}replacement-root-delegation.cose").read_bytes(),
+                        net["old_root"]["generation"], a.term)
+    print(f"handover: {put_object(f'{net.tag}handover.cose', cose)} ({len(cose)} bytes, new term {a.term})")
+
+
+def cmd_backup(a: argparse.Namespace) -> None:
+    """The newest ledger backup the Host holds (taken from the root after its ledger changed)."""
+    net = Net(load_state(), a.net)
+    r = host_call(net, "GET", f"/v1/ledger/backup?domain_id={net['domain']}")
+    if "backup_b64" not in r:
+        raise SystemExit(f"no backup: {r}")
+    print(f"sequence {r['sequence']}, {r['records']} records, root {r['root_device_id'][:16]}.. (term {r['root_term']}), "
+          f"taken {r['taken_at']}")
+
+
+def cmd_restore(a: argparse.Namespace) -> None:
+    """LEDGER_RESTORE: the held backup (sequence S, default the newest) onto the replacement root, with the fleet's handover."""
+    import base64
+
+    net = Net(load_state(), a.net)
+    held = host_call(net, "GET", f"/v1/ledger/backup?domain_id={net['domain']}")
+    if "sequence" not in held:
+        raise SystemExit(f"the Host holds no backup: {held}")
+    sequence = a.sequence or held["sequence"]
+    handover = (OBJECTS / f"{net.tag}handover.cose").read_bytes()
+    r = host_control(net, {"type": "LEDGER_RESTORE", "expected_revision": str(sequence),
+                           "signed_cbor_b64": base64.b64encode(handover).decode()}, timeout=a.timeout)
+    print(f"restore of sequence {sequence}: {r.get('state')} {r.get('outcome')} {r.get('reason', '')}")
+
+
 def cmd_host_env(a: argparse.Namespace) -> None:
     net = Net(load_state(), a.net)
     port = (net["root"] or {}).get("port", "<root port>")
@@ -632,6 +699,8 @@ def main() -> int:
     q.add_argument("--port", required=True)
     q.add_argument("--name")
     net_option(q)
+    q.add_argument("--replacement", action="store_true", help="root only: the replacement of a failed root (needs --first-term)")
+    q.add_argument("--first-term", type=int, default=0, help="the first root term the replacement root publishes (>= 2)")
     q = sub.add_parser("cmd")
     q.add_argument("--port", required=True)
     q.add_argument("--timeout", type=float, default=10.0)
@@ -641,11 +710,24 @@ def main() -> int:
     q.add_argument("--timeout", type=float, default=120.0)
     q.add_argument("field")
     q.add_argument("value")
+    q = sub.add_parser("install")
+    q.add_argument("--port", required=True)
+    q.add_argument("--file", default="handover.cose")
+    q.add_argument("--type", type=int, default=31)
+    q.add_argument("--timeout", type=float, default=15.0)
     q = sub.add_parser("monitor")
     q.add_argument("--port", required=True)
     q.add_argument("--seconds", type=float, default=10.0)
     net_option(sub.add_parser("host-env"))
     net_option(sub.add_parser("approve"))
+    q = sub.add_parser("handover")
+    q.add_argument("--term", type=int, required=True, help="the first root term the replacement root publishes")
+    net_option(q)
+    net_option(sub.add_parser("backup"))
+    q = sub.add_parser("restore")
+    q.add_argument("--sequence", type=int, default=0)
+    q.add_argument("--timeout", type=float, default=120.0)
+    net_option(q)
     q = sub.add_parser("policy")
     q.add_argument("mode", nargs="?", choices=("CLOSED", "EXTERNAL", "PREAPPROVED"))
     net_option(q)
@@ -683,7 +765,8 @@ def main() -> int:
      "host-env": cmd_host_env, "approve": cmd_approve,
      "host-send": cmd_host_send, "expected": cmd_expected, "window": cmd_window,
      "revoke": cmd_revoke, "policy": cmd_policy, "transfer": cmd_transfer,
-     "reconcile": cmd_reconcile}[a.command](a)
+     "reconcile": cmd_reconcile, "handover": cmd_handover, "backup": cmd_backup,
+     "restore": cmd_restore, "install": cmd_install}[a.command](a)
     return 0
 
 

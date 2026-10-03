@@ -3,12 +3,14 @@ u64 = 0..18446744073709551615
 u32 = 0..4294967295
 id16 = bstr .size 16
 id32 = bstr .size 32
-request = [request-id: id16, method: 1..17, params: request-params]
+request = [request-id: id16, method: 1..22, params: request-params]
 request-params = nil / send / get-message / cancel / join-decide / install /
  node-query / group-query / host-ack / event-ack / channel-action / sleep-window / get-request / group-set / group-targets /
- policy-set
+ policy-set / ledger-backup-get / ledger-restore-handover / ledger-restore-header / ledger-restore-record
  ; 16 DIAGNOSTICS takes nil (the root's own health, on request only)
  ; 17 POLICY_SET: the root's join mode (lm_policy_set; 0 closed, 1 external, 2 preapproved), compare-and-set
+ ; 18 LEDGER_BACKUP_BEGIN takes nil (the root cuts its ledger and signs a backup header: ended by an OPERATION event)
+ ; 19 LEDGER_BACKUP_GET, 20 LEDGER_RESTORE_HANDOVER, 21 LEDGER_RESTORE_HEADER, 22 LEDGER_RESTORE_RECORD (docs/19 section 9)
 send = [destination: id32, message: id16, intent-hash: id32,
  app-port: 1..65534, flags: 0..63, root-term: u32, expires: u64,
  object-transfer: bool, payload: bstr .size (0..4096)]
@@ -38,3 +40,14 @@ group-set = [group-id: u32, expected-revision: u64, members: [* 64 id32]]
 group-targets = [operation-boot: u64, operation-id: u64, snapshot-token: id16, offset: 0..64, limit: 1..16]
 
 policy-set = [join-mode: 0..2, expected-revision: u64]
+
+; 19. index 0 is the signed header (control.cddl 34; seq 0 asks for the header of the backup held), 1..count the records of
+; its chain in the canonical order. A record is one Flash read: the root answers BUSY until it is in (ask again).
+; The result is a map {id: u16, data: bstr, count: u8, index: u8, state: u8} (header: id 0, data = the COSE).
+ledger-backup-get = [seq: u63, index: 0..68]
+; 20. the fleet's RootHandover (control 31) that names THIS root as the new one; 21. the old root's header (control 34);
+; 22. one record: in the order of the header, with the chain link after it. Each is accepted with an operation id and ends with
+; an OPERATION event; the last record (the manifest) ends it when the ledger is loaded.
+ledger-restore-handover = [handover: bstr .size (1..1024)]
+ledger-restore-header = [header: bstr .size (1..1024)]
+ledger-restore-record = [index: 0..67, record-id: u16, state: 0..255, payload: bstr .size (0..672), next: id32]

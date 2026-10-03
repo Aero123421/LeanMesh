@@ -84,6 +84,29 @@ class Issuer:
                           [self.fleet, key_id(public), public_cose(public), domain, generation,
                            permissions], 448)
 
+    def handover(self, old_root: bytes, new_delegation: bytes, old_generation: int, new_term: int,
+                 recovery_mode: int = 1) -> bytes:
+        """RootHandover (type 31, docs/21 section 8): the domain's root authority moves from `old_root` (delegation generation
+        `old_generation`) to the root `new_delegation` names, under that delegation's higher generation; `new_term` is the first
+        root term the new root publishes (it must be above every term the old root may still publish, which the fleet
+        knows and this tool cannot). recovery_mode 1: the old root failed, its ledger comes from a backup."""
+        positive(old_generation)
+        domain, generation, root = self.open(new_delegation, 2, 448)
+        public = public_from_cose(root[2])
+        new_root = key_id(public)
+        if (domain == ZERO_DOMAIN or root[0] != self.fleet or root[1] != new_root or root[3] != domain
+                or root[4] != generation):
+            raise ValueError("RootDelegation semantic binding mismatch")
+        if len(old_root) != 32 or old_root == new_root:
+            raise ValueError("the old root must be another device than the new root")
+        if not old_generation < generation:
+            raise ValueError("the new delegation generation must be above the old one")
+        if type(new_term) is not int or not 1 <= new_term <= 0xFFFFFFFF or recovery_mode not in (0, 1):
+            raise ValueError("new_term must be 1..2^32-1 and recovery_mode 0 or 1")
+        return self._sign(31, domain, generation,
+                          [secrets.token_bytes(16), old_root, new_root, old_generation, generation,
+                           sha256(new_delegation).digest(), new_term, recovery_mode], 1024)
+
     def _device(self, cose: bytes) -> list:
         domain, revision, dc = self.open(cose, 1, 448)
         public = public_from_cose(dc[1])

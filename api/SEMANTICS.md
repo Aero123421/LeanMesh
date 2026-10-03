@@ -13,6 +13,7 @@ OpenAPIは形、本文は横断制約。実装は両方を満たす。u63はJSON
 - TRANSFER: device_id、署名AssignmentTicket必須。source/target/generation/nonce検査。
 - INSTALL_CONTROL: signed_cbor_b64必須。typeとsender権限を検査。
 - POLICY_SET: `join_mode`（CLOSED/EXTERNAL/PREAPPROVED）必須、CONFIGURE権限。rootのpolicy revisionに対するCAS（`GET /v1/policy` の `revision`）で、rootが`lm_policy_set`としてcommitしてから適用する（serial method 17、HIL-F5）。PREAPPROVEDでもfleet署名ticketと署名済みexpected entryの要件は外れない。署名付きpolicy object（type 12）はSDKが未対応で、この操作では使わない。
+- LEDGER_RESTORE（issue #5）: `signed_cbor_b64`=交換rootを新rootと名指すfleet署名のRootHandover（type 31。type 31の権限＝CONFIGUREとTRANSFERの両方を要求）、`expected_revision`=復元するbackupのsequence（`GET /v1/ledger/backup`の`sequence`。Hostが保持する最新と違えば409 `details.current_revision`、保持が無ければ404）。任意の`backup_b64`は保持しているものの代わりに使うbackup（chain検証で壊れていれば400、保持より低いsequenceは409、sequenceが`expected_revision`と違えば400）で、通れば保持されるbackupになる。handoverのold_rootはbackupを作ったrootと一致し、domainのrootはそれかnew_root以外に結び付いていないこと（409）。Hostは交換root（台帳なし）へhandover→旧rootのheader→全recordを送り、rootの各段のOPERATION eventで終わる。APPLIED=rootが台帳を載せて準備完了（`ROOT_APPLIED`）。REJECTED=rootが拒否（`ROOT_REFUSED`、理由はrootのstatus名）。INDETERMINATE=途中の中断やrootが保証できない書込み失敗（台帳が無ければ同じ要求をやり直せる）。接続中のrootがdomainに結び付いたrootでない場合、Hostはこの復元が成功した場合に限りその結び付きを旧→新へ移す（それ以外は従来のROOT_MISMATCH）。
 - CHANNEL_FREEZE: freeze boolean必須。committed planの取消にはならない。
 - CHANNEL_RECALCULATE: root coordinatorへの再評価要求だけ。成功したと偽ってchannelを直接書かない。
 不要なmode-specific fieldは400。不正署名403、古いrevision409、unknown mandatory capability503/UNSUPPORTED。error.detailsにはcurrent_revision/required_capability等だけを載せ、secretを返さない。
@@ -46,3 +47,7 @@ DeviceIdだけでなくassignment/membership世代を送信snapshotへ含める�
 UTC期限を過ぎた未送信QUEUED要求はserial接続無しでも最大64件ずつEXPIREDにし、受付枠を解放する。外部書込みの可能性がある要求はrootとのreconcile対象で、Host時計で終端到達を推定しない。root期限はUTCとして扱わない。LATESTは同principal/domain/destination/port/keyの未送信旧要求だけを同一transactionで置換し、未完了枠の正味増分で受付を判断する。保存・証拠容量不足なら旧要求を残して拒否する。
 
 Host dispatchは永続cursorによる8枠のweighted round robin: CONTROL, URGENT, NORMAL, URGENT, URGENT, BULK, URGENT, NORMAL。空classは飛ばし、class内は既存operationsのrowidによるcommit挿入順（UTC補正や同msの乱数IDで順序を変えない）。継続負荷でも通常・BULK枠を維持する。これはclaim回数の上限であり実無線遅延秒数の保証ではない。
+
+## Ledger backup（issue #5）
+`GET /v1/ledger/backup?domain_id=`（CONFIGURE。台帳のmemberとcredentialを列挙するのでREADでは足りない）: そのdomainのrootから取って保持している最新のbackup。domainごとに1つ、sequenceの高いものだけが残り、低いsequenceが高いものを置き換えない。Hostは台帳が変わった後（membership event、rootの制御operationの終了）と、session開始時にrootへ新しいbackupを求める（変更から最短`LEANMESH_BACKUP_DEBOUNCE_S`=5秒後、前回の取得から`LEANMESH_BACKUP_MIN_INTERVAL_S`=30秒以上、いずれも1秒未満にできない。失敗は5/10/20/40/60秒の間隔で最大10回、変更が無い間は何も問い合わせない）。`sequence`はrootが署名前に永続する単調な番号で、交換rootに引き継がれる。`backup_b64`は`[1, signed header (control 34), [[record id, state, payload, next], ...]]`のCBOR。Hostはrecordがheaderのhash chainと一致することまでを確かめ、署名の検証は復元されるrootが行う。保持するbackupが無ければ404。古いfirmwareのrootがserial method 18を答えない場合、そのsessionではbackupを求めない。
+

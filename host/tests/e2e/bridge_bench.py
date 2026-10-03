@@ -133,9 +133,11 @@ class Bench:
         assert sim.ok("route 1 0 0")["status"] == "OK"
 
     # ---- the Host ----------------------------------------------------------------------------
-    def start_host(self, crash: str | None = None, perms: list[str] | None = None) -> HostProcess:
+    def start_host(self, crash: str | None = None, perms: list[str] | None = None,
+                   env_extra: dict[str, str] | None = None) -> HostProcess:
         """Fresh uvicorn on the same directory/database. `crash` = "<stage>:<function>" arms a SIGKILL of
-        the Host at that storage-transaction boundary (crash_bridge_app.py). `perms`: the token's permissions."""
+        the Host at that storage-transaction boundary (crash_bridge_app.py). `perms`: the token's permissions.
+        `env_extra`: more environment (settings) for this Host."""
         from harness import native_build_dir  # noqa: PLC0415
 
         wd = self.workdir
@@ -147,6 +149,7 @@ class Bench:
                    LEANMESH_SERIAL=self.sim.ready["serial_pty"], LEANMESH_USB_KIT=str(self.kit),
                    LEANMESH_NATIVE_BUILD=str(native_build_dir()),
                    PYTHONPATH=os.pathsep.join([str(HOST_DIR), str(HERE)]))
+        env.update(env_extra or {})
         if crash:
             env["LEANMESH_BRIDGE_CRASH"] = crash
         proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "--factory", "crash_bridge_app:make",

@@ -235,7 +235,7 @@ def cddl_bounds():
     assert 'transfer-start =' not in text
     assert 'bitmap' not in load('protocol/registry.json')['control_types']
     assert 'bstr .size (0..4096)' in serial
-    assert 'type: (1..21 / 25..33)' in text
+    assert 'type: (1..21 / 25..34)' in text
     return {'selected_cross_contract_checks':True,'formal_cddl_grammar_and_cbor_instance_validation':False}
 
 def airtime():

@@ -91,6 +91,17 @@ struct PolicySetRequest {
     uint64_t expected_revision;
 };
 
+// [ISSUE5] Requests of CommandKind::RootLedgerBackup / RootLedgerRestore (serial methods 18..22, root builds only).
+struct LedgerBackupRequest {
+    uint8_t get = 0;   // 0: begin a backup; 1: read one page of backup `seq` (response: root::Ledger::BackupPage)
+    uint64_t seq = 0;
+    uint32_t index = 0;
+};
+struct LedgerRestoreRequest {
+    uint8_t step = 0;  // 0: the handover (cmd.payload), 1: the old root's header (cmd.payload), 2: one record
+    root::LedgerType::RestoreElement element;
+};
+
 class Engine {
   public:
     Engine(const EngineConfig &config, Ports ports);

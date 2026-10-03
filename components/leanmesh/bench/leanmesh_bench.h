@@ -40,6 +40,13 @@ lm_status_t lmb_provision_leaf(const uint8_t trust88[88], const uint8_t *device_
 lm_status_t lmb_provision_root(const uint8_t trust88[88], const uint8_t *device_cose, size_t device_len,
                                const uint8_t *delegation_cose, size_t delegation_len, const uint8_t host_id[32]);
 
+/* A REPLACEMENT root (issue #5, docs/21 section 8): the same domain under a higher delegation generation, its credential one
+   term below `first_term` (>= 2: the first term the fleet's RootHandover names, which its first boot publishes) and NO
+   ledger: the board is RECOVERY_REQUIRED until the old root's signed backup is restored onto it (serial methods 20..22). */
+lm_status_t lmb_provision_replacement_root(const uint8_t trust88[88], const uint8_t *device_cose, size_t device_len,
+                                           const uint8_t *delegation_cose, size_t delegation_len,
+                                           const uint8_t host_id[32], uint32_t first_term);
+
 /* Bench debugging: one text line of SDK internals (mesh attach state, candidates, link handshake and RX counters,
    end-session counters, neighbours). Reads owner state without the owner (racy counters, bench use only). */
 lm_status_t lmb_debug(lm_context_t *ctx, char *out, size_t cap);

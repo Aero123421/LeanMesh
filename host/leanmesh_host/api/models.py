@@ -19,6 +19,10 @@ U63Str = Annotated[str, StringConstraints(pattern=r"^(0|[1-9][0-9]{0,18})$"),
                    AfterValidator(lambda v: (parse_u63(v), v)[1])]
 Base64Str = Annotated[str, StringConstraints(max_length=5500),
                       AfterValidator(lambda v: (decode_b64(v), v)[1])]
+# A ledger backup (db/ledger_backup.py): up to 68 records of 672 B and the header, as one base64 blob.
+MAX_BACKUP_BYTES = 49152
+Base64Backup = Annotated[str, StringConstraints(max_length=(MAX_BACKUP_BYTES + 2) // 3 * 4),
+                         AfterValidator(lambda v: (decode_b64(v), v)[1])]
 
 MAX_MESSAGE_BYTES = 512
 MAX_OBJECT_BYTES = 4096
@@ -121,8 +125,9 @@ class ControlRule:
     """Fields a control type requires (all others are 400) and the permissions it needs."""
 
     def __init__(self, fields: tuple[str, ...], permissions: tuple[str, ...],
-                 capability: str | tuple[str, ...] | None = None) -> None:
+                 capability: str | tuple[str, ...] | None = None, optional: tuple[str, ...] = ()) -> None:
         self.fields = fields
+        self.optional = optional
         self.permissions = permissions
         self.capability = (capability,) if isinstance(capability, str) else capability
 
@@ -143,8 +148,13 @@ CONTROL_RULES = {
     "COMMISSIONING_WINDOW_SET": ControlRule(("signed_cbor_b64",), ("APPROVE",),
                                             "COMMISSIONING_WINDOW"),
     "ROOT_HANDOVER": ControlRule(("signed_cbor_b64",), ("CONFIGURE", "TRANSFER"), "ROOT_HANDOVER"),
+    # Issue #5: the replacement root gets the ledger of the old one back. signed_cbor_b64 is the fleet's RootHandover (type 31)
+    # that names the replacement root, so it needs the permissions of that object; expected_revision is the sequence of the
+    # backup restored. `backup_b64`: a backup to use instead of the one the Host holds (it must be at least as new).
+    "LEDGER_RESTORE": ControlRule(("signed_cbor_b64",), ("CONFIGURE", "TRANSFER"), optional=("backup_b64",)),
 }
-_OPTIONAL = ("device_id", "signed_cbor_b64", "decision", "leave_mode", "freeze", "group_id", "members", "join_mode")
+_OPTIONAL = ("device_id", "signed_cbor_b64", "decision", "leave_mode", "freeze", "group_id", "members", "join_mode",
+             "backup_b64")
 
 
 class ControlRequest(Strict):
@@ -153,7 +163,7 @@ class ControlRequest(Strict):
     expected_revision: U63Str
     type: Literal["JOIN_DECISION", "LEAVE", "REVOKE", "TRANSFER", "INSTALL_CONTROL", "POLICY_SET",
                   "CHANNEL_FREEZE", "CHANNEL_RECALCULATE", "GROUP_SET", "POWER_POLICY_SET",
-                  "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER"]
+                  "COMMISSIONING_WINDOW_SET", "ROOT_HANDOVER", "LEDGER_RESTORE"]
     request_id: Id16
     device_id: DeviceIdStr | None = None
     signed_cbor_b64: Base64Str | None = None
@@ -163,13 +173,15 @@ class ControlRequest(Strict):
     group_id: Annotated[int, Field(ge=1, le=0xFFFFFFFF)] | None = None
     members: Annotated[list[DeviceIdStr], Field(max_length=64)] | None = None
     join_mode: Literal["CLOSED", "EXTERNAL", "PREAPPROVED"] | None = None
+    backup_b64: Base64Backup | None = None
 
     @model_validator(mode="after")
     def _mode_specific_fields(self) -> ControlRequest:
         rule = CONTROL_RULES[self.type]
         present = {f for f in _OPTIONAL if getattr(self, f) is not None}
-        if present != set(rule.fields):
-            raise ValueError(f"{self.type} takes exactly the fields {sorted(rule.fields)}")
+        if not set(rule.fields) <= present <= set(rule.fields) | set(rule.optional):
+            raise ValueError(f"{self.type} takes exactly the fields {sorted(rule.fields)}"
+                             + (f" and optionally {sorted(rule.optional)}" if rule.optional else ""))
         if self.members is not None and len(set(self.members)) != len(self.members):
             raise ValueError("members must be unique")  # an empty set is valid and means nobody
         if self.signed_cbor_b64 is not None:
@@ -195,5 +207,5 @@ SIGNED_OBJECT_PERMISSIONS: dict[int, tuple[str, ...]] = {
     21: ("CONFIGURE",), 26: ("UPDATE_FIRMWARE",), 29: ("CONFIGURE",), 30: ("APPROVE",), 31: ("CONFIGURE", "TRANSFER"),
 }
 SIGNED_OBJECT_TYPE_OF = {"REVOKE": 11, "TRANSFER": 3, "POWER_POLICY_SET": 29,
-                         "COMMISSIONING_WINDOW_SET": 30, "ROOT_HANDOVER": 31}
+                         "COMMISSIONING_WINDOW_SET": 30, "ROOT_HANDOVER": 31, "LEDGER_RESTORE": 31}
 SIGNED_OBJECT_SUBJECT = frozenset({3, 11, 29})  # the first DeviceId of the object data is the device it is about

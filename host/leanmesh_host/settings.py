@@ -50,6 +50,10 @@ class Settings:
     principal_burst: int = 40
     global_rps: float = 100.0
     global_burst: int = 100
+    # Issue #5: when the Host asks the root for a ledger backup after a change (bridge/ledger.py). Never below one second:
+    # nothing here polls faster than the bridge's own one-second poll.
+    ledger_backup_debounce_s: float = 5.0
+    ledger_backup_min_interval_s: float = 30.0
 
     @staticmethod
     def from_env() -> Settings:
@@ -62,11 +66,20 @@ class Settings:
         def number(name: str, default: float) -> float:
             return float(os.environ.get(name, default))
 
+        def at_least_one(name: str, default: float) -> float:
+            value = number(name, default)
+            if value < 1.0:
+                raise SettingsError(f"{name} must be at least 1 second")
+            return value
+
         return Settings(
             principal_rps=number("LEANMESH_PRINCIPAL_RPS", Settings.principal_rps),
             principal_burst=int(number("LEANMESH_PRINCIPAL_BURST", Settings.principal_burst)),
             global_rps=number("LEANMESH_GLOBAL_RPS", Settings.global_rps),
             global_burst=int(number("LEANMESH_GLOBAL_BURST", Settings.global_burst)),
+            ledger_backup_debounce_s=at_least_one("LEANMESH_BACKUP_DEBOUNCE_S", Settings.ledger_backup_debounce_s),
+            ledger_backup_min_interval_s=at_least_one("LEANMESH_BACKUP_MIN_INTERVAL_S",
+                                                      Settings.ledger_backup_min_interval_s),
             db_path=Path(required("LEANMESH_DB")),
             tokens_path=Path(required("LEANMESH_TOKENS")),
             # db/schema.sql is the normative schema; packaging copies it next to the package.

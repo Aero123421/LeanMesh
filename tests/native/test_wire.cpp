@@ -613,7 +613,7 @@ LM_TEST("control types: 22..24 and undefined types rejected, session vs signed c
     LM_CHECK_OK(decode_control_body(view(probe(16, 1)), ControlCarrier::Session, b));
     LM_CHECK(decode_control_body(view(probe(16, 1)), ControlCarrier::Signed, b) ==
              Status::AuthRejected);
-    for (const uint8_t t : {0, 22, 23, 24, 34, 200}) {
+    for (const uint8_t t : {0, 22, 23, 24, 35, 200}) {
         LM_CHECK(decode_control_body(view(probe(t, 1)), ControlCarrier::Session, b) ==
                  Status::Unsupported);
         LM_CHECK(!is_control_type_defined(t));
@@ -623,7 +623,7 @@ LM_TEST("control types: 22..24 and undefined types rejected, session vs signed c
     // data of another type's shape is refused even though it is valid CBOR (no cross product).
     Bytes wrong = probe(15, 1); // RouteQuery expects [id32, u32]
     LM_CHECK(decode_control_body(view(wrong), ControlCarrier::Session, b) == Status::BadFrame);
-    for (uint8_t t = 1; t <= 33; ++t) {
+    for (uint8_t t = 1; t <= 34; ++t) { // 34: LedgerBackup (ISSUE5)
         LM_CHECK_EQ(is_control_type_defined(t), t != 22 && t != 23 && t != 24);
     }
     for (const uint8_t t : gen::k_signed_control_types) {

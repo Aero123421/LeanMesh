@@ -66,7 +66,10 @@ A→Bは07章のsigned replacementを使う。A側のPC停止、Aの電源を抜
 
 計画交換は旧root drain→署名objectを配布→各Node stored証拠→新root起動→各Node fresh authentication/route再登録。旧rootが故障している場合も新rootは手順を開始できるが、届いていないNodeは旧rootを待つ場合がある。全域が同時切替したとは言わない。
 
-新rootは検証済み台帳backup/署名assignmentから構成する。old deviceのidentityやinflight命令を無条件再実行しない。root termが変わった有限期限commandは08章のINDETERMINATE→アプリ再照合へ。旧rootの再出現は高いdelegation floorで拒否し、二つのrootをactive運用しない。
+新rootは検証済み台帳backup/署名assignmentから構成する。old deviceのidentityやinflight命令を無条件再実行しない。
+
+**台帳backupの取得と復元（issue #5）。** Hostは台帳が変わった後（membership event、rootの制御operationの終了、session開始時）にrootからsigned backupを取り、domainごとにsequenceが最も高い1つをSQLiteに保持する（低いsequenceで置き換えない）。旧rootが故障したら、運用者は交換rootを新DeviceIdとfleet署名のdelegation（上位generation）で用意し、fleetが旧→新のRootHandoverを署名する。HostはPOST /v1/control `LEDGER_RESTORE`（`signed_cbor_b64`=そのRootHandover、`expected_revision`=復元するbackupのsequence）で、handover → 旧rootのheader → 全recordをserial 20〜22でrootへ送る。交換rootは各段を検証してから書き（[12章 §5](12-storage.md)）、manifestを最後に書いて準備完了になる。Hostは、この復元が成功した場合に限り、domainに結び付いたrootを旧→新へ付け替える（それ以外の別rootはROOT_MISMATCHのまま）。memberはその後、各自のhandover保存と再認証（上のS18-D9）で新rootに従い、台帳が既に載せているので新しいticket・expected entry・承認は要らない。
+限界：復元できるのは最後に取れたbackupまで（それ以降の入会・失効・離脱は含まれない。backup後に旧rootで起きた失効はfleet/Hostの失効記録で再投入する）。backupが無ければ従来どおりRECOVERY_REQUIREDで止まる（空の台帳で再開しない）。Hostはheaderの署名を検証せず（chain整合のみ）、署名の検証は復元される交換rootが行う。root termが変わった有限期限commandは08章のINDETERMINATE→アプリ再照合へ。旧rootの再出現は高いdelegation floorで拒否し、二つのrootをactive運用しない。
 
 backup喪失時は、fleetの現行inventory/失効記録が得られる範囲で再認証する。現行の失効floorを知らないまま全員許可する「簡単復旧」は提供しない。物理的に完全複製されたroot鍵の排除は別のcustody問題であり、ネットワークだけで解決できるとは言わない。
 

@@ -52,3 +52,9 @@ bootstrap credential取得と候補contextの交換は認証前にはhintにす�
 ## 10. Powerとの横断契約
 RAM session再利用はtraffic keyだけでなく送信counter・受信window・完全peer identity・credential世代・authorization/key lifetimeの経過上限が保持できる時だけ。Light Sleepしただけでcounter=0に戻さない。相手のrestartはそのsessionを無効化し、全網Joinへ拡大しない。Deep Sleep復帰に新規人間承認を要求しないが、fresh EDHOCの演算/airtimeは発生する。停電復帰を「認証CPU負荷ゼロ」と呼ばない。
 Root/Host停止中の通信継続は既存path/session/有限authorization leaseが有効な範囲であり、無期限ではない。lease終了後は暗号上の認可を維持できない操作を保留し、アプリへ理由を返す。
+
+## 11. 台帳backup（issue #5）の信頼
+rootの台帳backup（control type 34）は、**現rootがdevice keyで署名する1つのheader**で成り立つ。headerはdomain、rootのDeviceId、rootのfleet署名RootDelegation（公開鍵への連鎖）、delegation世代、署名時のroot_term、単調なbackup sequence、台帳のchange point、recordの存在と内容のhash chain先頭を固定する。復元先（交換root）は、fleet trust anchor → headerの中の旧RootDelegation → 旧rootの署名と検証し、domain・handoverの旧root・旧generationの一致を要求する。recordはheaderのhash chainで1件ずつ書く前に検証する（署名は1つ、recordごとの署名はしない）。署名はrootのpublic-key worker jobで行い、ownerでは行わない。
+- backupに秘密は無い。entryはDeviceId・世代・request id・hash・rootが発行したMemberCredential COSE（公開情報）、floors/groups/policyは数値とid。root秘密鍵、identity、session鍵は入らない。ただしmemberのリストと資格は載るので、Hostの取得APIにはCONFIGURE権限を要求する。
+- backupはrootの権限を移さない。交換rootが台帳を受けるには、fleet署名のRootHandoverがそのrootを新rootと名指すこと（旧rootの鍵は使わず、新DeviceIdとdelegationを持つ）が必須で、旧rootの署名だけでは受理されない。古いbackupによる巻き戻し（失効・離脱の取消）は、交換rootが自分の知るsequence以上を要求して拒否し、Hostも最新sequenceだけを保持する。限界：backup後の変更は含まれない。
+
