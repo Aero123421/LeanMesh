@@ -69,19 +69,22 @@ measured by the sequence number, not by receipts.
 ### 3.2 Ping (Host -> node), app_port 211
 
 The laptop checks every node at once (one request per node), once or in a loop (interval >= 1 s). Host request:
-`delivery APPLIED`, `storage VOLATILE`, `queue_mode LATEST` with `coalesce_key` = 211 (a newer round replaces an unsent
-older one), priority NORMAL, deadline = min(loop interval, 3 s) (never longer than 3 s; a ping is never kept).
+`delivery APPLIED`, `storage VOLATILE`, `queue_mode FIFO` (the Host allows LATEST / `coalesce_key` only with
+BEST_EFFORT + VOLATILE), priority NORMAL, deadline (UTC, converted by the Host on its bound of the root clock) =
+min(loop interval, 3 s): a ping is never kept, so rounds of a loop cannot pile up.
 
 Payload: `u8 version = 1, u32 round`. The node application reports `lm_report_application_result(APPLIED)` at once, with
 no result bytes. Alive = the operation ends APPLIED (evidence APP_APPLIED). RTT = `APP_APPLIED.observed_mono_ms -
-ROOT_SENT.observed_mono_ms` (both on the root's clock; fall back to END_RECEIVED when APP_APPLIED has no time).
+ROOT_SENT.observed_mono_ms` (both on the root's clock; fall back to END_RECEIVED when APP_APPLIED has no time). The
+current Host does not fill `observed_mono_ms`; fieldview then measures POST -> final event on the laptop and marks the
+value as laptop-measured (it includes the Host's own latency).
 A request the Host or root refuses (RATE_LIMITED, NO_CAPACITY, BUSY ...) is "not sent", counted apart from "no answer"
 (EXPIRED / INDETERMINATE).
 
 ### 3.3 Display state (Host -> display), app_port 212
 
 Payload: `u8 version = 1, u8 state (0 USABLE, 1 FORBID), u32 command_seq`. Host request: `delivery APPLIED`,
-`storage VOLATILE`, `queue_mode LATEST`, `coalesce_key` = 212, priority NORMAL, deadline 10 s.
+`storage VOLATILE`, `queue_mode FIFO`, priority NORMAL, deadline 10 s (UTC).
 
 The display draws the state and, when the frame is on the panel, reports APPLIED; if it cannot draw, REJECTED. It
 stores the last applied state and seq in NVS and shows it again after a restart (telemetry flags carry it). A node that
