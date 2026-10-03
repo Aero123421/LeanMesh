@@ -48,10 +48,11 @@ tr.st-silent td, tr.st-left td, tr.st-lost td { color: var(--mute); }
 .chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--bg); border: 1px solid var(--line); }
 .chip.good { border-color: var(--good); color: var(--good); } .chip.bad { border-color: var(--poor); color: var(--poor); }
 .q-good { color: var(--good); } .q-fair { color: var(--fair); } .q-poor { color: var(--poor); }
-.r-alive { color: var(--good); } .r-noanswer { color: var(--poor); } .r-rejected { color: var(--fair); } .r-notsent { color: var(--mute); }
+.r-alive { color: var(--good); } .r-noanswer { color: var(--poor); } .r-rejected { color: var(--fair); } .r-notsent { color: var(--mute); } .r-unknown { color: var(--fair); } .r-skipped { color: var(--mute); } .r-late { color: var(--good); }
 .dots span { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 2px; background: var(--unknown); }
 .dots .alive { background: var(--good); } .dots .noanswer { background: var(--poor); } .dots .rejected { background: var(--fair); }
-.dots .notsent { background: transparent; border: 1px solid var(--unknown); }
+.dots .notsent, .dots .skipped { background: transparent; border: 1px solid var(--unknown); }
+.dots .unknown { background: var(--fair); opacity: .55; }
 .log { max-height: 280px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .log div { border-bottom: 1px solid var(--line); padding: 1px 0; }
 .log .k { display: inline-block; min-width: 6em; color: var(--mute); }
