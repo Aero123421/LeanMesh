@@ -122,6 +122,15 @@ async def submit_message(body: MessageRequest, request: Request, idempotency_key
 
 
 # ---- control ------------------------------------------------------------------------------------
+def _ticket_source(data: bytes) -> bytes | None:
+    """The source domain of an AssignmentTicket (control 3: [device, fleet, source, target, ...]); None if it has none."""
+    try:
+        source = cbor_decode(data)[2]
+    except (WireError, IndexError, TypeError):
+        return None
+    return bytes(source) if isinstance(source, bytes) else None
+
+
 def _check_signed_object(p: Principal, body: ControlRequest, signed: bytes, domain: bytes) -> None:
     """FIX11-D13: the permission, the domain and the subject are those of the decoded object, checked before the commit.
     The signature and the authority stay the root's to verify."""
@@ -138,8 +147,10 @@ def _check_signed_object(p: Principal, body: ControlRequest, signed: bytes, doma
         raise invalid(f"{body.type} takes a control object of type {expected}, not {ctl.type}")
     need_all(p, needed)
     # A fleet-issued RevokeObject (type 11) is domain-agnostic (zero domain, docs/06 §revocation); every other object
-    # names the domain it is for.
-    if ctl.domain != domain and not (ctl.type == 11 and ctl.domain == bytes(16)):
+    # names the domain it is for. A transfer ticket (type 3) is signed for its TARGET domain; the Host of its SOURCE domain
+    # installs the same ticket on its root to tell it of the move (docs/07 §8 old_domain_reconciliation, HIL 2026-10-03).
+    fleet_revocation = ctl.type == 11 and ctl.domain == bytes(16)
+    if ctl.domain != domain and not fleet_revocation and not (ctl.type == 3 and _ticket_source(ctl.data) == domain):
         raise invalid("the signed object names another domain than the request")
     if body.device_id is not None and ctl.type in SIGNED_OBJECT_SUBJECT and bytes.fromhex(body.device_id) != cbor_decode(ctl.data)[0]:
         raise invalid("the signed object is about another device than device_id")

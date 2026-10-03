@@ -1,15 +1,15 @@
 # ベンチ手順: 移設（TRANSFER）— 2 つの root
 
 domain A の ACTIVE な leaf を、fleet 署名の移設 ticket で domain B へ移す手順（docs/07 §8、[発行ツール](../sdk/fleet-issuer.md)）。
-**ソフトウェア側は sim で検証済み（`tests/native/issuer_driver.cpp` の `transfer`）。実機での移設は未実施**で、
-この手順を実機で通した結果は別に記録する。ベンチ用のツールであり、製品の provisioning ではない。
+**ソフトウェア側は sim で検証済み（`tests/native/issuer_driver.cpp` の `transfer`）。実機の結果は [2026-10-03-transfer.md](2026-10-03-transfer.md)**（mode 0、root B は XIAO C6）。
+ベンチ用のツールであり、製品の provisioning ではない。
 
 ## 構成
 
 | 役割 | ボード | 備考 |
 |---|---|---|
 | root A | ESP32-S3（`scripts/hil.sh build root esp32s3`） | 既存のベンチ。Host A の USB serial |
-| root B | もう 1 枚の ESP32-S3（同じ build） | **別の USB port、別の Host プロセス** |
+| root B | もう 1 枚の ESP32-S3、または ESP32-C6（`build root esp32c6`） | **別の USB port、別の Host プロセス** |
 | leaf | C3 / C6（`build leaf <target>`） | console は leaf だけ（root は provisioning 後は console なし） |
 
 root A と root B は同じ fleet（`hil.py init` の fleet 鍵）が署名する別 domain。Host は 1 台の root に 1 プロセスなので、

@@ -548,6 +548,11 @@ def test_fix11_signed_object_needs_the_permission_of_its_decoded_type(tmp_path: 
         fleet_wide = signed_object(11, [bytes.fromhex(NODE), 1, 1, 0, 1], domain="00" * 16)  # a fleet revocation: no domain
         assert install("all", ea, fleet_wide).status_code == 202
         assert install("all", ea, signed_object(12, POLICY_OBJECT, domain="00" * 16)).status_code == 400
+        # A transfer ticket is signed for its target domain: the source domain's Host installs it to reconcile its root
+        # (docs/07 §8); a ticket that names neither domain as this one is refused.
+        moved = [*TRANSFER_TICKET[:2], bytes.fromhex(DOMAIN), b"\xe1" * 16, *TRANSFER_TICKET[4:]]
+        assert install("all", ea, signed_object(3, moved, domain="e1" * 16)).status_code == 202
+        assert install("all", ea, signed_object(3, TRANSFER_TICKET, domain="e1" * 16)).status_code == 400
         assert install("all", ea, revoke, "REVOKE", device_id=NODE).status_code == 202
         policy = signed_object(12, [1, 1, bytes(32), b"\x00"])  # a policy object: CONFIGURE is enough
         assert install("cfg", e, policy).status_code == 202
