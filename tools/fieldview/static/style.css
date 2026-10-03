@@ -69,3 +69,4 @@ svg .node.group rect { stroke: var(--fair); stroke-dasharray: 2 3; }
 svg .link { fill: none; stroke-width: 3; }
 svg .link.good { stroke: var(--good); } svg .link.fair { stroke: var(--fair); } svg .link.poor { stroke: var(--poor); }
 svg .link.unknown { stroke: var(--unknown); stroke-dasharray: 5 4; stroke-width: 2; }
+svg .link-label { paint-order: stroke; stroke: var(--card); stroke-width: 3px; }

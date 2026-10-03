@@ -70,7 +70,7 @@ function drawTopology(tree) {
         const label = [c.rssi !== null && c.rssi !== undefined ? c.rssi + " dBm" : null,
                        c.loss_pct !== null && c.loss_pct !== undefined ? "loss " + c.loss_pct.toFixed(0) + "%" : null]
           .filter(Boolean).join("  ");
-        if (label) linkLayer.append(s("text", { class: "sub", x: (x1 + x2) / 2 + 4, y: my - 2 }, label));
+        if (label) linkLayer.append(s("text", { class: "sub link-label", x: x2, y: y2 - 6, "text-anchor": "middle" }, label));
       }
     }
   }
