@@ -11,7 +11,7 @@ from typing import Any
 from .cbor import WireError, _bad, cbor_decode, cbor_encode
 
 COSE_MAX_BYTES = 4096
-SIGNED_TYPES = frozenset({1, 2, 3, 4, 5, 11, 12, 19, 21, 26, 29, 30, 31, 32})
+SIGNED_TYPES = frozenset({1, 2, 3, 4, 5, 11, 12, 19, 21, 26, 29, 30, 31, 32, 34})
 SOCS = ("esp32c3", "esp32s3", "esp32c5", "esp32c6")
 U32, U63, U64 = 2**32 - 1, 2**63 - 1, 2**64 - 1
 
@@ -57,6 +57,7 @@ SHAPES: dict[int, list[Any]] = {
     32: [_U32, _U63, _ID16, _ID32, ("u", 0, 64), ("u", 0, 4), _ID32,
          ("list", 0, 16, ("tuple", [_ID32, _U63, _U63]))],
     33: [_U32, _U63, ("u", 0, 4), ("null", _ID16)],
+    34: [_U63, _U32, _U63, ("b", 1, 448), _U63, _U64, ("u", 0, 7), _ID32],  # LedgerBackup (ISSUE5)
 }
 
 

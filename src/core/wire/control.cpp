@@ -83,6 +83,9 @@ constexpr Field s_commissioning[] = {kId16, kU32, kU63, kU64, kU64, U(1, 64), U(
 constexpr Field s_handover[] = {kId16, kId32, kId32, kU63, kU63, kId32, kU32, U(0, 1)};
 constexpr Field s_group_snapshot[] = {kU32, kU63, kId16, kId32, U(0, 64), U(0, 4), kId32, kTargets};
 constexpr Field s_group_request[] = {kU32, kU63, U(0, 4), kNullId16};
+// 34 LedgerBackup (ISSUE5): seq, root term, delegation generation, the root's RootDelegation COSE, change point, entry mask,
+// extras, hash chain head. The mask is a plain u64 (bit i: ledger slot i).
+constexpr Field s_ledger_backup[] = {kU63, kU32, kU63, Bs(1, 448), kU63, kU64, U(0, 7), kId32};
 
 struct TypeShape {
     uint8_t type;
@@ -107,6 +110,7 @@ constexpr TypeShape k_shapes[] = {
     LM_SHAPE(28, s_sleep),              LM_SHAPE(29, s_power_policy),
     LM_SHAPE(30, s_commissioning),      LM_SHAPE(31, s_handover),
     LM_SHAPE(32, s_group_snapshot),     LM_SHAPE(33, s_group_request),
+    LM_SHAPE(34, s_ledger_backup),
 };
 #undef LM_SHAPE
 
