@@ -136,6 +136,12 @@ class Net:
         return os.environ.get(f"LEANMESH_HIL_SOCK_{self.name.upper()}", f"{first.removesuffix('.sock')}-{self.name}.sock")
 
 
+def root_delegation_file(net: Net) -> str:
+    """The RootDelegation of the network's CURRENT root: after `provision root --replacement` that is the replacement's
+    (a ticket names its root's delegation by hash: one for the old root is refused as NETWORK_MISMATCH, HIL 2026-10-04)."""
+    return f"{net.tag}{'replacement-root' if net.get('old_root') is not None else 'root'}-delegation.cose"
+
+
 def all_nets(state: dict) -> list[Net]:
     return [Net(state), *(Net(state, n) for n in state.get("nets", {}))]
 
@@ -311,7 +317,7 @@ def cmd_provision(a: argparse.Namespace) -> None:
         if any(name in n["leaves"] for n in all_nets(state)):
             raise SystemExit(f"a board named {name!r} exists already")
         dc = iss.device(public, f"hil-{name}-{device.hex()[:8]}", 1)
-        delegation = (OBJECTS / f"{net.tag}root-delegation.cose").read_bytes()
+        delegation = (OBJECTS / root_delegation_file(net)).read_bytes()
         net["expected_revision"] += 1  # one admission batch per board, never a revision twice
         files = iss.admission([dc], delegation, net["assignment"], net["expected_revision"])
         ticket = files[f"ticket-{device.hex()}.cose"]
@@ -619,7 +625,7 @@ def cmd_transfer(a: argparse.Namespace) -> None:
     old = int(st["assign"])
     new = a.new_generation or old + 1
     dc = (OBJECTS / leaf.get("dc", f"{a.leaf}-device.cose")).read_bytes()
-    delegation = (OBJECTS / f"{dst.tag}root-delegation.cose").read_bytes()
+    delegation = (OBJECTS / root_delegation_file(dst)).read_bytes()
     nonce = None
     if not a.grant:
         # The nonce is RAM only: do not restart the board between this and the join.
