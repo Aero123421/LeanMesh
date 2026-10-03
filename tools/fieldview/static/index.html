@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeanMesh field view</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>LeanMesh field view</h1>
+  <div id="chips"></div>
+</header>
+<div id="warnings" class="warnings" hidden></div>
+
+<main>
+  <section class="card" id="topo-card">
+    <h2>Topology <span class="legend">
+      <i class="sw good"></i>good <i class="sw fair"></i>fair <i class="sw poor"></i>poor <i class="sw unknown"></i>no data / silent
+    </span></h2>
+    <div id="topo-note" class="note"></div>
+    <div id="topo" class="scroll"></div>
+  </section>
+
+  <section class="side">
+    <div class="card">
+      <h2>Ping</h2>
+      <div class="row">
+        <button id="ping-now">Ping all now</button>
+        <label>every <input id="ping-interval" type="number" min="1" step="0.5" value="5"> s</label>
+        <button id="ping-start">Start loop</button>
+        <button id="ping-stop" class="secondary">Stop</button>
+      </div>
+      <div id="ping-status" class="note"></div>
+      <div id="ping-error" class="error" hidden></div>
+      <div class="scroll"><table class="mini" id="rounds"><thead><tr><th>round</th><th>UTC</th><th>nodes</th><th title="APPLIED">alive</th>
+        <th title="sent, no answer by the deadline">no answer</th><th title="the node answered REJECTED">rejected</th>
+        <th title="refused or never left: not RF loss">not sent</th><th>open</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>Display</h2>
+      <div class="row">
+        <select id="display-node"></select>
+        <button id="display-usable" class="ok">USABLE</button>
+        <button id="display-forbid" class="bad">FORBID</button>
+      </div>
+      <div id="display-error" class="error" hidden></div>
+      <div id="display-result" class="note">No display node reported yet (telemetry role 3).</div>
+    </div>
+  </section>
+</main>
+
+<section class="card">
+  <h2>Nodes</h2>
+  <div class="scroll">
+  <table id="nodes">
+    <thead><tr>
+      <th>name</th><th>chip</th><th>role</th><th>state</th><th>member / link</th><th>depth</th><th>parent</th>
+      <th>RSSI</th><th>telemetry age</th><th>telemetry loss</th><th>boots</th><th>counters</th><th>ping</th><th>display</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Event log</h2>
+  <div id="log" class="log"></div>
+</section>
+
+<footer id="foot"></footer>
+<script src="/app.js"></script>
+</body>
+</html>

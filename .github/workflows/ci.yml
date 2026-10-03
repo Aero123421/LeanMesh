@@ -34,7 +34,7 @@ jobs:
       # clang-format / clang-tidy are configured (.clang-format, .clang-tidy) but NOT gated: the C++ tree does not follow
       # the configured column limit (thousands of findings), so a gate would only be red. See docs/sdk/testing.md.
       - run: python -m pip install ruff==0.16.9
-      - run: ruff check host scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py scripts/report_pytest_failures.py
+      - run: ruff check host tools/fieldview scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py scripts/report_pytest_failures.py
 
   native:
     name: native build + ctest + power-cut matrix + coverage
