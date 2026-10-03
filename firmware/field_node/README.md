@@ -13,9 +13,12 @@
   - **telemetry** (app_port 210, 44 byte, protocol 3.1): REACHABLEになった直後に1回、以後 10 s + 0..1000 ms ごと。
     `LM_DEST_ROOT_APP`、BEST_EFFORT、VOLATILE、期限30 s(root時計。root時刻が無い間は送らない)。seq は受理された送信だけ進める
     (rootで見える欠番=本当の損失)。NVSのboot counterを載せる。
-  - **ping** (211): 受けたら直ちに `APPLIED` を報告。版が違えば `REJECTED`。
-  - **display state** (212): displayビルド以外は `REJECTED`。displayビルドは描画し、panelに出てから `APPLIED`、描けなければ
-    `REJECTED`。状態とseqをNVSに保存し、再起動後に描き直す。
+  - **ping** (211): delivery RECEIVED (protocol 3.2)。SDKの受領がそのまま答えで、アプリは結果を報告しない。数えるだけ(`field` の
+    `pings`、版や長さが違えば `pings_unknown`)。
+  - **display state** (212): displayビルド以外は `REJECTED`。displayビルドは描画し、DMAが新しいbufferを1周分panelへ送った
+    証拠(patch済みライブラリのGDMA frame終了割り込みを数える。protocol 3.3)を得てから `APPLIED`。panelが起動していない・証拠が
+    300 ms以内に来なければ `REJECTED` + telemetryのrender fault。panelが起動できなかったときは1分ごとに(最大10回)初期化し直す。
+    状態とseqをNVSに保存し、再起動後に描き直す。
   - 電源方針は常に ALWAYS_RX(起動直後にSDKのpolicyがそうでなければ戻す。hil_nodeの10秒の `safe` 窓は待たない。`safe` 行は受けて何もしない)。
 - 起動後のコンソール(任意。何も依存しない): `info` `status` `field`(最後のtelemetryとカウンタ) `join`(待ちを飛ばして今すぐ) `ev [on|off]`(EV行) `reboot`。
 
@@ -67,13 +70,16 @@ provisionすると板が再起動し、そのまま動き出す。
 行30..31: 緑=REACHABLE、青=到達不可・メンバーでない・REVOKED、黄=join中。16x16の5字(使 用 可 禁 止)は東雲フォント(Public Domain)。
 パネルのライブラリは ESP32-HUB75-MatrixPanel-DMA (MIT、`main/idf_component.yml` でcommit固定、Adafruit GFXなし)。ESP-IDF v6.0.3では
 GDMA APIが変わったためそのままではcompileできず、`third_party/patches/esp32-hub75-matrixpanel-dma-3.0.14-idf6-gdma.patch` をconfigure時に当てる
-(`third_party/` と `THIRD-PARTY-LICENSES.md` の1b・2)。
+(`third_party/` と `THIRD-PARTY-LICENSES.md` の1b・2)。2本目の `...-gdma-errors-and-frames.patch` はGDMAの各エラーを `begin()` の失敗にし
+(以前はlogして続行し、`begin()` はbufferができたことだけで真を返した)、frame終了割り込みでframe数を数え、`release()` でDMAを止めて
+descriptor・channel・peripheralを解放する。どちらもconfigure時に冪等(各々のmarkerで判定)、この順に当てる。
 
 ## 検証していないこと
 
 - どのビルドも実機で動かしていない(compile/linkと、wire format・join待ち時間・panel frameのhost単体試験だけ: `tests/native/test_field.cpp`)。
-- HUB75 panelが実際に表示されること(patch済みライブラリのIDF v6上の動作、FM6124のタイミング、APPLIEDを返す時点でframeが出ていること。
-  待ちは「2 refresh」40 msの見込み)。
+- HUB75 panelが実際に表示されること(patch済みライブラリのIDF v6上の動作、FM6124のタイミング)。「描いた」の証拠(GDMA frame終了
+  割り込みが実機で来ること、flip後3 frame = 新bufferの1周)は実機未確認。来なければ起動時に `panel init failed: the DMA ends no
+  frames` になる。LEDが光ったことは測れない。
 - 親RSSI(SDK側の追加待ち)。無効なら -128 を送りstatus行は `--`。
 - 電波・距離・topology・消費電力・長時間のheap/stack。電源断中のNVS書込み。
 - C3 / C6 の LED 配線(既定のGPIOは板により違う)。

@@ -73,6 +73,15 @@ typedef struct {
 } field_display_cmd_t;
 bool field_display_decode(const uint8_t *in, size_t n, field_display_cmd_t *cmd);
 
+/* What the node application does with a received MESSAGE event of `app_port` (docs/field/protocol.md section 3). */
+typedef enum {
+    FIELD_ACT_IGNORE,      /* not a field message: nothing is reported, nothing counted */
+    FIELD_ACT_PING_OK,     /* a version-1 ping: count it; no application result (the message is RECEIVED, the SDK's receipt answers) */
+    FIELD_ACT_PING_UNKNOWN, /* a ping this node cannot read (unknown version or length): count it apart; still no result */
+    FIELD_ACT_DISPLAY      /* a display command: decode it, draw it, report APPLIED / REJECTED */
+} field_action_t;
+field_action_t field_message_action(uint16_t app_port, const uint8_t *in, size_t n);
+
 /* Seconds to wait after the `attempt`-th (0-based) join ended or was refused: 5, 10, 20, 40, 60, 60, ... */
 uint32_t field_join_backoff_s(unsigned attempt);
 /* Milliseconds to the next telemetry: 10 s plus `random` modulo 1001 ms. */

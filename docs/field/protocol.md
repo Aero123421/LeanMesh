@@ -33,8 +33,9 @@ All nodes run ALWAYS_RX (no sleep) during field tests.
 
 ## 3. Application messages
 
-Ports are LeanMesh `app_port` values. All integers are big-endian. Unknown `version` -> the receiver ignores the message
-(a node reports REJECTED for a Host->node message it cannot read).
+Ports are LeanMesh `app_port` values. All integers are big-endian. Unknown `version` -> the receiver ignores the message:
+a display command it cannot read is answered REJECTED (an APPLIED message has an application result); a ping it cannot
+read is only counted (a RECEIVED message has none).
 
 ### 3.1 Telemetry (node -> root application), app_port 210
 
@@ -78,7 +79,9 @@ application result only after 10 s (`k_result_poll`). With 1 s deadlines two-hop
 every ping. A RECEIVED ping costs one receipt; the node application's liveness is shown by its telemetry.
 
 Payload: `u8 version = 1, u32 round`. The node needs to do nothing (the SDK's end-to-end receipt answers); it does not
-report an application result for a RECEIVED message. Alive = the operation ends RECEIVED (evidence END_RECEIVED).
+report an application result for a RECEIVED message (the SDK refuses one anyway: only APPLIED messages have a result). A
+valid ping is counted (`pings` in the node's `field` console line), one with an unknown version or length is counted apart
+(`pings_unknown`); neither is answered by the application. Alive = the operation ends RECEIVED (evidence END_RECEIVED).
 RTT = `END_RECEIVED.observed_mono_ms - ROOT_SENT.observed_mono_ms` (root clock). The current Host does not fill
 `observed_mono_ms`; fieldview then measures POST -> final event on the laptop and marks the value as laptop-measured.
 A request the Host or root refuses (RATE_LIMITED, NO_CAPACITY, BUSY ...) is "not sent"; a POST whose answer is lost is
@@ -89,9 +92,17 @@ A request the Host or root refuses (RATE_LIMITED, NO_CAPACITY, BUSY ...) is "not
 Payload: `u8 version = 1, u8 state (0 USABLE, 1 FORBID), u32 command_seq`. Host request: `delivery APPLIED`,
 `storage VOLATILE`, `queue_mode FIFO`, priority NORMAL, deadline 10 s (UTC).
 
-The display draws the state and, when the frame is on the panel, reports APPLIED; if it cannot draw, REJECTED. It
-stores the last applied state and seq in NVS and shows it again after a restart (telemetry flags carry it). A node that
-is not a display build answers REJECTED. "Arrived" (END_RECEIVED) and "drawn" (APP_APPLIED) are shown apart.
+The display draws the state and, when the frame has gone out, reports APPLIED; if it cannot draw, REJECTED. It stores
+the last applied state and seq in NVS and shows it again after a restart (telemetry flags carry it). A node that is not
+a display build answers REJECTED. "Arrived" (END_RECEIVED) and "drawn" (APP_APPLIED) are shown apart.
+
+"Gone out" on the HUB75 build is the driver's evidence, not a delay: the panel library is patched so that its GDMA
+end-of-frame interrupt counts the frames fed to the LCD peripheral; after the back buffer is linked into the DMA chain the
+node waits (at most 300 ms) until three frames have ended, i.e. one whole pass of the new buffer. APPLIED therefore means
+"the DMA fed a complete pass of the new frame to the panel interface"; it is not a light measurement (nothing in software
+sees the LEDs, and the last bytes of the pass can still sit in the peripheral FIFO). When the panel did not come up
+(memory, a GDMA error, no frames) or no frame end comes in time, the command is REJECTED and telemetry flag bit2 (render
+fault) is set; a panel that did not come up is initialised again once a minute, up to 10 times in all after boot.
 
 ## 4. Panel (64 x 32)
 
