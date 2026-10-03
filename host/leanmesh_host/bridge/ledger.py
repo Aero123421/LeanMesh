@@ -314,7 +314,7 @@ class LedgerSync:
             if ended is None:
                 raise TimeoutError("the root did not end the restore step")
             return None if ended == mapping.OK else ended
-        return mapping.BUSY
+        raise TimeoutError("the root stayed busy")  # (not a refusal: the restore is started again, as after a lost session)
 
     async def _ended(self, op: bytes, status: int, what: str, done: int, info: RootInfo, attempt: int) -> None:
         b = self.bridge

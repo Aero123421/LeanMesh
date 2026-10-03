@@ -3090,6 +3090,15 @@ LM_TEST("ISSUE5 sim: a backup is one signed cut - canonical records, a hash chai
         }
         LM_CHECK(std::search(b1.header.begin(), b1.header.end(), scalar.begin(), scalar.end()) == b1.header.end());
     }
+    // a backup header is no object to install (it travels by serial 18..22 only), and a member has no ledger to back up or restore
+    lm_operation_id_t unused_op = 0;
+    LM_CHECK_EQ(lm_install_control(n.ctx(0), 34, b1.header.data(), b1.header.size(), &unused_op),
+                static_cast<lm_status_t>(LM_STATUS_UNSUPPORTED));
+    LedgerBackupRequest begin;
+    LM_CHECK_EQ(u(bk_call(n, 2, begin).status), u(Status::Unsupported));
+    LedgerRestoreRequest restore_step0;
+    LM_CHECK_EQ(u(capi::call(n.ctx(2), CommandKind::RootLedgerRestore, &restore_step0, sizeof(restore_step0)).status),
+                u(Status::Unsupported));
     // the sequence number is persisted before it is signed on: a second backup is 2, and a restart does not repeat it
     BkImage b2;
     LM_CHECK_EQ(u(pull_backup(n, 0, b2)), 0u);

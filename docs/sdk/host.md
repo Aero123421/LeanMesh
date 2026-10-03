@@ -21,6 +21,7 @@ LEANMESH_SERIAL=/dev/ttyACM0 LEANMESH_USB_KIT=/etc/leanmesh/usb-kit.cbor \
 | `LEANMESH_SCHEMA` | いいえ | `db/schema.sql` の場所（既定はリポジトリ内） |
 | `LEANMESH_NATIVE_BUILD` / `LEANMESH_HOSTNATIVE` | いいえ | `libleanmesh_host.so` を探すbuildディレクトリ / 直接パス |
 | `LEANMESH_PRINCIPAL_RPS` `_BURST` `LEANMESH_GLOBAL_RPS` `_BURST` | いいえ | rate limit（既定 20/40、100/100。0で無効）。超過は 429 `RATE_LIMITED` + `retry_after_ms` |
+| `LEANMESH_BACKUP_DEBOUNCE_S` `LEANMESH_BACKUP_MIN_INTERVAL_S` | いいえ | rootの台帳backupを取る間隔（既定 5 / 30 秒。1秒未満は起動拒否。§7） |
 
 - 既定はUnix socket。`0.0.0.0` へ公開しません。LANに出す場合は別途TLS/mTLS境界を置きます。
 - 常駐の雛形は [config/leanmesh.service.example](../../config/leanmesh.service.example)（専用user、`Restart=on-failure`、`NoNewPrivileges`）。

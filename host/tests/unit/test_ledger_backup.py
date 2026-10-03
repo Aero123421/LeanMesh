@@ -176,3 +176,23 @@ def test_an_existing_database_gains_the_table_and_keeps_everything_else(tmp_path
         assert third.submit(lambda c: lb.meta(c, DOMAIN)["sequence"]).result() == 1  # type: ignore[index]
     finally:
         third.stop()
+
+
+def test_the_backup_intervals_are_settings_and_never_below_one_second(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from leanmesh_host.settings import Settings, SettingsError  # noqa: PLC0415
+
+    monkeypatch.setenv("LEANMESH_DB", str(tmp_path / "db"))
+    monkeypatch.setenv("LEANMESH_TOKENS", str(tmp_path / "tokens"))
+    monkeypatch.delenv("LEANMESH_BACKUP_DEBOUNCE_S", raising=False)
+    monkeypatch.delenv("LEANMESH_BACKUP_MIN_INTERVAL_S", raising=False)
+    s = Settings.from_env()
+    assert (s.ledger_backup_debounce_s, s.ledger_backup_min_interval_s) == (5.0, 30.0)  # the documented defaults
+    monkeypatch.setenv("LEANMESH_BACKUP_DEBOUNCE_S", "1")
+    monkeypatch.setenv("LEANMESH_BACKUP_MIN_INTERVAL_S", "2.5")
+    s = Settings.from_env()
+    assert (s.ledger_backup_debounce_s, s.ledger_backup_min_interval_s) == (1.0, 2.5)
+    for name in ("LEANMESH_BACKUP_DEBOUNCE_S", "LEANMESH_BACKUP_MIN_INTERVAL_S"):
+        monkeypatch.setenv(name, "0.5")  # a polling loop faster than the bridge's own one-second poll: refused at start
+        with pytest.raises(SettingsError, match="at least 1 second"):
+            Settings.from_env()
+        monkeypatch.setenv(name, "5")

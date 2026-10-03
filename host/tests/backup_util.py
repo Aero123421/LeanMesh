@@ -45,3 +45,10 @@ def make(slots: list[int], extras: int = 0, **kw: object) -> lb.Backup:
     recs = pages(slots, extras)
     entries = sum(1 << s for s in slots)
     return lb.build(header(entries, extras, head_of(recs), **kw), recs)  # type: ignore[arg-type]
+
+
+def handover_cose(old: bytes = ROOT, new: bytes = OTHER_ROOT, domain: bytes = DOMAIN) -> bytes:
+    """A structurally valid RootHandover COSE (type 31; the signature is a placeholder: the replacement root verifies it)."""
+    body = ControlBody(31, 1, bytes(16), domain, 2, ROOT,
+                       cbor_encode([b"\x48" * 16, old, new, 1, 2, bytes(32), 2, 0]))
+    return encode_cose_sign1(ROOT, encode_control_body(body), bytes(64))
