@@ -60,7 +60,11 @@
   <table id="nodes">
     <thead><tr>
       <th>name</th><th>chip</th><th>role</th><th>state</th><th>member / link</th><th>depth</th><th>parent</th>
-      <th>RSSI</th><th>telemetry age</th><th>telemetry loss</th><th>boots</th><th>counters</th><th>ping</th><th>display</th>
+      <th>RSSI</th><th>telemetry age</th><th>telemetry loss</th><th>boots</th>
+      <th title="why the node last booted: reset reason and the SDK's restart cause (node log)">boot cause</th>
+      <th title="seconds from boot to REACHABLE in the current boot (node log)">attach</th>
+      <th title="longest TX completion the radio reported, in ms, with the number of late ones (node log)">TX max</th>
+      <th>counters</th><th>ping</th><th>display</th>
     </tr></thead>
     <tbody></tbody>
   </table>

@@ -116,6 +116,20 @@ function drawHeader(st) {
 // ---- table --------------------------------------------------------------------------------------------------------
 function td(content, cls, title) { return h("td", { class: cls, title }, content); }
 
+// node log (§3.4) cells: what the node itself recorded about its boot and attach
+function bootTitle(n) {
+  const parts = [];
+  if (n.boot_detail) parts.push(n.boot_detail);
+  parts.push(`boots in the node log: ${n.boots_logged}, SDK restarts: ${n.sdk_restarts}`);
+  if (n.log_records) parts.push(`records ${n.log_records}, missing ${n.records_lost}, dropped by the node ${n.log_lost}`);
+  return parts.join("\n");
+}
+function attachTitle(n) {
+  const t = (v) => (v === null || v === undefined ? "-" : v.toFixed(1) + " s");
+  return `after boot: member ${t(n.member_s)}, reachable ${t(n.attach_s)}, root time valid ${t(n.time_valid_s)}` +
+    `\nunreachable events: ${n.unreachable}`;
+}
+
 function drawNodes(st) {
   const rows = st.nodes.map((n) => {
     const p = n.ping, lastKind = p.last ? p.last.kind : null;
@@ -140,6 +154,11 @@ function drawNodes(st) {
       td(n.received + n.lost === 0 ? "-" : `${pct(n.loss_pct)} (${n.lost}/${n.received + n.lost})` +
          (q === null || q === undefined ? "" : ` · recent ${pct(q)}`), "num"),
       td(`${n.reboots}` + (n.boot_count === null ? "" : ` (#${n.boot_count})`), "num"),
+      td(fmt(n.boot_cause), n.sdk_restarts ? "warn" : "", bootTitle(n)),
+      td(n.attach_s === null || n.attach_s === undefined ? "-" : n.attach_s.toFixed(1) + " s", "num", attachTitle(n)),
+      td(n.tx_done_max_ms === null || n.tx_done_max_ms === undefined ? "-" : `${n.tx_done_max_ms} ms` +
+         (n.tx_late ? ` (${n.tx_late} late)` : ""), "num" + (n.tx_late ? " warn" : ""),
+         n.tx_stall_waits ? `${n.tx_stall_waits} stall wait(s)` : ""),
       td(n.tx_frames === null && n.rx_frames === null ? "-" : `tx ${fmt(n.tx_frames)} rx ${fmt(n.rx_frames)} rf ${fmt(n.rf_failures)} busy ${fmt(n.local_busy)}`, "",
          n.min_heap_bytes ? "min heap " + n.min_heap_bytes + " B" : ""),
       td(pingCell, "", `answered ${answered}, no answer ${p.noanswer} (late answers ${p.late}), rejected ${p.rejected}, ` +

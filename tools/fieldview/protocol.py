@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-TELEMETRY_PORT, PING_PORT, DISPLAY_PORT = 210, 211, 212
+TELEMETRY_PORT, PING_PORT, DISPLAY_PORT, NODELOG_PORT = 210, 211, 212, 213
 TELEMETRY_LEN = 44
 # version role chip flags | seq uptime | boot reset depth rssi reserved | interval | tx rx rf busy heap display_seq
 _TELEMETRY = struct.Struct(">BBBBIIHBBbBHIIIIII")
@@ -101,6 +101,119 @@ def encode_telemetry(*, role: int = 1, chip: int = 1, flags: int = 0, seq: int =
     """The node's side of §3.1, for tests and the fake Host (raw values: 0xFF / -128 / 0xFFFFFFFF mean unknown)."""
     return _TELEMETRY.pack(1, role, chip, flags, seq, uptime_s, boot_count, reset_reason, depth, rssi, 0,
                            interval_s, tx, rx, rf, busy, heap, display_seq)
+
+
+# ---- node event log (§3.4) --------------------------------------------------------------------------------------
+
+NODELOG_MAX_BYTES = 160
+_NODELOG_HEAD = struct.Struct(">BB")        # version, count
+_NODELOG_REC = struct.Struct(">BBHI")       # type, len, seq, t_ms (ms since this boot)
+(T_BOOT, T_MEMBER, T_REACHABLE, T_UNREACHABLE, T_TIME_VALID, T_JOIN_END, T_RADIO, T_DEPTH, T_DISPLAY_FAULT,
+ T_LOG_LOST) = range(1, 11)
+# type -> (name, payload layout, field names); a longer payload than the layout is read as a prefix (later additions)
+_NODELOG_TYPES: dict[int, tuple[str, struct.Struct, tuple[str, ...]]] = {
+    T_BOOT: ("BOOT", struct.Struct(">BBHII"),
+             ("reset_reason", "sdk_restart_cause", "boot_count", "prev_uptime_ms", "detail_ms")),
+    T_MEMBER: ("MEMBER", struct.Struct(">"), ()),
+    T_REACHABLE: ("REACHABLE", struct.Struct(">Bb"), ("depth", "parent_rssi_dbm")),
+    T_UNREACHABLE: ("UNREACHABLE", struct.Struct(">BB"), ("connectivity_state", "reason")),
+    T_TIME_VALID: ("TIME_VALID", struct.Struct(">"), ()),
+    T_JOIN_END: ("JOIN_END", struct.Struct(">II"), ("outcome", "reason")),
+    T_RADIO: ("RADIO", struct.Struct(">III"), ("tx_done_max_ms", "tx_late", "tx_stall_waits")),
+    T_DEPTH: ("DEPTH", struct.Struct(">Bb"), ("depth", "parent_rssi_dbm")),
+    T_DISPLAY_FAULT: ("DISPLAY_FAULT", struct.Struct(">B"), ("code",)),
+    T_LOG_LOST: ("LOG_LOST", struct.Struct(">H"), ("records_dropped",)),
+}
+RSSI_UNKNOWN = -128
+# lm::port::ResetReason (src/core/diag/health.hpp; the Host's bridge/diag.py names them the same way)
+RESET_REASONS = ("unknown", "power on", "software", "panic", "watchdog", "brownout", "deep sleep wake", "external")
+SDK_RESTART_RADIO_STALL = 1
+CONNECTIVITY_NAMES = {0: "UNKNOWN", 1: "REACHABLE", 2: "DEGRADED", 3: "ISOLATED", 4: "SLEEPING"}
+DISPLAY_FAULTS = {1: "panel init failed", 2: "draw failed"}
+
+
+class NodeLogError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class NodeRecord:
+    type: int
+    seq: int
+    t_ms: int
+    fields: dict[str, int | None] | None = None   # None: a type this tool does not know (skipped by its length)
+
+    @property
+    def name(self) -> str:
+        known = _NODELOG_TYPES.get(self.type)
+        return known[0] if known else f"type{self.type}"
+
+    @property
+    def known(self) -> bool:
+        return self.fields is not None
+
+
+def decode_nodelog(data: bytes) -> list[NodeRecord]:
+    """§3.4: `u8 version = 1, u8 count`, then count records `u8 type, u8 len, u16 seq, u32 t_ms, payload`. Unknown types
+    are skipped by len (and returned with fields None). A message that is malformed anywhere - another version, more than
+    160 bytes, a record that runs past the end, a known type with a payload shorter than its layout, bytes left over after
+    `count` records - is refused as a whole: NodeLogError, nothing of it is used."""
+    if len(data) > NODELOG_MAX_BYTES:
+        raise NodeLogError(f"node log message is {len(data)} bytes, at most {NODELOG_MAX_BYTES}")
+    if len(data) < _NODELOG_HEAD.size:
+        raise NodeLogError(f"node log message is {len(data)} bytes, shorter than its header")
+    version, count = _NODELOG_HEAD.unpack_from(data)
+    if version != 1:
+        raise NodeLogError(f"unknown node log version {version}")
+    pos, out = _NODELOG_HEAD.size, []
+    for index in range(count):
+        if pos + _NODELOG_REC.size > len(data):
+            raise NodeLogError(f"record {index} of {count} is cut off")
+        rtype, length, seq, t_ms = _NODELOG_REC.unpack_from(data, pos)
+        pos += _NODELOG_REC.size
+        if pos + length > len(data):
+            raise NodeLogError(f"record {index} (type {rtype}) needs {length} payload bytes, {len(data) - pos} left")
+        payload = data[pos:pos + length]
+        pos += length
+        known = _NODELOG_TYPES.get(rtype)
+        if known is None:
+            out.append(NodeRecord(rtype, seq, t_ms))
+            continue
+        name, layout, names = known
+        if length < layout.size:
+            raise NodeLogError(f"record {index} ({name}) has {length} payload bytes, expected {layout.size}")
+        fields: dict[str, int | None] = dict(zip(names, layout.unpack_from(payload), strict=True))
+        if fields.get("parent_rssi_dbm") == RSSI_UNKNOWN:
+            fields["parent_rssi_dbm"] = None   # as in telemetry: -128 is "unknown"
+        out.append(NodeRecord(rtype, seq, t_ms, fields))
+    if pos != len(data):
+        raise NodeLogError(f"{len(data) - pos} byte(s) left after {count} record(s)")
+    return out
+
+
+def encode_nodelog(records: list[tuple[int, int, int, bytes]]) -> bytes:
+    """The node's side of §3.4 for tests and the fake Host: (type, seq, t_ms, payload) per record."""
+    body = b"".join(_NODELOG_REC.pack(rtype, len(payload), seq, t_ms) + payload for rtype, seq, t_ms, payload in records)
+    return _NODELOG_HEAD.pack(1, len(records)) + body
+
+
+def nodelog_payload(rtype: int, **values: int) -> bytes:
+    """A known type's payload from its named fields (all of them, as keywords), big-endian."""
+    _name, layout, names = _NODELOG_TYPES[rtype]
+    return layout.pack(*(values[n] for n in names))
+
+
+def reset_reason_name(code: int | None) -> str:
+    if code is None or code == 0xFF:
+        return "unknown"
+    return RESET_REASONS[code] if code < len(RESET_REASONS) else f"reset {code}"
+
+
+def sdk_cause_text(cause: int) -> str | None:
+    """The SDK's own restart cause (lm_idf_last_restart), None when there is none."""
+    if cause == 0:
+        return None
+    return "radio stall (TX completion never came)" if cause == SDK_RESTART_RADIO_STALL else f"SDK restart cause {cause}"
 
 
 # ---- Host requests -----------------------------------------------------------------------------------------------

@@ -35,7 +35,8 @@ Host が現れると自動でつながる。
   rootが列挙するのにtelemetryを出さないnodeは灰色の破線で描く。`parent_device_id` を返さないHostでは、親の分からないnodeは
   すべて「parent unknown」グループの下に置く（推測で別nodeの下に置かない）。Hostが列挙しない親は灰色の代理nodeで示す。
 - **Nodes** 表: 名前・chip・role・state（ok / lost / silent / left / unlisted）・membership/connectivity・depth・親・RSSI・
-  telemetry age・telemetry欠落率（seqの欠番から。累計と直近）・reboot回数・counter・ping結果・表示状態。
+  telemetry age・telemetry欠落率（seqの欠番から。累計と直近）・reboot回数・**boot cause**・**attach**・**TX max**（この3列はノードログ由来: 下記）・
+  counter・ping結果・表示状態。
 - **Ping**: 「Ping all now」と、1秒以上の間隔でのloop（開始/停止）。1 roundは ACTIVE な node ごとに `POST /v1/messages` 1件
   （`delivery RECEIVED`、VOLATILE、FIFO、期限は loop 間隔に関係なく **3 s 固定**。protocol.md §3.2）。結果の種類（Host / root / nodeの
   側の事実だけで分け、足りない証拠を推定で埋めない）:
@@ -57,12 +58,15 @@ Host が現れると自動でつながる。
   **受理した命令はそれぞれ operation id で自分の evidence と最終結果を記録する**（画面に出るのは最新の1件だけ。display.ndjson の
   `latest` が画面に出ていたかを示す）。arrived だけで drawn でない命令は ping の alive にはならない。
 - **Event log**: join / leave（`/v1/nodes` の差分）、親の変更、depth変更、connectivity変更、telemetry欠落、node lost / back
-  （telemetry age > 3周期）、reboot（boot_count / seq の巻き戻り）、Hostの event journal の欠落（CURSOR_GAP）。
+  （telemetry age > 3周期）、reboot（boot_count / seq の巻き戻り）、Hostの event journal の欠落（CURSOR_GAP）、
+  **ノードログの重要な記録**（boot とその原因、member / attach までの秒、unreachable、親の変更、TX完了の遅れ、panel故障、記録の欠落）。
 
 ## 記録（`<logs-dir>/<UTC時刻>/`）
 
-`telemetry.ndjson` `ping.ndjson` `display.ndjson` `events.ndjson`（各行にノートPCのUTC時刻 `t`）と `summary.csv`（10秒ごとにnode1行:
-name, device, depth, parent, rssi, telemetry欠落率, ping sent/alive/lost/not sent/unknown/skipped/late, RTT中央値, 最終telemetryからの秒）。
+`telemetry.ndjson` `ping.ndjson` `display.ndjson` `events.ndjson` `nodelog.ndjson`（各行にノートPCのUTC時刻 `t`）と `summary.csv`（10秒ごとにnode1行:
+name, device, depth, parent, rssi, telemetry欠落率, ping sent/alive/lost/not sent/unknown/skipped/late, RTT中央値, 最終telemetryからの秒,
+`attach_s`（現在のbootでREACHABLEまでの秒）, `boots`（ノードログで見たBOOT数）, `sdk_restarts`（うちSDKの再起動）, `tx_done_max_ms`（最後のRADIO記録）。
+ノードログを一度も受けていないnodeではこの4列は空）。
 受理した ping は `event: posted`（operation id・epoch）をその場で書くので、結果が書かれる前に落ちても Host から id で読み直せる。
 書込みは専用threadの有界queueで行い、ディスクが壊れても画面は止まらず警告を出す。ファイルは回転しない（4 node・1 s loop で
 1日に数百MB規模: 長い試験は `--logs-dir` の空きを見ておく）。
@@ -72,9 +76,38 @@ ping/display の結果を読んで記録するまでも待つ（最大20 s）。
 再起動後に読み直す）、ディスクが戻ったら**欠落を明示する `recorder-gap` 行**を events.ndjson に書いて fsync してから ACK を進める
 （画面の警告は残る）。ACK が進まない間の警告: 「acknowledgement held: the records are not safely on disk」。
 
+## ノードログ（app_port 213, protocol.md §3.4）
+
+nodeがRAM ringに溜めた短い2進記録（BOOT / MEMBER / REACHABLE / UNREACHABLE / TIME_VALID / JOIN_END / RADIO / DEPTH / DISPLAY_FAULT / LOG_LOST）を、
+telemetryと同じ経路（Host の `MESSAGE_RECEIVED`、`evidence.details.app_port == 213`）で読む。USBの無い現場で「なぜ再起動したか・joinとattachに何秒
+かかったか・いつ切れたか」を後から説明するためのもの。
+
+- **デコード**（`protocol.decode_nodelog`）: version 1、`count` 個の記録（`u8 type, u8 len, u16 seq, u32 t_ms, payload`）。知らない type は
+  `len` で飛ばし、nodelog.ndjson には `fields: null` で残す。**壊れた message は丸ごと捨てる**: 別version、160 byte超、`count` に足りない/
+  余る、記録が末尾を越える、既知typeでpayloadがレイアウトより短い。`bad_nodelog` に数え（`/api/state` の `host.bad_nodelog`）、
+  nodelog.ndjson に `type: "BAD_MESSAGE"` と理由を1行残し、event logに出す（落ちない、一部だけ使うこともしない）。レイアウトより長い
+  payloadは先頭だけ読む（後からの項目追加）。`parent_rssi_dbm` -128 は telemetry と同じく null（不明）。
+- **記録と ACK**: 取り込んだ記録は `rec.log("nodelog", ...)` で telemetry と同じ有界queueに入り、そのページのACKは fsync 済みの後（上記
+  「ACK と記録の順序」）。backlog（起動前の未読）の記録も nodelog.ndjson に書き（`backlog: true`）nodeの状態にも反映するが、laptop時刻が
+  合わないのでevent logには出さない。
+- **nodelog.ndjson**: 1記録1行 `{t, device, name, cursor, backlog, boot_count, seq, t_ms, type, type_id, fields}`。`boot_count` は直近のBOOT
+  記録のもの（BOOTを見ていない間・BOOTが届かないまま再起動を検知した後は null）。`t_ms` はそのboot開始からのms。付くことがある印:
+  `new_boot`、`late`（重複/古い記録: 状態は変えない）、`unseen_boot`（BOOT無しにseqが巻き戻った）、`missing_before`（その前に欠けた件数）、`jump`。
+- **nodeごとの状態**（`nodelog.NodeLogTrack`、固定個の値だけ。記録の履歴は持たない）: 直近のBOOT（reset reason と SDK cause、
+  `sdk_restart_cause` 1 = 「radio stall (TX completion never came)」）、BOOT数 / SDKによる再起動数、**現在のbootの timeline**
+  （bootから MEMBER / REACHABLE / TIME_VALID まで。BOOTで必ず初期化し、前のbootの値を新しいbootに持ち越さない）、UNREACHABLE の累計、直近のRADIO
+  （`tx_done_max_ms` / `tx_late` / `tx_stall_waits`）、記録の欠番（bootごとのseqの欠け。u16の巻き戻りは再起動と見なさない）、LOG_LOSTの合計。
+  **seqの欠番（途中で届かなかった記録）と LOG_LOST（nodeのringが捨てた記録）は別の数**で、足し引きしない（ringが捨てた記録がseqの欠番としても
+  見えることがある）。
+- **event log の文例**: `display2 booted: software restart by the SDK (radio stall, TX completion outstanding 3012 ms) after 52 s` /
+  `relay-c3 attached 8.4 s after boot (depth 2, -61 dBm)` / `relay-c6a unreachable (ISOLATED, reason 3) 21 s after boot` /
+  `display1 radio: longest TX completion 1350 ms, 2 late`（RADIOはtx_late / tx_stall_waits が増えたときだけ）。
+- 限界: ノードログは BEST_EFFORT・BULK で、届かない記録がある（seqの欠番で分かる）。BOOT の `prev_uptime_ms` と `detail_ms` は、
+  nodeが `lm_idf_last_restart` を持たないとき 0（§3.4）。実機・実無線では未検証（meshsim の member が1 messageを送る通し試験のみ）。
+
 ## Hostとの関係（実装の根拠）
 
-- **telemetry**: app_port 210 の node→root 通信は、Host の event journal に `MESSAGE_RECEIVED`（`origin`, `payload_b64`,
+- **telemetry**（と ノードログ app_port 213）: app_port 210 の node→root 通信は、Host の event journal に `MESSAGE_RECEIVED`（`origin`, `payload_b64`,
   `evidence.details.app_port`）として出る。`GET /v1/events?after=<cursor>&wait_ms=` のlong pollをconsumer（`POST /v1/consumers/{name}/ack`）
   として読み、取り込んだ後にACKする。再起動後は consumer のACK位置（`ack 0` が現在位置を返す）から続け、起動前の未読は
   baseline にだけ使う。CURSOR_GAP / EVENT_GAP は画面とeventsに出し、telemetry欠落の基準を取り直す（RF損失に数えない）。
@@ -126,6 +159,7 @@ ping/display の結果を読んで記録するまでも待つ（最大20 s）。
 
 ```sh
 ~/.cache/leanmesh/host-venv/bin/python -m pytest host/tests/unit/test_fieldview_core.py host/tests/unit/test_fieldview_fake_host.py \
+    host/tests/unit/test_fieldview_nodelog.py \
     -q -p no:cacheprovider --basetemp=/tmp/claude-501/pt-fv
 LEANMESH_NATIVE_BUILD=~/.cache/leanmesh/native ~/.cache/leanmesh/host-venv/bin/python -m pytest \
     host/tests/e2e/test_fieldview_meshsim.py -q -s -p no:cacheprovider --basetemp=/tmp/claude-501/pt-fv

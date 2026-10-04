@@ -149,12 +149,14 @@ page with no external scripts or fonts (fields have no Internet):
 - topology: the root and every node as a tree from `GET /v1/nodes` (`parent_device_id`, `root_depth`), link colour by
   the child's parent RSSI and its telemetry loss; nodes the root lists but that send nothing are still drawn
 - table per node: name (from the bench state file when present), chip, role, membership/connectivity, depth, parent
-  RSSI, last telemetry age, telemetry loss % (from seq gaps), boots, ping result / RTT / loss %, display state
+  RSSI, last telemetry age, telemetry loss % (from seq gaps), boots, boot cause (node log), attach time to REACHABLE and
+  longest TX completion (node log), ping result / RTT / loss %, display state
 - ping: "ping all now" and a loop with an interval from 1 s; results per node and round
 - display: pick a display, USABLE / FORBID, shows arrived / drawn
 - log of joins, parent changes, losses, reboots (from MEMBERSHIP / node changes and telemetry)
-- records per session under `logs/<session>/`: `telemetry.ndjson`, `ping.ndjson`, `display.ndjson`, `events.ndjson`
-  (laptop UTC time on every line), and `summary.csv` (one row per node per 10 s)
+- records per session under `logs/<session>/`: `telemetry.ndjson`, `ping.ndjson`, `display.ndjson`, `events.ndjson`,
+  `nodelog.ndjson` (every §3.4 record; laptop UTC time on every line), and `summary.csv` (one row per node per 10 s, with
+  `attach_s`, `boots`, `sdk_restarts`, `tx_done_max_ms` from the node log)
 
 ## 6. SDK additions this needs
 
