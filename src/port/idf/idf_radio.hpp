@@ -10,11 +10,10 @@
 // Driver callbacks (Wi-Fi task) only copy into fixed rings and notify the owner. RX frames and the
 // single TX completion use separate rings, so RX overload can never lose the TX-done.
 //
-// One driver instance per device. stop() with a TX whose callback is overdue (>= the 1000 ms owner
-// watchdog) first waits up to k_drain_wait more for that callback: ESP-NOW retries a unicast many times
-// at LR 250 kbit/s, and a peer that just went away (restarted) can keep one TX busy past 1 s
-// (HIL 2026-10-04: every such TX rebooted the sender, and the reboots spread through the mesh). The late
-// callback's arrival proves the drain; only when it never comes does the port do the controlled reboot,
+// One driver instance per device. The owner watchdog (TxManager::k_watchdog, 3000 ms) lies beyond every completion
+// the driver was seen to deliver (slowest 1.02-1.06 s, HIL 2026-10-04; a 1000 ms watchdog restarted healthy radios
+// in a chain through the mesh). stop() with a TX whose callback is overdue first waits up to k_drain_wait more for
+// that callback: its arrival proves the drain; only when it never comes does the port do the controlled reboot,
 // the specified fall-back when the driver cannot be drained (docs/03 §4), and it records why in RTC memory
 // (lm_idf_last_restart). Fresh session after boot. The Wi-Fi power save is off (ESP-NOW must hear and send
 // at any time: an always-on node is ALWAYS_RX, a sleeping one stops the radio instead).
@@ -52,6 +51,9 @@ class IdfRadio final : public port::Radio {
 
     // A late TX completion is waited for this long after the watchdog before the controlled reboot.
     static constexpr Duration k_drain_wait = Duration::from_ms(2000);
+    // Field diagnostics only (lm_idf_radio_stats tx_late): a completion at least this slow. Fixed, apart from the
+    // watchdog, so the field log keeps showing the ~1.05 s completions that once tripped the old 1000 ms watchdog.
+    static constexpr uint32_t k_tx_slow_ms = 1000;
 
     [[nodiscard]] uint32_t rx_dropped() const { return rx_ring_.dropped(); }
     [[nodiscard]] uint32_t rx_depth() const { return rx_ring_.depth(); } // [S19]

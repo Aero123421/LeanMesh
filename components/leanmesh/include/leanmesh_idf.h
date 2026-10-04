@@ -31,8 +31,8 @@ bool lm_idf_last_restart(lm_idf_restart_t *out);
 /* Radio facts since boot (field diagnostics). Any task. */
 typedef struct {
     uint32_t tx_done_max_ms; /* the longest time from a TX to its completion */
-    uint32_t tx_late;        /* completions that came after the 1 s watchdog */
-    uint32_t tx_stall_waits; /* radio recoveries that had to wait for an overdue completion */
+    uint32_t tx_late;        /* completions that took 1 s or longer */
+    uint32_t tx_stall_waits; /* radio recoveries that found a completion overdue (watchdog) */
 } lm_idf_radio_stats_t;
 void lm_idf_radio_stats(lm_idf_radio_stats_t *out);
 

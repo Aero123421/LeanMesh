@@ -169,12 +169,27 @@ LM_TEST("D10 sim: callback delay 20/100/500 ms: RX before TX-done, credit to the
     }
 }
 
-LM_TEST("D10 sim: callback later than the 1000 ms watchdog is never credited to the next frame") {
+LM_TEST("HIL-F11: a completion at 1.05 s is a normal outcome: no UNKNOWN, no radio restart") {
+    // ESP-IDF delivered the slow LR completions at 1.02-1.06 s; a 1000 ms watchdog turned each into a radio restart.
     Fixture fx(2);
-    fx.radio(0).tx_callback_delay_us = 1'500'000;
+    fx.radio(0).tx_callback_delay_us = 1'060'000;
     const uint32_t gen_before = fx.radio(0).driver_generation();
     LM_CHECK_OK(fx.send(0, 1, 1));
-    fx.run_ms(1010); // watchdog fired at 1000 ms
+    fx.run_ms(1100);
+    const TxStats &t = fx.eng(0).tx().stats();
+    LM_CHECK_EQ(t.unknown, 0u);
+    LM_CHECK_EQ(t.mac_acked, 1u);
+    LM_CHECK_EQ(fx.eng(0).tx().last_outcome().tag, 1u);
+    LM_CHECK_EQ(fx.eng(0).stats().radio_restarts, 0u);
+    LM_CHECK_EQ(fx.radio(0).driver_generation(), gen_before);
+}
+
+LM_TEST("D10 sim: callback later than the 3000 ms watchdog is never credited to the next frame") {
+    Fixture fx(2);
+    fx.radio(0).tx_callback_delay_us = 3'500'000;
+    const uint32_t gen_before = fx.radio(0).driver_generation();
+    LM_CHECK_OK(fx.send(0, 1, 1));
+    fx.run_ms(3010); // watchdog fired at 3000 ms
     const TxStats &t = fx.eng(0).tx().stats();
     LM_CHECK_EQ(t.unknown, 1u);
     LM_CHECK_EQ(t.rf_failed, 0u); // unknown is neither success nor an RF-loss sample
@@ -186,11 +201,11 @@ LM_TEST("D10 sim: callback later than the 1000 ms watchdog is never credited to 
     LM_CHECK_EQ(fx.radio(0).peer_count(), 2u); // broadcast + the leased regular peer, re-registered
     fx.radio(0).tx_callback_delay_us = 800'000; // frame 2 completes in time, but after the old one
     LM_CHECK_OK(fx.send(0, 1, 2));
-    fx.run_ms(600);                            // now ~1610 ms: the OLD callback (1500 ms) arrived
+    fx.run_ms(600);                            // now ~3610 ms: the OLD callback (3500 ms) arrived
     LM_CHECK(fx.eng(0).tx().in_flight());      // frame 2 still waits for its own callback
     LM_CHECK_EQ(t.mac_acked, 0u);
     LM_CHECK_EQ(fx.eng(0).stats().tx_done_unmatched, 1u);
-    fx.run_ms(400); // frame 2's own callback (~1810 ms)
+    fx.run_ms(400); // frame 2's own callback (~3810 ms)
     LM_CHECK_EQ(fx.eng(0).tx().last_outcome().tag, 2u);
     LM_CHECK(fx.eng(0).tx().last_outcome().result == port::TxResult::MacAcked);
     LM_CHECK_EQ(t.mac_acked, 1u);
@@ -198,10 +213,10 @@ LM_TEST("D10 sim: callback later than the 1000 ms watchdog is never credited to 
 
 LM_TEST("D10 sim: failed radio re-init isolates TX, retries with backoff, then FAULT; restart heals") {
     Fixture fx(2);
-    fx.radio(0).tx_callback_delay_us = 5'000'000; // the result never arrives in time
+    fx.radio(0).tx_callback_delay_us = 7'000'000; // the result never arrives in time
     fx.radio(0).start_fault_count = 3;            // and the driver cannot be re-initialised
     LM_CHECK_OK(fx.send(0, 1, 1));
-    fx.run_ms(1010);
+    fx.run_ms(3010);
     LM_CHECK(fx.eng(0).radio_state() == RadioState::Recovering);
     LM_CHECK(fx.send(0, 1, 2) == Status::DriverResultUnknown); // isolated, not "loss"
     LM_CHECK_EQ(fx.eng(0).tx().stats().rf_failed, 0u);
@@ -220,7 +235,7 @@ LM_TEST("D10 sim: failed radio re-init isolates TX, retries with backoff, then F
     LM_CHECK_EQ(ev.kind, LM_EVENT_FAULT);
     LM_CHECK_EQ(ev.reason, LM_STATUS_DRIVER_RESULT_UNKNOWN);
     // Faulted stays quiet (no timers) until the application stops and starts the SDK.
-    fx.run_ms(5000); // the old callback (5 s) and the command notifications cause their own steps
+    fx.run_ms(5000); // the old callback (7 s) and the command notifications cause their own steps
     const uint64_t steps = fx.eng(0).stats().steps;
     fx.run_ms(60'000);
     LM_CHECK_EQ(fx.eng(0).stats().steps, steps);

@@ -371,7 +371,7 @@ void IdfRadio::on_sent(bool success) {
     const auto took_ms = static_cast<uint32_t>((done.at.us - tx_started_us_.load()) / 1000);
     for (uint32_t seen = g_tx_done_max_ms.load(); took_ms > seen && !g_tx_done_max_ms.compare_exchange_weak(seen, took_ms);) {
     }
-    if (took_ms >= static_cast<uint32_t>(TxManager::k_watchdog.us / 1000)) {
+    if (took_ms >= k_tx_slow_ms) {
         g_tx_late.fetch_add(1);
     }
     in_flight_.store(false);
