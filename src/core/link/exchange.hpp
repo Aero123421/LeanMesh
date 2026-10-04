@@ -126,15 +126,39 @@ struct EndStats {
 
 // Minimum interval between full handshakes with one peer (docs/06 §8): keyed by MAC for links, by
 // DeviceId for end sessions. Bounded, LRU replacement: the gate limits load, it authorises nothing.
+// docs/06 §8: one full handshake per peer per `min` (30 s). A handshake that was started (the gate spent) but FAILED
+// may be tried again sooner: 5 s, then 10, 20, ... up to `min` while it keeps failing (HIL 2026-10-04: a node that
+// restarted found its parent still holding the old session; one failed attempt then held both sides for 30 s and
+// re-attaching took 40-110 s). A completed handshake resets the backoff. The bound per peer stays one public-key
+// handshake per 5 s at worst, and the responder still runs one handshake at a time.
 template <class Key> class RateGate {
   public:
+    static constexpr Duration k_fail_retry = Duration::from_s(5);
+
     [[nodiscard]] bool allow(const Key &k, MonoTime now, Duration min) const {
         for (const Entry &e : entries_) {
             if (e.used && e.key == k) {
-                return now - e.at >= min;
+                return now - e.at >= (e.fails == 0 ? min : fail_hold(e.fails, min));
             }
         }
         return true;
+    }
+    // The handshake that spent the gate of `k` failed: the next attempt waits the failure backoff instead of `min`.
+    void failed(const Key &k, MonoTime now) {
+        for (Entry &e : entries_) {
+            if (e.used && e.key == k) {
+                e.at = now;
+                e.fails = static_cast<uint8_t>(e.fails < 8 ? e.fails + 1 : 8);
+            }
+        }
+    }
+    // The handshake of `k` completed: back to the full gate for the next one.
+    void succeeded(const Key &k) {
+        for (Entry &e : entries_) {
+            if (e.used && e.key == k) {
+                e.fails = 0;
+            }
+        }
     }
     void touch(const Key &k, MonoTime now) {
         Entry *slot = nullptr;
@@ -151,7 +175,8 @@ template <class Key> class RateGate {
             slot = &*std::min_element(entries_.begin(), entries_.end(),
                                       [](const Entry &a, const Entry &b) { return a.at < b.at; });
         }
-        *slot = Entry{k, now, true};
+        const uint8_t fails = slot->used && slot->key == k ? slot->fails : 0;
+        *slot = Entry{k, now, true, fails}; // a new attempt keeps the failure count until it completes
     }
     // An attempt we abandoned (glare yield) must not gate the peer.
     void forget(const Key &k) {
@@ -167,7 +192,12 @@ template <class Key> class RateGate {
         Key key;
         MonoTime at;
         bool used = false;
+        uint8_t fails = 0; // failed handshakes in a row since the last completed one
     };
+    static Duration fail_hold(uint8_t fails, Duration min) {
+        const int64_t us = k_fail_retry.us << (fails > 4 ? 3 : fails - 1); // 5, 10, 20, 40 s ... capped at min
+        return us < min.us ? Duration{us} : min;
+    }
     std::array<Entry, 4> entries_{};
 };
 
@@ -484,6 +514,7 @@ class Exchange {
     JoinPeerOut *join_out_ = nullptr;
     std::size_t own_len_ = 0; // JoinResp: length of the bundle staged in rx_
     bool initiator_ = false;
+    bool gate_spent_ = false; // this exchange spent its peer's handshake gate (a failure then backs off, RateGate)
     MacAddr mac_; // 1-hop modes: the peer's MAC and driver registration
     PeerHandle peer_;
     bool peer_transient_ = false;

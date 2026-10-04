@@ -89,6 +89,7 @@ Status Exchange::acquire_link_peer(const MacAddr &mac) {
 void Exchange::begin_common(Mode mode, bool initiator, MonoTime now) {
     mode_ = mode;
     initiator_ = initiator;
+    gate_spent_ = false;
     handle_ = Handle{0, ++handle_gen_ == 0 ? ++handle_gen_ : handle_gen_};
     hard_deadline_ = now + s_.policy.exchange_deadline;
     deadline_ = hard_deadline_;
@@ -114,6 +115,13 @@ void Exchange::abort(Status why) {
     if (!lingering) {
         count(Count::Failed);
         last_failure_ = why;
+        // A started 1-hop handshake failed: retry after the failure backoff (RateGate). Not for End mode: an end
+        // session over the mesh fails while the path is not ready yet (after a join or a root restart), and quick
+        // retries of it would hold the node's one exchange slot that the link handshake needs (test_term HIL-F9:
+        // 39 s -> 73 s with them).
+        if (gate_spent_ && why != Status::RateLimited && mode_ != Mode::End) {
+            s_.gate.failed(mac_, s_.engine.step_time());
+        }
         if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && initiator_)) &&
             s_.join.exchange_failed != nullptr) {
             s_.join.exchange_failed(s_.join.ctx, why); // [S8] the joiner learns the attempt is over
@@ -344,6 +352,7 @@ void Exchange::start_hs(sec::HsRole role, ByteView msg1, MonoTime now) {
         // once it arrives, for the responder (resp_message_1 spends its gate there too). The credential exchange
         // before it is cheap and slot-bounded on both sides. (End mode spends its own gate when it starts.)
         s_.gate.touch(mac_, now);
+        gate_spent_ = true;
     }
     const ByteView peers[1] = {ByteView{peer_state_.ccs.data(), peer_state_.ccs_len}};
     Status st = hs_.begin(role, s_.identity.key(), s_.identity.ccs(), peers, 1);
@@ -634,6 +643,7 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
         return true;
     }
     count(Count::Completed);
+    s_.gate.succeeded(mac_);
     if (initiator_) {
         finish_idle();
         return true;

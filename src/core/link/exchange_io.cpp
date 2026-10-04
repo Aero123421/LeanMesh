@@ -237,6 +237,7 @@ void Exchange::resp_message_1(ByteView msg1, MonoTime now) {
         end_gate_.touch(peer_id_, now);
     } else {
         s_.gate.touch(mac_, now);
+        gate_spent_ = true; // (1-hop only: the failure backoff is not used for end sessions)
     }
     deadline_ = hard_deadline_;
     start_hs(sec::HsRole::Responder, msg1, now);
