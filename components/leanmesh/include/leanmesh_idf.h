@@ -17,6 +17,25 @@ extern "C" {
    It does not change the power policy and never lowers a docs/06 condition. */
 bool lm_idf_sleep_veto(uint8_t sleep_kind);
 
+/* Why the previous boot ended, when the SDK itself restarted the chip (field diagnostics, HIL 2026-10-04). Kept in RTC
+   memory: it survives a software reset, not a power loss (the chip's reset reason then says power-on). */
+#define LM_IDF_RESTART_RADIO_STALL 1u /* a TX completion never came, even 2 s after the 1 s watchdog: driver not drained */
+typedef struct {
+    uint32_t cause;     /* LM_IDF_RESTART_* */
+    uint32_t uptime_ms; /* how long that boot had run */
+    uint32_t detail;    /* RADIO_STALL: how long the TX completion had been outstanding, ms */
+} lm_idf_restart_t;
+/* true and *out filled when the previous boot ended in such a restart; false otherwise. Any task, any time. */
+bool lm_idf_last_restart(lm_idf_restart_t *out);
+
+/* Radio facts since boot (field diagnostics). Any task. */
+typedef struct {
+    uint32_t tx_done_max_ms; /* the longest time from a TX to its completion */
+    uint32_t tx_late;        /* completions that came after the 1 s watchdog */
+    uint32_t tx_stall_waits; /* radio recoveries that had to wait for an overdue completion */
+} lm_idf_radio_stats_t;
+void lm_idf_radio_stats(lm_idf_radio_stats_t *out);
+
 #ifdef __cplusplus
 }
 #endif

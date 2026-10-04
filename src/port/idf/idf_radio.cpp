@@ -9,7 +9,9 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
 #include "esp_wifi.h"
+#include "leanmesh_idf.h"
 #include "port/idf/idf_owner.hpp"
 #include "soc/soc_caps.h"
 
@@ -18,6 +20,45 @@ namespace lm::idf {
 namespace {
 
 IdfRadio *g_radio = nullptr; // the one driver instance; set before the callbacks are registered
+
+// Radio facts for lm_idf_radio_stats (field diagnostics). Counters only: the send callback updates two of them with
+// plain atomic arithmetic (no logging, no formatting).
+std::atomic<uint32_t> g_tx_done_max_ms{0};
+std::atomic<uint32_t> g_tx_late{0};
+std::atomic<uint32_t> g_tx_stall_waits{0};
+
+// Why the previous boot ended, if the SDK itself restarted it: RTC memory that survives a software reset but not a
+// power loss (then the reset reason says power-on). The magic tells a written record from power-on garbage.
+constexpr uint32_t k_restart_magic = 0x4C4D5253U; // "LMRS"
+struct RestartRecord {
+    uint32_t magic;
+    uint32_t cause;
+    uint32_t uptime_ms;
+    uint32_t detail;
+};
+RTC_NOINIT_ATTR RestartRecord g_restart_rec;
+RestartRecord g_restart_seen{};   // the previous boot's record, taken once at the first read
+bool g_restart_taken = false;
+
+void take_restart_record() {
+    if (g_restart_taken) {
+        return;
+    }
+    g_restart_taken = true;
+    if (g_restart_rec.magic == k_restart_magic) {
+        g_restart_seen = g_restart_rec;
+    }
+    g_restart_rec.magic = 0; // a later restart that is not the SDK's (panic, power) never shows an old cause
+}
+
+[[noreturn]] void controlled_restart(uint32_t cause, uint32_t detail) {
+    take_restart_record();
+    g_restart_rec.cause = cause;
+    g_restart_rec.uptime_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    g_restart_rec.detail = detail;
+    g_restart_rec.magic = k_restart_magic;
+    esp_restart();
+}
 
 // Callback trampolines: no logging, no formatting, no allocation (docs/15 §2).
 void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
@@ -113,6 +154,11 @@ Status IdfRadio::start_wifi(const port::RfProfile &profile) {
         return Status::RecoveryRequired;
     }
     wifi_running_ = true;
+    // Power save off, read back (the STA default is MIN_MODEM): a radio that is on is on for ESP-NOW.
+    wifi_ps_type_t ps = WIFI_PS_MAX_MODEM;
+    if (esp_wifi_set_ps(WIFI_PS_NONE) != ESP_OK || esp_wifi_get_ps(&ps) != ESP_OK || ps != WIFI_PS_NONE) {
+        return Status::RecoveryRequired;
+    }
     return Status::Ok;
 }
 
@@ -170,11 +216,20 @@ Status IdfRadio::stop() {
         return Status::Ok;
     }
     if (now_ready_) {
-        const bool overdue =
-            in_flight_.load() && static_cast<uint64_t>(esp_timer_get_time()) - tx_started_us_ >=
-                                     static_cast<uint64_t>(TxManager::k_watchdog.us);
+        const uint64_t started = tx_started_us_.load();
+        const bool overdue = in_flight_.load() && static_cast<uint64_t>(esp_timer_get_time()) - started >=
+                                                      static_cast<uint64_t>(TxManager::k_watchdog.us);
         if (overdue) {
-            esp_restart(); // callback drain cannot be proven: controlled reboot (docs/03 §4)
+            // A late completion still proves the drain: wait for it, bounded (a recovery path, not a poll).
+            g_tx_stall_waits.fetch_add(1);
+            const uint64_t limit = started + static_cast<uint64_t>(TxManager::k_watchdog.us + k_drain_wait.us);
+            while (in_flight_.load() && static_cast<uint64_t>(esp_timer_get_time()) < limit) {
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
+            if (in_flight_.load()) { // callback drain cannot be proven: controlled reboot (docs/03 §4)
+                controlled_restart(LM_IDF_RESTART_RADIO_STALL,
+                                   static_cast<uint32_t>((static_cast<uint64_t>(esp_timer_get_time()) - started) / 1000));
+            }
         }
         // Only a successful deinit proves the callbacks are gone. On failure the port stays "ready"
         // (callbacks possibly live) so a second stop() retries instead of reporting success, and the
@@ -250,7 +305,7 @@ Status IdfRadio::transmit(const MacAddr &dst, ByteView frame, port::TxToken toke
         return Status::Busy;
     }
     pending_token_ = token;
-    tx_started_us_ = static_cast<uint64_t>(esp_timer_get_time());
+    tx_started_us_.store(static_cast<uint64_t>(esp_timer_get_time()));
     const esp_err_t e = esp_now_send(dst.bytes.data(), frame.data(), frame.size());
     if (e != ESP_OK) {
         in_flight_.store(false); // no callback will follow
@@ -312,9 +367,35 @@ void IdfRadio::on_sent(bool success) {
     done.token = pending_token_;
     done.result = success ? port::TxResult::MacAcked : port::TxResult::MacFailed;
     done.at = now_mono();
+    const auto took_ms = static_cast<uint32_t>((done.at.us - tx_started_us_.load()) / 1000);
+    for (uint32_t seen = g_tx_done_max_ms.load(); took_ms > seen && !g_tx_done_max_ms.compare_exchange_weak(seen, took_ms);) {
+    }
+    if (took_ms >= static_cast<uint32_t>(TxManager::k_watchdog.us / 1000)) {
+        g_tx_late.fetch_add(1);
+    }
     in_flight_.store(false);
     (void)done_ring_.push(done);
     owner_.notify();
 }
 
 } // namespace lm::idf
+
+extern "C" bool lm_idf_last_restart(lm_idf_restart_t *out) {
+    lm::idf::take_restart_record();
+    if (out == nullptr || lm::idf::g_restart_seen.magic != lm::idf::k_restart_magic) {
+        return false;
+    }
+    out->cause = lm::idf::g_restart_seen.cause;
+    out->uptime_ms = lm::idf::g_restart_seen.uptime_ms;
+    out->detail = lm::idf::g_restart_seen.detail;
+    return true;
+}
+
+extern "C" void lm_idf_radio_stats(lm_idf_radio_stats_t *out) {
+    if (out == nullptr) {
+        return;
+    }
+    out->tx_done_max_ms = lm::idf::g_tx_done_max_ms.load();
+    out->tx_late = lm::idf::g_tx_late.load();
+    out->tx_stall_waits = lm::idf::g_tx_stall_waits.load();
+}

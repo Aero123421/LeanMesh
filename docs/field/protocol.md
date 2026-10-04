@@ -104,6 +104,35 @@ sees the LEDs, and the last bytes of the pass can still sit in the peripheral FI
 (memory, a GDMA error, no frames) or no frame end comes in time, the command is REJECTED and telemetry flag bit2 (render
 fault) is set; a panel that did not come up is initialised again once a minute, up to 10 times in all after boot.
 
+### 3.4 Node event log (node -> root application), app_port 213
+
+Why: in the field no board has a USB host, but what happened on a node between two telemetry messages - why it
+restarted, how long its join and attach took, when its link dropped - is what a stability test needs (HIL
+2026-10-04). The node keeps short binary records in a RAM ring (32 records; when it is full the oldest is dropped and
+counted) and sends them in batches while it is REACHABLE with a valid root time: at most one message per 2 s, only when
+records are pending. Delivery `LM_BEST_EFFORT`, `LM_VOLATILE`, priority BULK (below control, pings and display
+commands), deadline 30 s on the root clock. Records carry a per-boot sequence number, so the laptop sees gaps. Nothing is
+written to flash for it; the SDK's own restart cause survives a software reset in RTC memory (`lm_idf_last_restart`).
+
+Message: `u8 version = 1, u8 count`, then `count` records, at most 160 bytes in all. Record:
+`u8 type, u8 len, u16 seq, u32 t_ms (ms since this boot), len bytes of payload`.
+
+| type | name | payload | when |
+|---|---|---|---|
+| 1 | BOOT | `u8 reset_reason` (as telemetry), `u8 sdk_restart_cause` (0 none, 1 radio stall), `u16 boot_count`, `u32 prev_uptime_ms`, `u32 detail_ms` (12 B) | first record of every boot; the last two are those of `lm_idf_last_restart` (0 when there is none) |
+| 2 | MEMBER | none | membership became ACTIVE (after a join, or at boot for a stored member) |
+| 3 | REACHABLE | `u8 depth, i8 parent_rssi_dbm` | connectivity became REACHABLE |
+| 4 | UNREACHABLE | `u8 connectivity_state, u8 reason` | connectivity left REACHABLE |
+| 5 | TIME_VALID | none | the root clock became valid |
+| 6 | JOIN_END | `u32 outcome, u32 reason` | a join operation ended |
+| 7 | RADIO | `u32 tx_done_max_ms, u32 tx_late, u32 tx_stall_waits` (`lm_idf_radio_stats`) | when a value changed, at most every 10 s |
+| 8 | DEPTH | `u8 depth, i8 parent_rssi_dbm` | the depth changed while REACHABLE (the parent changed) |
+| 9 | DISPLAY_FAULT | `u8 code` (1 init failed, 2 draw failed) | the panel failed |
+| 10 | LOG_LOST | `u16 records_dropped` | the ring dropped records since the last message |
+
+Unknown types are skipped by `len`. fieldview writes every record to `nodelog.ndjson` and shows the important ones
+(BOOT with its cause, MEMBER / REACHABLE with the time since boot, UNREACHABLE, RADIO with a late completion) in its log.
+
 ## 4. Panel (64 x 32)
 
 - rows 0..7: status line in a 5x7 font: hop count and parent RSSI (`H2 -67`), or `JOIN` / `LOST` / `REVOKED`
