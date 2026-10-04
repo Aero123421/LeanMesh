@@ -160,7 +160,7 @@ void Exchange::wipe() {
 void Exchange::finish_idle() {
     pend_.wipe();
     stage_release();
-    tx_active_ = false;
+    tx_active_ = rto_after_tx_ = false;
     rto_at_ = retry_at_ = deadline_ = MonoTime::never();
     rx_len_ = 0;
     phase_ = Phase::Idle;

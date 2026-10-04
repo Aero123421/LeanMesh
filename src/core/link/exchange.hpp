@@ -62,7 +62,9 @@ struct LinkPolicy {
     Duration prev_grace = Duration::from_s(10);        // old session receives this long (S5-D6)
     Duration handshake_gate = Duration::from_s(30);    // docs/06 §8: one full handshake / peer
     Duration exchange_deadline = Duration::from_s(30); // registry session_binding.timeout_ms
-    Duration rto = Duration::from_ms(1000); // 1-hop carriers (end mode: route round timeout)
+    // 1-hop carriers (end mode: route round timeout). It runs from the TX-done of our last fragment and restarts with
+    // every fragment of the reply, so it only has to outlast one TX of the peer (ESP-IDF: up to 1.06 s, HIL-F12).
+    Duration rto = Duration::from_ms(1500);
     uint8_t max_attempts = 3;               // registry session_binding.max_attempts
     Duration tx_gap{};                      // [S11] pause between streamed fragments (a joiner behind a relay)
     Duration join_session_life =
@@ -551,6 +553,7 @@ class Exchange {
     ObjKind tx_kind_ = ObjKind::CredI;
     std::size_t tx_off_ = 0;
     bool tx_inflight_ = false;
+    bool rto_after_tx_ = false; // [HIL-F12] the last fragment is out: the initiator arms the RTO at its TX-done
     uint64_t tx_seq_ = 0;
     Handle stage_h_; // pool frame holding the EDHOC message, or the sealed bind frame/record
     std::size_t stage_len_ = 0;

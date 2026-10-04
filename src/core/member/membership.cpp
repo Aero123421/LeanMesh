@@ -304,7 +304,7 @@ void Membership::discovery(const MacAddr &src, const wire::BootstrapCarrier &c, 
 void Membership::apply_pacing(uint8_t depth) {
     link::LinkPolicy &p = engine_.link().policy();
     const link::LinkPolicy defaults;
-    p.rto = depth == 0 ? defaults.rto : Duration::from_ms(1000 + 200 * std::min<int>(depth, 20));
+    p.rto = depth == 0 ? defaults.rto : defaults.rto + Duration::from_ms(200 * std::min<int>(depth, 20));
     p.tx_gap = depth == 0 ? defaults.tx_gap : Duration::from_ms(60);
 }
 
