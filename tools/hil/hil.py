@@ -327,6 +327,16 @@ def cmd_provision(a: argparse.Namespace) -> None:
             if fname.startswith("expected-"):
                 put_object(f"{net.tag}{name}-{fname}", data)
         net.save()  # the revision is used even if the board refuses
+        # The ExpectedSet page goes to the root BEFORE the board gets its records: a provisioned board asks to join at
+        # once, and an ask the root cannot match yet is refused and repeated only after the node's backoff (HIL
+        # 2026-10-04: 50-70 s joins). Without a Host the page waits for `expected <name>`.
+        for fname, data in sorted(files.items()):
+            if fname.startswith("expected-"):
+                try:
+                    r = install_control(net, data)
+                    print(f"{net.tag}{name}-{fname} on the root: {r.get('state')} {r.get('outcome')} {r.get('reason', '')}")
+                except (OSError, SystemExit) as exc:
+                    print(f"{net.tag}{name}-{fname} not installed ({exc}): run `expected {name}` once the Host is up")
         require_ok(board.command(f"prov-leaf {trust} {dc.hex()} {ticket.hex()}", seconds=30), "prov-leaf")
         net["leaves"][name] = {"device": device.hex(), "port": a.port, "role": a.role,
                                "dc": f"{net.tag}{name}-device.cose"}

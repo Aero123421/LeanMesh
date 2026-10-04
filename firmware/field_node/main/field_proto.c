@@ -1,6 +1,8 @@
 /* Field test kit wire formats and pure rules; see field_proto.h. */
 #include "field_proto.h"
 
+#include <string.h>
+
 static void put16(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)(v >> 8);
     p[1] = (uint8_t)v;
@@ -105,10 +107,87 @@ field_action_t field_message_action(uint16_t app_port, const uint8_t *in, size_t
 }
 
 uint32_t field_join_backoff_s(unsigned attempt) {
-    static const uint8_t k_steps[] = {5, 10, 20, 40, 60};
-    return attempt < sizeof k_steps ? k_steps[attempt] : 60u;
+    static const uint8_t k_steps[] = {2, 4, 8, 15, 20};
+    return attempt < sizeof k_steps ? k_steps[attempt] : 20u;
 }
 
 uint32_t field_telemetry_delay_ms(uint32_t random) {
     return FIELD_TELEMETRY_INTERVAL_S * 1000u + random % (FIELD_TELEMETRY_JITTER_MS + 1u);
+}
+
+/* ---- node event log ---- */
+
+size_t field_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+    return 4;
+}
+
+size_t field_put16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+    return 2;
+}
+
+void field_log_init(field_log_t *log) {
+    memset(log, 0, sizeof *log);
+    log->next_seq = 1;
+}
+
+void field_log_add(field_log_t *log, uint8_t type, uint32_t t_ms, const uint8_t *payload, uint8_t len) {
+    if (log->count == FIELD_LOG_RING) { /* full: the oldest goes, and is counted */
+        log->head = (uint8_t)((log->head + 1u) % FIELD_LOG_RING);
+        --log->count;
+        if (log->dropped != 0xFFFFu) ++log->dropped;
+    }
+    field_log_rec_t *r = &log->rec[(log->head + log->count) % FIELD_LOG_RING];
+    r->type = type;
+    r->len = len > FIELD_LOG_PAYLOAD_MAX ? (uint8_t)FIELD_LOG_PAYLOAD_MAX : len;
+    r->seq = log->next_seq;
+    log->next_seq = (uint16_t)(log->next_seq == 0xFFFFu ? 1u : log->next_seq + 1u); /* 0 is the LOG_LOST record's */
+    r->t_ms = t_ms;
+    if (r->len != 0 && payload != NULL) memcpy(r->payload, payload, r->len);
+    ++log->count;
+}
+
+static size_t put_record(uint8_t *p, uint8_t type, uint8_t len, uint16_t seq, uint32_t t_ms, const uint8_t *payload) {
+    p[0] = type;
+    p[1] = len;
+    field_put16(p + 2, seq);
+    field_put32(p + 4, t_ms);
+    if (len != 0) memcpy(p + FIELD_LOG_RECORD_HEAD, payload, len);
+    return FIELD_LOG_RECORD_HEAD + len;
+}
+
+size_t field_log_encode(const field_log_t *log, uint32_t now_ms, uint8_t *out, size_t cap, unsigned *taken) {
+    *taken = 0;
+    if (cap > FIELD_LOG_MESSAGE_MAX) cap = FIELD_LOG_MESSAGE_MAX;
+    if ((log->count == 0 && log->dropped == 0) || cap < 2 + FIELD_LOG_RECORD_HEAD + 2) return 0;
+    size_t n = 2;
+    unsigned records = 0;
+    if (log->dropped != 0) {
+        uint8_t lost[2];
+        field_put16(lost, log->dropped);
+        n += put_record(out + n, FIELD_LOG_LOST, 2, 0, now_ms, lost);
+        ++records;
+    }
+    while (*taken < log->count) {
+        const field_log_rec_t *r = &log->rec[(log->head + *taken) % FIELD_LOG_RING];
+        if (n + FIELD_LOG_RECORD_HEAD + r->len > cap) break;
+        n += put_record(out + n, r->type, r->len, r->seq, r->t_ms, r->payload);
+        ++*taken;
+        ++records;
+    }
+    out[0] = FIELD_PROTO_VERSION;
+    out[1] = (uint8_t)records;
+    return n;
+}
+
+void field_log_consume(field_log_t *log, unsigned taken) {
+    if (taken > log->count) taken = log->count;
+    log->head = (uint8_t)((log->head + taken) % FIELD_LOG_RING);
+    log->count = (uint8_t)(log->count - taken);
+    log->dropped = 0;
 }

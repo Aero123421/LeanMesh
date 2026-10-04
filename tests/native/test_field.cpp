@@ -172,12 +172,12 @@ LM_TEST("FIELD display payload: version 1, state 0/1, u32 command_seq") {
     LM_CHECK(!field_display_decode(usable, 7, &c));
 }
 
-LM_TEST("FIELD join backoff is 5, 10, 20, 40, 60, 60 ... seconds") {
-    const unsigned want[] = {5, 10, 20, 40, 60, 60, 60};
+LM_TEST("FIELD join backoff is 2, 4, 8, 15, 20, 20 ... seconds") {
+    const unsigned want[] = {2, 4, 8, 15, 20, 20, 20};
     for (unsigned i = 0; i < sizeof want / sizeof want[0]; ++i) {
         LM_CHECK_EQ(field_join_backoff_s(i), want[i]);
     }
-    LM_CHECK_EQ(field_join_backoff_s(1000), 60u);
+    LM_CHECK_EQ(field_join_backoff_s(1000), 20u);
 }
 
 LM_TEST("FIELD telemetry delay is 10 s plus 0..1000 ms") {
@@ -347,3 +347,70 @@ LM_TEST("FIELD console line: the tail of a dropped line is not a command") {
 }
 
 LM_TEST_MAIN()
+
+
+// ---- node event log (docs/field/protocol.md section 3.4) ----
+
+LM_TEST("FIELD log: records encode as type, len, seq, t_ms, payload after version and count") {
+    field_log_t log;
+    field_log_init(&log);
+    const uint8_t rch[2] = {2, static_cast<uint8_t>(-61)};
+    field_log_add(&log, FIELD_LOG_MEMBER, 1234, nullptr, 0);
+    field_log_add(&log, FIELD_LOG_REACHABLE, 0x01020304, rch, 2);
+    uint8_t out[FIELD_LOG_MESSAGE_MAX];
+    unsigned taken = 0;
+    const size_t n = field_log_encode(&log, 5000, out, sizeof out, &taken);
+    LM_CHECK_EQ(n, 2u + 8u + 10u);
+    LM_CHECK_EQ(taken, 2u);
+    const uint8_t want[] = {1, 2,                                          // version, count
+                            FIELD_LOG_MEMBER, 0, 0, 1, 0, 0, 0x04, 0xD2,     // seq 1, t 1234
+                            FIELD_LOG_REACHABLE, 2, 0, 2, 1, 2, 3, 4, 2, static_cast<uint8_t>(-61)};
+    LM_CHECK(std::memcmp(out, want, sizeof want) == 0);
+    field_log_consume(&log, taken);
+    LM_CHECK_EQ(field_log_encode(&log, 5000, out, sizeof out, &taken), 0u); // nothing left
+    field_log_add(&log, FIELD_LOG_TIME_VALID, 9, nullptr, 0);
+    LM_CHECK_EQ(field_log_encode(&log, 5000, out, sizeof out, &taken), 10u);
+    LM_CHECK_EQ(out[4], 0); // seq 3 continues after a consumed message
+    LM_CHECK_EQ(out[5], 3);
+}
+
+LM_TEST("FIELD log: a full ring drops the oldest and the next message starts with LOG_LOST") {
+    field_log_t log;
+    field_log_init(&log);
+    for (unsigned i = 0; i < FIELD_LOG_RING + 3; ++i) {
+        field_log_add(&log, FIELD_LOG_DEPTH, i, nullptr, 0);
+    }
+    LM_CHECK_EQ(log.count, FIELD_LOG_RING);
+    LM_CHECK_EQ(log.dropped, 3u);
+    uint8_t out[FIELD_LOG_MESSAGE_MAX];
+    unsigned taken = 0;
+    const size_t n = field_log_encode(&log, 77, out, sizeof out, &taken);
+    LM_CHECK(n <= FIELD_LOG_MESSAGE_MAX);
+    LM_CHECK_EQ(out[2], FIELD_LOG_LOST);
+    LM_CHECK_EQ(out[3], 2);           // len
+    LM_CHECK_EQ(out[4] | out[5], 0);  // seq 0: not part of the record stream
+    LM_CHECK_EQ(out[10], 0);          // records dropped, big-endian
+    LM_CHECK_EQ(out[11], 3);
+    LM_CHECK_EQ(out[12], FIELD_LOG_DEPTH);
+    LM_CHECK_EQ(out[15], 4);          // the oldest kept record is seq 4
+    LM_CHECK_EQ(out[1], taken + 1);   // count includes LOG_LOST
+    const unsigned left = log.count - taken;
+    field_log_consume(&log, taken);
+    LM_CHECK_EQ(log.dropped, 0u);
+    LM_CHECK_EQ(log.count, left);     // what did not fit stays for the next message
+}
+
+LM_TEST("FIELD log: a message never exceeds 160 bytes and keeps whole records") {
+    field_log_t log;
+    field_log_init(&log);
+    uint8_t boot[12] = {};
+    for (unsigned i = 0; i < 20; ++i) {
+        field_log_add(&log, FIELD_LOG_BOOT, i, boot, sizeof boot);
+    }
+    uint8_t out[400];
+    unsigned taken = 0;
+    const size_t n = field_log_encode(&log, 0, out, sizeof out, &taken);
+    LM_CHECK(n <= FIELD_LOG_MESSAGE_MAX);
+    LM_CHECK_EQ(n, 2u + taken * 20u); // 8-byte head + 12-byte payload each
+    LM_CHECK_EQ(out[1], taken);
+}

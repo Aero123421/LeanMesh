@@ -27,6 +27,7 @@
 #include "field_render.h"
 #include "leanmesh.h"
 #include "leanmesh_bench.h"
+#include "leanmesh_idf.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
@@ -113,6 +114,12 @@ static struct {
     uint32_t disp_seq;
     field_view_t shown;
     bool shown_valid;
+    /* node event log (protocol 3.4) */
+    field_log_t log;
+    uint64_t log_at_ms, radio_at_ms;
+    bool was_member, time_valid;
+    uint8_t last_depth;
+    lm_idf_radio_stats_t radio_logged;
 } g;
 
 static uint8_t s_payload[LM_MAX_MESSAGE_BYTES];
@@ -122,6 +129,75 @@ static uint8_t s_payload[LM_MAX_MESSAGE_BYTES];
 #define say(...) bc_logf(__VA_ARGS__)
 
 static uint64_t now_ms(void) { return (uint64_t)(esp_timer_get_time() / 1000); }
+
+/* ---- node event log (protocol 3.4): records in a RAM ring, sent in batches while REACHABLE ---- */
+
+static void log_add(uint8_t type, const uint8_t *payload, uint8_t len) {
+    field_log_add(&g.log, type, (uint32_t)now_ms(), payload, len);
+}
+
+static void log_two(uint8_t type, uint8_t a, uint8_t b) {
+    const uint8_t p[2] = {a, b};
+    log_add(type, p, sizeof p);
+}
+
+/* The first record of a boot: the chip's reset reason and, when the SDK restarted the chip itself, why. */
+static void log_boot(void) {
+    lm_diagnostics_t d = {.struct_size = sizeof d, .abi_version = LM_ABI_VERSION};
+    const bool dv = g.ctx != NULL && lm_diagnostics_get(g.ctx, &d) == LM_STATUS_OK;
+    lm_idf_restart_t r = {0};
+    const bool sdk = lm_idf_last_restart(&r);
+    uint8_t p[12];
+    p[0] = field_reset_reason8(d.last_reset_reason, dv && (d.validity_bits & FIELD_DIAG_VALID_RESET_REASON) != 0);
+    p[1] = sdk ? (uint8_t)r.cause : 0;
+    field_put16(p + 2, g.boot_count);
+    field_put32(p + 4, sdk ? r.uptime_ms : 0);
+    field_put32(p + 8, sdk ? r.detail : 0);
+    log_add(FIELD_LOG_BOOT, p, sizeof p);
+    if (sdk) say("FIELD the previous boot ended in an SDK restart: cause %u after %u ms (detail %u ms)\n", (unsigned)r.cause,
+                 (unsigned)r.uptime_ms, (unsigned)r.detail);
+}
+
+/* Radio facts when they changed, at most every 10 s. */
+static void log_radio(uint64_t now) {
+    if (now < g.radio_at_ms) return;
+    g.radio_at_ms = now + 10000;
+    lm_idf_radio_stats_t s = {0};
+    lm_idf_radio_stats(&s);
+    if (s.tx_done_max_ms == g.radio_logged.tx_done_max_ms && s.tx_late == g.radio_logged.tx_late &&
+        s.tx_stall_waits == g.radio_logged.tx_stall_waits) {
+        return;
+    }
+    g.radio_logged = s;
+    uint8_t p[12];
+    field_put32(p, s.tx_done_max_ms);
+    field_put32(p + 4, s.tx_late);
+    field_put32(p + 8, s.tx_stall_waits);
+    log_add(FIELD_LOG_RADIO, p, sizeof p);
+}
+
+/* One batch at most every 2 s, only with records pending and a valid root time; BULK, best effort (protocol 3.4). */
+static void log_send(uint64_t now) {
+    if (!g.was_reachable || now < g.log_at_ms) return;
+    uint8_t buf[FIELD_LOG_MESSAGE_MAX];
+    unsigned taken = 0;
+    const size_t n = field_log_encode(&g.log, (uint32_t)now, buf, sizeof buf, &taken);
+    if (n == 0) return;
+    lm_root_time_t t = {.struct_size = sizeof t, .abi_version = LM_ABI_VERSION};
+    if (lm_root_time_get(g.ctx, &t) != LM_STATUS_OK || !t.valid) return;
+    lm_send_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION};
+    r.destination.kind = LM_DEST_ROOT_APP;
+    r.app_port = FIELD_PORT_LOG;
+    r.delivery = LM_BEST_EFFORT;
+    r.storage = LM_VOLATILE;
+    r.priority = LM_PRIORITY_BULK;
+    r.queue_mode = LM_FIFO;
+    r.root_term = t.root_term;
+    r.expires_root_ms = t.earliest_root_ms + FIELD_TELEMETRY_DEADLINE_MS;
+    lm_operation_id_t op = 0;
+    if (lm_send(g.ctx, &r, buf, n, &op) == LM_STATUS_OK) field_log_consume(&g.log, taken); /* else: kept for the next try */
+    g.log_at_ms = now + FIELD_LOG_INTERVAL_MS;
+}
 
 /* ---- display state in NVS ---- */
 
@@ -220,6 +296,7 @@ static void display_try_init(uint64_t now) {
     g.display_init_at_ms = now + DISPLAY_INIT_RETRY_MS;
     g.display_up = field_display_init();
     g.render_fault = !g.display_up;
+    if (!g.display_up) log_two(FIELD_LOG_DISPLAY_FAULT, 1, 0);
     g.shown_valid = false; /* a new panel shows nothing yet */
     say("FIELD panel init %u/%u: %s\n", g.display_init_tries, (unsigned)DISPLAY_INIT_ATTEMPTS, g.display_up ? "up" : "FAILED");
 }
@@ -229,7 +306,9 @@ static void draw_if_changed(uint64_t now) {
     const field_view_t v = current_view();
     if (g.shown_valid && same_view(&v, &g.shown) && !g.render_fault) return;
     if (g.render_fault && now < g.draw_retry_ms) return;
+    const bool was_fault = g.render_fault;
     g.render_fault = !field_display_show(&v);
+    if (g.render_fault && !was_fault) log_two(FIELD_LOG_DISPLAY_FAULT, 2, 0);
     if (!g.render_fault) {
         g.shown = v;
         g.shown_valid = true;
@@ -259,7 +338,7 @@ static void join_ask(uint64_t now) {
 }
 
 /* An ACTIVE member re-attaches by the SDK itself: nothing to ask. Any other state asks lm_join(NEW) when no ask is
-   outstanding; after one ended the next waits 5, 10, 20, 40, 60, 60 ... s (the SDK ends one search after 30 s). A
+   outstanding; after one ended the next waits 2, 4, 8, 15, 20, 20 ... s (the SDK ends one search after 30 s). A
    revoked or quarantined node stops asking. */
 static void join_tick(uint64_t now) {
     if (g.m.state == LM_ACTIVE) {
@@ -271,8 +350,13 @@ static void join_tick(uint64_t now) {
     if (join_blocked()) return;
     if (g.join_op != 0) {
         lm_operation_t o = {.struct_size = sizeof o, .abi_version = LM_ABI_VERSION};
-        if (lm_get_operation(g.ctx, g.join_op, &o) == LM_STATUS_OK && o.phase != LM_PHASE_FINAL) return;
+        const bool known = lm_get_operation(g.ctx, g.join_op, &o) == LM_STATUS_OK;
+        if (known && o.phase != LM_PHASE_FINAL) return;
         g.join_op = 0; /* ended (or no longer known) */
+        uint8_t p[8];
+        field_put32(p, known ? o.outcome : FIELD_UNKNOWN_U32);
+        field_put32(p + 4, known ? o.reason : FIELD_UNKNOWN_U32);
+        log_add(FIELD_LOG_JOIN_END, p, sizeof p);
         g.join_at_ms = now + 1000ull * field_join_backoff_s(g.join_asks - 1);
         return;
     }
@@ -354,6 +438,24 @@ static void link_tick(uint64_t now) {
     display_try_init(now);
     draw_if_changed(now);
     const bool reachable = g.link == FIELD_LINK_REACHABLE;
+    /* the node event log: what changed since the last look */
+    const bool member = g.m.state == LM_ACTIVE;
+    if (member && !g.was_member) log_add(FIELD_LOG_MEMBER, NULL, 0);
+    g.was_member = member;
+    const field_view_t v = current_view();
+    if (reachable && !g.was_reachable) {
+        log_two(FIELD_LOG_REACHABLE, v.root_depth, (uint8_t)v.parent_rssi_dbm);
+    } else if (!reachable && g.was_reachable) {
+        log_two(FIELD_LOG_UNREACHABLE, (uint8_t)g.c.state, (uint8_t)g.c.reason);
+    } else if (reachable && v.root_depth != g.last_depth) {
+        log_two(FIELD_LOG_DEPTH, v.root_depth, (uint8_t)v.parent_rssi_dbm); /* the parent changed */
+    }
+    g.last_depth = reachable ? v.root_depth : FIELD_UNKNOWN_U8;
+    lm_root_time_t t = {.struct_size = sizeof t, .abi_version = LM_ABI_VERSION};
+    const bool time_valid = lm_root_time_get(g.ctx, &t) == LM_STATUS_OK && t.valid;
+    if (time_valid && !g.time_valid) log_add(FIELD_LOG_TIME_VALID, NULL, 0);
+    g.time_valid = time_valid;
+    log_radio(now);
     if (reachable && !g.was_reachable) g.tele_at_ms = now; /* the first telemetry right after REACHABLE (also after a loss) */
     g.was_reachable = reachable;
 }
@@ -372,6 +474,7 @@ static void display_command(const lm_event_t *e, const uint8_t *p, size_t n) {
     v.forbid = cmd.state == FIELD_DISPLAY_FORBID;
     display_try_init(now_ms()); /* a command is a reason to try a panel that is down (still at most once a minute) */
     if (!g.display_up || !field_display_show(&v)) {
+        if (!g.render_fault) log_two(FIELD_LOG_DISPLAY_FAULT, 2, 0);
         g.render_fault = true;
         g.draw_retry_ms = now_ms() + DRAW_RETRY_MS;
         ++g.display_rejected;
@@ -458,6 +561,11 @@ static void cmd_field(void) {
                 (int)f->parent_rssi_dbm, (unsigned)f->tx_frames, (unsigned)f->rx_frames, (unsigned)f->rf_failures,
                 (unsigned)f->local_busy, (unsigned)f->min_heap_bytes, (unsigned)f->display_seq, (unsigned)f->flags);
     }
+    lm_idf_radio_stats_t rs = {0};
+    lm_idf_radio_stats(&rs);
+    bc_outf(" log_pending=%u log_dropped=%u log_next_seq=%u tx_done_max_ms=%u tx_late=%u tx_stall_waits=%u", (unsigned)g.log.count,
+            (unsigned)g.log.dropped, (unsigned)g.log.next_seq, (unsigned)rs.tx_done_max_ms, (unsigned)rs.tx_late,
+            (unsigned)rs.tx_stall_waits);
     bc_out("\n");
 }
 
@@ -472,6 +580,16 @@ static void run_command(char *line) {
         cmd_status();
     } else if (strcmp(cmd, "field") == 0) {
         cmd_field();
+    } else if (strcmp(cmd, "debug") == 0) { /* the SDK's mesh / handshake counters (bench API, as hil_node) */
+        static char dbg[1024];
+        const lm_status_t st = lmb_debug(g.ctx, dbg, sizeof dbg);
+        if (st == LM_STATUS_OK) {
+            bc_out("OK ");
+            bc_out(dbg);
+            bc_out("\n");
+        } else {
+            bc_answer(st);
+        }
     } else if (strcmp(cmd, "join") == 0) { /* ask now (a bench shortcut past the backoff) */
         g.join_at_ms = 0;
         bc_out("OK\n");
@@ -510,6 +628,8 @@ static lm_status_t start_mesh(void) {
 void field_app_run(uint16_t boot_count) {
     g.boot_count = boot_count;
     g.tele_at_ms = UINT64_MAX;
+    field_log_init(&g.log);
+    g.last_depth = FIELD_UNKNOWN_U8;
     g.link = FIELD_LINK_JOINING;
     bc_console_init();
     field_led_init();
@@ -520,6 +640,10 @@ void field_app_run(uint16_t boot_count) {
     /* A WINDOWED/REPORT_ONLY policy would light-sleep the chip and take the USB console with it; the field test runs
        ALWAYS_RX. (hil_node waits 10 s for a `safe` line first; a field node does not wait.) */
     const bool always_rx = st == LM_STATUS_OK && bc_force_always_rx(g.ctx);
+    log_boot();
+    /* The first join ask waits 0..2 s: boards powered on together do not all ask the root in the same instant (the root
+       runs one handshake at a time). */
+    g.join_at_ms = now_ms() + esp_random() % 2000u;
     /* The panel comes after the SDK's workspace: if memory is short the panel fails (render fault), not the mesh. */
     display_try_init(now_ms());
     draw_if_changed(now_ms());
@@ -546,6 +670,7 @@ void field_app_run(uint16_t boot_count) {
             link_tick(now);
         }
         if (g.was_reachable && now >= g.tele_at_ms) telemetry_send(now);
+        log_send(now);
         field_led_tick(now);
     }
 }
