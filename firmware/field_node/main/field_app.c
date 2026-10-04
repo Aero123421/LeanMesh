@@ -611,9 +611,38 @@ static void run_command(char *line) {
         } else {
             bc_answer(st);
         }
-    } else if (strcmp(cmd, "join") == 0) { /* ask now (a bench shortcut past the backoff) */
-        g.join_at_ms = 0;
-        bc_out("OK\n");
+    } else if (strcmp(cmd, "join") == 0) {
+        const char *arg = strtok_r(NULL, " ", &save);
+        if (arg == NULL) { /* ask now (a bench shortcut past the backoff) */
+            g.join_at_ms = 0;
+            bc_out("OK\n");
+        } else if (strcmp(arg, "transfer") == 0) { /* follow a new root: after `install 31 <RootHandover>` */
+            lm_join_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION,
+                                   .mode = LM_JOIN_TRANSFER_CANDIDATE};
+            esp_fill_random(r.request_id.bytes, sizeof r.request_id.bytes);
+            lm_operation_id_t op = 0;
+            const lm_status_t st = lm_join(g.ctx, &r, &op);
+            if (st == LM_STATUS_OK) {
+                bc_outf("OK op=%llu\n", (unsigned long long)op);
+            } else {
+                bc_answer(st);
+            }
+        } else {
+            bc_answer(LM_STATUS_INVALID_ARGUMENT);
+        }
+    } else if (strcmp(cmd, "install") == 0) { /* install <type> <hex>: a signed control object (hil.py install) */
+        const char *type = strtok_r(NULL, " ", &save);
+        const char *hex = strtok_r(NULL, " ", &save);
+        /* s_payload is free here: the console runs between event pumps on this task */
+        const int n = type != NULL && hex != NULL ? bc_unhex(hex, s_payload, sizeof s_payload) : -1;
+        lm_operation_id_t op = 0;
+        const lm_status_t st = n > 0 ? lm_install_control(g.ctx, (uint32_t)strtoul(type, NULL, 10), s_payload, (size_t)n, &op)
+                                     : LM_STATUS_INVALID_ARGUMENT;
+        if (st == LM_STATUS_OK) {
+            bc_outf("OK op=%llu\n", (unsigned long long)op);
+        } else {
+            bc_answer(st);
+        }
     } else if (strcmp(cmd, "ev") == 0) {
         const char *arg = strtok_r(NULL, " ", &save);
         g.ev_print = arg == NULL ? !g.ev_print : strcmp(arg, "on") == 0;
