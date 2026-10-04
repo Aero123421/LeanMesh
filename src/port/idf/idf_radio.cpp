@@ -223,8 +223,9 @@ Status IdfRadio::stop() {
             // A late completion still proves the drain: wait for it, bounded (a recovery path, not a poll).
             g_tx_stall_waits.fetch_add(1);
             const uint64_t limit = started + static_cast<uint64_t>(TxManager::k_watchdog.us + k_drain_wait.us);
+            const TickType_t pause = pdMS_TO_TICKS(5) > 0 ? pdMS_TO_TICKS(5) : 1; // HZ=100: 5 ms is 0 ticks (a spin)
             while (in_flight_.load() && static_cast<uint64_t>(esp_timer_get_time()) < limit) {
-                vTaskDelay(pdMS_TO_TICKS(5));
+                vTaskDelay(pause);
             }
             if (in_flight_.load()) { // callback drain cannot be proven: controlled reboot (docs/03 §4)
                 controlled_restart(LM_IDF_RESTART_RADIO_STALL,
