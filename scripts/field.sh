@@ -3,6 +3,8 @@
 # Usage: scripts/field.sh build <relay|leaf|display> [target]          target default esp32s3 (display: esp32s3 only)
 #        scripts/field.sh flash <relay|leaf|display> <port> [target]   erases the whole flash first (a fresh bench identity)
 #        scripts/field.sh update <relay|leaf|display> <port> [target]  writes the app only: keeps identity and membership
+# Env:   FIELD_ANTENNA=external (XIAO ESP32-C6 with a U.FL antenna; use its own LEANMESH_BUILD_ROOT: an existing build
+#        directory keeps its sdkconfig)
 # `display` = RELAY + CONFIG_FIELD_HUB75 (the Seengreat HUB75 S3 board). That board has no USB auto-reset: put it in
 # download mode by hand first (hold BOOT, press and release EN), then flash; it is flashed with --before no-reset
 # (override: FIELD_ESPTOOL_BEFORE=default-reset) and has to be reset by hand afterwards (EN).
@@ -43,6 +45,11 @@ case "$action" in
         [ "$level" = low ] && printf 'CONFIG_FIELD_LED_ACTIVE_LOW=y\n' >> "$extra" || printf 'CONFIG_FIELD_LED_ACTIVE_HIGH=y\n' >> "$extra"
         printf 'CONFIG_FIELD_LED_GPIO=%s\n' "$gpio" >> "$extra" ;;
       *) echo "FIELD_LED: none | low:<gpio> | high:<gpio>" >&2; exit 2 ;;
+    esac
+    case "${FIELD_ANTENNA:-}" in  # XIAO ESP32-C6 only: the U.FL connector instead of the on-board antenna
+      ""|onboard) ;;
+      external) printf 'CONFIG_HIL_XIAO_C6_EXTERNAL_ANTENNA=y\n' >> "$extra" ;;
+      *) echo "FIELD_ANTENNA: onboard | external" >&2; exit 2 ;;
     esac
     defaults="$proj/sdkconfig.defaults"
     [ "$role" != display ] || defaults="$defaults;$proj/sdkconfig.hub75"
