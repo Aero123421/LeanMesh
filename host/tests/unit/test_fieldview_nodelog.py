@@ -61,7 +61,7 @@ def test_a_boot_record_is_read_at_the_offsets_of_the_table() -> None:
     assert pr.encode_nodelog([(1, 9, 40, payload)]) == data
 
 
-def test_all_ten_types_round_trip_with_their_named_fields() -> None:
+def test_the_first_ten_types_round_trip_with_their_named_fields() -> None:
     records = [
         boot(),
         bare(pr.T_MEMBER, 2, 1200),
@@ -253,6 +253,18 @@ def test_the_words_of_the_records() -> None:
     assert said[5] == ("depth", "display2 parent changed (depth 3, -80 dBm)")
     assert said[6] is None                                          # nothing late: no line
     assert said[7] == ("radio", "display2 radio: longest TX completion 1350 ms, 2 late")
+
+
+def test_a_radio_fault_record_round_trips_and_says_how_the_app_recovered() -> None:
+    t = nl.NodeLogTrack()
+    out = pr.decode_nodelog(pr.encode_nodelog([
+        boot(1, 10), rec(pr.T_RADIO_FAULT, 2, 95_000, reason=0x0000_0010, restart_status=0),
+        rec(pr.T_RADIO_FAULT, 3, 140_000, reason=0x0000_0010, restart_status=7)]))
+    assert out[1].name == "RADIO_FAULT" and out[1].fields == {"reason": 16, "restart_status": 0}
+    said = [nl.describe("relay-c6a", r, t.feed(r), t) for r in out]
+    assert said[1] == ("radio", "relay-c6a radio fault (reason 16) 95 s after boot: SDK restarted")
+    assert said[2] == ("radio", "relay-c6a radio fault (reason 16) 140 s after boot: SDK restart failed (status 7), "
+                                "rebooted")
 
 
 def test_boot_texts_for_the_plain_reset_reasons() -> None:

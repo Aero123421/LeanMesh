@@ -509,6 +509,24 @@ static void on_message(const lm_event_t *e, size_t n) {
     }
 }
 
+/* LM_EVENT_FAULT: the SDK could not re-initialise the radio and stays silent until the application stops and starts it
+   (docs/03 section 4). A field node does that at once; when that fails too it reboots, so no board stays mute. */
+static void radio_fault(uint32_t reason) {
+    const lm_status_t stopped = lm_stop(g.ctx, 0, NULL); /* drain 0: the stop happens inside the call */
+    const lm_status_t started = stopped == LM_STATUS_OK ? lm_start(g.ctx) : stopped;
+    uint8_t p[8];
+    field_put32(p, reason);
+    field_put32(p + 4, (uint32_t)started);
+    log_add(FIELD_LOG_RADIO_FAULT, p, sizeof p); /* sent once the node is REACHABLE again */
+    say("FIELD radio fault (reason %u): SDK restart %s (%u)\n", (unsigned)reason, started == LM_STATUS_OK ? "ok" : "failed",
+        (unsigned)started);
+    if (started != LM_STATUS_OK) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_restart();
+    }
+    g.refresh_now = true;
+}
+
 static void pump_events(void) {
     for (int i = 0; i < 16; ++i) {
         lm_event_t e = {.struct_size = sizeof e, .abi_version = LM_ABI_VERSION};
@@ -523,6 +541,9 @@ static void pump_events(void) {
             on_message(&e, e.payload_bytes);
         } else if (e.kind == LM_EVENT_MEMBERSHIP || e.kind == LM_EVENT_CONNECTIVITY) {
             g.refresh_now = true;
+        } else if (e.kind == LM_EVENT_FAULT) {
+            radio_fault(e.reason);
+            return;
         }
     }
 }

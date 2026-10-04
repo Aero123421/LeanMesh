@@ -232,4 +232,7 @@ def describe(name: str, rec: pr.NodeRecord, fed: Fed, track: NodeLogTrack) -> tu
         return "panel", f"{name} display fault: {pr.DISPLAY_FAULTS.get(f['code'], 'code ' + str(f['code']))}"
     if t == pr.T_LOG_LOST:
         return "nodelog", f"{name}: the node's log ring dropped {f['records_dropped']} record(s)"
+    if t == pr.T_RADIO_FAULT:
+        done = "SDK restarted" if f["restart_status"] == 0 else f"SDK restart failed (status {f['restart_status']}), rebooted"
+        return "radio", f"{name} radio fault (reason {f['reason']}) {_span(rec.t_ms)} after boot: {done}"
     return None

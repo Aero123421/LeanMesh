@@ -129,6 +129,7 @@ Message: `u8 version = 1, u8 count`, then `count` records, at most 160 bytes in 
 | 8 | DEPTH | `u8 depth, i8 parent_rssi_dbm` | the depth changed while REACHABLE (the parent changed) |
 | 9 | DISPLAY_FAULT | `u8 code` (1 init failed, 2 draw failed) | the panel failed |
 | 10 | LOG_LOST | `u16 records_dropped` | the ring dropped records since the last message |
+| 11 | RADIO_FAULT | `u32 reason` (of `LM_EVENT_FAULT`), `u32 restart_status` (`lm_stop`+`lm_start`, 0 = ok) | the SDK gave up on the radio; the app restarted the SDK (a failed restart reboots the board) |
 
 Unknown types are skipped by `len`. fieldview writes every record to `nodelog.ndjson` and shows the important ones
 (BOOT with its cause, MEMBER / REACHABLE with the time since boot, UNREACHABLE, RADIO with a late completion) in its log.
