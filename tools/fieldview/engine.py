@@ -2,7 +2,8 @@
 keeps per-node statistics, runs pings and display commands through POST /v1/messages, and records everything.
 
 How it reads the Host (api/SEMANTICS.md, 'Cursor/consumer'):
-  * telemetry arrives as MESSAGE_RECEIVED events (`origin`, `payload_b64`, `evidence.details.app_port`);
+  * telemetry (port 210) and the node event log (port 213, §3.4) arrive as MESSAGE_RECEIVED events (`origin`,
+    `payload_b64`, `evidence.details.app_port`); both are recorded before their page is acknowledged;
   * the journal is read by cursor with long polls (GET /v1/events?after=&wait_ms=) as a registered consumer: after the
     records are queued the cursor is acknowledged (POST /v1/consumers/{name}/ack), so the Host keeps what we have not
     read (critical events are protected until every consumer acknowledged them) and a restart resumes where we stopped;
@@ -38,6 +39,7 @@ from typing import Any
 
 from . import protocol as pr
 from .hostclient import HostClient, HostUnreachable, Reply, SendUnknown
+from .nodelog import NodeLogTrack, describe
 from .recorder import Recorder, utc_text
 from .stats import PingTrack, TelemetryTrack
 from .topology import NodeView, build_tree, short_id
@@ -180,6 +182,7 @@ class FieldView:
         self.nodes_seen = False
         self.first_listed: dict[str, float] = {}
         self.tele: dict[str, TelemetryTrack] = {}
+        self.nodelog: dict[str, NodeLogTrack] = {}
         self.ping: dict[str, PingTrack] = {}
         self.node_state: dict[str, str] = {}
         self.silent_noted: set[str] = set()
@@ -203,6 +206,7 @@ class FieldView:
         self.live_events = 0
         self.other_messages = 0
         self.bad_telemetry = 0
+        self.bad_nodelog = 0
         self._segments: deque[Segment] = deque()
         self._page_holds: set[str] = set()
         self._ack_lock = asyncio.Lock()
@@ -428,6 +432,8 @@ class FieldView:
         if kind == "MESSAGE_RECEIVED":
             if pr.event_app_port(ev) == pr.TELEMETRY_PORT:
                 self._on_telemetry(ev, backlog)
+            elif pr.event_app_port(ev) == pr.NODELOG_PORT:
+                self._on_nodelog(ev, backlog)
             else:
                 self.other_messages += 1
         elif kind == "OPERATION_UPDATE":
@@ -468,6 +474,45 @@ class FieldView:
         if was_lost:
             self.node_state[device] = "ok"
             self.note("back", f"{self.name_of(device)} sends telemetry again", device)
+
+    # ---- node event log (§3.4) ----------------------------------------------------------------------------------
+    def _on_nodelog(self, ev: dict[str, Any], backlog: bool) -> None:
+        """One port-213 message: every record goes to nodelog.ndjson, the state of the node follows (a backlog message too:
+        the log is history the node cannot repeat), and the records that matter become lines of the event log (not for
+        a backlog message: its laptop time would be wrong). A malformed message is counted and recorded whole, never used."""
+        device = ev.get("origin", "")
+        name = self.name_of(device)
+        try:
+            records = pr.decode_nodelog(pr.event_payload(ev))
+        except (pr.NodeLogError, ValueError) as exc:
+            self.bad_nodelog += 1
+            self.rec.log("nodelog", {"device": device, "name": name, "cursor": ev.get("cursor"), "backlog": backlog,
+                                     "type": "BAD_MESSAGE", "error": str(exc)})
+            if not backlog:
+                self.note("nodelog", f"unreadable node log from {name}: {exc}", device)
+            return
+        track = self.nodelog.setdefault(device, NodeLogTrack())
+        for rec in records:
+            fed = track.feed(rec)
+            line: dict[str, Any] = {"device": device, "name": name, "cursor": ev.get("cursor"), "backlog": backlog,
+                                    "boot_count": track.boot_count, "seq": rec.seq, "t_ms": rec.t_ms,
+                                    "type": rec.name, "type_id": rec.type, "fields": rec.fields}
+            for flag in ("late", "new_boot", "unseen_boot", "jump"):
+                if getattr(fed, flag):
+                    line[flag] = True
+            if fed.missing:
+                line["missing_before"] = fed.missing
+            self.rec.log("nodelog", line)
+            if backlog:
+                continue
+            if fed.unseen_boot:
+                self.note("nodelog", f"{name} restarted, but its BOOT record never arrived (seq {rec.seq})", device)
+            if fed.missing or fed.jump:
+                self.note("nodelog", f"{name}: node log record(s) missing before seq {rec.seq}"
+                                     + (f" ({fed.missing})" if fed.missing else " (a jump too big to count)"), device)
+            said = describe(name, rec, fed, track)
+            if said is not None:
+                self.note(said[0], said[1], device)
 
     # ---- operations ---------------------------------------------------------------------------------------------
     def _on_operation_event(self, ev: dict[str, Any]) -> None:
@@ -1087,7 +1132,8 @@ class FieldView:
     def _forget_stale_devices(self) -> None:
         """The per-node tables follow what the Host lists; a node that is not listed any more (revoked, replaced) is
         dropped, oldest first, once a table is beyond DEVICES_MAX (a Host holds at most 64 members)."""
-        tables: list[dict[str, Any]] = [self.tele, self.ping, self.node_state, self.display, self.first_listed]
+        tables: list[dict[str, Any]] = [self.tele, self.ping, self.node_state, self.display, self.first_listed,
+                                        self.nodelog]
         for table in tables:
             extra = len(table) - DEVICES_MAX
             if extra > 0:
@@ -1160,6 +1206,7 @@ class FieldView:
             "min_heap_bytes": t.min_heap_bytes if t else None,
             "display_state": t.display_state if t else None, "display_seq": t.display_seq if t else None,
             "render_fault": t.render_fault if t else None, "ping": ping.as_dict(),
+            **(self.nodelog.get(device) or NodeLogTrack()).as_dict(),
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -1180,7 +1227,8 @@ class FieldView:
             "domain": self.cfg.domain, "interval_assumed_s": self.cfg.interval_s,
             "host": {**self.host, "requests": self.client.requests, "rate_limited": self.client.rate_limited,
                      "cursor": self.cursor, "backlog_events": self.backlog_events, "live_events": self.live_events,
-                     "other_messages": self.other_messages, "bad_telemetry": self.bad_telemetry},
+                     "other_messages": self.other_messages, "bad_telemetry": self.bad_telemetry,
+                     "bad_nodelog": self.bad_nodelog},
             "warnings": warnings, "tree": tree, "nodes": rows, "unlisted": unlisted,
             "events": list(self.log)[-200:], "ping": ps, "display": self.display,
             "display_nodes": [{"device": d, "name": self.name_of(d)} for d in self.display_nodes()],
@@ -1198,6 +1246,10 @@ class FieldView:
                         "ping_sent": p["sent"], "ping_alive": p["alive"], "ping_lost": p["noanswer"],
                         "ping_notsent": p["notsent"], "ping_unknown": p["unknown"], "ping_skipped": p["skipped"],
                         "ping_late": p["late"],
+                        "attach_s": None if r["attach_s"] is None else f"{r['attach_s']:.1f}",
+                        "boots": r["boots_logged"] if r["log_records"] else None,
+                        "sdk_restarts": r["sdk_restarts"] if r["log_records"] else None,
+                        "tx_done_max_ms": r["tx_done_max_ms"],
                         "ping_rtt_median_ms": None if p["rtt_median_ms"] is None else f"{p['rtt_median_ms']:.0f}",
                         "last_seen_age_s": None if r["age_s"] is None else f"{r['age_s']:.0f}"})
         return out

@@ -59,6 +59,10 @@ tr.st-silent td, tr.st-left td, tr.st-lost td { color: var(--mute); }
 .log .k-lost, .log .k-leave, .log .k-reboot, .log .k-gap, .log .k-loss { color: var(--poor); }
 .log .k-join, .log .k-back { color: var(--good); }
 .log .k-parent, .log .k-depth { color: var(--accent); }
+.log .k-unreachable, .log .k-radio, .log .k-panel { color: var(--poor); }
+.log .k-attach { color: var(--good); }
+.log .k-nodelog, .log .k-boot { color: var(--fair); }
+td.warn { color: var(--poor); }
 footer { padding: 10px 16px 24px; color: var(--mute); font-size: 12px; }
 svg text { fill: var(--fg); font: 12px system-ui, sans-serif; }
 svg .sub { fill: var(--mute); font-size: 10px; }

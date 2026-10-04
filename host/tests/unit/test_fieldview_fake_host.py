@@ -856,3 +856,90 @@ def test_the_tables_stay_bounded_in_a_long_session(
             assert not fv._open_pings and not fv._epoch_users and len(fv.final_hint) <= 4096
 
     asyncio.run(scenario())
+
+
+# ---- the node event log, app port 213 (docs/field/protocol.md §3.4) ----------------------------------------------------
+
+def nodelog(fake: FakeHost, device: str, *records: tuple[int, int, int, bytes]) -> int:
+    return fake.emit_telemetry(device, pr.encode_nodelog(list(records)), port=pr.NODELOG_PORT)
+
+
+NL_BOOT = (pr.T_BOOT, 1, 20, pr.nodelog_payload(pr.T_BOOT, reset_reason=2, sdk_restart_cause=1, boot_count=7,
+                                                prev_uptime_ms=52_300, detail_ms=3012))
+NL_REACHABLE = (pr.T_REACHABLE, 2, 8400, pr.nodelog_payload(pr.T_REACHABLE, depth=2, parent_rssi_dbm=-61))
+
+
+def test_the_node_log_is_read_by_cursor_recorded_and_acknowledged(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(C, parent_device_id=ROOT, root_depth=1)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: not fv._backlog, "the backlog is read")
+            telemetry(fake, C, 1, role=3, depth=1, rssi=-60)
+            nodelog(fake, C, NL_BOOT, NL_REACHABLE)
+            nodelog(fake, C, (pr.T_RADIO, 3, 30_000, pr.nodelog_payload(
+                pr.T_RADIO, tx_done_max_ms=1350, tx_late=2, tx_stall_waits=0)))
+            fake.emit_telemetry(C, b"\x01\x05garbage", port=pr.NODELOG_PORT)           # malformed: counted, never used
+            await until(lambda: C in fv.nodelog and fv.nodelog[C].radio and fv.bad_nodelog == 1, "the node log")
+            await until(lambda: fake.acks.get("fieldview") == len(fake.events), "the cursor is acknowledged")
+            row = {r["name"]: r for r in fv.snapshot()["nodes"]}["display-1"]
+            assert row["boot_cause"] == "software; SDK: radio stall (TX completion never came)"
+            assert (row["attach_s"], row["tx_done_max_ms"], row["tx_late"], row["boots_logged"]) == (8.4, 1350, 2, 1)
+            assert fv.other_messages == 0 and fv.tele[C].received == 1
+
+    asyncio.run(scenario())
+    recs = lines(next(tmp_path.glob("rec*/nodelog.ndjson")))
+    assert [x["type"] for x in recs] == ["BOOT", "REACHABLE", "RADIO", "BAD_MESSAGE"]
+    assert [x["boot_count"] for x in recs[:3]] == [7, 7, 7] and recs[0]["t"].endswith("Z")
+    events = lines(next(tmp_path.glob("rec*/events.ndjson")))
+    said = {x["kind"]: x["text"] for x in events if x.get("device") == C}
+    assert said["boot"] == ("display-1 booted: software restart by the SDK (radio stall, TX completion outstanding "
+                            "3012 ms) after 52 s")
+    assert said["attach"] == "display-1 attached 8.4 s after boot (depth 2, -61 dBm)"
+
+
+def test_node_log_events_are_not_acknowledged_before_their_records_are_on_disk(
+        fake: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine_mod, "ACK_EVERY_S", 0.1)
+    fake.add_node(A, parent_device_id=ROOT)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            await until(lambda: not fv._backlog, "the backlog is read")
+            base = fake.acks.get("fieldview", 0)
+            fv.rec.sync = lambda timeout=5.0: False          # the disk does not confirm
+            nodelog(fake, A, NL_BOOT, NL_REACHABLE)
+            await until(lambda: A in fv.nodelog and fv.nodelog[A].attach_s == 8.4, "node log read")
+            await asyncio.sleep(0.6)                          # several ack periods
+            assert fake.acks.get("fieldview", 0) == base and fv.ack_pending and "ack-records" in fv.warnings
+            del fv.rec.sync                                    # the disk is fine again
+            await until(lambda: fake.acks.get("fieldview") == len(fake.events), "the ack catches up")
+            assert "ack-records" not in fv.warnings and not fv.ack_pending
+
+    asyncio.run(scenario())
+    assert [x["type"] for x in lines(next(tmp_path.glob("rec*/nodelog.ndjson")))] == ["BOOT", "REACHABLE"]
+
+
+def test_the_page_shows_the_node_log_columns_and_events(fake: FakeHost, tmp_path: Path) -> None:
+    fake.add_node(C, parent_device_id=ROOT, root_depth=1)
+
+    async def scenario() -> None:
+        async with view(fake, tmp_path) as fv:
+            app = make_app(fv, 18092)
+            server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
+            task = asyncio.ensure_future(server.serve())
+            await until(lambda: server.started, "web server")
+            base = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+            nodelog(fake, C, NL_BOOT, NL_REACHABLE)
+            await until(lambda: C in fv.nodelog and fv.nodelog[C].attach_s, "node log read")
+            async with httpx.AsyncClient(base_url=base, headers={"Host": "127.0.0.1:18092"}) as c:
+                page = (await c.get("/")).text
+                assert "<th" in page and all(h in page for h in ("boot cause", "attach", "TX max"))
+                state = (await c.get("/api/state")).json()
+                row = state["nodes"][0]
+                assert row["boot_cause"].startswith("software; SDK: radio stall") and row["attach_s"] == 8.4
+                assert any(e["kind"] == "boot" and "radio stall" in e["text"] for e in state["events"])
+            server.should_exit = True
+            await task
+
+    asyncio.run(scenario())

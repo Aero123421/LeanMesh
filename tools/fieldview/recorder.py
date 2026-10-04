@@ -18,10 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-FILES = ("telemetry", "ping", "display", "events")
+FILES = ("telemetry", "ping", "display", "events", "nodelog")
 SUMMARY_COLUMNS = ("utc", "name", "device", "depth", "parent", "rssi_dbm", "telemetry_loss_pct", "ping_sent",
                    "ping_alive", "ping_lost", "ping_notsent", "ping_unknown", "ping_skipped", "ping_late",
-                   "ping_rtt_median_ms", "last_seen_age_s")
+                   "ping_rtt_median_ms", "last_seen_age_s", "attach_s", "boots", "sdk_restarts", "tx_done_max_ms")
 QUEUE_MAX = 20000
 
 

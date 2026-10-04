@@ -6,6 +6,7 @@ Protocol bench only: a pty is not USB and sim time is not timing evidence, so th
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from collections.abc import Callable
@@ -57,6 +58,13 @@ class Member:
         r = await self.cmd(f"send 1 root best_effort volatile 210 1 {now_ms + 60_000} {payload}")
         assert r.get("ok") and r["status"] == "OK", r
 
+    async def nodelog(self, *records: tuple[int, int, int, bytes]) -> None:
+        """One node event log message (§3.4, app port 213) to the root application."""
+        now_ms = int((await self.cmd("status"))["now_us"]) // 1000
+        payload = pr.encode_nodelog(list(records)).hex()
+        r = await self.cmd(f"send 1 root best_effort volatile {pr.NODELOG_PORT} 1 {now_ms + 60_000} {payload}")
+        assert r.get("ok") and r["status"] == "OK", r
+
     async def app(self) -> None:
         """Takes the messages the member receives and answers the ping / display ports as `mode` says."""
         while True:
@@ -103,6 +111,16 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
                 await member.telemetry(seq=seq, uptime_s=seq * 10, role=3, chip=1, depth=1, rssi=-71)
             await until(lambda: node in fv.tele and fv.tele[node].received == 3, "three telemetry messages")
             assert (fv.tele[node].lost, fv.tele[node].last.parent_rssi_dbm) == (1, -71)
+            # node log (§3.4): a BOOT with an SDK restart cause and a REACHABLE; record 3 never arrives
+            await member.nodelog(
+                (pr.T_BOOT, 1, 20, pr.nodelog_payload(pr.T_BOOT, reset_reason=2, sdk_restart_cause=1, boot_count=7,
+                                                      prev_uptime_ms=52_300, detail_ms=3012)),
+                (pr.T_REACHABLE, 2, 8400, pr.nodelog_payload(pr.T_REACHABLE, depth=1, parent_rssi_dbm=-71)),
+                (pr.T_RADIO, 4, 9000, pr.nodelog_payload(pr.T_RADIO, tx_done_max_ms=1350, tx_late=2, tx_stall_waits=0)))
+            await until(lambda: node in fv.nodelog and fv.nodelog[node].radio, "the node log")
+            nrow = {r["device"]: r for r in fv.snapshot()["nodes"]}[node]
+            found["nodelog"] = (nrow["boot_cause"], nrow["attach_s"], nrow["tx_done_max_ms"], nrow["records_lost"])
+            assert found["nodelog"] == ("software; SDK: radio stall (TX completion never came)", 8.4, 1350, 1)
             # ping: delivery RECEIVED, the SDK's end-to-end receipt makes it alive (END_RECEIVED)
             rnd = await fv.ping_round(5.0)
             await until(lambda: rnd["open"] == 0, "the ping ends")
@@ -137,6 +155,8 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
     found = asyncio.run(scenario())
     print("fieldview e2e:", found)
     assert found["warnings"] == []
+    logged = [json.loads(x) for x in (tmp_path / "fieldview" / "nodelog.ndjson").read_text().splitlines()]
+    assert [x["type"] for x in logged] == ["BOOT", "REACHABLE", "RADIO"] and logged[0]["boot_count"] == 7
     # what the real Host was sent: FIFO RECEIVED / APPLIED with a UTC deadline (the LATEST form would have been refused)
     ops = [r for r in (tmp_path / "fieldview" / "ping.ndjson").read_text().splitlines() if '"result"' in r]
     assert len(ops) == 2
