@@ -137,7 +137,9 @@ def test_a_lost_place_is_shown_and_never_skipped_silently(fake: FakeHost, tmp_pa
             fake.purge(4)
             await until(lambda: "gap" in fv.warnings, "CURSOR_GAP shown")
             assert any(e["kind"] == "gap" and "CURSOR_GAP" in e["text"] for e in fv.log)
-            await until(lambda: fv.tele[A].received == 3 and fv.cursor == f"{fake.journal}:6", "reading resumes")
+            # The gap re-reads as backlog (baseline only): wait until it is over, or 9 becomes the baseline.
+            await until(lambda: not fv._backlog and fv.tele[A].received == 3 and fv.cursor == f"{fake.journal}:6",
+                        "reading resumes")
             telemetry(fake, A, 9)  # and 7, 8 missing is counted again from the new baseline
             await until(lambda: fv.tele[A].lost == 2, "loss after the gap")
 
@@ -525,7 +527,8 @@ def test_events_are_not_acknowledged_before_their_records_are_on_disk(
 
     async def scenario() -> None:
         async with view(fake, tmp_path) as fv:
-            await until(lambda: not fv._backlog, "the backlog is read")
+            # The backlog's own ack may still be in flight: count from after it has landed.
+            await until(lambda: not fv._backlog and not fv.ack_pending, "the backlog is read and acknowledged")
             base = fake.acks.get("fieldview", 0)
             fv.rec.sync = lambda timeout=5.0: False          # the disk does not confirm (fsync fails / hangs)
             for seq in (1, 2, 3):
@@ -535,7 +538,8 @@ def test_events_are_not_acknowledged_before_their_records_are_on_disk(
             assert fake.acks.get("fieldview", 0) == base       # nothing acknowledged
             assert "ack-records" in fv.warnings and fv.ack_pending
             del fv.rec.sync                                    # the disk is fine again
-            await until(lambda: fake.acks.get("fieldview") == len(fake.events), "the ack catches up")
+            await until(lambda: fake.acks.get("fieldview") == len(fake.events) and not fv.ack_pending,
+                        "the ack catches up")
             assert "ack-records" not in fv.warnings and not fv.ack_pending
 
     asyncio.run(scenario())
@@ -905,7 +909,8 @@ def test_node_log_events_are_not_acknowledged_before_their_records_are_on_disk(
 
     async def scenario() -> None:
         async with view(fake, tmp_path) as fv:
-            await until(lambda: not fv._backlog, "the backlog is read")
+            # The backlog's own ack may still be in flight: count from after it has landed.
+            await until(lambda: not fv._backlog and not fv.ack_pending, "the backlog is read and acknowledged")
             base = fake.acks.get("fieldview", 0)
             fv.rec.sync = lambda timeout=5.0: False          # the disk does not confirm
             nodelog(fake, A, NL_BOOT, NL_REACHABLE)
@@ -913,7 +918,8 @@ def test_node_log_events_are_not_acknowledged_before_their_records_are_on_disk(
             await asyncio.sleep(0.6)                          # several ack periods
             assert fake.acks.get("fieldview", 0) == base and fv.ack_pending and "ack-records" in fv.warnings
             del fv.rec.sync                                    # the disk is fine again
-            await until(lambda: fake.acks.get("fieldview") == len(fake.events), "the ack catches up")
+            await until(lambda: fake.acks.get("fieldview") == len(fake.events) and not fv.ack_pending,
+                        "the ack catches up")
             assert "ack-records" not in fv.warnings and not fv.ack_pending
 
     asyncio.run(scenario())
@@ -930,6 +936,7 @@ def test_the_page_shows_the_node_log_columns_and_events(fake: FakeHost, tmp_path
             task = asyncio.ensure_future(server.serve())
             await until(lambda: server.started, "web server")
             base = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+            await until(lambda: not fv._backlog, "the backlog is read")  # a backlog node log makes no events
             nodelog(fake, C, NL_BOOT, NL_REACHABLE)
             await until(lambda: C in fv.nodelog and fv.nodelog[C].attach_s, "node log read")
             async with httpx.AsyncClient(base_url=base, headers={"Host": "127.0.0.1:18092"}) as c:
