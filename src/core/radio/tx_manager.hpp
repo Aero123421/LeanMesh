@@ -38,7 +38,10 @@ struct TxStats {
 
 class TxManager {
   public:
-    static constexpr Duration k_watchdog = Duration::from_ms(1000);
+    // Longer than any completion the driver still delivers. ESP-IDF LR 250 kbit/s unicasts complete in up to 0.98 s, and
+    // the slow ones end at 1.02-1.06 s (a driver-side limit, busy channel suspected), never later (HIL 2026-10-04).
+    // A 1000 ms watchdog sat inside that range and restarted healthy radios over and over (docs/03 §4).
+    static constexpr Duration k_watchdog = Duration::from_ms(3000);
 
     // Status::Busy: a TX is already in flight (or the driver refused: local, not RF loss).
     // Status::DriverResultUnknown: isolated after a watchdog until reinitialised().

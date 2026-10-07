@@ -47,8 +47,10 @@ def first_party_files() -> list[Path]:
         if not base.exists():
             continue
         for f in base.rglob("*"):
-            if f.is_file() and "__pycache__" not in f.parts and (f.suffix in SUFFIXES or f.name in SUFFIXES
-                                                                 or f.name == "Kconfig"):
+            # managed_components: third-party ESP-IDF components the component manager downloads (gitignored)
+            if f.is_file() and "__pycache__" not in f.parts and "managed_components" not in f.parts and (
+                    f.suffix in SUFFIXES or f.name in SUFFIXES
+                    or f.name == "Kconfig"):
                 out.append(f)
     return out
 

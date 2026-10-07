@@ -817,6 +817,123 @@ LM_TEST("SEC-b sim: a member's leave removes it from the root's tree and its end
     LM_CHECK(n.eng(0).link().neighbors().find_device(n.id(1)) == nullptr);
 }
 
+// FIELD: the root reports where each member stands in its approved tree (parent, depth) for the Host's node list.
+namespace {
+struct Position {
+    bool ok = false;
+    uint16_t parent = 0;
+    unsigned depth = 0;
+};
+Position position(MNet &n, unsigned i) {
+    Position p;
+    ShortAddr parent{};
+    uint8_t depth = 0;
+    p.ok = n.eng(0).routes().topology().position_of(ShortAddr{n.addr(i)}, n.root_ms(), parent, depth) == Status::Ok;
+    p.parent = parent.value();
+    p.depth = depth;
+    return p;
+}
+} // namespace
+
+LM_TEST("FIELD sim: the root reports parent and depth of a relay chain and follows a parent change") {
+    MNet n(4); // root 0 (address 1) - relay 1 - relay 2 - leaf 3; node 3 also hears node 1, once the test lets it
+    n.link(1, 3, false);
+    n.boot_all();
+    n.set_time();
+    // Before the mesh forms nothing is attached: no member has a position (a member without a parent states none).
+    LM_CHECK(!position(n, 1).ok && !position(n, 2).ok && !position(n, 3).ok);
+    LM_CHECK(n.until([&] { return n.formed(); }, 200'000, 20));
+    const Position p1 = position(n, 1);
+    const Position p2 = position(n, 2);
+    const Position p3 = position(n, 3);
+    LM_CHECK(p1.ok && p2.ok && p3.ok);
+    LM_CHECK_EQ(p1.parent, 1U); // a direct child: the root's own address
+    LM_CHECK_EQ(p1.depth, 1U);
+    LM_CHECK_EQ(p2.parent, n.addr(1));
+    LM_CHECK_EQ(p2.depth, 2U);
+    LM_CHECK_EQ(p3.parent, n.addr(2));
+    LM_CHECK_EQ(p3.depth, 3U);
+    // The root itself and an address nobody holds have no position.
+    ShortAddr par{};
+    uint8_t dep = 0;
+    LM_CHECK(n.eng(0).routes().topology().position_of(ShortAddr{1}, n.root_ms(), par, dep) == Status::NotFound);
+    LM_CHECK(n.eng(0).routes().topology().position_of(ShortAddr{900}, n.root_ms(), par, dep) == Status::NotFound);
+    // Parent change: relay 2 dies, node 3 hears relay 1 and attaches below it.
+    n.link(1, 3, true);
+    n.node(2).power_cut();
+    LM_CHECK(n.until([&] { return n.ready(3) && n.mesh(3).parent_addr() == ShortAddr{n.addr(1)} && position(n, 3).ok; },
+                     200'000, 20));
+    const Position q3 = position(n, 3);
+    LM_CHECK_EQ(q3.parent, n.addr(1));
+    LM_CHECK_EQ(q3.depth, 2U);
+    LM_CHECK_EQ(position(n, 1).depth, 1U);
+}
+
+// FIELD: lm_diagnostics_get reports the RSSI of the last frame received from the current mesh parent.
+namespace {
+struct ParentRssi {
+    bool valid = false;
+    int16_t dbm = 0;
+};
+ParentRssi parent_rssi(MNet &n, unsigned i) {
+    lm_diagnostics_t d{};
+    d.struct_size = sizeof(d);
+    d.abi_version = LM_ABI_VERSION;
+    LM_CHECK_EQ(lm_diagnostics_get(n.ctx(i), &d), LM_STATUS_OK);
+    ParentRssi r;
+    r.valid = (d.validity_bits & LM_DIAGNOSTICS_VALID_PARENT_RSSI) != 0;
+    r.dbm = d.parent_rssi_dbm;
+    LM_CHECK(r.valid || d.parent_rssi_dbm == 0); // unknown is zero in the struct and says so in the bit
+    return r;
+}
+void set_rssi_link(MNet &n, unsigned a, unsigned b, bool up, int16_t dbm) {
+    LinkParams p;
+    p.up = up;
+    p.rssi_valid = true;
+    p.rssi_dbm = dbm;
+    n.world.set_link(static_cast<uint16_t>(a), static_cast<uint16_t>(b), p);
+}
+} // namespace
+
+LM_TEST("FIELD sim: parent RSSI is unknown before attach, the parent's after, none while re-attaching, the new parent's after") {
+    MNet n(4); // root 0 - relay 1 - relay 2 - leaf 3; node 3 also hears node 1, once the test lets it
+    set_rssi_link(n, 0, 1, true, -50);
+    set_rssi_link(n, 1, 2, true, -60);
+    set_rssi_link(n, 2, 3, true, -70);
+    set_rssi_link(n, 1, 3, false, -80);
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(!parent_rssi(n, 3).valid); // nothing attached yet
+    LM_CHECK(n.until([&] { return n.formed(); }, 200'000, 20));
+    LM_CHECK(n.until([&] { return parent_rssi(n, 3).valid; }, 60'000, 20));
+    LM_CHECK_EQ(parent_rssi(n, 3).dbm, -70);
+    LM_CHECK_EQ(parent_rssi(n, 2).dbm, -60);
+    LM_CHECK_EQ(parent_rssi(n, 1).dbm, -50);
+    LM_CHECK(!parent_rssi(n, 0).valid); // the root has no parent
+    // The same parent, a changed link: the value follows the last frame (the parent's next hello or ack).
+    set_rssi_link(n, 2, 3, true, -64);
+    LM_CHECK(n.until([&] { return parent_rssi(n, 3).valid && parent_rssi(n, 3).dbm == -64; }, 100'000, 20));
+    // Parent change: relay 2 dies and node 3 cannot reach anyone else yet. Without an approved parent there is no
+    // value, however recently the dead parent was heard. Then it hears relay 1 and takes it as its parent.
+    n.node(2).power_cut();
+    LM_CHECK(n.until([&] { return !parent_rssi(n, 3).valid; }, 200'000, 5));
+    LM_CHECK(!n.ready(3));
+    set_rssi_link(n, 1, 3, true, -80);
+    LM_CHECK(n.until([&] { return n.ready(3) && n.mesh(3).parent_addr() == ShortAddr{n.addr(1)}; }, 200'000, 20));
+    LM_CHECK(n.until([&] { return parent_rssi(n, 3).valid; }, 60'000, 20));
+    LM_CHECK_EQ(parent_rssi(n, 3).dbm, -80);
+}
+
+LM_TEST("FIELD sim: a medium without RSSI leaves parent RSSI unknown even in a formed mesh") {
+    MNet n(3); // default links carry no RSSI (the sim reports none, like a driver that has none)
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.formed(); }, 200'000, 20));
+    n.run_ms(40'000);
+    LM_CHECK(!parent_rssi(n, 1).valid);
+    LM_CHECK(!parent_rssi(n, 2).valid);
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;

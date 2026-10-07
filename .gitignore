@@ -9,3 +9,5 @@ sdkconfig.old
 .venv/
 .pytest_cache/
 *.log
+# firmware/field_node: written by the component manager (differs per target); the pin is main/idf_component.yml
+dependencies.lock

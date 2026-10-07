@@ -60,6 +60,11 @@ void collect(Engine &e, MonoTime now, Snapshot &s) {
         s.validity |= valid::root_term;
         s.root_term = static_cast<uint32_t>(e.identity().term().value());
     }
+    int16_t rssi = 0;
+    if (e.mesh().parent_rssi(rssi)) {
+        s.validity |= valid::parent_rssi;
+        s.parent_rssi_dbm = rssi;
+    }
     const channel::Channel &ch = e.chan();
     if (ch.enabled()) {
         s.validity |= valid::channel;
@@ -115,6 +120,9 @@ void to_abi(const Snapshot &s, lm_diagnostics_t &o) {
     }
     if (has(valid::interval)) {
         o.interval_us = s.interval_us;
+    }
+    if (has(valid::parent_rssi)) {
+        o.parent_rssi_dbm = s.parent_rssi_dbm;
     }
     if (has(valid::reset_reason)) {
         o.last_reset_reason = s.reset_reason;

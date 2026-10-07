@@ -52,7 +52,7 @@ groupへのSENDは対象全員について権限を照合します。
 | `POST /v1/control` | 型による | JOIN_DECISION / LEAVE（503 UNSUPPORTED） / REVOKE / TRANSFER / INSTALL_CONTROL / POLICY_SET / CHANNEL_FREEZE / CHANNEL_RECALCULATE / GROUP_SET / POWER_POLICY_SET / COMMISSIONING_WINDOW_SET / ROOT_HANDOVER / LEDGER_RESTORE（§7） |
 | `GET /v1/operations/{id}`、`POST .../cancel`、`GET .../targets` | READ / 書込み | 状態と証拠 / 取消 / group個別結果（16件/page） |
 | `GET /v1/ledger/backup` | CONFIGURE | そのdomainのrootの台帳backup（最新のsequence 1つ、`backup_b64`付き。§7）。Hostがrootから自動で取る |
-| `GET /v1/nodes[/{device_id}[/power]]`、`/v1/channel`、`/v1/policy`、`/v1/lifecycle/requests` | READ | rootの報告のmirror（`domain_id` クエリ必須）。`/v1/policy` は rootの join mode と policy revision |
+| `GET /v1/nodes[/{device_id}[/power]]`、`/v1/channel`、`/v1/policy`、`/v1/lifecycle/requests` | READ | rootの報告のmirror（`domain_id` クエリ必須）。`/v1/nodes` の各nodeは承認済み親を持つとき`parent_device_id`（直下の子はroot自身のDeviceId）と`root_depth`（1=rootの直下）を持ち、持たないとき両方とも無い（serial NODE_QUERYの`tree`、docs/19）。`/v1/policy` は rootの join mode と policy revision |
 | `GET /v1/events`、`GET /v1/events/stream`、`POST /v1/consumers/{name}/ack` | READ | event journal（§4） |
 
 ## 3. 送信とidempotency

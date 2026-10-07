@@ -243,6 +243,7 @@ MonoTime Engine::step(MonoTime now) {
 void Engine::on_radio_event(const port::RadioEvent &ev, MonoTime now) {
     if (ev.kind == port::RadioEvent::Kind::Rx) {
         ++stats_.rx_frames;
+        mesh_.on_radio_rx(ev.rx); // parent RSSI (diagnostics): a field of the frame the driver callback already carried
         // [SLICE:S5 LINK] header decode, SID lookup, AEAD open, kind dispatch. A valid frame with no
         // consumer yet (discovery, join proxy, no sink) is counted, never acted on.
         if (!link_.on_rx(ev.rx, now)) {

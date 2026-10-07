@@ -373,7 +373,41 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
             const root::Entry &e = led.entry(i);
             n += (node_state(led, e, st) && (!p.has_filter || e.device.bytes == p.filter)) ? 1U : 0U;
         }
-        w.map(6);
+        // Deterministic CBOR: keys by length, then bytewise (tree, nodes, power, policy, channel, pending, revision).
+        w.map(7);
+        key(w, "tree"); // FIELD: [address, parent address, depth] of every listed member that has an approved parent now
+        {
+            const MonoTime now = usb_.now();
+            const auto position = [&](const root::Entry &e, ShortAddr &parent, uint8_t &depth) {
+                return engine_.routes().topology().position_of(e.address, now.to_ms(), parent, depth) == Status::Ok;
+            };
+            std::size_t nt = 0;
+            for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
+                uint32_t st = 0;
+                const root::Entry &e = led.entry(i);
+                ShortAddr parent{};
+                uint8_t depth = 0;
+                nt += (node_state(led, e, st) && (!p.has_filter || e.device.bytes == p.filter) &&
+                       position(e, parent, depth))
+                          ? 1U
+                          : 0U;
+            }
+            w.array(nt);
+            for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
+                uint32_t st = 0;
+                const root::Entry &e = led.entry(i);
+                ShortAddr parent{};
+                uint8_t depth = 0;
+                if (!node_state(led, e, st) || (p.has_filter && e.device.bytes != p.filter) ||
+                    !position(e, parent, depth)) {
+                    continue;
+                }
+                w.array(3);
+                w.uint(e.address.value());
+                w.uint(parent.value());
+                w.uint(depth);
+            }
+        }
         key(w, "nodes");
         w.array(n);
         for (std::size_t i = 0; i < root::k_ledger_slots; ++i) {
@@ -420,7 +454,6 @@ std::size_t Bridge::encode_result(const Pending &p, MutByteView out) {
             w.uint(mp.latest_s);
             w.uint(mp.reported_s);
         }
-        // Deterministic CBOR: keys by length, then bytewise (nodes, power, policy, channel, pending, revision).
         key(w, "policy"); // HIL-F5: [revision, join mode] of lm_policy_get, the compare-and-set base of POLICY_SET
         {
             lm_policy_t pol{};

@@ -617,3 +617,33 @@ def test_host_sets_the_root_join_mode_and_a_preapproved_device_joins_without_a_d
     assert b.sim.ok("join 1 97")["status"] == "OK"
     b.await_active(1)
     assert b.get("/v1/lifecycle/requests", domain_id=b.domain)["items"] == []
+
+
+@pytest.mark.e2e
+def test_nodes_report_parent_and_depth_and_follow_a_parent_change(meshsim: Callable[..., MeshSim], tmp_path: Path) -> None:
+    """FIELD: a chain root - relay 1 - relay 2 - leaf 3 forms by itself; GET /v1/nodes carries the approved parent
+    (the root's DeviceId for the direct child) and the depth from the root's NODE_QUERY `tree`. When the leaf's parent
+    dies and it hears relay 1, the Host's view follows without any membership event (the timed NODE_QUERY)."""
+    b = Bench.build_mesh(meshsim, tmp_path, seed=0x1F1E, nodes=4, topology="chain")
+    try:
+        dev = [b.device(i) for i in range(4)]
+        b.start_host()
+        wait_for(lambda: b.status().get("root_connected"), 25, "root_connected")
+        root = bytes(db_rows(b.host.db, "SELECT root_device FROM domains")[0][0]).hex()
+
+        def shape(want: dict[int, tuple[int, int | None]]) -> bool:
+            """want: node index -> (depth, parent node index; None = the root)"""
+            got = {n["device_id"]: n for n in b.get("/v1/nodes", domain_id=b.domain)["items"]}
+            return all(got.get(dev[i], {}).get("root_depth") == depth
+                       and got.get(dev[i], {}).get("parent_device_id") == (root if parent is None else dev[parent])
+                       for i, (depth, parent) in want.items())
+
+        wait_for(lambda: shape({1: (1, None), 2: (2, 1), 3: (3, 2)}), 60, "the tree reported to the Host")
+        one = b.get(f"/v1/nodes/{dev[3]}", domain_id=b.domain)
+        assert one["parent_device_id"] == dev[2] and one["root_depth"] == 3
+        # Parent change: the leaf also hears relay 1, relay 2 dies.
+        b.sim.ok("link 1 3 up")
+        b.sim.ok("power-cut 2")
+        wait_for(lambda: shape({1: (1, None), 3: (2, 1)}), 120, "the leaf below relay 1 at the Host")
+    finally:
+        b.close()

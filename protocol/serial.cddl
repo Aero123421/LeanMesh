@@ -20,6 +20,12 @@ join-decide = [pending-request: id16, device: id32, credential-hash: id32,
  decision: 0..1, expected-revision: u64]
 install = [control-type: u32, signed-object: bstr .size (1..4096)]
 node-query = [device: id32 / nil]
+;   NODE_QUERY result map (typed CBOR, keys by length then bytes): tree, nodes, power, policy, channel, pending, revision.
+;   tree = [* 64 [address: 2..65534, parent-address: 1..65534, depth: 1..20]] one row per listed member that has an approved parent in the
+;   root's tree right now (every ancestor Active and in its lease): the parent's short address (the root's own address for depth 1) and the
+;   member's depth (1 = direct child of the root). A member without a row has no approved parent. An address is a lookup hint of the
+;   `nodes` rows [device id, assignment, membership, state, confirmed, address] (never an identity). Additive since FIELD: a Host that does
+;   not know `tree` ignores it; one that gets no `tree` states no parent.
 group-query = [group-id: u32, revision: u64, page: 0..4, snapshot-token: id16 / nil]
 host-ack = [origin: id32, assignment: u64, message: id16, intent-hash: id32,
  journal-id: id16, committed-sequence: u64]

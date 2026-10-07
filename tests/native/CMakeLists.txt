@@ -104,5 +104,12 @@ target_compile_definitions(test_model PRIVATE LM_MODEL_COMMIT="${LM_MODEL_COMMIT
 lm_add_test(test_term SOURCES test_term.cpp LABELS "integration;sim;mesh;lifecycle;scenario")
 target_link_libraries(test_term PRIVATE lm_fleet)
 set_tests_properties(test_term PROPERTIES TIMEOUT 900)
+# FIELD test kit (firmware/field_node): the node's wire formats, join backoff, panel frame and the bench console's line assembly are plain C without ESP-IDF
+# (docs/field/protocol.md); the firmware around them needs a board.
+set(LM_FIELD_NODE_MAIN ${LM_REPO_ROOT}/firmware/field_node/main)
+set(LM_BENCH_CONSOLE ${LM_REPO_ROOT}/firmware/common/bench_console)
+lm_add_test(test_field SOURCES test_field.cpp ${LM_FIELD_NODE_MAIN}/field_proto.c ${LM_FIELD_NODE_MAIN}/field_render.c
+            ${LM_BENCH_CONSOLE}/bench_line.c LABELS "unit;field")
+target_include_directories(test_field PRIVATE ${LM_FIELD_NODE_MAIN} ${LM_BENCH_CONSOLE}/include)
 # Sim-heavy suites that take over 120 s under ASan/UBSan on a CI runner (they finish in seconds otherwise).
 set_tests_properties(test_power test_channel test_group test_delivery PROPERTIES TIMEOUT 900)

@@ -9,7 +9,8 @@ Run with the Host venv:  PYTHONPATH=host ~/.cache/leanmesh/host-venv/bin/python 
                                          a REPLACEMENT root of a failed one (issue #5): delegation generation + 1, credential
                                          one term below N, no ledger (RECOVERY_REQUIRED until restored)
   provision leaf --port P [--name N] [--net netB]
-                                         same for a leaf: DeviceCredential + initial ticket (+ ExpectedSet page)
+                                         same for a leaf: DeviceCredential + initial ticket (+ ExpectedSet page);
+                                         `relay` and `display` (firmware/field_node) are provisioned the same way
   handover --term N                      the fleet's RootHandover old root -> replacement root (after `provision root --replacement`)
   backup                                 the Host's newest ledger backup (GET /v1/ledger/backup): sequence, records, root
   restore [--sequence S]                 LEDGER_RESTORE of that backup onto the replacement root through the Host
@@ -133,6 +134,12 @@ class Net:
         if self.name is None:
             return first
         return os.environ.get(f"LEANMESH_HIL_SOCK_{self.name.upper()}", f"{first.removesuffix('.sock')}-{self.name}.sock")
+
+
+def root_delegation_file(net: Net) -> str:
+    """The RootDelegation of the network's CURRENT root: after `provision root --replacement` that is the replacement's
+    (a ticket names its root's delegation by hash: one for the old root is refused as NETWORK_MISMATCH, HIL 2026-10-04)."""
+    return f"{net.tag}{'replacement-root' if net.get('old_root') is not None else 'root'}-delegation.cose"
 
 
 def all_nets(state: dict) -> list[Net]:
@@ -310,7 +317,7 @@ def cmd_provision(a: argparse.Namespace) -> None:
         if any(name in n["leaves"] for n in all_nets(state)):
             raise SystemExit(f"a board named {name!r} exists already")
         dc = iss.device(public, f"hil-{name}-{device.hex()[:8]}", 1)
-        delegation = (OBJECTS / f"{net.tag}root-delegation.cose").read_bytes()
+        delegation = (OBJECTS / root_delegation_file(net)).read_bytes()
         net["expected_revision"] += 1  # one admission batch per board, never a revision twice
         files = iss.admission([dc], delegation, net["assignment"], net["expected_revision"])
         ticket = files[f"ticket-{device.hex()}.cose"]
@@ -320,6 +327,16 @@ def cmd_provision(a: argparse.Namespace) -> None:
             if fname.startswith("expected-"):
                 put_object(f"{net.tag}{name}-{fname}", data)
         net.save()  # the revision is used even if the board refuses
+        # The ExpectedSet page goes to the root BEFORE the board gets its records: a provisioned board asks to join at
+        # once, and an ask the root cannot match yet is refused and repeated only after the node's backoff (HIL
+        # 2026-10-04: 50-70 s joins). Without a Host the page waits for `expected <name>`.
+        for fname, data in sorted(files.items()):
+            if fname.startswith("expected-"):
+                try:
+                    r = install_control(net, data)
+                    print(f"{net.tag}{name}-{fname} on the root: {r.get('state')} {r.get('outcome')} {r.get('reason', '')}")
+                except (OSError, SystemExit) as exc:
+                    print(f"{net.tag}{name}-{fname} not installed ({exc}): run `expected {name}` once the Host is up")
         require_ok(board.command(f"prov-leaf {trust} {dc.hex()} {ticket.hex()}", seconds=30), "prov-leaf")
         net["leaves"][name] = {"device": device.hex(), "port": a.port, "role": a.role,
                                "dc": f"{net.tag}{name}-device.cose"}
@@ -618,7 +635,7 @@ def cmd_transfer(a: argparse.Namespace) -> None:
     old = int(st["assign"])
     new = a.new_generation or old + 1
     dc = (OBJECTS / leaf.get("dc", f"{a.leaf}-device.cose")).read_bytes()
-    delegation = (OBJECTS / f"{dst.tag}root-delegation.cose").read_bytes()
+    delegation = (OBJECTS / root_delegation_file(dst)).read_bytes()
     nonce = None
     if not a.grant:
         # The nonce is RAM only: do not restart the board between this and the join.
@@ -695,7 +712,7 @@ def main() -> int:
     q = sub.add_parser("init")
     q.add_argument("--name", help="a further network of the same fleet (default: the bench's first network)")
     q = sub.add_parser("provision")
-    q.add_argument("role", choices=("root", "leaf", "relay"))  # a relay board is provisioned like a leaf
+    q.add_argument("role", choices=("root", "leaf", "relay", "display"))  # a relay or display board is provisioned like a leaf
     q.add_argument("--port", required=True)
     q.add_argument("--name")
     net_option(q)

@@ -37,7 +37,7 @@ rootは対象のmembership_generationを失効floorへ加算し、接続中peer�
 root鍵変更はfleet署名delegationの高世代を配布→stored証拠→切替。旧delegationの新Join発行は切替後拒否。必要な旧record受信猶予は最大60秒で延長しない。通常traffic keyは1時間または2^24packetの先到でfresh EDHOC。group共有暗号鍵は導入しない。
 
 ## 8. DoSと秘密
-Join proxy slots2、同時P-256 jobs1、1相手full-handshake最短30秒。root全体4handshakes/秒をadmission上限目標とするが実機の演算完了能力でさらに制限。cookie/期待hintでCPU予算を予約してから高価な演算へ進む。RF jamは解決できない。
+Join proxy slots2、同時P-256 jobs1、1相手full-handshake最短30秒（完了したhandshakeの間隔）。1-hop（link・join）で開始した（message_1でgateを使った）handshakeが失敗した場合だけ、次の試行は5秒、続けて失敗すれば10、20秒…と倍にし30秒で頭打ち、完了で元に戻す（HIL 2026-10-04 F10：再起動したnodeの最初の試行は親が旧sessionを持つため失敗しやすく、失敗でも30秒待たせると再接続に40〜110秒かかった）。1相手あたり最悪でも5秒に1回の公開鍵処理で、同時P-256 jobs1の上限は変わらない。end sessionは経路が整うまで失敗しやすく、早い再試行は1つしかないexchange slotを塞ぐので、従来どおり30秒。root全体4handshakes/秒をadmission上限目標とするが実機の演算完了能力でさらに制限。cookie/期待hintでCPU予算を予約してから高価な演算へ進む。RF jamは解決できない。
 ESP32 entropyは公式条件でseedする。Wi-Fi稼働前に適当に乱数を作らない。[E06] テストseedはtest専用targetでのみ受け付け、本番binaryの起動で拒否。key、grant秘密、payload、Wi-Fi秘密を標準ログに出さない。NVS eraseは論理的失効であり、Flash上の全過去copyの物理消去保証ではない。
 
 ## 9. Context bindingの正確な順序

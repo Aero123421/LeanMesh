@@ -126,6 +126,8 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
     rx_len_ += f.body.size();
     if (rx_len_ == rx_total_) {
         obj_complete(f.kind, ByteView{rx_.data(), rx_len_}, o, now);
+    } else if (initiator_ && mode_ != Mode::End && !rto_at_.is_never()) {
+        rto_at_ = now + s_.policy.rto; // [HIL-F12] the reply is arriving, so our object got through: no repeat now
     }
 }
 
@@ -237,6 +239,7 @@ void Exchange::resp_message_1(ByteView msg1, MonoTime now) {
         end_gate_.touch(peer_id_, now);
     } else {
         s_.gate.touch(mac_, now);
+        gate_spent_ = true; // (1-hop only: the failure backoff is not used for end sessions)
     }
     deadline_ = hard_deadline_;
     start_hs(sec::HsRole::Responder, msg1, now);
@@ -293,6 +296,7 @@ void Exchange::send_object(ObjKind kind, bool retransmit) {
     tx_kind_ = kind;
     tx_off_ = 0;
     rto_at_ = MonoTime::never();
+    rto_after_tx_ = false;
     attempts_ = retransmit ? static_cast<uint8_t>(attempts_ + 1) : 1;
 }
 
@@ -368,7 +372,11 @@ Status Exchange::send_link_chunk(ByteView obj, MonoTime now) {
     tx_off_ += chunk;
     if (tx_off_ >= obj.size()) {
         tx_active_ = false; // the next fragment would follow the TX-done of this one
-        arm_rto(now);
+        if (initiator_ && mode_ != Mode::End) {
+            rto_after_tx_ = true; // [HIL-F12] the reply wait starts when the last fragment has left, not before
+        } else {
+            arm_rto(now);
+        }
     }
     return Status::Ok;
 }
@@ -376,6 +384,10 @@ Status Exchange::send_link_chunk(ByteView obj, MonoTime now) {
 void Exchange::on_tx_outcome(const TxOutcome &o, MonoTime now) {
     if (is_link_tag(o.tag) && mode_ != Mode::End) {
         tx_inflight_ = false;
+        if (rto_after_tx_) {
+            rto_after_tx_ = false;
+            arm_rto(now);
+        }
         if (o.result == port::TxResult::MacFailed) {
             ++s_.stats.tx_rf_failed; // the only RF-loss sample; recovery is by RTO, not here
         }

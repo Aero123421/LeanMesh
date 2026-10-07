@@ -1,0 +1,7 @@
+# The display build (CONFIG_FIELD_HUB75): Seengreat RGB Matrix HUB75 S3, ESP32-S3-WROOM-1-N16R8 (16 MB flash).
+# The partition table stays the 4 MiB two-slot layout of config/partitions_4m.csv (the rest of the flash is unused).
+CONFIG_FIELD_HUB75=y
+# The panel library is built without Adafruit GFX (its own drawPixel, NO_GFX).
+CONFIG_ESP32_HUB75_USE_GFX=n
+# CONFIG_ESPTOOLPY_FLASHSIZE_4MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

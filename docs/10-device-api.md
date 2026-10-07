@@ -27,7 +27,7 @@ DURABLEは予めjournal capacityを予約。APPLIEDは受信アプリの`lm_repo
 
 ## 6. diagnosticsとsleep
 `lm_get_capabilities`はbuild/implemented/qualified/enabledを分ける。payload_capacityは最大path条件とsingle-frame現在pathの両方を返す。chip名で推測しない。
-`lm_diagnostics_get`はvalidity bitsを持ち、不明は0と別に表す。reset cause、peer使用数、retry、loss、queue、CPU、stack、energy指標、current/pendingchannelと世代を公開する。
+`lm_diagnostics_get`はvalidity bitsを持ち、不明は0と別に表す。reset cause、peer使用数、retry、loss、queue、CPU、stack、energy指標、current/pendingchannelと世代を公開する。`parent_rssi_dbm`（FIELD）は現在のmesh parentから最後に受信したframeのRSSI（signed int16 dBm）で、validity bit `LM_DIAGNOSTICS_VALID_PARENT_RSSI`（bit 22）が立つときだけ既知。承認済みparentが無い間（rootは常に）と、radio driverがそのframeのRSSIを渡さなかったときはbit clear・値0（0 dBmと混ぜない）。値の取得はRX callbackではなくowner側で、callbackはframeにRSSI（int8）を載せて渡すだけ。frameの送信元MACは未認証なので診断値であり、どの判断もこれを読まない。parentが替わると新parentについて既に聞いたframeの値になる（旧parentの値は残らない）。rootのserial/Host診断mapにはparentが無いため載せない。
 `lm_sleep_prepare`は非同期operationを返し、その完了後にpolicyとpending処理に合意した一回限りticketを取得する。新DATA/未終了commitが入ればticketを失効。`lm_sleep_enter`はticket世代を再検証し、直前のpendingを無視して眠らない。
 
 ## 7. エラーの互換性

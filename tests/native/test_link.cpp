@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "capi/context.hpp"
+#include "core/link/exchange.hpp"
 #include "fleet.hpp"
 #include "lmtest.hpp"
 #include "port/sim/sim_node.hpp"
@@ -373,12 +374,12 @@ LM_TEST("S08 sim: a replayed CredI holds the single slot for 4 s at most and cos
     LM_CHECK_OK(n.connect(2, 0));
     n.run_ms(2500);
     LM_CHECK(n.lnk(0).stats().hs_busy_drop >= 1u);
-    n.run_s(2); // 4 s after the replay the slot is free again
+    n.run_s(2); // 4 s after the replay the slot is free again: node 2's last repeat (RTO 1.5 s, HIL-F12) is served
     LM_CHECK(!n.lnk(0).exchange().busy());
-    LM_CHECK(n.lnk(0).exchange().last_failure() == Status::Expired);
+    LM_CHECK(n.paired(0, 2));
     LM_CHECK_EQ(n.eng(0).peers().transient_count(), 0u);
-    LM_CHECK_EQ(n.lnk(0).neighbors().count(), 0u);
-    n.run_s(31); // node 2's own 30 s gate after its failed attempt; node 0 never touched its gate
+    LM_CHECK_EQ(n.lnk(0).neighbors().count(), 1u); // node 2 only: the replay left nothing behind
+    n.run_s(31); // node 0 never touched its gate for node 1's MAC
     LM_CHECK_OK(n.connect(1, 0));
     n.run_ms(3000);
     LM_CHECK(n.paired(0, 1));
@@ -1021,3 +1022,54 @@ LM_TEST("measure: sizeof of the new owner state") {
 }
 
 LM_TEST_MAIN()
+
+
+// HIL 2026-10-04: a failed handshake held the peer's gate for the full 30 s, so a node that restarted while its parent
+// still held the old session needed 40-110 s to attach. A failure now backs off 5, 10, 20 s ... (capped at the gate);
+// a completed handshake keeps the full 30 s and resets the backoff (docs/06 §8).
+LM_TEST("HIL-F10 a failed handshake backs off from 5 s; a completed one keeps the 30 s gate") {
+    using lm::Duration;
+    using lm::MonoTime;
+    const Duration gate = Duration::from_s(30);
+    lm::link::RateGate<lm::MacAddr> g;
+    lm::MacAddr mac;
+    mac.bytes = {1, 2, 3, 4, 5, 6};
+    const auto at = [](int64_t s) { return MonoTime{static_cast<uint64_t>(s) * 1000000ULL}; };
+    LM_CHECK(g.allow(mac, at(0), gate));
+    g.touch(mac, at(100));                      // a handshake started
+    LM_CHECK(!g.allow(mac, at(104), gate));
+    g.failed(mac, at(102));                     // ... and failed: 5 s from the failure
+    LM_CHECK(!g.allow(mac, at(106), gate));
+    LM_CHECK(g.allow(mac, at(107), gate));
+    g.touch(mac, at(107));
+    g.failed(mac, at(110));                     // second failure in a row: 10 s
+    LM_CHECK(!g.allow(mac, at(119), gate));
+    LM_CHECK(g.allow(mac, at(120), gate));
+    g.touch(mac, at(120));
+    g.failed(mac, at(121));                     // third: 20 s
+    LM_CHECK(!g.allow(mac, at(140), gate));
+    LM_CHECK(g.allow(mac, at(141), gate));
+    for (int i = 0; i < 5; ++i) {               // it keeps failing: never longer than the gate itself
+        g.touch(mac, at(200));
+        g.failed(mac, at(200));
+    }
+    LM_CHECK(!g.allow(mac, at(229), gate));
+    LM_CHECK(g.allow(mac, at(230), gate));
+    g.touch(mac, at(300));
+    g.succeeded(mac);                           // completed: the next one waits the full gate again
+    LM_CHECK(!g.allow(mac, at(329), gate));
+    LM_CHECK(g.allow(mac, at(330), gate));
+    g.touch(mac, at(400));
+    g.failed(mac, at(400));                     // and a failure after a success starts at 5 s again
+    LM_CHECK(g.allow(mac, at(405), gate));
+}
+
+LM_TEST("HIL-F12 slow TX completions (1.06 s) on both sides: the handshake completes without spurious retransmits") {
+    Net n(2);
+    n.node(0).radio.tx_callback_delay_us = 1'060'000;
+    n.node(1).radio.tx_callback_delay_us = 1'060'000;
+    LM_CHECK_OK(n.connect(1, 0));
+    LM_CHECK(n.run_until([&] { return n.paired(0, 1); }, 30'000));
+    LM_CHECK_EQ(n.lnk(1).stats().hs_retransmits, 0u);
+    LM_CHECK_EQ(n.lnk(0).stats().hs_retransmits, 0u);
+}

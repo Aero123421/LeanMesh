@@ -19,7 +19,7 @@ RF profileにはcountry、board revision、antenna part、許可channel集合、
 
 ## 4. callbackと失敗
 in-flight物理送信は1。callbackにはsession/driver generationと期待peerを照合できるowner側記録を対応付ける。公開driver callbackがtokenを返さない条件でtimeout後すぐ次TXへ進み、遅いcallbackを次のpacket成功へ割当ててはならない。
-watchdog 1000msで結果不明→新規TX隔離→停止/排出/再初期化。callback drainを保証できないdriverではcontrolled reboot。再起動時はfresh sessionで旧callbackを無効化する。
+watchdog 3000msで結果不明→新規TX隔離→停止/排出/再初期化。watchdogはdriverが実際に返す完了時間より長くする：ESP-IDFのLR250 unicastは通常0.98sまでに完了し、遅いものは1.02〜1.06sで完了した（driver側の上限。混雑したchannelが疑われるが未測定）。それより遅い完了は観測されていない（HIL 2026-10-04：watchdog 1000msはこの分布の内側にあり、正常な無線を1台で数分に数十回再初期化し、mesh全体の通信が数分止まった）。停止時にcallbackが未着なら、遅れたcallbackの到着でdrainを証明できるので、ESP-IDF portはさらに最大2000ms待つ。それでも来なければcallback drainを保証できないのでcontrolled reboot。理由はRTCメモリに残し、次の起動で`lm_idf_last_restart`が返す。再起動時はfresh sessionで旧callbackを無効化する。ESP-IDF portはWi-Fi省電力をWIFI_PS_NONEにして読み戻す（電波を止めるのはSDKのpower modeだけ）。
 NO_MEM/BUSY/peer容量不足は資源エラー。link品質の失敗サンプルへ加えない。予定off-channel/sleepも同様。受信RSSIはsigned int16 dBm、unknownはnull/validity bit。0やunsigned変換で不明を表さない。
 
 ## 5. 実機マトリクス

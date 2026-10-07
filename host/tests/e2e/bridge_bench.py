@@ -178,7 +178,17 @@ class Bench:
     def await_root(self) -> None:
         """root_connected, the root's capabilities read and the member listed in the Host's node mirror."""
         wait_for(lambda: self.status().get("root_connected"), 25, "root_connected")
-        wait_for(lambda: self.get("/v1/nodes", domain_id=self.domain).get("items"), 25, "node mirror")
+        wait_for(self._mirrored_nodes, 25, "node mirror")
+
+    def _mirrored_nodes(self) -> Any:
+        """The mirror's members, or None while the Host has not learned the domain yet (404 right after connect)."""
+        assert self.host is not None
+        with self.host.client() as c:
+            r = c.get("/v1/nodes", params={"domain_id": self.domain}, headers=self.host.auth)
+        if r.status_code == 404:
+            return None
+        assert r.status_code == 200, ("/v1/nodes", r.status_code, r.text)
+        return r.json().get("items")
 
     def kill_host(self) -> None:
         assert self.host is not None

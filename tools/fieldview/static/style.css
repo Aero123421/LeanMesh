@@ -1,0 +1,77 @@
+:root {
+  --bg: #f4f5f7; --card: #fff; --fg: #1d2330; --mute: #667085; --line: #d9dde5;
+  --good: #2e9e5b; --fair: #d99a1e; --poor: #d64545; --unknown: #9aa3b2;
+  --accent: #2f6fdb; --warnbg: #fff4d6; --warnfg: #6b4a00; --errfg: #b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171d; --card: #1d2129; --fg: #e6e9ef; --mute: #98a2b3; --line: #343b48;
+          --warnbg: #3a2f10; --warnfg: #ffd98a; --errfg: #ff8f84; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; background: var(--card);
+         border-bottom: 1px solid var(--line); }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.legend { font-weight: 400; font-size: 12px; color: var(--mute); }
+.sw { display: inline-block; width: 18px; height: 4px; margin: 0 3px 2px 8px; border-radius: 2px; vertical-align: middle; }
+.sw.good { background: var(--good); } .sw.fair { background: var(--fair); } .sw.poor { background: var(--poor); }
+.sw.unknown { background: var(--unknown); }
+main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr); gap: 12px; padding: 12px 16px 0; }
+.side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+@media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+section.card, .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+body > section.card { margin: 12px 16px 0; }
+.scroll { overflow: auto; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+button { font: inherit; padding: 5px 12px; border: 1px solid var(--accent); background: var(--accent); color: #fff;
+         border-radius: 6px; cursor: pointer; }
+button.secondary { background: transparent; color: var(--accent); }
+button.ok { background: var(--good); border-color: var(--good); } button.bad { background: var(--poor); border-color: var(--poor); }
+button:disabled { opacity: .5; cursor: default; }
+input[type=number], select { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px;
+                             background: var(--card); color: var(--fg); }
+input[type=number] { width: 5em; }
+.note { color: var(--mute); font-size: 13px; margin-bottom: 6px; }
+.error { color: var(--errfg); margin: 4px 0; }
+.warnings { margin: 0; padding: 8px 16px; background: var(--warnbg); color: var(--warnfg); border-bottom: 1px solid var(--line); }
+.warnings div { margin: 2px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--mute); font-weight: 600; position: sticky; top: 0; background: var(--card); }
+table.mini th, table.mini td { padding: 2px 6px; font-size: 12px; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.st-silent td, tr.st-left td, tr.st-lost td { color: var(--mute); }
+.pill { display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 12px; color: #fff; background: var(--unknown); }
+.pill.ok { background: var(--good); } .pill.lost { background: var(--poor); } .pill.silent { background: var(--unknown); }
+.pill.left { background: var(--unknown); } .pill.unlisted { background: var(--fair); }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--bg); border: 1px solid var(--line); }
+.chip.good { border-color: var(--good); color: var(--good); } .chip.bad { border-color: var(--poor); color: var(--poor); }
+.q-good { color: var(--good); } .q-fair { color: var(--fair); } .q-poor { color: var(--poor); }
+.r-alive { color: var(--good); } .r-noanswer { color: var(--poor); } .r-rejected { color: var(--fair); } .r-notsent { color: var(--mute); } .r-unknown { color: var(--fair); } .r-skipped { color: var(--mute); } .r-late { color: var(--good); }
+.dots span { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 2px; background: var(--unknown); }
+.dots .alive { background: var(--good); } .dots .noanswer { background: var(--poor); } .dots .rejected { background: var(--fair); }
+.dots .notsent, .dots .skipped { background: transparent; border: 1px solid var(--unknown); }
+.dots .unknown { background: var(--fair); opacity: .55; }
+.log { max-height: 280px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.log div { border-bottom: 1px solid var(--line); padding: 1px 0; }
+.log .k { display: inline-block; min-width: 6em; color: var(--mute); }
+.log .k-lost, .log .k-leave, .log .k-reboot, .log .k-gap, .log .k-loss { color: var(--poor); }
+.log .k-join, .log .k-back { color: var(--good); }
+.log .k-parent, .log .k-depth { color: var(--accent); }
+.log .k-unreachable, .log .k-radio, .log .k-panel { color: var(--poor); }
+.log .k-attach { color: var(--good); }
+.log .k-nodelog, .log .k-boot { color: var(--fair); }
+td.warn { color: var(--poor); }
+footer { padding: 10px 16px 24px; color: var(--mute); font-size: 12px; }
+svg text { fill: var(--fg); font: 12px system-ui, sans-serif; }
+svg .sub { fill: var(--mute); font-size: 10px; }
+svg .node rect { fill: var(--card); stroke: var(--accent); stroke-width: 2; }
+svg .node.lost rect, svg .node.silent rect, svg .node.left rect, svg .node.placeholder rect { stroke: var(--unknown); stroke-dasharray: 4 3; }
+svg .node.lost text, svg .node.silent text, svg .node.left text, svg .node.placeholder text { fill: var(--mute); }
+svg .node.root rect { fill: var(--accent); } svg .node.root text { fill: #fff; }
+svg .node.group rect { stroke: var(--fair); stroke-dasharray: 2 3; }
+svg .link { fill: none; stroke-width: 3; }
+svg .link.good { stroke: var(--good); } svg .link.fair { stroke: var(--fair); } svg .link.poor { stroke: var(--poor); }
+svg .link.unknown { stroke: var(--unknown); stroke-dasharray: 5 4; stroke-width: 2; }
+svg .link-label { paint-order: stroke; stroke: var(--card); stroke-width: 3px; }
