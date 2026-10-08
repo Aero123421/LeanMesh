@@ -278,6 +278,7 @@ class Mesh {
     [[nodiscard]] bool route_via(const uint16_t *root_path, uint8_t n, uint32_t revision,
                                  delivery::PathSpec &out) const;
     [[nodiscard]] Status to_root(ByteView body, const delivery::PathSpec &route, MonoTime now, Handle owner = {});
+    [[nodiscard]] Handle next_control_owner(uint16_t kind);
     void renew(MonoTime now);
     void query_timer(MonoTime now);
     void connect_spare(MonoTime now);

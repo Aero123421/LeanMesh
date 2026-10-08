@@ -163,6 +163,13 @@ Status Mesh::to_root(ByteView body, const delivery::PathSpec &route, MonoTime no
     return engine_.delivery().send_control(root_id(), route, body, now, owner);
 }
 
+Handle Mesh::next_control_owner(uint16_t kind) {
+    if (++control_seq_ == 0) {
+        ++control_seq_; // zero means no completion owner; this is a bounded TX tag, not a pool generation
+    }
+    return Handle{kind, control_seq_};
+}
+
 // ---- power (S16) ----
 bool Mesh::parent_link(MacAddr &mac, DeviceId &dev) const {
     if (state_ != State::Ready || parent_ < 0) {
@@ -977,7 +984,7 @@ void Mesh::send_register(MonoTime now) {
         attach_fail(now);
         return;
     }
-    att_.tx_owner = Handle{1, ++control_seq_};
+    att_.tx_owner = next_control_owner(1);
     att_.next_at = MonoTime::never();
     const Status st = to_root(ByteView{body.data(), len}, route, now, att_.tx_owner);
     if (st == Status::NoCapacity || st == Status::Busy || st == Status::NoRoute) {
@@ -1016,7 +1023,7 @@ void Mesh::send_ready(MonoTime now) {
         attach_fail(now);
         return;
     }
-    att_.tx_owner = Handle{1, ++control_seq_};
+    att_.tx_owner = next_control_owner(1);
     att_.next_at = MonoTime::never();
     const Status st = to_root(ByteView{body.data(), len}, route, now, att_.tx_owner);
     if (st == Status::NoCapacity || st == Status::Busy || st == Status::NoRoute) {
@@ -1318,7 +1325,7 @@ void Mesh::renew(MonoTime now) {
         encode(r, MutByteView{body}, len) != Status::Ok) {
         return;
     }
-    renew_owner_ = Handle{2, ++control_seq_};
+    renew_owner_ = next_control_owner(2);
     renew_wait_ = MonoTime::never();
     const Status st = to_root(ByteView{body.data(), len}, route, now, renew_owner_);
     if (st == Status::Ok) {
@@ -1472,7 +1479,7 @@ void Mesh::query_timer(MonoTime now) {
             q = Ask{};
             continue;
         }
-        q.tx_owner = Handle{3, ++control_seq_};
+        q.tx_owner = next_control_owner(3);
         q.next_at = MonoTime::never();
         if (to_root(ByteView{body.data(), len}, route, now, q.tx_owner) == Status::Ok) {
             ++q.tries;
