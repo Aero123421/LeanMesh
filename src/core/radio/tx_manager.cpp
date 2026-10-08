@@ -44,8 +44,13 @@ bool TxManager::on_tx_done(const port::RadioTxDone &done, TxOutcome &out) {
     }
     in_flight_ = false;
     const Duration service = done.at - (deadline_ + Duration{-k_watchdog.us});
-    if (done.result != port::TxResult::Unknown && service.us > service_bound_.us && service <= k_watchdog) {
-        service_bound_ = service;
+    if (done.result != port::TxResult::Unknown && service <= k_watchdog) {
+        service_cur_ = service > service_cur_ ? service : service_cur_;
+        if (++service_n_ == k_service_window) {
+            service_prev_ = service_cur_;
+            service_cur_ = Duration{};
+            service_n_ = 0;
+        }
     }
     out = TxOutcome{tag_, done.result, done.at};
     last_ = out;
