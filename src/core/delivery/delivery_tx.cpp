@@ -396,6 +396,10 @@ void Delivery::drive(Handle h, MonoTime now) {
     }
     // 4. End session.
     EndSession *s = sessions_.find_peer(op.dest);
+    if (!a->control && s != nullptr && now < s->retry_at) {
+        a->next_at = earliest(s->retry_at, dl); // deadline stays authoritative during the cooldown
+        return;
+    }
     if (s == nullptr || s->suspect || !s->rec.active() || !(now < s->valid_until)) {
         a->st = Active::St::WaitSession;
         request_exchange(*a, op, ps, now);
@@ -494,6 +498,13 @@ void Delivery::transmit(Handle h, ByteView record, const PathSpec &ps, MonoTime 
 // The last round got no (complete) answer. After this returns the active either waits at next_at
 // (paced), is finished, or has st == WaitRoute and drive() builds the next frame.
 void Delivery::round_ended(Handle h, Active &a, Op &op, MonoTime now, bool link_failed) {
+    EndSession *peer = sessions_.find_peer(op.dest);
+    if (!a.control && !link_failed && peer != nullptr && (op.evidence & ev::end_received) == 0 &&
+        engine_.power().wait_for_wake(op.dest, now).us == 0 &&
+        !engine_.chan().planned_gap(now)) {
+        peer->failures = static_cast<uint8_t>(std::min<unsigned>(peer->failures + 1U, 6U));
+        peer->retry_at = now + failure_delay(peer->failures);
+    }
     a.new_round = true;
     a.st = Active::St::WaitRoute;
     if ((op.evidence & ev::end_received) != 0 && op.delivery == LM_APPLIED) {
@@ -756,6 +767,10 @@ void Delivery::on_receipt(const EndSession &s, const std::array<uint8_t, 16> &mi
         return;
     }
     ++stats_.receipts_rx;
+    if (EndSession *peer = sessions_.find_peer(s.peer)) {
+        peer->failures = 0;
+        peer->retry_at = {};
+    }
     // A later stage carries the earlier ones: the destination attests that it stored the message
     // before its application acknowledged, applied or refused it (S9-D5).
     uint32_t bits = 0;

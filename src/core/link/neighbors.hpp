@@ -40,6 +40,8 @@ struct SessionKeys {
 };
 
 struct Neighbor {
+    MonoTime retry_at{}; // exhausted hop attempts: bounded peer cooldown, reset by authenticated HOP_ACK
+    uint8_t failures = 0;
     MacAddr mac;
     DeviceId device;
     ShortAddr address; // lookup hint from the verified MemberCredential, never an identity

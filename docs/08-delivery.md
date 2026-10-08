@@ -44,5 +44,6 @@ RX pool不足はNO_CAPACITY/credit0、古いbulk再組立を先に失効する�
 ## spec0.2: 一斉配信の進捗と省電力
 [22章](22-group-and-sleep.md)がtarget世代、待受、結果集計の追加契約。WAIT_WAKEは結果ではなく待機phaseで、inflight送出枠を占有しない。SUBMITTEDはBEST_EFFORTの送出証拠だけ、PARTIALはgroup集約結果だけで個別targetへ代入しない。parentのRAM保管をDURABLE終端受理へ格上げしない。
 
-### relayの認可待ち
+### Issue 19: 継続失敗の抑制
+既存neighbor/end-sessionの有界slotで連続失敗を保持する。通常DATAのhop試行を3回使い切った相手、終端receiptが来ない宛先は1/2/4/8/16/30秒で次の試行を遅らせ、認証済みHOP_ACK/receiptでそれぞれ解除する。再送ciphertext、deadline、全体round上限は変えない。Sleep/予定channel gap、BUSY、APP_PENDINGはこの失敗へ加算しない。control laneは復帰・認証・経路更新のためneighborのDATA抑制に巻き込まない。end sessionを更新しても同じassignment/membershipの宛先の抑制は保持し、別世代へ持ち越さない。所属抹消はroot台帳の証拠だけで行う。期限なしDURABLEも有限roundごとの60秒pauseとこの抑制に従う。
 relayの次hopがTIME_UNCERTAINならHOP_ACK BUSY/retry_after 2000msを返す（最大16回）。認可を弱めずcredential/時刻の更新を待ち、NoRouteやRF失敗へ混ぜない。

@@ -286,6 +286,9 @@ Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
         s_.engine.delivery().invalidate_addr(mc.address);
     }
     delivery::EndSession *slot = ss.find_peer(peer);
+    const bool same_member = slot != nullptr && slot->peer_assignment == mc.assignment && slot->peer_membership == mc.membership;
+    const MonoTime retry_at = same_member ? slot->retry_at : MonoTime{};
+    const uint8_t failures = same_member ? slot->failures : 0;
     if (slot == nullptr) {
         slot = &ss.acquire();
     } else {
@@ -295,6 +298,8 @@ Status Exchange::install_end_session(MonoTime now, DeadlineCheck lease) {
         slot->wipe();
     }
     slot->used = true;
+    slot->retry_at = retry_at;
+    slot->failures = failures;
     slot->peer = peer;
     slot->peer_addr = mc.address;
     slot->peer_assignment = mc.assignment;

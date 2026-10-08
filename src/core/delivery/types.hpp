@@ -105,6 +105,10 @@ struct Receipt {
     return Duration{600000 + 2 * static_cast<int64_t>(hops) * per_hop_us};
 }
 
+[[nodiscard]] constexpr Duration failure_delay(uint8_t failures) {
+    return Duration::from_s(failures > 5 ? 30 : (int64_t{1} << (failures == 0 ? 0 : failures - 1)));
+}
+
 [[nodiscard]] inline MessageId to_message_id(const std::array<uint8_t, 16> &b) {
     MessageId m;
     for (unsigned i = 0; i < 8; ++i) {

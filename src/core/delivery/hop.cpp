@@ -85,6 +85,13 @@ void HopTx::rtt_sample(Duration r) {
 }
 
 void HopTx::finish(Handle h, TxFrame &f, HopEnd end, MonoTime now) {
+    if (end == HopEnd::Failed && f.cls != sched::Class::Control && f.attempts >= k_link_attempts &&
+        !engine_.power().child_asleep(f.mac, now) && !engine_.chan().planned_gap(now)) {
+        if (link::Neighbor *peer = link_.neighbors().find_mac(f.mac)) {
+            peer->failures = static_cast<uint8_t>(std::min<unsigned>(peer->failures + 1U, 6U));
+            peer->retry_at = now + failure_delay(peer->failures);
+        }
+    }
     FrameDone d;
     d.kind = f.kind;
     d.owner = f.owner();
@@ -140,6 +147,12 @@ bool HopTx::on_ack(const MacAddr &src, const wire::HopAck &ack, MonoTime now) {
         }
         if (ack.status == wire::HopAckStatus::Accepted && f->kind == OwnerKind::Out && hooks_.accepted != nullptr) {
             hooks_.accepted(hooks_.ctx, f->owner(), now);
+        }
+        if (ack.status == wire::HopAckStatus::Accepted) {
+            if (link::Neighbor *peer = link_.neighbors().find_mac(src)) {
+                peer->failures = 0;
+                peer->retry_at = {};
+            }
         }
         if (f->st == TxFrame::St::OnAir) {
             ++stats_.early_acks;
@@ -318,6 +331,11 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
             finish(h, *f, HopEnd::Aborted, now);
             progress = true;
             return;
+        }
+        if (const link::Neighbor *peer = link_.neighbors().find_mac(f->mac);
+            f->cls != sched::Class::Control && peer != nullptr && now < peer->retry_at) {
+            f->at = peer->retry_at; // other peers remain runnable; no new queue or polling loop
+            continue;
         }
         // [S16] A sleepy child's frames wait for its poll (window, credit). A frame sealed under a link session that
         // was replaced while it waited cannot be opened any more: it ends, and its origin sends the original again.
