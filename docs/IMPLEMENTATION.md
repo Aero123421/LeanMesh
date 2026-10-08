@@ -27,8 +27,8 @@ python3 scripts/check_spec.py && git checkout evidence/VALIDATION.json
 
 Build/venv directories live outside the repo. E2E tests find meshsim in `$LEANMESH_NATIVE_BUILD`
 (default `~/.cache/leanmesh/native`) and FAIL when it is missing. Nothing is flashed, ever.
-There is no CI: the same checks (spec, lint, native, model seeds, host, e2e, sanitizers, 4-SoC IDF builds) run in the development
-environment before a merge ([docs/sdk/testing.md](sdk/testing.md) §2).
+CI (`.github/workflows/ci.yml`): `spec`, `lint`, `native`, `model-random`, `host`, `e2e`, `sanitizers`, `idf-targets` (matrix of 4 SoCs);
+the IDF image is pinned by digest, actions by commit SHA (job list: [docs/sdk/testing.md](sdk/testing.md) §2).
 
 ## 1. Directory layout and ownership
 

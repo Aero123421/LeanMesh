@@ -1,0 +1,293 @@
+# LeanMesh CI. Every job fails loudly; nothing is skipped when a tool or pin is missing.
+# The ESP-IDF image tag was verified on Docker Hub (2026-09-29): espressif/idf:v6.0.3, manifest-list
+# digest pinned in each job's `container:`. The build scripts additionally refuse any IDF HEAD other than the pin in
+# config/dependencies.json. CI never flashes hardware.
+name: ci
+on: [push, pull_request]
+
+defaults:
+  run:
+    shell: bash # bash -eo pipefail: a failing pipeline stage fails the step
+
+jobs:
+  spec:
+    name: spec consistency (G0)
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install -r scripts/requirements-check.txt
+      - run: python scripts/check_spec.py
+
+  lint:
+    name: ruff (host + the scripts this repo maintains)
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      # clang-format / clang-tidy are configured (.clang-format, .clang-tidy) but NOT gated: the C++ tree does not follow
+      # the configured column limit (thousands of findings), so a gate would only be red. See docs/sdk/testing.md.
+      - run: python -m pip install ruff==0.16.9
+      - run: ruff check host tools/fieldview scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py scripts/report_pytest_failures.py
+
+  native:
+    name: native build + ctest + power-cut matrix + coverage
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_NATIVE_BUILD: /tmp/leanmesh-native
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - name: host C/C++ compiler
+        run: |
+          if ! command -v c++ >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends g++
+          fi
+          c++ --version
+      - run: scripts/third_party.sh setup
+      - run: scripts/third_party.sh verify
+      - name: native configure + build (TF-PSA-Crypto from the pinned IDF tree)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
+          cmake --build "$LEANMESH_NATIVE_BUILD"
+      - name: public C API completeness (every api/leanmesh.h function defined in the native build)
+        run: python3 scripts/check_api_defined.py --native-build "$LEANMESH_NATIVE_BUILD"
+      - name: ctest (per-test TIMEOUT properties; the sim-heavy suites get 900 s)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          ctest --test-dir "$LEANMESH_NATIVE_BUILD" --output-on-failure --no-tests=error -j2
+      - name: power-cut matrix (one harness, tests/native/cut_matrix.hpp; sim store, not a real power loss)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          T="$LEANMESH_NATIVE_BUILD/tests/native"
+          { "$T/test_join" POWER; "$T/test_lifecycle" M05; "$T/test_lifecycle" LC08; "$T/test_channel" POWER; "$T/test_delivery" POWER-; } | tee powercut-matrix.txt
+          grep -q "\[matrix\]" powercut-matrix.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: powercut-matrix, path: powercut-matrix.txt }
+      - name: budget report (docs/16; a report, not a gate)
+        run: python3 scripts/budget_report.py --native-build "$LEANMESH_NATIVE_BUILD" --json budget-native.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: budget-native, path: budget-native.json }
+      - name: scenario coverage (static map of test references; fails only on ids missing from tests/scenarios.json)
+        run: python3 scripts/scenario_coverage.py --out-dir coverage-out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with: { name: scenario-coverage, path: "coverage-out/scenario-coverage.*" }
+
+  model-random:
+    name: seeded model tests on a fresh random seed range (the fixed default seeds never change)
+    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_NATIVE_BUILD: /tmp/leanmesh-native
+      MODEL_SEEDS: "3000"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - name: host C/C++ compiler
+        run: |
+          if ! command -v c++ >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends g++
+          fi
+      - run: scripts/third_party.sh setup
+      - run: scripts/third_party.sh verify
+      - name: build test_model
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
+          cmake --build "$LEANMESH_NATIVE_BUILD" --target test_model
+      - name: run MODEL_SEEDS consecutive seeds from a random base (the range is printed; a failure prints its seed)
+        run: |
+          base=$(( (RANDOM * 32768 + RANDOM) % 900000000 + 100000 ))
+          echo "model seed range: [$base, $((base + MODEL_SEEDS)))  (re-run one seed: LM_MODEL_SEED=<n> tests/native/test_model)"
+          fail=0
+          for i in $(seq 0 $((MODEL_SEEDS - 1))); do
+            seed=$((base + i))
+            if ! LM_MODEL_SEED=$seed "$LEANMESH_NATIVE_BUILD/tests/native/test_model" > model.log 2>&1; then
+              echo "::error::model seed $seed failed"; cat model.log; fail=1; break
+            fi
+          done
+          exit $fail
+
+  host:
+    name: host pytest (unit + integration, native helper library)
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_NATIVE_BUILD: /tmp/leanmesh-native
+      LEANMESH_VENV: /tmp/leanmesh-venv
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - name: host C/C++ compiler and Python 3.12
+        run: |
+          if ! command -v c++ >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends g++
+          fi
+          if ! command -v python3.12 >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv
+          fi
+      - run: scripts/third_party.sh setup
+      - run: scripts/third_party.sh verify
+      - name: native build (libleanmesh_host.so and meshsim only)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
+          cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host meshsim lmtool issuer_driver
+      - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
+      - name: host pytest (unit, integration)
+        run: 'timeout 1500 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/unit host/tests/integration'
+
+  e2e:
+    name: host E2E against meshsim (incl. the 21-node / 20-hop full-stack run)
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_NATIVE_BUILD: /tmp/leanmesh-native
+      LEANMESH_VENV: /tmp/leanmesh-venv
+      LEANMESH_E2E_REPORT_DIR: /tmp/e2e-report
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - name: host C/C++ compiler and Python 3.12
+        run: |
+          if ! command -v c++ >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends g++
+          fi
+          if ! command -v python3.12 >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv
+          fi
+      - run: scripts/third_party.sh setup
+      - run: scripts/third_party.sh verify
+      - name: native build (libleanmesh_host.so and meshsim only)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
+          cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host meshsim lmtool
+      - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
+      - name: E2E (real Host + real cores on a simulated radio; sim timings, not RF)
+        id: e2e
+        run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s --junitxml="$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - name: E2E failure details in the run summary
+        if: ${{ failure() && steps.e2e.outcome == 'failure' }}
+        run: '"$LEANMESH_VENV/bin/python" scripts/report_pytest_failures.py "$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with: { name: e2e-fullstack-report, path: /tmp/e2e-report }
+
+  sanitizers:
+    name: ASan + UBSan (native ctest, then the E2E with the ASan meshsim)
+    timeout-minutes: 150
+    runs-on: ubuntu-24.04
+    container:
+      image: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+      options: --cap-add=SYS_PTRACE # LeakSanitizer suspends threads with ptrace
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_NATIVE_BUILD: /tmp/leanmesh-native          # plain: the Python Host loads its libleanmesh_host.so
+      LEANMESH_ASAN_BUILD: /tmp/leanmesh-asan              # -DLM_SANITIZE=ON: every native test and meshsim
+      LEANMESH_MESHSIM_BUILD: /tmp/leanmesh-asan
+      LEANMESH_SIM_STRICT_EXIT: "1"                        # a meshsim that ended non-zero or printed a report fails its test
+      LEANMESH_VENV: /tmp/leanmesh-venv
+      LEANMESH_E2E_REPORT_DIR: /tmp/asan-e2e-report
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=0:print_stacktrace=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1    # UBSan only prints by default: make it fatal
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - name: host C/C++ compiler and Python 3.12
+        run: |
+          if ! command -v c++ >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends g++
+          fi
+          if ! command -v python3.12 >/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv
+          fi
+      - run: scripts/third_party.sh setup
+      - run: scripts/third_party.sh verify
+      - name: configure + build the sanitizer tree and the plain host library
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          cmake -S . -B "$LEANMESH_ASAN_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH" -DLM_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake --build "$LEANMESH_ASAN_BUILD"
+          cmake -S . -B "$LEANMESH_NATIVE_BUILD" -G Ninja -DLM_IDF_PATH="$IDF_PATH"
+          cmake --build "$LEANMESH_NATIVE_BUILD" --target leanmesh_host
+      - name: ctest under ASan + UBSan (the sim-heavy suites have TIMEOUT 900 s, see tests/native/CMakeLists.txt)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          ctest --test-dir "$LEANMESH_ASAN_BUILD" --output-on-failure --no-tests=error -j2
+      - run: PYTHON=python3.12 scripts/setup_host_venv.sh sync-dev
+      - name: offline issuer objects verified and joined by the sanitized SDK
+        env:
+          LEANMESH_ISSUER_DRIVER: /tmp/leanmesh-asan/tests/native/issuer_driver
+        run: '"$LEANMESH_VENV/bin/python" -m pytest -v host/tests/integration/test_fleet_issuer.py'
+      - name: E2E with the ASan meshsim and the plain libleanmesh_host.so
+        id: e2e
+        run: 'timeout 3300 "$LEANMESH_VENV/bin/python" -m pytest -v host/tests/e2e -s --junitxml="$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - name: E2E failure details in the run summary
+        if: ${{ failure() && steps.e2e.outcome == 'failure' }}
+        run: '"$LEANMESH_VENV/bin/python" scripts/report_pytest_failures.py "$LEANMESH_E2E_REPORT_DIR/pytest-results.xml"'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with: { name: asan-e2e-report, path: /tmp/asan-e2e-report }
+
+  idf-targets:
+    name: IDF build ${{ matrix.target }} (baseline, example_node, crypto_link_check)
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v6.0.3@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32c3, esp32c5, esp32c6]
+    env:
+      IDF_PATH: /opt/esp/idf
+      LEANMESH_BUILD_ROOT: /tmp/leanmesh-build
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { submodules: false }
+      - run: git config --global --add safe.directory '*'
+      - run: scripts/third_party.sh setup
+      - run: scripts/build_targets.sh ${{ matrix.target }}
+      - name: example_node with the ROOT profile
+        run: scripts/build_targets.sh --app example_node --profile ROOT ${{ matrix.target }}
+      - name: example_node with the RELAY profile
+        run: scripts/build_targets.sh --app example_node --profile RELAY ${{ matrix.target }}
+      - name: budget report (SoC compiler sizeof, map, image diff; a report, not a gate)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          python3 scripts/budget_report.py --json budget-${{ matrix.target }}.json \
+            --idf-build "$LEANMESH_BUILD_ROOT/example_node/${{ matrix.target }}" \
+            --idf-build "$LEANMESH_BUILD_ROOT/example_node-RELAY/${{ matrix.target }}" \
+            --idf-build "$LEANMESH_BUILD_ROOT/example_node-ROOT/${{ matrix.target }}"
+      - name: budget report of this SoC (LEAF/RELAY/ROOT builds found in the build root; a report, not a gate)
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          python3 scripts/budget_report.py --idf-root "$LEANMESH_BUILD_ROOT" --out-dir "budget-out-${{ matrix.target }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: "budget-${{ matrix.target }}"
+          path: |
+            budget-${{ matrix.target }}.json
+            budget-out-${{ matrix.target }}/budget-report.*

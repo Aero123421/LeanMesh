@@ -131,7 +131,7 @@ meshsimはプロトコル試験台で、RSSI・RF・電力を持ちません。*
 
 ## 確認した内容（2026-09-30、FIX13の作業中のtree〈`57a2b66` + 未commitの変更〉、Linux x86-64、IDF v6.0.3）
 
-ローカルの実行結果です。マージ前に流す確認の一覧は [testing.md](testing.md) §2。数と日付はこの実行のもので、以降のtreeでは変わります。
+ローカルの実行結果です。CIの結果は [testing.md](testing.md) §5 の行（`57a2b66` のgreen run）を見てください。数と日付はこの実行のもので、以降のtreeでは変わります。
 
 | コマンド | 結果 |
 |---|---|
@@ -142,4 +142,4 @@ meshsimはプロトコル試験台で、RSSI・RF・電力を持ちません。*
 | `build_targets.sh --app example_node`（esp32c3 の LEAF と ROOT） | 2 build成功。他のSoC・RELAYはこの作業では再buildしていない |
 | `check_spec.py`（後に `git checkout evidence/VALIDATION.json`） | PASS |
 
-**実行していないもの**: flash、実機での起動、RF。`baseline_espnow` と `crypto_link_check` のbuildは今回の実行に含めていません（[testing.md](testing.md) §2 の対象）。
+**実行していないもの**: flash、実機での起動、RF。`baseline_espnow` と `crypto_link_check` のbuildは今回の実行に含めていません（CIの対象）。

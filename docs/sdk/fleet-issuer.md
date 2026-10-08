@@ -171,7 +171,7 @@ CLI 自体の出力も同じ Join 経路に渡します。署名改ざん、正�
 A の member を root A 停止中に B の root へ移し、B で ACTIVE（A と B の同時 ACTIVE なし）、古い・別 nonce・別 source の
 ticket と使用済み ticket の再 install は機器が拒否、A が戻ると同じ ticket で ledger が LEFT になり A は機器と session を
 持たない、までを検査します。
-マージ前の確認（[testing.md](testing.md) §2）の Host と sanitizer の試験で実行し、build output がなければ失敗します。
+CI の Host job と sanitizer job で実行し、build output がなければ失敗します。
 
 driver の平文 device scalar は一時的な `0700` pytest directory の fixture だけに置き、
 製品の生成・輸出・書込み経路としては提供しません。RF、実 NVS、実電源断、鍵 custody、独立 EDHOC
