@@ -50,4 +50,4 @@ python scripts/energy_report.py examples/power-trace.SYNTHETIC.csv \
 
 仕様検査のPASSは、ファームウェア、FastAPI製品サービス、20hop実RF、実電源断、電池寿命、独立暗号レビューのPASSではありません。実装側の試験（ctest、pytest、meshsim）も同様に、実機の合格ではありません。
 
-`tests/golden.json`とpower fixtureは公開のtest-only材料です。鍵を本番へ転用せず、通常検査で期待値を自動更新しないでください。現行のAPI契約はC ABI2。Wire拡張やGroupSnapshotV2はCHANGELOGで互換条件を確認してください。
+`tests/golden.json`とpower fixtureは公開のtest-only材料です。鍵を本番へ転用せず、通常検査で期待値を自動更新しないでください。現行のAPI契約はC ABI2。開発中のため旧版とのWire・ABI・保存データの互換は持ちません（AGENTS.md）。
