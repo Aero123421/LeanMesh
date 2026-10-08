@@ -17,7 +17,7 @@ LeanMeshは開発中の仮称SDKで、外部の利用者・配布済みの機器
   2. 失敗する回帰テストを書く。不変条件と今回変える振る舞いに絞り、内部の細部まではテストしない。
   3. テストが通る最小の実装をする。実経路の試験と差分/資源測定を行う。
   4. 不要になったコード・テスト・資料と、資料とコードの食い違いが残っていないか確かめて消す。レビューを受ける。
-- 今回のZIPは仕様。既存KG/RouteLoomへのmerge、機器書込み、鍵削除、現場配備は別の明示指示を必要とする。
+- KGuardはLeanMeshを正式に使う適用先だが、KGの業務の語彙・判断はcoreへ入れない（目的のとおり）。KGリポジトリ側の作業、機器への書込み、鍵の削除、現場配備は別の明示指示を必要とする。
 
 ## 必ず守ること
 - Identity、assignment_generation、membership_generation、root_term、channel_epoch、link_session、end_session、application bindingを兼用しない。
