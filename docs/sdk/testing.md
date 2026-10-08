@@ -8,7 +8,7 @@
 |---|---|---|
 | 仕様検査（G0） | `python scripts/check_spec.py` | 仕様文書・registry・header・schemaの整合、markdownリンク。実装の合格ではない |
 | native ctest | `ctest --test-dir ~/.cache/leanmesh/native -j4` | 実coreを載せた `SimNode`/`World` での網（`tests/native/test_*.cpp`）。codec・暗号vectorだけがunit |
-| sanitizer | `-DLM_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug` の別buildでctest | ASan + UBSan（UBSanは致命扱い）。CIではASan meshsimでE2Eも通す |
+| sanitizer | `-DLM_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug` の別buildでctest | ASan + UBSan（UBSanは致命扱い）。マージ前の確認（§2）ではASan meshsimでE2Eも通す |
 | Host unit / integration | `pytest host/tests/unit host/tests/integration` | codec、認証、API契約（OpenAPIと突き合わせ）、DB上限、Hostプロセスのcrash |
 | オフライン fleet 発行 | `pytest host/tests/integration/test_fleet_issuer.py` | 暗号化鍵の custody guard、CLI 出力の SDK/PSA 検証と sim Join。ASan/UBSan driver でも実行。実機書込みは含まない |
 | 公開C APIの網羅 | `python3 scripts/check_api_defined.py --native-build <build>`（ctest `api_defined`） | `api/leanmesh.h` の全関数がnative buildで定義済み、`LM_EVIDENCE_*`/`LM_PHASE_*` がHost・OpenAPIと一致 |
@@ -36,19 +36,36 @@ LM_MODEL_SEED=17 LM_MODEL_LOG=1 ~/.cache/leanmesh/native/tests/native/test_model
 
 失敗時はseed、event log、最小化した列、commitを出します。検査するのは「証拠は前にしか進まない」「APPLIEDは宛先アプリの報告がある時だけ」「再起動をまたいでも配送回数の上限を超えない」「復旧後、有限期限の操作は終わる」です。
 
-## 2. CI（`.github/workflows/ci.yml`）
+## 2. マージ前の確認（CIは使わない）
 
-| job | 内容 |
-|---|---|
-| `spec` | check_spec（依存はexact version固定） |
-| `lint` | `ruff check`（host と、このrepoが保守するscript）。clang-format / clang-tidy は設定があるが**gateにしていない**（C++は設定のcolumn limitに従っておらず、指摘が数千件あるため。将来の課題） |
-| `native` | build、ctest（`--no-tests=error`）、電源断matrix、budget report、scenario coverage |
-| `model-random` | `test_model` を**毎回ランダムな基点**から3000 seed連続で実行（範囲をlogに出す。失敗時はseedを出す。`LM_MODEL_SEED=<n>` で再現）。既定のctestの48 seed（1000〜1047 + 回帰5 seed）は固定で、新しい列は見ない |
-| `host` / `e2e` | Host unit+integration / meshsimとのE2E（20 hop、report出力） |
-| `sanitizers` | ASan+UBSanのctestとE2E |
-| `idf-targets` | esp32s3/c3/c5/c6 それぞれで baseline・example_node・crypto_link_check と RELAY / ROOT profile をbuild、予算報告 |
+CI（GitHub Actions）は使いません。マージ前に開発環境で次を流し、実行したコマンドと結果をPRに書きます。flashはしません。
 
-全jobに `timeout-minutes` があり、actionはcommit SHAで固定、IDF imageはdigest固定です。pytestは `timeout` コマンドで全体を打ち切ります（per-test timeoutのpluginはhash lockに未追加）。CIはflashしません。
+```sh
+B=~/.cache/leanmesh/native A=~/.cache/leanmesh/asan V=~/.cache/leanmesh/host-venv   # build・venvはrepoの外
+python scripts/check_spec.py && git checkout evidence/VALIDATION.json               # G0（検査が再生成するので戻す）
+ruff check host tools/fieldview scripts/check_api_defined.py scripts/budget_report.py scripts/scenario_coverage.py scripts/report_pytest_failures.py
+scripts/third_party.sh setup && scripts/third_party.sh verify
+
+cmake -S . -B $B -G Ninja -DLM_IDF_PATH=$IDF_PATH && cmake --build $B             # IDF v6.0.3 の export.sh を読んだ後
+python3 scripts/check_api_defined.py --native-build $B
+ctest --test-dir $B --output-on-failure --no-tests=error -j2
+T=$B/tests/native; $T/test_join POWER; $T/test_lifecycle M05; $T/test_lifecycle LC08; $T/test_channel POWER; $T/test_delivery POWER-
+LM_MODEL_SEEDS=3000 $T/test_model
+LEANMESH_NATIVE_BUILD=$B $V/bin/python -m pytest host/tests                        # unit + integration + E2E（meshsim、21 node / 20 hop）
+
+cmake -S . -B $A -G Ninja -DLM_IDF_PATH=$IDF_PATH -DLM_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug && cmake --build $A
+UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir $A --output-on-failure --no-tests=error -j2
+LEANMESH_ISSUER_DRIVER=$A/tests/native/issuer_driver $V/bin/python -m pytest host/tests/integration/test_fleet_issuer.py
+LEANMESH_NATIVE_BUILD=$B LEANMESH_MESHSIM_BUILD=$A LEANMESH_SIM_STRICT_EXIT=1 UBSAN_OPTIONS=halt_on_error=1 $V/bin/python -m pytest host/tests/e2e
+
+for t in esp32s3 esp32c3 esp32c5 esp32c6; do                                       # 変えた範囲がportやfirmwareに及ぶとき
+  scripts/build_targets.sh $t
+  scripts/build_targets.sh --app example_node --profile ROOT $t
+  scripts/build_targets.sh --app example_node --profile RELAY $t
+done
+```
+
+clang-format / clang-tidy は設定があるが**gateにしていない**（C++は設定のcolumn limitに従っておらず、指摘が数千件あるため。将来の課題）。
 
 ## 3. シナリオの結びつけ
 
@@ -85,8 +102,7 @@ heap最小値・stack余裕・CPU・airtime・energyは実機測定が必要で�
 
 | 項目 | 状態 |
 |---|---|
-| CI（GitHub Actions）でのgreen | commit `57a2b66` の直近のgreen run: https://github.com/Aero123421/LeanMesh/actions/runs/36707722886（その時点で最新。以降のcommitのCIは別に確認する。CIはsim/hostの範囲で、実機の合格ではない）。`8668c69` までのpushは赤だった |
-| C++の整形・静的解析（clang-format / clang-tidy） | **gateにしていない**。設定はあるがtreeが従っておらず（指摘が数千件）、CIは走らせない |
+| C++の整形・静的解析（clang-format / clang-tidy） | **gateにしていない**。設定はあるがtreeが従っておらず（指摘が数千件）、§2の確認にも含めない |
 | RF（距離、20 hop実機、channel切替の実網、共存、RSSI） | **未実施**。simはRFモデルを持たない |
 | HIL（4 SoCでの実動作、USB実機、Wi-Fi LR250、ESP-NOWのpeer/ACK挙動） | **未実施**。firmwareは4 SoCで**buildだけ**確認 |
 | ROOT を ESP32-C3 に載せる構成 | **未対応**。RAM超過があり、実機の空きheap未測定（ADR-002） |

@@ -25,7 +25,7 @@
 
 |区分|内容|
 |---|---|
-|実装し、ローカルで検証した|native ctest（ASan/UBSan含む）、Host pytest、meshsim上のE2E（21 node / 20 hop）、4 SoCのESP-IDF build（LEAF/RELAY/ROOT）。CI: `57a2b66` の直近のgreen run は [Actions](https://github.com/Aero123421/LeanMesh/actions/runs/36707722886)（その時点で最新。以降のcommitは別に確認する。CIもsimulation/hostの範囲）|
+|実装し、ローカルで検証した|native ctest（ASan/UBSan含む）、Host pytest、meshsim上のE2E（21 node / 20 hop）、4 SoCのESP-IDF build（LEAF/RELAY/ROOT）。CIは使わず、マージ前に同じ確認を開発環境で流す（[試験 §2](docs/sdk/testing.md)）。どれもsimulation/hostの範囲|
 |未検証|RF、実機（HIL）、消費電力、実電源断、鍵のcustody、EDHOCの独立実装との相互接続|
 |未対応|ROOTのESP32-C3搭載（実機heap測定まで）、量産用provisioningツール。RF承認は既定off|
 |目標超過|RAM（12/12 build、最大 +13404 B）、flash差分（12/12 buildが256 KiB超、ROOT 4 SoCは320 KiBも超）、SDK SLOC（28k超）。[budget-report](build-records/budget-report.md)、[ADR-002](decisions/ADR-002-budget-status.md)|

@@ -7,7 +7,7 @@
 ## 実装を使う
 
 全体像は[README](README.md)（図つき）。
-ビルド、Device API、Host、試験の手順は **[docs/sdk/](docs/sdk/README.md)**。実装し、ローカルで検証したのはソフトウェアとsimulationの範囲で、RF・実機・消費電力・実電源断・鍵custodyは未検証です（[一覧](docs/sdk/testing.md)）。CIは `57a2b66` で直近のgreen run（https://github.com/Aero123421/LeanMesh/actions/runs/36707722886、その時点で最新。以降のcommitは別に確認する）。CIもsimulation/hostの範囲です。RAM・flash・SLOCは目標超過、ROOTのESP32-C3搭載は未対応です。
+ビルド、Device API、Host、試験の手順は **[docs/sdk/](docs/sdk/README.md)**。実装し、ローカルで検証したのはソフトウェアとsimulationの範囲で、RF・実機・消費電力・実電源断・鍵custodyは未検証です（[一覧](docs/sdk/testing.md)）。CIは使わず、マージ前に同じ確認を開発環境で流します（[試験 §2](docs/sdk/testing.md)）。これもsimulation/hostの範囲です。RAM・flash・SLOCは目標超過、ROOTのESP32-C3搭載は未対応です。
 
 ## 読む場所
 

@@ -1,7 +1,7 @@
 # 10 Device API（C ABIを唯一の正本にする）
 
 ## 1. 契約
-`api/leanmesh.h` はcompile可能な公開C ABI。宣言された全関数はnative/sim buildとIDF portで定義され、`scripts/check_api_defined.py`（ctest `api_defined`、CI）が未定義を検出する。C++ wrapperはこのC APIを呼ぶ薄いinlineで十分で、CだけJoin/APPLIEDが使えない状態を作らない。拡張されるrequest/snapshot structにstruct_size/abi_version。固定幅ID・sleep ticket・workspace寸法のvalue structはその例外としてheaderの定義に固定。integer widthを固定しreserved=0を必須とする。ABI_VERSION=2。native/simでは`lm_init`は`SimNode::boot`が束ねたportsに対して呼ばれ（それ以外はUNSUPPORTED）、`lm_destroy`はstop後のみOK（実行中はBUSY）。v0.2はheaderの既知サイズと完全一致だけを受理する。将来のtail拡張受理は次ABIの互換表で追加するまで行わない。不明な必須flagはUNSUPPORTED。
+`api/leanmesh.h` はcompile可能な公開C ABI。宣言された全関数はnative/sim buildとIDF portで定義され、`scripts/check_api_defined.py`（ctest `api_defined`）が未定義を検出する。C++ wrapperはこのC APIを呼ぶ薄いinlineで十分で、CだけJoin/APPLIEDが使えない状態を作らない。拡張されるrequest/snapshot structにstruct_size/abi_version。固定幅ID・sleep ticket・workspace寸法のvalue structはその例外としてheaderの定義に固定。integer widthを固定しreserved=0を必須とする。ABI_VERSION=2。native/simでは`lm_init`は`SimNode::boot`が束ねたportsに対して呼ばれ（それ以外はUNSUPPORTED）、`lm_destroy`はstop後のみOK（実行中はBUSY）。v0.2はheaderの既知サイズと完全一致だけを受理する。将来のtail拡張受理は次ABIの互換表で追加するまで行わない。不明な必須flagはUNSUPPORTED。
 
 ## 2. 初期化と寿命
 `lm_workspace_required(config)`が必要な配置領域size/alignmentを返す。`lm_init(workspace,size,config,&ctx)`は検査と構築だけでRF送信しない。`lm_start`は非同期でSTARTED/FAULTを通知。`lm_stop`は呼出し内で完了しdrain_msは待機に使わない（`*operation`は常に0）。未完了のsendはその場で最終OPERATION eventを受ける（フレームが出た/journalが残るならINDETERMINATE、出ていなければCANCELLED_NOT_SENT）。stop時にMESSAGE/結果付きOPERATIONのeventは撤回され、GAPが1つ立つ（durable MESSAGEはlm_start後にrecoveredとして1回だけ再通知）。destroyはstop完了かつjob未完了なしの後のみ（BUSYなら待って再試行）。ctxとworkspaceはdestroyまで有効。IDF portは必要なtask/ringを初期化し、それ以降coreでheap allocationをしない。
