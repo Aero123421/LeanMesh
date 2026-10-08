@@ -33,6 +33,12 @@ Delivery::Delivery(Engine &engine, member::LocalIdentity &identity, link::LinkLa
     hh.ctx = this;
     hh.may_send = &hop_may_send;
     hh.done = &hop_done;
+    hh.accepted = [](void *ctx, Handle owner, MonoTime now) {
+        auto &d = *static_cast<Delivery *>(ctx);
+        if (Active *a = d.actives_.get(owner)) {
+            d.note_evidence(d.ops_[a->op], ev::hop_accepted, now);
+        }
+    };
     hop_.set_hooks(hh);
     link::EndPort ep; // end sessions are set up by the node's single exchange in end mode
     ep.ctx = this;

@@ -31,6 +31,20 @@ void collect(Engine &e, MonoTime now, Snapshot &s) {
             s.rx_ring_depth = f.rx_ring_depth;
             s.rx_ring_dropped = f.rx_ring_dropped;
         }
+        if (f.tx_power_valid) {
+            s.validity |= valid::tx_power;
+            s.tx_power_qdbm = f.tx_power_qdbm;
+        }
+        if (f.radio_recovery_valid) {
+            s.validity |= valid::radio_recovery;
+            s.radio_recovery_uptime_ms = f.radio_recovery_uptime_ms;
+            s.radio_recovery_reason = f.radio_recovery_reason;
+            s.radio_recovery_status = f.radio_recovery_status;
+            s.radio_recovery_attempts = f.radio_recovery_attempts;
+            s.radio_recovery_tx = f.radio_recovery_tx;
+            s.radio_recovery_rx = f.radio_recovery_rx;
+            s.radio_recovery_previous_boot = f.radio_recovery_previous_boot;
+        }
     }
 
     // sdk: counters the owner keeps since the first lm_start (never reset, docs/16)
@@ -42,6 +56,7 @@ void collect(Engine &e, MonoTime now, Snapshot &s) {
     s.link_retries = hop.retransmits + e.link().stats().hs_retransmits;
     s.rf_failures = tx.rf_failed;      // MacFailed only: the one RF-loss sample
     s.mac_unknown = tx.unknown;        // neither loss nor success
+    s.unicast_acked = tx.unicast_acked;
     uint64_t refused = 0;              // admission refusals of the scheduler: our capacity, not RF
     for (const sched::ClassStats &c : e.sched().stats().cls) {
         refused += c.refused;

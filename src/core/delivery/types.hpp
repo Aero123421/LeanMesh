@@ -99,8 +99,14 @@ struct Receipt {
 // Time one end-to-end round (frame out, receipt back) may take over `hops` hops before the origin
 // repeats it: queue budget + 2 * hops * per-hop allowance (docs/08 §6). The numbers are unmeasured
 // defaults (S9-D9); hardware qualification replaces them with link p95 values.
-[[nodiscard]] constexpr Duration round_timeout(unsigned hops) {
-    return Duration::from_ms(600 + 240 * static_cast<int64_t>(hops));
+[[nodiscard]] constexpr Duration round_timeout(unsigned hops, Duration service = {}) {
+    // Each hop serializes DATA and HOP_ACK; leave the same allowance on the receipt path.
+    const int64_t per_hop_us = service.us * 2 > 120000 ? service.us * 2 : 120000;
+    return Duration{600000 + 2 * static_cast<int64_t>(hops) * per_hop_us};
+}
+
+[[nodiscard]] constexpr Duration failure_delay(uint8_t failures) {
+    return Duration::from_s(failures > 5 ? 30 : (int64_t{1} << (failures == 0 ? 0 : failures - 1)));
 }
 
 [[nodiscard]] inline MessageId to_message_id(const std::array<uint8_t, 16> &b) {

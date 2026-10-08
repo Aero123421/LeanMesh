@@ -140,7 +140,12 @@ void Delivery::forward(const link::RxInfo &info, wire::RouteHeader &h, ByteView 
                                  f->frame, now);
     if (st != Status::Ok) {
         hop_.release(fh);
-        answer(A::Rejected, 0);
+        if (st == Status::TimeUncertain) {
+            ++stats_.rx_busy; // the next link awaits its credential/time, not RF loss or a broken path
+            answer(A::Busy, 2000); // bounded by HopTx::k_max_busy_defers; let the renewal finish
+        } else {
+            answer(A::Rejected, 0);
+        }
         return;
     }
     f->expires_root_ms = eh.expires_root_ms; // FIX4-D1: checked again before every hand-off and retry

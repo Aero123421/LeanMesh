@@ -35,7 +35,7 @@ namespace lm::route {
 
 inline constexpr std::size_t k_cands = 3;   // parent + 2 spares (docs/04 §2)
 inline constexpr std::size_t k_query_slots = 2;
-inline constexpr uint32_t k_tag_mesh = 0x4D530000; // "MS": beacons and probes (low bits: kind<<8 | candidate)
+inline constexpr uint32_t k_tag_mesh = 0x4D530000; // "MS": beacons and probes (low bits: beacon/reply kind, or probe marker + sequence + candidate)
 
 class Mesh {
   public:
@@ -187,6 +187,7 @@ class Mesh {
         MonoTime avoid_until{};
         MonoTime probe_wait = MonoTime::never();
         std::array<uint8_t, 8> nonce{};
+        uint16_t probe_tag = 0; // pending physical TX; candidate reuse cannot arm an old wait
         LinkQuality q;
         Instability inst;
         uint8_t fails = 0;
@@ -203,6 +204,7 @@ class Mesh {
         uint8_t n = 0;
         std::array<uint16_t, k_max_root_path> path{};
         MonoTime next_at = MonoTime::never();
+        Handle tx_owner;
         bool switching = false; // a voluntary move: the old path keeps serving
     };
     struct Ask { // one ROUTE_QUERY in flight (or a recent refusal, kept 5 s so a sender does not hammer the root)
@@ -211,6 +213,7 @@ class Mesh {
         DeviceId dest;
         MonoTime next_at = MonoTime::never();
         uint8_t tries = 0;
+        Handle tx_owner;
     };
 
     // hooks (static trampolines installed into Delivery)
@@ -243,7 +246,7 @@ class Mesh {
     // beacons, probes, trickle
     void send_beacon(bool solicit, MonoTime now);
     void schedule_beacon(MonoTime now, uint16_t max_delay_ms);
-    void send_probe(Cand &c, MonoTime now);
+    [[nodiscard]] Status send_probe(Cand &c, MonoTime now);
     void drop_link(Cand &c);
     void trickle(MonoTime now);
     void trickle_reset(MonoTime now);
@@ -274,7 +277,8 @@ class Mesh {
     [[nodiscard]] Status route_of(const DeviceId &dest, delivery::PathSpec &out, MonoTime now) const;
     [[nodiscard]] bool route_via(const uint16_t *root_path, uint8_t n, uint32_t revision,
                                  delivery::PathSpec &out) const;
-    [[nodiscard]] Status to_root(ByteView body, const delivery::PathSpec &route, MonoTime now);
+    [[nodiscard]] Status to_root(ByteView body, const delivery::PathSpec &route, MonoTime now, Handle owner = {});
+    [[nodiscard]] Handle next_control_owner(uint16_t kind);
     void renew(MonoTime now);
     void query_timer(MonoTime now);
     void connect_spare(MonoTime now);
@@ -324,6 +328,9 @@ class Mesh {
     MonoTime last_solicit_answer_{};
     uint32_t seq_counter_ = 0;
     uint8_t next_qid_ = 1;
+    uint16_t probe_seq_ = 0;
+    uint32_t control_seq_ = 0;
+    Handle renew_owner_;
 };
 
 } // namespace lm::route

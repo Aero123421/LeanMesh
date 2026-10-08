@@ -4,6 +4,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "leanmesh_idf.h"
 
 namespace lm::idf {
 
@@ -56,6 +57,21 @@ port::HealthFacts IdfHealth::read() {
     f.rx_ring_valid = true;
     f.rx_ring_depth = radio_.rx_depth();
     f.rx_ring_dropped = radio_.rx_dropped();
+    lm_idf_radio_stats_t radio{};
+    lm_idf_radio_stats(&radio);
+    f.tx_power_valid = radio.tx_power_valid && radio.tx_power_qdbm >= 0;
+    f.tx_power_qdbm = f.tx_power_valid ? static_cast<uint32_t>(radio.tx_power_qdbm) : 0;
+    lm_idf_recovery_t recovery{};
+    f.radio_recovery_valid = lm_idf_last_radio_recovery(&recovery);
+    if (f.radio_recovery_valid) {
+        f.radio_recovery_uptime_ms = recovery.uptime_ms;
+        f.radio_recovery_reason = recovery.reason;
+        f.radio_recovery_status = recovery.status;
+        f.radio_recovery_attempts = recovery.attempts;
+        f.radio_recovery_tx = recovery.tx_frames;
+        f.radio_recovery_rx = recovery.rx_frames;
+        f.radio_recovery_previous_boot = recovery.previous_boot;
+    }
     return f;
 }
 

@@ -19,6 +19,7 @@
 #include "port/sim/sim_node.hpp"
 #include "port/sim/sim_world.hpp"
 #include "serial/cobs.hpp"
+#include "serial/bridge.hpp"
 #include "serial/pairing.hpp"
 #include "serial/root_usb.hpp"
 
@@ -181,6 +182,56 @@ Bytes request(uint8_t seed, uint8_t method, std::size_t param_bytes) {
 }
 
 } // namespace
+
+LM_TEST("ISSUE19-3/6 serial: real diagnostics carry recovery and quantized power through the encrypted USB link") {
+    Rig r(19);
+    serial::Bridge bridge{r.eng(), *r.root, 19};
+    LM_CHECK(r.until([&] { return r.both_active(); }, 3000));
+    auto &facts = r.node().health.extra;
+    facts.tx_power_valid = true;
+    facts.tx_power_qdbm = 34;
+    facts.radio_recovery_valid = true;
+    facts.radio_recovery_reason = 256;
+    facts.radio_recovery_attempts = 2;
+    std::array<uint8_t, 32> req{};
+    wire::CborWriter w{MutByteView{req}};
+    w.array(3);
+    std::array<uint8_t, 16> id{};
+    w.bytes(ByteView{id});
+    w.uint(16); // DIAGNOSTICS
+    w.null();
+    LM_CHECK_OK(w.finish());
+    LM_CHECK_OK(r.host->send(gen::SerialKind::Request, r.host->link().session_gen(), ByteView{req.data(), w.size()}, r.hnow()));
+    LM_CHECK(r.until([&] { return r.responses == 1; }, 2000));
+    wire::CborReader response{ByteView{r.last_response.data(), r.last_response.size()}};
+    (void)response.array(4, 4);
+    (void)response.bstr(16, 16);
+    LM_CHECK_EQ(response.uint_in(0, 100), static_cast<uint64_t>(Status::Ok));
+    LM_CHECK(response.try_null());
+    wire::CborReader result{response.bstr(1, 8192)};
+    LM_CHECK_OK(response.finish());
+    wire::CborReader::Item map;
+    LM_CHECK(result.next(map) && map.type == wire::CborType::Map);
+    bool power = false, recovery = false;
+    for (uint64_t i = 0; i < map.arg; ++i) {
+        const ByteView key = result.tstr(1, 64);
+        const ByteView value = result.skip_item();
+        if (std::string(reinterpret_cast<const char *>(key.data()), key.size()) != "driver") continue;
+        wire::CborReader driver{value};
+        wire::CborReader::Item fields;
+        LM_CHECK(driver.next(fields) && fields.type == wire::CborType::Map);
+        for (uint64_t j = 0; j < fields.arg; ++j) {
+            const ByteView name = driver.tstr(1, 64);
+            const std::string text(reinterpret_cast<const char *>(name.data()), name.size());
+            const uint64_t number = driver.uint_in(0, UINT64_MAX);
+            if (text == "tx_power_qdbm") power = number == 34;
+            if (text == "radio_recovery_attempts") recovery = number == 2;
+        }
+        LM_CHECK_OK(driver.finish());
+    }
+    LM_CHECK_OK(result.finish());
+    LM_CHECK(power && recovery);
+}
 
 LM_TEST("S09-sim COBS round trip, resync and cap") {
     Bytes buf(serial::k_cobs_headroom + 600);

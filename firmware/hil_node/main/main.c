@@ -23,6 +23,8 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "bench_console.h"
+#include "bench_recovery.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -387,6 +389,32 @@ bool lm_idf_sleep_veto(uint8_t sleep_kind) {
     return usb_serial_jtag_is_connected();
 }
 
+#if CONFIG_LEANMESH_PROFILE_ROOT
+/* The root application owns recovery; the Host only reports diagnostics. USB remains a binary Host stream. */
+static void root_watch(void) {
+    bc_radio_watch_t watch = {0};
+    uint32_t window_ms = 0, recoveries = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        lm_idf_radio_health_t h;
+        if (lm_idf_radio_health(s_ctx, &h) != LM_STATUS_OK) continue;
+        const bc_radio_sample_t sample = {h.faulted, h.running, h.peers, h.rx_frames, h.tx_frames, h.unicast_acked};
+        const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        const uint32_t reason = bc_radio_watch(&watch, &sample, now);
+        if (reason == BC_RADIO_NO_FAULT) continue;
+        if ((uint32_t)(now - window_ms) >= 120000) {
+            window_ms = now;
+            recoveries = 0;
+        }
+        lm_status_t stopped = LM_STATUS_OK;
+        lm_idf_record_radio_recovery(reason, LM_STATUS_DRIVER_RESULT_UNKNOWN, h.tx_frames, h.rx_frames);
+        const lm_status_t started = ++recoveries <= 3 ? bc_radio_restart(s_ctx, &stopped) : LM_STATUS_RECOVERY_REQUIRED;
+        lm_idf_finish_radio_recovery(started);
+        if (started != LM_STATUS_OK) lm_idf_restart_radio_recovery();
+    }
+}
+#endif
+
 void app_main(void) {
     bc_board_init();
     esp_err_t err = nvs_flash_init(); /* the default "nvs" partition (Wi-Fi/PHY data), plaintext on a bench board */
@@ -404,6 +432,7 @@ void app_main(void) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart(); /* no console to report on: retry from a clean boot */
     }
+    root_watch();
 #else
     bc_console_init();
     /* Safe mode: a WINDOWED/REPORT_ONLY policy light-sleeps the chip, and light sleep stops the USB-Serial/JTAG port

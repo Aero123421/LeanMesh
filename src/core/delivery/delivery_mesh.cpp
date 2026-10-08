@@ -25,7 +25,7 @@ Status Delivery::start_session(const DeviceId &peer, const PathSpec &route, Mono
 
 // The record is sealed into a pool frame borrowed for the call, right behind the room for the route header (P9);
 // a control record has no MessageId meaning and no deadline.
-Status Delivery::send_control(const DeviceId &peer, const PathSpec &route, ByteView body, MonoTime now) {
+Status Delivery::send_control(const DeviceId &peer, const PathSpec &route, ByteView body, MonoTime now, Handle owner) {
     EndSession *s = sessions_.find_peer(peer);
     if (s == nullptr || s->suspect || !s->rec.active() || !(now < s->valid_until)) {
         return Status::AuthPending;
@@ -45,7 +45,7 @@ Status Delivery::send_control(const DeviceId &peer, const PathSpec &route, ByteV
     LM_TRY(seal_end_record(*s, s->tx_sid, route.term, eh, body, record_area(scratch, route.len), rlen));
     sessions_.touch(*s);
     Status why = Status::Ok;
-    return build_and_send(route, scratch, rlen, OwnerKind::Mesh, Handle{}, now, why) ? Status::Ok : why;
+    return build_and_send(route, scratch, rlen, OwnerKind::Mesh, owner, now, why) ? Status::Ok : why;
 }
 
 Status Delivery::send_routed(const PathSpec &route, ByteView record, OwnerKind kind, Handle owner, MonoTime now) {

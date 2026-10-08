@@ -186,6 +186,8 @@ def boot_text(f: dict[str, Any]) -> str:
     cause, detail = f["sdk_restart_cause"], f["detail_ms"]
     if cause == pr.SDK_RESTART_RADIO_STALL:
         what = "software restart by the SDK (radio stall" + (f", TX completion outstanding {detail} ms)" if detail else ")")
+    elif cause == pr.SDK_RESTART_RADIO_RECOVERY:
+        what = f"software restart by the SDK (radio recovery failed, reason {detail})"
     elif cause:
         what = f"restart by the SDK (cause {cause}" + (f", detail {detail} ms)" if detail else ")")
     else:
@@ -232,6 +234,11 @@ def describe(name: str, rec: pr.NodeRecord, fed: Fed, track: NodeLogTrack) -> tu
         return "panel", f"{name} display fault: {pr.DISPLAY_FAULTS.get(f['code'], 'code ' + str(f['code']))}"
     if t == pr.T_LOG_LOST:
         return "nodelog", f"{name}: the node's log ring dropped {f['records_dropped']} record(s)"
+    if t == pr.T_SDK_FAULT:
+        return "sdk_fault", f"{name} SDK halted: reason {f['reason']}, stop status {f['stop_status']}"
+    if t == pr.T_TX_POWER:
+        power = f"{f['tx_power_qdbm'] / 4:g} dBm" if f["valid"] else "unknown"
+        return "radio", f"{name} radio TX power readback {power}"
     if t == pr.T_RADIO_FAULT:
         done = "SDK restarted" if f["restart_status"] == 0 else f"SDK restart failed (status {f['restart_status']}), rebooted"
         return "radio", f"{name} radio fault (reason {f['reason']}) {_span(rec.t_ms)} after boot: {done}"

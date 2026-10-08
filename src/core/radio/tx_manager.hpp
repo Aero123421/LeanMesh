@@ -3,7 +3,7 @@
 // Every transmission gets TxToken{driver_generation, sequence}. A completion is credited only to
 // the in-flight record with an equal token: an old callback (older sequence, older driver
 // generation, or one that arrives after the watchdog already declared the result unknown) is never
-// attributed to a later frame. When no callback arrives within 1000 ms the result is UNKNOWN,
+// attributed to a later frame. When no callback arrives within k_watchdog the result is UNKNOWN,
 // further TX is refused (isolated) until the owner re-initialised the radio (new driver generation)
 // and called reinitialised().
 //
@@ -28,6 +28,7 @@ struct TxOutcome {
 struct TxStats {
     uint64_t started = 0;
     uint64_t mac_acked = 0;
+    uint64_t unicast_acked = 0;       // successful targeted MAC completions; broadcasts cannot prove a live peer
     uint64_t rf_failed = 0;           // MacFailed: the only RF-loss evidence
     uint64_t unknown = 0;             // watchdog: neither loss nor success
     uint64_t local_refused = 0;       // driver Busy/NoCapacity (BUSY/NO_MEM): never RF loss
@@ -58,12 +59,15 @@ class TxManager {
     [[nodiscard]] bool in_flight() const { return in_flight_; }
     [[nodiscard]] bool isolated() const { return isolated_; }
     [[nodiscard]] const TxStats &stats() const { return stats_; }
+    // Conservative observed service time, not an RF RTT or a hardware-qualified percentile.
+    [[nodiscard]] Duration service_bound() const { return service_bound_; }
     // The most recent outcome (diagnostics and tests; consumers act on it in on_tx_outcome).
     [[nodiscard]] const TxOutcome &last_outcome() const { return last_; }
 
   private:
     bool in_flight_ = false;
     bool isolated_ = false;
+    bool unicast_ = false;
     port::TxToken token_;
     port::TxToken unknown_token_;
     uint32_t tag_ = 0;
@@ -71,6 +75,7 @@ class TxManager {
     MonoTime deadline_;
     TxOutcome last_;
     TxStats stats_;
+    Duration service_bound_{};
 };
 
 } // namespace lm

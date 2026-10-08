@@ -679,6 +679,12 @@ Reply Engine::execute(const Command &cmd, MonoTime now) {
     switch (cmd.kind) {
     case CommandKind::GetCapabilities:
         return get_capabilities(cmd);
+    case CommandKind::DiagnosticsSnapshot:
+        if (cmd.response == nullptr || cmd.response_size != sizeof(diag::Snapshot)) {
+            return Reply{Status::InvalidArgument, 0, 0};
+        }
+        diag::collect(*this, now, *static_cast<diag::Snapshot *>(cmd.response));
+        return Reply{Status::Ok, 0, 0};
     case CommandKind::DiagnosticsGet: { // [SLICE:S19] answered from what the owner already keeps: no timer, no wake
         if (cmd.response == nullptr || cmd.response_size != sizeof(lm_diagnostics_t)) {
             return Reply{Status::InvalidArgument, 0, 0};

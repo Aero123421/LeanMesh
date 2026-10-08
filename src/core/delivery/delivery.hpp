@@ -362,7 +362,7 @@ class Delivery {
     [[nodiscard]] const EndSession *end_session_at(ShortAddr a) { return sessions_.find_addr(a); }
     // One CONTROL record (<= 96 B) sealed under the end session with `peer`, sent along `route`.
     // AuthPending: no usable session. Every call seals with a fresh counter (never a reused nonce).
-    [[nodiscard]] Status send_control(const DeviceId &peer, const PathSpec &route, ByteView body, MonoTime now);
+    [[nodiscard]] Status send_control(const DeviceId &peer, const PathSpec &route, ByteView body, MonoTime now, Handle owner = {});
     // A routed record that is not end-authenticated (join tunnel carriers). NoRoute/NoCapacity as
     // for any frame; `owner` comes back in the hook's FrameDone.
     [[nodiscard]] Status send_routed(const PathSpec &route, ByteView record, OwnerKind kind, Handle owner,

@@ -25,3 +25,6 @@ NO_MEM/BUSY/peer容量不足は資源エラー。link品質の失敗サンプル
 ## 5. 実機マトリクス
 S3/C3/C5/C6×送受信方向16cell、unicast/loss/reset/channel migrationのそれぞれを試験。20hopは21台以上のRF chainを強制する。3台simulatorの100/100配送を100台・20hopの証拠にしない。
 ボードは同じSoCでもFlash、USB、アンテナ、PSRAMが違う。XIAO等のboard overlayを別管理し、coreはPSRAM不要。4MiB Flash構成が最低保守profile、2MiBはdual-slot非対応として別能力を返す。
+
+### Issue 19: benchアプリの復旧owner
+HIL ROOTアプリが1秒ごとにownerのprivate snapshotを読み、FAULTならstop/startする。Hostは復旧を起動せず、USBのevent queueを監視アプリが消費しない。RX stallは以前RXを観測し、peerがあり、120秒RX進捗が無く、同期間に3回以上unicast MAC成功がある時だけ判定する。broadcast/無通信/RF不達/停止/Sleepでは判定しない。120秒に3回までSDK復旧を試し、失敗または上限で理由・status・時刻・countersをRTCへ残してrebootする。fieldアプリはFAULT reason=DRIVER_RESULT_UNKNOWNだけSDK復旧し、他のFAULTは一度理由を記録して停止する。これらはbench firmwareの動作で、coreの常時診断pollは追加しない。

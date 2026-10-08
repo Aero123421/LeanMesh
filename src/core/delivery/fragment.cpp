@@ -117,7 +117,7 @@ Status Delivery::seal_fragment(Active &a, Op &op, EndSession &s, const PathSpec 
         a.st = Active::St::WaitReceipt;
         op.phase = Phase::WaitingReceipt;
         a.hops = ps.len;
-        a.round_at = now + round_timeout(ps.len);
+        a.round_at = now + round_timeout(ps.len, engine_.tx().service_bound());
         a.next_at = earliest(a.round_at, local_deadline(op.expires, op.term, now));
         parked = true;
         return Status::Ok;
@@ -187,7 +187,7 @@ void Delivery::on_bitmap(const EndSession &s, const OpenedEnd &o, MonoTime now) 
             (void)hop_.withdraw(OwnerKind::Out, h);
             a->st = Active::St::WaitReceipt;
             op->phase = Phase::WaitingReceipt;
-            a->round_at = now + round_timeout(a->hops == 0 ? 1U : a->hops);
+            a->round_at = now + round_timeout(a->hops == 0 ? 1U : a->hops, engine_.tx().service_bound());
             a->next_at = earliest(a->round_at, local_deadline(op->expires, op->term, now));
         }
         return;

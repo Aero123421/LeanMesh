@@ -32,6 +32,8 @@ struct EndSession {
     uint32_t last_use = 0;
     uint32_t epoch = 0;     // changes with every installed session: sealed records remember it
     bool suspect = false;   // a whole message got no answer: the peer may have lost this session
+    MonoTime retry_at{};
+    uint8_t failures = 0; // consecutive E2E rounds without a receipt; never Busy or planned Sleep
     // The way back to the peer is not kept here: the reverse of every authenticated route from it
     // goes into the node's route table (Delivery, ARCH-D4).
 
@@ -49,6 +51,8 @@ struct EndSession {
         peer_lease = RootTime{};
         last_use = epoch = 0;
         suspect = false;
+        retry_at = {};
+        failures = 0;
     }
 };
 

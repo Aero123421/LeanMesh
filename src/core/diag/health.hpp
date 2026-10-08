@@ -25,6 +25,12 @@ struct HealthFacts {
     bool rx_ring_valid = false;
     uint32_t rx_ring_depth = 0;    // driver callback ring now
     uint32_t rx_ring_dropped = 0;  // frames the callback could not enqueue since boot
+    bool tx_power_valid = false;
+    uint32_t tx_power_qdbm = 0; // non-negative driver readback, quarter dBm (IDF range 8..84)
+    bool radio_recovery_valid = false;
+    uint32_t radio_recovery_uptime_ms = 0, radio_recovery_reason = 0, radio_recovery_status = 0;
+    uint32_t radio_recovery_attempts = 0, radio_recovery_tx = 0, radio_recovery_rx = 0;
+    uint32_t radio_recovery_previous_boot = 0;
 };
 
 class Health {

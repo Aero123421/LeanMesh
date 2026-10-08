@@ -13,24 +13,12 @@ class SimHealth final : public port::Health {
   public:
     explicit SimHealth(const SimRadio &radio) : radio_(radio) {}
     port::HealthFacts read() override {
-        port::HealthFacts f;
+        port::HealthFacts f = extra; // explicit test facts only; defaults are unknown
         f.reset_valid = true;
         f.reset = port::ResetReason::PowerOn;
         f.rx_ring_valid = true;
         f.rx_ring_depth = radio_.rx_depth();
         f.rx_ring_dropped = radio_.rx_dropped();
-        if (extra.heap_valid) {
-            f.heap_valid = true;
-            f.min_heap_bytes = extra.min_heap_bytes;
-        }
-        if (extra.stack_valid) {
-            f.stack_valid = true;
-            f.stack_free_bytes = extra.stack_free_bytes;
-        }
-        if (extra.cpu_valid) {
-            f.cpu_valid = true;
-            f.owner_cpu_us = extra.owner_cpu_us;
-        }
         ++reads;
         return f;
     }

@@ -3913,6 +3913,46 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4294967295
+              },
+              "tx_power_qdbm": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 84
+              },
+              "radio_recovery_uptime_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_recovery_reason": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_recovery_status": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_recovery_attempts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_recovery_tx": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_recovery_rx": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "radio_recovery_previous_boot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
               }
             }
           },

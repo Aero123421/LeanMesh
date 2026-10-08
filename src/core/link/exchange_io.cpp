@@ -126,8 +126,8 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
     rx_len_ += f.body.size();
     if (rx_len_ == rx_total_) {
         obj_complete(f.kind, ByteView{rx_.data(), rx_len_}, o, now);
-    } else if (initiator_ && mode_ != Mode::End && !rto_at_.is_never()) {
-        rto_at_ = now + s_.policy.rto; // [HIL-F12] the reply is arriving, so our object got through: no repeat now
+    } else if (initiator_ && !rto_at_.is_never()) {
+        rto_at_ = now + (mode_ == Mode::End ? delivery::round_timeout(route_.len, s_.engine.tx().service_bound()) : s_.policy.rto); // [HIL-F12] the reply is arriving, so our object got through: no repeat now
     }
 }
 
@@ -165,6 +165,7 @@ bool Exchange::start_responder(const Frag &f, const Origin &o, MonoTime now) {
         }
         begin_common(Mode::End, false, now);
         route_ = *o.reply;
+        budget_end_exchange(now);
         break;
     }
     xid_ = f.xid;
@@ -313,12 +314,13 @@ void Exchange::arm_rto(MonoTime now) {
         if (phase_ == Phase::SendCred) { // CredR is out: wait for message_1, but not for long
             phase_ = Phase::AwaitMsg;
             expect_ = ObjKind::Msg1;
-            deadline_ = earliest(deadline_, now + k_msg1_wait);
+            const Duration wait = mode_ == Mode::End ? delivery::round_timeout(route_.len, s_.engine.tx().service_bound()) : k_msg1_wait;
+            deadline_ = earliest(deadline_, now + (wait > k_msg1_wait ? wait : k_msg1_wait));
         }
         return;
     }
     if (phase_ == Phase::SendCred || phase_ == Phase::AwaitMsg || phase_ == Phase::AwaitBind) {
-        rto_at_ = now + (mode_ == Mode::End ? delivery::round_timeout(route_.len) : s_.policy.rto);
+        rto_at_ = now + (mode_ == Mode::End ? delivery::round_timeout(route_.len, s_.engine.tx().service_bound()) : s_.policy.rto);
     }
 }
 

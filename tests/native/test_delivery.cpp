@@ -344,6 +344,65 @@ void set_link(DNet &n, unsigned a, unsigned b, bool up, uint16_t loss = 0, uint1
 
 } // namespace
 
+LM_TEST("ISSUE19-1 sim: a relay waiting for authorization answers Busy without using RF attempts") {
+    DNet n(3);
+    n.set_time();
+    n.routes(0, 2);
+    warm_up(n, 0, 2);
+    auto *peer = n.eng(1).link().neighbors().find_device(n.id(2));
+    LM_CHECK(peer != nullptr);
+    if (peer == nullptr) return;
+    const auto lease = peer->lease;
+    peer->lease.term = RootTerm{99};
+    peer->lease_uncertain = true;
+    const auto send = n.send(0, 2, LM_RECEIVED, LM_VOLATILE, payload_of(19));
+    n.run_ms(5000);
+    LM_CHECK(n.dv(0).hop_stats().ack_busy > 0);
+    LM_CHECK_EQ(n.dv(0).hop_stats().rf_failed, 0u);
+    peer->lease = lease;
+    peer->lease_uncertain = false;
+    LM_CHECK(n.until([&] { return n.op(0, send.op).outcome == LM_OUTCOME_RECEIVED; }, 20000));
+}
+
+LM_TEST("ISSUE19-4 sim: exhausted RF attempts defer the dead peer, then an ACK resets the delay") {
+    DNet n(2);
+    n.set_time();
+    n.routes(0, 1);
+    warm_up(n, 0, 1);
+    set_link(n, 0, 1, false);
+    const auto failed0 = n.eng(0).tx().stats().rf_failed;
+    const auto send = n.send(0, 1, LM_RECEIVED, LM_VOLATILE, payload_of(19));
+    LM_CHECK_EQ(send.st, LM_STATUS_OK);
+    n.run_ms(1000);
+    LM_CHECK(n.eng(0).tx().stats().rf_failed - failed0 <= 3);
+    set_link(n, 0, 1, true);
+    LM_CHECK(n.until([&] { return n.op(0, send.op).outcome == LM_OUTCOME_RECEIVED; }, 10000));
+    const auto again = n.send(0, 1, LM_RECEIVED, LM_VOLATILE, payload_of(20));
+    LM_CHECK(n.until([&] { return n.op(0, again.op).outcome == LM_OUTCOME_RECEIVED; }, 500));
+}
+
+LM_TEST("ISSUE19-4 sim: an unreachable destination is delayed separately from its healthy first hop") {
+    DNet n(3);
+    n.set_time();
+    n.routes(0, 2);
+    warm_up(n, 0, 2);
+    set_link(n, 1, 2, false);
+    const auto send = n.send(0, 2, LM_RECEIVED, LM_VOLATILE, payload_of(21));
+    LM_CHECK_EQ(send.st, LM_STATUS_OK);
+    auto *dest = n.dv(0).sessions().find_peer(n.id(2));
+    LM_CHECK(dest != nullptr);
+    if (dest == nullptr) return;
+    LM_CHECK(n.until([&] { return dest->failures == 1; }, 10000));
+    LM_CHECK(dest->retry_at > n.now(0));
+    const auto *first_hop = n.eng(0).link().neighbors().find_device(n.id(1));
+    LM_CHECK(first_hop != nullptr && first_hop->failures == 0);
+    set_link(n, 1, 2, true);
+    LM_CHECK(n.until([&] { return n.op(0, send.op).outcome == LM_OUTCOME_RECEIVED; }, 15000));
+    LM_CHECK_EQ(dest->failures, 0u);
+    const auto again = n.send(0, 2, LM_RECEIVED, LM_VOLATILE, payload_of(22));
+    LM_CHECK(n.until([&] { return n.op(0, again.op).outcome == LM_OUTCOME_RECEIVED; }, 1000));
+}
+
 LM_TEST("D10 sim: HOP_ACK arrives before the TX callback (500 ms late) and is joined to the right frame") {
     DNet n(2);
     n.set_time();

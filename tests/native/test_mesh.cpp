@@ -15,6 +15,7 @@
 #include "core/wire/cbor.hpp"
 #include "fleet.hpp"
 #include "lmtest.hpp"
+#include "bench_recovery.h"
 #include "core/member/discovery.hpp"
 #include "core/member/proxy.hpp"
 #include "core/route/mesh_wire.hpp"
@@ -420,6 +421,81 @@ uint64_t await_received(MNet &n, unsigned from, lm_operation_id_t op, uint64_t l
     return (n.world.now_us() - t0) / 1000;
 }
 } // namespace
+
+LM_TEST("ISSUE19-3 sim: root FAULT must recover and members reattach without rejoining") {
+    MNet n(3);
+    form_chain(n, 60000);
+    const auto membership1 = n.eng(1).identity().member().membership;
+    const auto membership2 = n.eng(2).identity().member().membership;
+    LM_CHECK(n.until([&] { return !n.eng(0).tx().in_flight(); }, 1000, 1));
+    n.node(0).radio.tx_callback_delay_us = 7000000;
+    n.node(0).radio.start_fault_count = 3;
+    const std::array<uint8_t, 8> frame{'L', 'M', 1, 1, 0, 0, 0, 19};
+    LM_CHECK_OK(n.eng(0).transmit(n.node(1).radio.mac(), ByteView{frame}, 19, n.now(0)));
+    n.node(0).notify();
+    LM_CHECK(n.until([&] { return n.eng(0).radio_state() == RadioState::Faulted; }, 10000, 1));
+    n.node(0).radio.tx_callback_delay_us = 0;
+    lm_status_t stopped;
+    LM_CHECK_EQ(bc_radio_restart(n.ctx(0), &stopped), LM_STATUS_OK);
+    LM_CHECK_EQ(stopped, LM_STATUS_OK);
+    n.run_ms(5000);
+    LM_CHECK(n.eng(0).radio_state() == RadioState::Running);
+    LM_CHECK(n.until([&] { return n.formed(); }, 200000, 5));
+    LM_CHECK(n.eng(1).identity().member().membership == membership1);
+    LM_CHECK(n.eng(2).identity().member().membership == membership2);
+}
+
+LM_TEST("ISSUE19-2 sim: local Busy during attach Probe keeps the established link") {
+    for (const Status refused : {Status::Busy, Status::DriverResultUnknown, Status::NoCapacity}) {
+        MNet n(2);
+        n.boot_all();
+        n.set_time();
+        LM_CHECK(n.until([&] { return n.mesh(1).attach_step_id() == 2; }, 30'000, 1));
+        const uint64_t failed = n.mesh(1).stats().attach_failed;
+        const uint64_t probes = n.mesh(1).stats().probes_tx;
+        n.node(0).radio.tx_fault_count = 100'000; // no answer to the first probe, if it already left
+        n.node(1).radio.tx_fault = refused;
+        n.node(1).radio.tx_fault_count = 100'000;
+        n.run_ms(7000); // more than three reply waits, then many local refusals
+        LM_CHECK_EQ(n.mesh(1).stats().attach_failed, failed);
+        LM_CHECK_EQ(n.mesh(1).stats().probes_tx, probes);
+        const auto *peer = n.eng(1).link().neighbors().find_device(n.id(0));
+        LM_CHECK(peer != nullptr && peer->cur.active);
+        n.node(0).radio.tx_fault_count = 0;
+        n.node(1).radio.tx_fault_count = 0;
+        LM_CHECK(n.until([&] { return n.formed(); }, 30'000, 5));
+        LM_CHECK_EQ(n.mesh(1).stats().attach_failed, failed);
+    }
+}
+
+LM_TEST("ISSUE19-1 sim: 1.06 s TX completion and late RX still form a 1/3-hop mesh and deliver DATA") {
+    for (const unsigned hops : {1U, 3U}) {
+        MNet n(hops + 1);
+        n.world.options().tx_callback_delay_us = 1'060'000;
+        LinkParams slow;
+        slow.up = true;
+        slow.delay_us = 1'059'000; // RX just before TX-done, rather than near the start of the TX
+        for (unsigned i = 0; i < hops; ++i) {
+            n.world.set_link(static_cast<uint16_t>(i), static_cast<uint16_t>(i + 1), slow);
+        }
+        (void)form_chain(n, 600'000);
+        LM_CHECK(n.formed());
+        n.set_time();
+        for (const unsigned from : {0U, hops}) {
+            const unsigned to = from == 0 ? hops : 0;
+            const Bytes body = payload_of(0x19, 32);
+            const auto sent = n.send(from, to, LM_RECEIVED, body, 60'000);
+            LM_CHECK_EQ(sent.st, LM_STATUS_OK);
+            (void)await_received(n, from, sent.op, 60'000);
+            Received received;
+            LM_CHECK(n.pop_message(to, received));
+            LM_CHECK(received.payload == body);
+        }
+        for (unsigned i = 0; i <= hops; ++i) {
+            LM_CHECK_EQ(n.eng(i).stats().radio_restarts, 0u);
+        }
+    }
+}
 
 LM_TEST("R01 sim: delivery across the formed mesh, both directions, no static routes") {
     MNet n(21);

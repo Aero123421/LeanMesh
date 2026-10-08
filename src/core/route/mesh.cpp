@@ -11,8 +11,8 @@ namespace {
 
 constexpr Duration k_probe_wait = Duration::from_ms(1500);
 constexpr Duration k_probe_fresh = Duration::from_s(20); // a candidate not heard for this long is probed before use
-constexpr Duration k_link_wait = Duration::from_s(6);      // a link handshake takes a few seconds at most
-constexpr Duration k_session_wait = Duration::from_s(30);  // registry session_binding.timeout_ms
+constexpr Duration k_link_wait = Duration::from_s(6); // default progress check; slow TX waits for the exchange limit
+constexpr Duration k_session_wait = Duration::from_ms(gen::aead::session_bind_timeout_ms); // registry session_binding.timeout_ms
 constexpr Duration k_busy_retry = Duration::from_ms(20);   // radio/TX pool busy: local, not a failure
 constexpr Duration k_slot_retry = Duration::from_ms(250);
 constexpr Duration k_term_hint_gap = Duration::from_s(30); // HIL-F9: an unauthenticated newer-term hint, at most this often
@@ -159,8 +159,15 @@ Status Mesh::route_of(const DeviceId &dest, delivery::PathSpec &out, MonoTime no
     return route_to_root(out, now) ? Status::Ok : Status::Busy; // no valid path (yet, or repairing): wait
 }
 
-Status Mesh::to_root(ByteView body, const delivery::PathSpec &route, MonoTime now) {
-    return engine_.delivery().send_control(root_id(), route, body, now);
+Status Mesh::to_root(ByteView body, const delivery::PathSpec &route, MonoTime now, Handle owner) {
+    return engine_.delivery().send_control(root_id(), route, body, now, owner);
+}
+
+Handle Mesh::next_control_owner(uint16_t kind) {
+    if (++control_seq_ == 0) {
+        ++control_seq_; // zero means no completion owner; this is a bounded TX tag, not a pool generation
+    }
+    return Handle{kind, control_seq_};
 }
 
 // ---- power (S16) ----
@@ -198,6 +205,8 @@ void Mesh::on_wake(MonoTime now, bool fresh_sessions) {
         if (c.used) {
             c.heard = now;
             c.probe_wait = MonoTime::never();
+            c.probe_tag = 0;
+            c.nonce.fill(0);
             c.probe_miss = 0;
             c.rf_streak = 0;
         }
@@ -557,13 +566,16 @@ void Mesh::drop_link(Cand &c) {
         (void)engine_.link().close(n->device);
     }
     c.probe_miss = 0;
+    c.probe_tag = 0;
+    c.probe_wait = MonoTime::never();
+    c.nonce.fill(0);
     c.q = LinkQuality{};
 }
 
-void Mesh::send_probe(Cand &c, MonoTime now) {
+Status Mesh::send_probe(Cand &c, MonoTime now) {
     const link::Neighbor *n = neighbor_of(c);
     if (n == nullptr || !n->cur.active) {
-        return;
+        return Status::NoRoute;
     }
     // [S18] A probe that went unanswered is one miss, counted once: a later attempt the radio refuses (Busy) must not
     // count the same probe again (with frequent rotations that turned one lost probe into a dropped parent).
@@ -571,13 +583,19 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
         c.probe_wait = MonoTime::never();
         if (++c.probe_miss >= 3) {
             drop_link(c);
-            return;
+            return Status::NoRoute;
         }
+    }
+    if (c.probe_tag != 0 || !c.probe_wait.is_never()) {
+        if (att_.step == Step::Probe && att_.cand == index_of(&c)) {
+            att_.next_at = c.probe_wait;
+        }
+        return Status::Busy; // keep the pending nonce; physical completion or the reply continues
     }
     const member::MemberCredential &mc = engine_.identity().member();
     Probe p;
-    engine_.random(MutByteView{c.nonce});
-    std::copy(c.nonce.begin(), c.nonce.end(), p.nonce.begin());
+    engine_.random(MutByteView{p.nonce}.first(c.nonce.size()));
+    const uint16_t tag = static_cast<uint16_t>(0x8000U | ((++probe_seq_ & 0x1FFFU) << 2U) | index_of(&c));
     p.sender = mc.address.value();
     p.receiver = c.addr;
     p.reply = false;
@@ -590,12 +608,17 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
                              MutByteView{plain}, len);
     if (st == Status::Ok) {
         st = engine_.link().send_sealed(n->device, n->mac, wire::FrameKind::Route, ByteView{plain.data(), len},
-                                        k_tag_mesh | (uint32_t{k_kind_probe} << 8U) | static_cast<uint32_t>(index_of(&c)), now);
+                                        k_tag_mesh | tag, now);
     }
     if (st == Status::Ok) {
         ++stats_.probes_tx;
-        c.probe_wait = now + k_probe_wait;
-    } else if (st == Status::Busy || st == Status::DriverResultUnknown) {
+        std::copy_n(p.nonce.begin(), c.nonce.size(), c.nonce.begin());
+        c.probe_tag = tag;
+        c.probe_wait = MonoTime::never();
+        if (att_.step == Step::Probe && att_.cand == index_of(&c)) {
+            att_.next_at = MonoTime::never();
+        }
+    } else if (st == Status::Busy || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
         ++stats_.tx_busy;
         c.nonce.fill(0);
         attempt_at_ = earliest(attempt_at_, now + k_busy_retry); // Search/Attach re-enter and probe again
@@ -603,6 +626,7 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
             att_.next_at = now + k_busy_retry;
         }
     }
+    return st;
 }
 
 void Mesh::on_route_frame(const link::RxInfo &info, ByteView plain, MonoTime now) {
@@ -638,11 +662,12 @@ void Mesh::on_probe(const link::RxInfo &info, const Probe &p, MonoTime now) {
         return;
     }
     Cand *c = find_cand(info.src);
-    if (c == nullptr || c->probe_wait.is_never() ||
+    if (c == nullptr || (c->probe_wait.is_never() && c->probe_tag == 0) ||
         !std::equal(c->nonce.begin(), c->nonce.end(), p.nonce.begin())) {
         return; // not the answer to a probe we sent
     }
     c->probe_wait = MonoTime::never();
+    c->probe_tag = 0;
     c->probe_miss = 0;
     c->nonce.fill(0);
     alive(*c, now);
@@ -681,14 +706,23 @@ void Mesh::rf_sample(Cand &c, bool ok, MonoTime now) {
 }
 
 void Mesh::on_tx_outcome(const TxOutcome &o, MonoTime now) {
-    if (!is_mesh_tag(o.tag) || ((o.tag >> 8U) & 0xFFU) != k_kind_probe || state_ == State::Off) {
+    if (!is_mesh_tag(o.tag) || (o.tag & 0x8000U) == 0 || state_ == State::Off) {
         return;
     }
-    const uint32_t idx = o.tag & 0xFFU;
+    const uint32_t idx = o.tag & 3U;
     if (idx >= k_cands || !cands_[idx].used) {
         return;
     }
     Cand &c = cands_[idx];
+    if (c.probe_tag != static_cast<uint16_t>(o.tag)) {
+        return; // answered already, or this candidate slot now belongs to another probe
+    }
+    c.probe_tag = 0;
+    const Duration service{engine_.tx().service_bound().us * 2};
+    c.probe_wait = now + (service > k_probe_wait ? service : k_probe_wait);
+    if (att_.step == Step::Probe && att_.cand == static_cast<int>(idx)) {
+        att_.next_at = c.probe_wait;
+    }
     if (o.result == port::TxResult::MacFailed) {
         rf_sample(c, false, now); // the only RF-loss sample of a probe (a missing reply is not)
         if (index_of(&c) == parent_ && state_ == State::Ready && c.rf_streak < k_rf_failures) {
@@ -728,11 +762,11 @@ void Mesh::trickle(MonoTime now) {
         suspect(now); // the link session is gone (peer restarted): repair like a dead parent
         return;
     }
-    send_probe(p, now);
+    (void)send_probe(p, now);
     for (std::size_t k = 0; k < cands_.size(); ++k) {
         Cand &c = cands_[k];
         if (c.used && static_cast<int>(k) != parent_ && linked(c) && trickle_n_ % 4 == 0) {
-            send_probe(c, now); // spares are measured at a quarter of the rate
+            (void)send_probe(c, now); // spares are measured at a quarter of the rate
         }
     }
     const int best = [&] { // a voluntary move needs 20 % better and 30 s of holding (docs/04 §5)
@@ -799,7 +833,7 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
     } else if (state_ == State::Ready && !c->q.known()) {
         // A spare: first measurement. [S18] Not for a session made again (a rotation): its link is measured, and the
         // responder installs before the initiator, so a probe sent at once would die on an SID the peer lacks yet.
-        send_probe(*c, now);
+        (void)send_probe(*c, now);
     }
 }
 
@@ -868,7 +902,8 @@ void Mesh::attach_step(MonoTime now) {
                 disc_.note_handshake();
             }
             att_.step = Step::Link;
-            att_.next_at = now + k_link_wait;
+            const Duration wait = engine_.tx().service_bound().us > 120000 ? k_session_wait : k_link_wait;
+            att_.next_at = now + wait;
         } else if (st == Status::Busy || st == Status::RateLimited || st == Status::NoCapacity) {
             att_.step = Step::Link;
             att_.next_at = now + (st == Status::RateLimited ? Duration::from_s(2) : Duration::from_ms(500));
@@ -888,13 +923,18 @@ void Mesh::attach_step(MonoTime now) {
             att_.step = Step::Probe;
             att_.tries = 0;
         }
+        if (c.probe_tag != 0 || (!c.probe_wait.is_never() && now < c.probe_wait)) {
+            att_.next_at = c.probe_wait;
+            return; // neither a new callback nor a local wake may expire an in-flight third probe
+        }
         if (att_.tries >= 3) {
             attach_fail(now);
             return;
         }
-        ++att_.tries;
         att_.next_at = now + k_probe_wait;
-        send_probe(c, now);
+        if (send_probe(c, now) == Status::Ok) {
+            ++att_.tries; // local refusal has sent no probe and consumes no attempt
+        }
         return;
     }
     delivery::PathSpec route;
@@ -944,7 +984,9 @@ void Mesh::send_register(MonoTime now) {
         attach_fail(now);
         return;
     }
-    const Status st = to_root(ByteView{body.data(), len}, route, now);
+    att_.tx_owner = next_control_owner(1);
+    att_.next_at = MonoTime::never();
+    const Status st = to_root(ByteView{body.data(), len}, route, now, att_.tx_owner);
     if (st == Status::NoCapacity || st == Status::Busy || st == Status::NoRoute) {
         att_.next_at = now + Duration::from_ms(200); // TX pool full / no session with the first hop yet: local
         return;
@@ -965,7 +1007,6 @@ void Mesh::send_register(MonoTime now) {
         attach_fail(now);
         return;
     }
-    att_.next_at = now + delivery::round_timeout(route.len);
 }
 
 void Mesh::send_ready(MonoTime now) {
@@ -982,7 +1023,9 @@ void Mesh::send_ready(MonoTime now) {
         attach_fail(now);
         return;
     }
-    const Status st = to_root(ByteView{body.data(), len}, route, now);
+    att_.tx_owner = next_control_owner(1);
+    att_.next_at = MonoTime::never();
+    const Status st = to_root(ByteView{body.data(), len}, route, now, att_.tx_owner);
     if (st == Status::NoCapacity || st == Status::Busy || st == Status::NoRoute) {
         att_.next_at = now + Duration::from_ms(200);
         return;
@@ -996,7 +1039,6 @@ void Mesh::send_ready(MonoTime now) {
         attach_fail(now);
         return;
     }
-    att_.next_at = now + delivery::round_timeout(route.len);
 }
 
 void Mesh::attach_timer(MonoTime now) {
@@ -1213,6 +1255,7 @@ void Mesh::on_lease(const LeaseRec &l, MonoTime now) {
         return;
     }
     // Renewal answer.
+    renew_owner_ = {};
     renew_wait_ = MonoTime::never();
     renew_tries_ = 0;
     if (l.status != Status::Ok) {
@@ -1282,10 +1325,11 @@ void Mesh::renew(MonoTime now) {
         encode(r, MutByteView{body}, len) != Status::Ok) {
         return;
     }
-    const Status st = to_root(ByteView{body.data(), len}, route, now);
+    renew_owner_ = next_control_owner(2);
+    renew_wait_ = MonoTime::never();
+    const Status st = to_root(ByteView{body.data(), len}, route, now, renew_owner_);
     if (st == Status::Ok) {
         ++stats_.readies;
-        renew_wait_ = now + delivery::round_timeout(route.len);
     } else if (st == Status::AuthPending) {
         lose_path(now); // no end session with the root any more: attach again
     } else {
@@ -1340,6 +1384,25 @@ void Mesh::on_frame_done(const delivery::FrameDone &f, delivery::HopEnd end, Mon
     }
     if (state_ == State::Off) {
         return;
+    }
+    if (f.kind == delivery::OwnerKind::Mesh && !f.owner.is_none()) {
+        const Duration wait = delivery::round_timeout(depth() + 1U, engine_.tx().service_bound());
+        if (f.owner == att_.tx_owner && (att_.step == Step::Register || att_.step == Step::Confirm)) {
+            const unsigned hops = cands_[static_cast<std::size_t>(att_.cand)].n;
+            att_.next_at = end == delivery::HopEnd::Accepted
+                               ? now + delivery::round_timeout(hops, engine_.tx().service_bound()) : now;
+            att_.tx_owner = {};
+        } else if (f.owner == renew_owner_) {
+            renew_wait_ = end == delivery::HopEnd::Accepted ? now + wait : now;
+            renew_owner_ = {};
+        } else {
+            for (Ask &q : asks_) {
+                if (q.used && q.tx_owner == f.owner) {
+                    q.next_at = end == delivery::HopEnd::Accepted ? now + wait : now;
+                    q.tx_owner = {};
+                }
+            }
+        }
     }
     Cand *c = find_cand(f.mac);
     if (c == nullptr) {
@@ -1416,10 +1479,11 @@ void Mesh::query_timer(MonoTime now) {
             q = Ask{};
             continue;
         }
-        if (to_root(ByteView{body.data(), len}, route, now) == Status::Ok) {
+        q.tx_owner = next_control_owner(3);
+        q.next_at = MonoTime::never();
+        if (to_root(ByteView{body.data(), len}, route, now, q.tx_owner) == Status::Ok) {
             ++q.tries;
             ++stats_.queries;
-            q.next_at = now + delivery::round_timeout(route.len);
         } else {
             q.next_at = now + Duration::from_ms(200); // no session yet / TX pool full: local
         }
@@ -1433,6 +1497,7 @@ void Mesh::on_answer(const Answer &a, MonoTime now) {
             continue;
         }
         if (a.status != Status::Ok) {
+            q.tx_owner = {};
             q.tries = k_refused;
             q.next_at = now + k_negative_life;
             return;

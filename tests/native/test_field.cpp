@@ -7,6 +7,7 @@
 
 #include "core/diag/diag.hpp"
 #include "lmtest.hpp"
+#include "bench_recovery.h"
 
 extern "C" {
 #include "bench_line.h"
@@ -413,4 +414,29 @@ LM_TEST("FIELD log: a message never exceeds 160 bytes and keeps whole records") 
     LM_CHECK(n <= FIELD_LOG_MESSAGE_MAX);
     LM_CHECK_EQ(n, 2u + taken * 20u); // 8-byte head + 12-byte payload each
     LM_CHECK_EQ(out[1], taken);
+}
+
+LM_TEST("ISSUE19-3/5: only radio faults recover; RX silence needs successful unicasts, not idle or sleep") {
+    LM_CHECK(bc_is_radio_fault(LM_STATUS_DRIVER_RESULT_UNKNOWN));
+    LM_CHECK(!bc_is_radio_fault(LM_STATUS_STORAGE_FAILURE));
+    LM_CHECK(!bc_is_radio_fault(LM_STATUS_RECOVERY_REQUIRED));
+    bc_radio_watch_t watch{};
+    bc_radio_sample_t sample{};
+    sample.running = true;
+    sample.peers = 1;
+    sample.rx_frames = 1;
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 0), 0u);
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 120000), 0u); // quiet peers/broadcasts are not evidence
+    sample.unicast_acked = 3;
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 120001), BC_RADIO_RX_STALL);
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 120002), 0u); // one decision per silence interval
+    sample.running = false; // planned off period clears the observation
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 240003), 0u);
+    sample.running = true;
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 240004), 0u);
+    sample.rx_frames++;
+    sample.unicast_acked += 3;
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 360005), 0u); // RX progress resets it
+    sample.faulted = true;
+    LM_CHECK_EQ(bc_radio_watch(&watch, &sample, 360006), BC_RADIO_FAULT);
 }

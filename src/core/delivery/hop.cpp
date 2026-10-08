@@ -61,11 +61,13 @@ void HopTx::queue_ack(const MacAddr &mac, const DeviceId &peer, uint64_t counter
 }
 
 Duration HopTx::rto_for(uint8_t attempts) const {
-    Duration d = rto_;
-    for (uint8_t i = 1; i < attempts && d < k_rto_max; ++i) {
+    const Duration floor{engine_.tx().service_bound().us * 2};
+    const Duration ceiling = floor > k_rto_max ? floor : k_rto_max;
+    Duration d = rto_ > floor ? rto_ : floor;
+    for (uint8_t i = 1; i < attempts && d < ceiling; ++i) {
         d = Duration{d.us * 2};
     }
-    return clamp(d, k_rto_min, k_rto_max);
+    return clamp(d, k_rto_min, ceiling);
 }
 
 void HopTx::rtt_sample(Duration r) {
@@ -83,6 +85,13 @@ void HopTx::rtt_sample(Duration r) {
 }
 
 void HopTx::finish(Handle h, TxFrame &f, HopEnd end, MonoTime now) {
+    if (end == HopEnd::Failed && f.cls != sched::Class::Control && f.attempts >= k_link_attempts &&
+        !engine_.power().child_asleep(f.mac, now) && !engine_.chan().planned_gap(now)) {
+        if (link::Neighbor *peer = link_.neighbors().find_mac(f.mac)) {
+            peer->failures = static_cast<uint8_t>(std::min<unsigned>(peer->failures + 1U, 6U));
+            peer->retry_at = now + failure_delay(peer->failures);
+        }
+    }
     FrameDone d;
     d.kind = f.kind;
     d.owner = f.owner();
@@ -136,11 +145,23 @@ bool HopTx::on_ack(const MacAddr &src, const wire::HopAck &ack, MonoTime now) {
             f->frame.counter() != ack.acked_link_counter || f->mac != src) {
             continue;
         }
-        // Matched by (peer, link counter), whatever the TX callback did yet: an ACK that beats the
-        // driver callback (D10) still belongs to this frame and to no later one. The callback,
-        // when it comes, finds no frame with its sequence and only frees the radio.
+        if (ack.status == wire::HopAckStatus::Accepted && f->kind == OwnerKind::Out && hooks_.accepted != nullptr) {
+            hooks_.accepted(hooks_.ctx, f->owner(), now);
+        }
+        if (ack.status == wire::HopAckStatus::Accepted) {
+            if (link::Neighbor *peer = link_.neighbors().find_mac(src)) {
+                peer->failures = 0;
+                peer->retry_at = {};
+            }
+        }
         if (f->st == TxFrame::St::OnAir) {
             ++stats_.early_acks;
+            if (!f->has(TxFrame::AckAccepted) && !f->has(TxFrame::AckRejected) && !f->has(TxFrame::AckBusy)) {
+                f->set(ack.status == wire::HopAckStatus::Accepted ? TxFrame::AckAccepted
+                       : ack.status == wire::HopAckStatus::Rejected ? TxFrame::AckRejected : TxFrame::AckBusy);
+                f->at = MonoTime{uint64_t{ack.retry_after_ms} * 1000U}; // not a deadline while OnAir
+            }
+            return true;
         }
         apply_ack(h, *f, ack.status, ack.retry_after_ms, now);
         pump(now);
@@ -164,8 +185,18 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
             } else if (o.result == port::TxResult::Unknown) {
                 ++stats_.tx_unknown;
             }
-            f->st = TxFrame::St::WaitAck;
-            f->at = now + rto_for(f->attempts);
+            if (f->has(TxFrame::AckAccepted) || f->has(TxFrame::AckRejected) || f->has(TxFrame::AckBusy)) {
+                const auto status = f->has(TxFrame::AckAccepted) ? wire::HopAckStatus::Accepted
+                                  : f->has(TxFrame::AckRejected) ? wire::HopAckStatus::Rejected : wire::HopAckStatus::Busy;
+                const auto retry_ms = static_cast<uint16_t>(f->at.to_ms());
+                f->set(TxFrame::AckAccepted, false);
+                f->set(TxFrame::AckRejected, false);
+                f->set(TxFrame::AckBusy, false);
+                apply_ack(h, *f, status, retry_ms, now);
+            } else {
+                f->st = TxFrame::St::WaitAck;
+                f->at = now + rto_for(f->attempts);
+            }
             break;
         }
     }
@@ -300,6 +331,11 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
             finish(h, *f, HopEnd::Aborted, now);
             progress = true;
             return;
+        }
+        if (const link::Neighbor *peer = link_.neighbors().find_mac(f->mac);
+            f->cls != sched::Class::Control && peer != nullptr && now < peer->retry_at) {
+            f->at = peer->retry_at; // other peers remain runnable; no new queue or polling loop
+            continue;
         }
         // [S16] A sleepy child's frames wait for its poll (window, credit). A frame sealed under a link session that
         // was replaced while it waited cannot be opened any more: it ends, and its origin sends the original again.

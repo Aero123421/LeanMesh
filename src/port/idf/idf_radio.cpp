@@ -26,37 +26,50 @@ IdfRadio *g_radio = nullptr; // the one driver instance; set before the callback
 std::atomic<uint32_t> g_tx_done_max_ms{0};
 std::atomic<uint32_t> g_tx_late{0};
 std::atomic<uint32_t> g_tx_stall_waits{0};
+std::atomic<int16_t> g_tx_power_qdbm{0};
+std::atomic<bool> g_tx_power_valid{false};
 
 // Why the previous boot ended, if the SDK itself restarted it: RTC memory that survives a software reset but not a
 // power loss (then the reset reason says power-on). The magic tells a written record from power-on garbage.
-constexpr uint32_t k_restart_magic = 0x4C4D5253U; // "LMRS"
+constexpr uint32_t k_restart_magic = 0x4C4D5232U; // "LMR2": includes the recovery record
 struct RestartRecord {
     uint32_t magic;
     uint32_t cause;
     uint32_t uptime_ms;
     uint32_t detail;
+    lm_idf_recovery_t recovery;
 };
+portMUX_TYPE g_recovery_lock = portMUX_INITIALIZER_UNLOCKED;
+lm_idf_recovery_t g_recovery{};
 RTC_NOINIT_ATTR RestartRecord g_restart_rec;
 RestartRecord g_restart_seen{};   // the previous boot's record, taken once at the first read
 bool g_restart_taken = false;
 
 void take_restart_record() {
+    portENTER_CRITICAL(&g_recovery_lock);
     if (g_restart_taken) {
+        portEXIT_CRITICAL(&g_recovery_lock);
         return;
     }
     g_restart_taken = true;
     if (g_restart_rec.magic == k_restart_magic) {
         g_restart_seen = g_restart_rec;
+        g_restart_seen.recovery.previous_boot = true;
+        g_recovery = g_restart_seen.recovery;
     }
     g_restart_rec.magic = 0; // a later restart that is not the SDK's (panic, power) never shows an old cause
+    portEXIT_CRITICAL(&g_recovery_lock);
 }
 
 [[noreturn]] void controlled_restart(uint32_t cause, uint32_t detail) {
     take_restart_record();
+    portENTER_CRITICAL(&g_recovery_lock);
     g_restart_rec.cause = cause;
     g_restart_rec.uptime_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     g_restart_rec.detail = detail;
+    g_restart_rec.recovery = g_recovery;
     g_restart_rec.magic = k_restart_magic;
+    portEXIT_CRITICAL(&g_recovery_lock);
     esp_restart();
 }
 
@@ -163,6 +176,7 @@ Status IdfRadio::start_wifi(const port::RfProfile &profile) {
 }
 
 Status IdfRadio::apply_channel_and_power(uint8_t channel, int16_t tx_qdbm) {
+    g_tx_power_valid.store(false);
     if (esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK ||
         esp_wifi_set_max_tx_power(static_cast<int8_t>(tx_qdbm)) != ESP_OK) {
         return Status::RecoveryRequired;
@@ -176,6 +190,8 @@ Status IdfRadio::apply_channel_and_power(uint8_t channel, int16_t tx_qdbm) {
         power > tx_qdbm) {
         return Status::RecoveryRequired;
     }
+    g_tx_power_qdbm.store(power);
+    g_tx_power_valid.store(true);
     return Status::Ok;
 }
 
@@ -212,6 +228,7 @@ Status IdfRadio::start(const port::RfProfile &profile) {
 }
 
 Status IdfRadio::stop() {
+    g_tx_power_valid.store(false);
     if (!now_ready_ && !wifi_running_) {
         return Status::Ok;
     }
@@ -389,7 +406,41 @@ extern "C" bool lm_idf_last_restart(lm_idf_restart_t *out) {
     out->cause = lm::idf::g_restart_seen.cause;
     out->uptime_ms = lm::idf::g_restart_seen.uptime_ms;
     out->detail = lm::idf::g_restart_seen.detail;
+    out->recovery = lm::idf::g_restart_seen.recovery;
     return true;
+}
+
+extern "C" void lm_idf_record_radio_recovery(uint32_t reason, lm_status_t status, uint64_t tx, uint64_t rx) {
+    using namespace lm::idf;
+    take_restart_record();
+    portENTER_CRITICAL(&g_recovery_lock);
+    g_recovery = lm_idf_recovery_t{static_cast<uint32_t>(esp_timer_get_time() / 1000), reason,
+                                  static_cast<uint32_t>(status), g_recovery.attempts == UINT32_MAX ? UINT32_MAX : g_recovery.attempts + 1,
+                                  static_cast<uint32_t>(tx), static_cast<uint32_t>(rx), false};
+    portEXIT_CRITICAL(&g_recovery_lock);
+}
+
+extern "C" void lm_idf_finish_radio_recovery(lm_status_t status) {
+    using namespace lm::idf;
+    portENTER_CRITICAL(&g_recovery_lock);
+    g_recovery.status = static_cast<uint32_t>(status);
+    portEXIT_CRITICAL(&g_recovery_lock);
+}
+
+extern "C" bool lm_idf_last_radio_recovery(lm_idf_recovery_t *out) {
+    using namespace lm::idf;
+    if (out == nullptr) return false;
+    take_restart_record();
+    portENTER_CRITICAL(&g_recovery_lock);
+    *out = g_recovery;
+    portEXIT_CRITICAL(&g_recovery_lock);
+    return out->attempts != 0;
+}
+
+extern "C" void lm_idf_restart_radio_recovery(void) {
+    lm_idf_recovery_t recovery{};
+    (void)lm_idf_last_radio_recovery(&recovery);
+    lm::idf::controlled_restart(LM_IDF_RESTART_RADIO_RECOVERY, recovery.reason);
 }
 
 extern "C" void lm_idf_radio_stats(lm_idf_radio_stats_t *out) {
@@ -399,4 +450,6 @@ extern "C" void lm_idf_radio_stats(lm_idf_radio_stats_t *out) {
     out->tx_done_max_ms = lm::idf::g_tx_done_max_ms.load();
     out->tx_late = lm::idf::g_tx_late.load();
     out->tx_stall_waits = lm::idf::g_tx_stall_waits.load();
+    out->tx_power_valid = lm::idf::g_tx_power_valid.load();
+    out->tx_power_qdbm = lm::idf::g_tx_power_qdbm.load();
 }

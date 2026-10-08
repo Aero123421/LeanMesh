@@ -14,7 +14,10 @@ RADIO_STATES = ("STOPPED", "RUNNING", "RECOVERING", "FAULTED", "ASLEEP")
 
 # name -> True when the value is a u64 counter (a U63 decimal string in the API), False for a small integer.
 DRIVER = {"reset_reason": False, "min_heap_bytes": False, "stack_free_bytes": False, "owner_cpu_us": True,
-          "rx_ring_depth": False, "rx_ring_dropped": False}
+          "rx_ring_depth": False, "rx_ring_dropped": False, "tx_power_qdbm": False,
+          "radio_recovery_uptime_ms": False, "radio_recovery_reason": False, "radio_recovery_status": False,
+          "radio_recovery_attempts": False, "radio_recovery_tx": False, "radio_recovery_rx": False,
+          "radio_recovery_previous_boot": False}
 SDK = {"root_term": False, "channel_epoch": False, "current_channel": False, "pending_channel": False,
        "regular_peers": False, "transient_peers": False, "tx_depth": False, "radio_state": False,
        "tx_frames": True, "rx_frames": True, "link_retries": True, "rf_failures": True, "local_busy": True,
