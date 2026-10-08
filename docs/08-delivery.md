@@ -27,7 +27,7 @@ frameは送信Nodeの現在root_termを載せるので、期限のroot_termはNo
 
 ## 6. link/E2E retry
 1hopはMAC result + link-auth HOP_ACCEPT。HOP_ACCEPTはreceiverが転送/受信bufferを確保してから返す。ACKそのものにACKを返さない。初回含め3link attempts、origin全体3E2E rounds、同じdeadline内。
-link RTO初期80ms、SRTT+4*RTTVARの既定clampは20〜500ms。ownerは完了tokenが一致した送信のservice時間の最大値Sを保持する（watchdog以下、UNKNOWNは除外。実機p95ではない）。HOP_ACK待ちは自分のTX完了後に開始し、下限を2*S、上限をmax(500ms, 2*S)へ適応させる。callback前の早いACKは証拠として保持し、frameの解放と次段の待ちはcallback後に行う。E2E/REGISTER/READY/ROUTE_QUERYの待ちは最初のhopの完了後、600ms + 2*残りhop*max(120ms, 2*S)。これは未測定の既定値に観測service時間を足す保守的な予算であり、実機link p95・queue遅延のqualificationを代替しない。下位の正常retry中に上位retryを重ねない。RECEIPT自体もlink retryするがreceipt-of-receiptは出さない。
+link RTO初期80ms、SRTT+4*RTTVARの既定clampは20〜500ms。ownerは完了tokenが一致した送信のservice時間について、直近32完了の窓とその前の窓の最大値Sを保持する（watchdog以下、UNKNOWNは除外。実機p95ではない）。1回の遅い完了は32〜64完了の間だけ待ちを広げ、再起動まで残らない。HOP_ACK待ちは自分のTX完了後に開始し、下限を2*S、上限をmax(500ms, 2*S)へ適応させる。callback前の早いACKは証拠として保持し、frameの解放と次段の待ちはcallback後に行う。E2E/REGISTER/READY/ROUTE_QUERYの待ちは最初のhopの完了後、600ms + 2*残りhop*max(120ms, 2*S)。これは未測定の既定値に観測service時間を足す保守的な予算であり、実機link p95・queue遅延のqualificationを代替しない。下位の正常retry中に上位retryを重ねない。RECEIPT自体もlink retryするがreceipt-of-receiptは出さない。
 
 ## 7. group
 どの認可済みNodeもgroup送信できる。group_id/revisionをrootが管理し、送信受付時のmember集合をsnapshot化（max64、sorted unique DeviceIdと各assignment/membership generation）。spec0.2はcontrol32のGroupSnapshotV2を用いる。rootはbodyがend-to-endの場合payloadを読まず、送信元にsnapshotを返して対象ごとend sessionでfan-outする。rootで平文展開する方式へ無言でdowngradeしない。

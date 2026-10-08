@@ -184,6 +184,29 @@ LM_TEST("HIL-F11: a completion at 1.05 s is a normal outcome: no UNKNOWN, no rad
     LM_CHECK_EQ(fx.radio(0).driver_generation(), gen_before);
 }
 
+LM_TEST("ISSUE19 sim: one slow completion widens the service bound only for the recent completions") {
+    // A single 2.9 s completion must not slow every hop/E2E/probe wait until reboot; normal completions bring it back.
+    Fixture fx(2);
+    auto send_one = [&](uint32_t tag, uint64_t wait_ms) {
+        LM_CHECK(!fx.eng(0).tx().in_flight());
+        LM_CHECK_OK(fx.send(0, 1, tag));
+        fx.run_ms(wait_ms);
+        LM_CHECK(!fx.eng(0).tx().in_flight());
+    };
+    fx.radio(0).tx_callback_delay_us = 2'900'000;
+    send_one(1, 3000);
+    LM_CHECK(fx.eng(0).tx().service_bound() >= Duration::from_ms(2900));
+    fx.radio(0).tx_callback_delay_us = 100'000;
+    send_one(2, 150);
+    LM_CHECK(fx.eng(0).tx().service_bound() >= Duration::from_ms(2900)); // still conservative right after it
+    for (uint32_t i = 0; i < 2 * TxManager::k_service_window; ++i) {
+        send_one(3 + i, 150);
+    }
+    LM_CHECK(fx.eng(0).tx().service_bound() >= Duration::from_ms(100));
+    LM_CHECK(fx.eng(0).tx().service_bound() < Duration::from_ms(200));
+    LM_CHECK_EQ(fx.eng(0).tx().stats().unknown, 0u);
+}
+
 LM_TEST("D10 sim: callback later than the 3000 ms watchdog is never credited to the next frame") {
     Fixture fx(2);
     fx.radio(0).tx_callback_delay_us = 3'500'000;

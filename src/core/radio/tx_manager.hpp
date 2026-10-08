@@ -43,6 +43,9 @@ class TxManager {
     // the slow ones end at 1.02-1.06 s (a driver-side limit, busy channel suspected), never later (HIL 2026-10-04).
     // A 1000 ms watchdog sat inside that range and restarted healthy radios over and over (docs/03 §4).
     static constexpr Duration k_watchdog = Duration::from_ms(3000);
+    // The service bound is the largest completion of the current and the previous window of this many completions: one
+    // slow completion widens the waits for 32-64 completions, not until reboot.
+    static constexpr uint32_t k_service_window = 32;
 
     // Status::Busy: a TX is already in flight (or the driver refused: local, not RF loss).
     // Status::DriverResultUnknown: isolated after a watchdog until reinitialised().
@@ -59,8 +62,8 @@ class TxManager {
     [[nodiscard]] bool in_flight() const { return in_flight_; }
     [[nodiscard]] bool isolated() const { return isolated_; }
     [[nodiscard]] const TxStats &stats() const { return stats_; }
-    // Conservative observed service time, not an RF RTT or a hardware-qualified percentile.
-    [[nodiscard]] Duration service_bound() const { return service_bound_; }
+    // Conservative recent service time (k_service_window), not an RF RTT or a hardware-qualified percentile.
+    [[nodiscard]] Duration service_bound() const { return service_prev_ > service_cur_ ? service_prev_ : service_cur_; }
     // The most recent outcome (diagnostics and tests; consumers act on it in on_tx_outcome).
     [[nodiscard]] const TxOutcome &last_outcome() const { return last_; }
 
@@ -75,7 +78,9 @@ class TxManager {
     MonoTime deadline_;
     TxOutcome last_;
     TxStats stats_;
-    Duration service_bound_{};
+    Duration service_cur_{};  // largest completion of the window being filled
+    Duration service_prev_{}; // largest completion of the window before it
+    uint32_t service_n_ = 0;
 };
 
 } // namespace lm
