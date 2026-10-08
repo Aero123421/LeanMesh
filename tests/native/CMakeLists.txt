@@ -71,6 +71,8 @@ target_link_libraries(test_sched PRIVATE lm_fleet)
 # MESH slice (S11): formation, registration, leases, repair, queries and delivery over the formed mesh.
 lm_add_test(test_mesh SOURCES test_mesh.cpp LABELS "integration;sim;mesh;scenario")
 target_link_libraries(test_mesh PRIVATE lm_fleet)
+target_sources(test_mesh PRIVATE ${LM_REPO_ROOT}/firmware/common/bench_console/bench_recovery.c)
+target_include_directories(test_mesh PRIVATE ${LM_REPO_ROOT}/firmware/common/bench_console/include)
 set_tests_properties(test_mesh PROPERTIES TIMEOUT 900) # 21..41 node formations: minutes under ASan/UBSan
 # GROUP slice (S15): GroupSnapshotV2 pages, fan-out from the origin, per-target results, cancel, fixed set.
 lm_add_test(test_group SOURCES test_group.cpp LABELS "integration;sim;group;scenario")
@@ -111,5 +113,6 @@ set(LM_BENCH_CONSOLE ${LM_REPO_ROOT}/firmware/common/bench_console)
 lm_add_test(test_field SOURCES test_field.cpp ${LM_FIELD_NODE_MAIN}/field_proto.c ${LM_FIELD_NODE_MAIN}/field_render.c
             ${LM_BENCH_CONSOLE}/bench_line.c LABELS "unit;field")
 target_include_directories(test_field PRIVATE ${LM_FIELD_NODE_MAIN} ${LM_BENCH_CONSOLE}/include)
+target_sources(test_field PRIVATE ${LM_BENCH_CONSOLE}/bench_recovery.c)
 # Sim-heavy suites that take over 120 s under ASan/UBSan on a CI runner (they finish in seconds otherwise).
 set_tests_properties(test_power test_channel test_group test_delivery PROPERTIES TIMEOUT 900)

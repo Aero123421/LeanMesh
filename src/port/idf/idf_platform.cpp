@@ -5,6 +5,8 @@
 #include <new>
 
 #include "capi/context.hpp"
+#include "core/diag/diag.hpp"
+#include "leanmesh_idf.h"
 #include "port/idf/idf_clock.hpp"
 #include "port/idf/idf_health.hpp"
 #include "port/idf/idf_jobs.hpp"
@@ -54,6 +56,26 @@ port::RfProfile rf_profile_from_config() {
 } // namespace lm::idf
 
 extern "C" {
+
+lm_status_t lm_idf_radio_health(lm_context_t *ctx, lm_idf_radio_health_t *out) {
+    using namespace lm;
+    using namespace lm::idf;
+    if (ctx == nullptr || ctx != g_ctx || out == nullptr) return LM_STATUS_INVALID_ARGUMENT;
+    diag::Snapshot snap;
+    Command cmd;
+    cmd.kind = CommandKind::DiagnosticsSnapshot;
+    cmd.response = &snap;
+    cmd.response_size = sizeof(snap);
+    const Status st = g_platform.owner.call(cmd).status;
+    if (st != Status::Ok) return to_abi(st);
+    out->faulted = snap.radio_state == static_cast<uint32_t>(RadioState::Faulted);
+    out->running = snap.radio_state == static_cast<uint32_t>(RadioState::Running);
+    out->peers = snap.regular_peers;
+    out->rx_frames = snap.rx_frames;
+    out->tx_frames = snap.tx_frames;
+    out->unicast_acked = snap.unicast_acked;
+    return LM_STATUS_OK;
+}
 
 lm_status_t lm_init(void *workspace, size_t bytes, const lm_config_t *config,
                     lm_context_t **out) {

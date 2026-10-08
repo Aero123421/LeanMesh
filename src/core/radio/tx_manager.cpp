@@ -25,6 +25,7 @@ Status TxManager::begin(port::Radio &radio, const MacAddr &dst, ByteView frame, 
         return s; // no TX exists: no outcome, no RF sample
     }
     in_flight_ = true;
+    unicast_ = dst != MacAddr::broadcast();
     token_ = token;
     tag_ = tag;
     deadline_ = now + k_watchdog;
@@ -50,6 +51,7 @@ bool TxManager::on_tx_done(const port::RadioTxDone &done, TxOutcome &out) {
     last_ = out;
     if (done.result == port::TxResult::MacAcked) {
         ++stats_.mac_acked;
+        stats_.unicast_acked += unicast_ ? 1U : 0U;
     } else if (done.result == port::TxResult::MacFailed) {
         ++stats_.rf_failed;
     } else {

@@ -90,6 +90,26 @@ LM_TEST("T19 diagnostics: a value the build cannot know is unknown (bit clear, z
     LM_CHECK((d.validity_bits >> 32) == 0); // FIX7-D12: the app bits have no field in the C struct
 }
 
+LM_TEST("ISSUE19-3 diagnostics: recovery facts are known only with a valid port reading") {
+    Net net(1);
+    auto &facts = net.world.node(0).health.extra;
+    facts.radio_recovery_valid = true;
+    facts.radio_recovery_reason = 256;
+    facts.radio_recovery_attempts = 2;
+    diag::Snapshot snap;
+    Command cmd;
+    cmd.kind = CommandKind::DiagnosticsSnapshot;
+    cmd.response = &snap;
+    cmd.response_size = sizeof snap;
+    LM_CHECK_OK(net.eng(0).execute(cmd, net.world.node(0).clock.now()).status);
+    LM_CHECK_EQ(snap.radio_recovery_reason, 256u);
+    LM_CHECK_EQ(snap.radio_recovery_attempts, 2u);
+    LM_CHECK_EQ(net.diag(0).validity_bits & (diag::valid::radio_recovery), 0u); // ABI has no field
+    facts.radio_recovery_valid = false;
+    LM_CHECK_OK(net.eng(0).execute(cmd, net.world.node(0).clock.now()).status);
+    LM_CHECK_EQ(snap.validity & (diag::valid::radio_recovery), 0u);
+}
+
 LM_TEST("T19 diagnostics: local shortage (BUSY) is not RF loss; a MAC failure is, and only that") {
     Net net(2);
     // One TX in flight: the second frame is refused by the driver slot, a local condition.

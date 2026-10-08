@@ -410,3 +410,15 @@ def test_the_per_node_state_is_bounded(tmp_path: Path, monkeypatch: pytest.Monke
     assert len(vars(fv.nodelog[one])) == size
     assert len(fv.log) <= engine_mod.EVENT_LOG_KEEP
     rec_.close()
+
+
+def test_issue19_sdk_fault_and_recovery_boot_are_explained() -> None:
+    records = [rec(pr.T_SDK_FAULT, 1, 100, reason=14, stop_status=0)]
+    track = nl.NodeLogTrack()
+    text = []
+    for record in pr.decode_nodelog(pr.encode_nodelog(records)):
+        fed = track.feed(record)
+        text.append(nl.describe("node", record, fed, track)[1])
+    assert "SDK halted" in text[0] and "14" in text[0]
+    assert "radio recovery failed, reason 16" in nl.boot_text(
+        {"reset_reason": 2, "sdk_restart_cause": 2, "detail_ms": 16, "prev_uptime_ms": 1000})

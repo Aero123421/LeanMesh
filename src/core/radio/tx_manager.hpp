@@ -28,6 +28,7 @@ struct TxOutcome {
 struct TxStats {
     uint64_t started = 0;
     uint64_t mac_acked = 0;
+    uint64_t unicast_acked = 0;       // successful targeted MAC completions; broadcasts cannot prove a live peer
     uint64_t rf_failed = 0;           // MacFailed: the only RF-loss evidence
     uint64_t unknown = 0;             // watchdog: neither loss nor success
     uint64_t local_refused = 0;       // driver Busy/NoCapacity (BUSY/NO_MEM): never RF loss
@@ -66,6 +67,7 @@ class TxManager {
   private:
     bool in_flight_ = false;
     bool isolated_ = false;
+    bool unicast_ = false;
     port::TxToken token_;
     port::TxToken unknown_token_;
     uint32_t tag_ = 0;

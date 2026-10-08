@@ -33,6 +33,7 @@ inline constexpr uint64_t heap = 1ULL << 1;
 inline constexpr uint64_t stack = 1ULL << 2;
 inline constexpr uint64_t owner_cpu = 1ULL << 3;
 inline constexpr uint64_t rx_ring = 1ULL << 4;
+inline constexpr uint64_t radio_recovery = 1ULL << 6;
 // sdk
 inline constexpr uint64_t counters = 1ULL << 16; // tx_frames, rx_frames, link_retries, rf_failures, local_busy
 inline constexpr uint64_t peers = 1ULL << 17;
@@ -61,6 +62,9 @@ struct Snapshot {
     uint32_t stack_free_bytes = 0;
     uint64_t owner_cpu_us = 0;
     uint32_t rx_ring_depth = 0, rx_ring_dropped = 0;
+    uint32_t radio_recovery_uptime_ms = 0, radio_recovery_reason = 0, radio_recovery_status = 0;
+    uint32_t radio_recovery_attempts = 0, radio_recovery_tx = 0, radio_recovery_rx = 0;
+    uint32_t radio_recovery_previous_boot = 0;
     // sdk
     uint32_t root_term = 0, channel_epoch = 0, current_channel = 0, pending_channel = 0;
     uint32_t regular_peers = 0, transient_peers = 0, tx_depth = 0, radio_state = 0;
@@ -68,6 +72,7 @@ struct Snapshot {
     uint64_t interval_us = 0;
     int16_t parent_rssi_dbm = 0;  // valid::parent_rssi
     uint64_t mac_unknown = 0;     // TX results neither success nor loss (watchdog)
+    uint64_t unicast_acked = 0;   // private app recovery snapshot, not part of the C diagnostics ABI
     // app
     uint32_t events_pending = 0;
     uint64_t events_lost = 0;

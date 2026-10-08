@@ -161,7 +161,14 @@ void put_diag(wire::CborWriter &w, const diag::Snapshot &d, const lm_capabilitie
                         {"mac_unknown", d.mac_unknown, has(v::counters)},
                         {"interval_us", d.interval_us, has(v::interval)}}});
     key(w, "driver");
-    put_fields<6>(w, {{{"reset_reason", d.reset_reason, has(v::reset_reason)},
+    put_fields<13>(w, {{{"radio_recovery_uptime_ms", d.radio_recovery_uptime_ms, has(v::radio_recovery)},
+                       {"radio_recovery_reason", d.radio_recovery_reason, has(v::radio_recovery)},
+                       {"radio_recovery_status", d.radio_recovery_status, has(v::radio_recovery)},
+                       {"radio_recovery_attempts", d.radio_recovery_attempts, has(v::radio_recovery)},
+                       {"radio_recovery_tx", d.radio_recovery_tx, has(v::radio_recovery)},
+                       {"radio_recovery_rx", d.radio_recovery_rx, has(v::radio_recovery)},
+                       {"radio_recovery_previous_boot", d.radio_recovery_previous_boot, has(v::radio_recovery)},
+                       {"reset_reason", d.reset_reason, has(v::reset_reason)},
                        {"min_heap_bytes", d.min_heap_bytes, has(v::heap)},
                        {"stack_free_bytes", d.stack_free_bytes, has(v::stack)},
                        {"owner_cpu_us", d.owner_cpu_us, has(v::owner_cpu)},

@@ -119,7 +119,7 @@ Message: `u8 version = 1, u8 count`, then `count` records, at most 160 bytes in 
 
 | type | name | payload | when |
 |---|---|---|---|
-| 1 | BOOT | `u8 reset_reason` (as telemetry), `u8 sdk_restart_cause` (0 none, 1 radio stall), `u16 boot_count`, `u32 prev_uptime_ms`, `u32 detail_ms` (12 B) | first record of every boot; the last two are those of `lm_idf_last_restart` (0 when there is none) |
+| 1 | BOOT | `u8 reset_reason` (as telemetry), `u8 sdk_restart_cause` (0 none, 1 radio stall, 2 radio recovery failed), `u16 boot_count`, `u32 prev_uptime_ms`, `u32 detail_ms` (cause 2: fault reason, otherwise ms; 12 B) | first record of every boot; the last two are those of `lm_idf_last_restart` (0 when there is none) |
 | 2 | MEMBER | none | membership became ACTIVE (after a join, or at boot for a stored member) |
 | 3 | REACHABLE | `u8 depth, i8 parent_rssi_dbm` | connectivity became REACHABLE |
 | 4 | UNREACHABLE | `u8 connectivity_state, u8 reason` | connectivity left REACHABLE |
@@ -130,6 +130,9 @@ Message: `u8 version = 1, u8 count`, then `count` records, at most 160 bytes in 
 | 9 | DISPLAY_FAULT | `u8 code` (1 init failed, 2 draw failed) | the panel failed |
 | 10 | LOG_LOST | `u16 records_dropped` | the ring dropped records since the last message |
 | 11 | RADIO_FAULT | `u32 reason` (of `LM_EVENT_FAULT`), `u32 restart_status` (`lm_stop`+`lm_start`, 0 = ok) | the SDK gave up on the radio; the app restarted the SDK (a failed restart reboots the board) |
+| 12 | SDK_FAULT | `u32 reason, u32 stop_status` | non-radio FAULT: log once and halt SDK traffic; console stays available |
+
+A failed radio recovery is kept in RTC before reboot and re-emitted as RADIO_FAULT with BOOT after reset; cause 2 keeps the reason in the BOOT detail field. Power loss does not preserve that evidence.
 
 Unknown types are skipped by `len`. fieldview writes every record to `nodelog.ndjson` and shows the important ones
 (BOOT with its cause, MEMBER / REACHABLE with the time since boot, UNREACHABLE, RADIO with a late completion) in its log.

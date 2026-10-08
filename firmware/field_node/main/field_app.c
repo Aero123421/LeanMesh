@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "bench_console.h"
+#include "bench_recovery.h"
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_system.h"
@@ -117,7 +118,7 @@ static struct {
     /* node event log (protocol 3.4) */
     field_log_t log;
     uint64_t log_at_ms, radio_at_ms;
-    bool was_member, time_valid;
+    bool was_member, time_valid, fault_halted;
     uint8_t last_depth;
     lm_idf_radio_stats_t radio_logged;
 } g;
@@ -154,7 +155,13 @@ static void log_boot(void) {
     field_put32(p + 4, sdk ? r.uptime_ms : 0);
     field_put32(p + 8, sdk ? r.detail : 0);
     log_add(FIELD_LOG_BOOT, p, sizeof p);
-    if (sdk) say("FIELD the previous boot ended in an SDK restart: cause %u after %u ms (detail %u ms)\n", (unsigned)r.cause,
+    if (sdk && r.cause == LM_IDF_RESTART_RADIO_RECOVERY) {
+        uint8_t fault[8];
+        field_put32(fault, r.recovery.reason);
+        field_put32(fault + 4, r.recovery.status);
+        log_add(FIELD_LOG_RADIO_FAULT, fault, sizeof fault);
+    }
+    if (sdk) say("FIELD the previous boot ended in an SDK restart: cause %u after %u ms (detail %u)\n", (unsigned)r.cause,
                  (unsigned)r.uptime_ms, (unsigned)r.detail);
 }
 
@@ -512,8 +519,12 @@ static void on_message(const lm_event_t *e, size_t n) {
 /* LM_EVENT_FAULT: the SDK could not re-initialise the radio and stays silent until the application stops and starts it
    (docs/03 section 4). A field node does that at once; when that fails too it reboots, so no board stays mute. */
 static void radio_fault(uint32_t reason) {
-    const lm_status_t stopped = lm_stop(g.ctx, 0, NULL); /* drain 0: the stop happens inside the call */
-    const lm_status_t started = stopped == LM_STATUS_OK ? lm_start(g.ctx) : stopped;
+    lm_diagnostics_t before = {.struct_size = sizeof before, .abi_version = LM_ABI_VERSION};
+    (void)lm_diagnostics_get(g.ctx, &before);
+    lm_idf_record_radio_recovery(reason, LM_STATUS_DRIVER_RESULT_UNKNOWN, before.tx_frames, before.rx_frames);
+    lm_status_t stopped;
+    const lm_status_t started = bc_radio_restart(g.ctx, &stopped);
+    lm_idf_finish_radio_recovery(started);
     uint8_t p[8];
     field_put32(p, reason);
     field_put32(p + 4, (uint32_t)started);
@@ -522,7 +533,7 @@ static void radio_fault(uint32_t reason) {
         (unsigned)started);
     if (started != LM_STATUS_OK) {
         vTaskDelay(pdMS_TO_TICKS(100));
-        esp_restart();
+        lm_idf_restart_radio_recovery();
     }
     g.refresh_now = true;
 }
@@ -542,7 +553,17 @@ static void pump_events(void) {
         } else if (e.kind == LM_EVENT_MEMBERSHIP || e.kind == LM_EVENT_CONNECTIVITY) {
             g.refresh_now = true;
         } else if (e.kind == LM_EVENT_FAULT) {
-            radio_fault(e.reason);
+            if (bc_is_radio_fault(e.reason)) {
+                radio_fault(e.reason);
+            } else if (!g.fault_halted) {
+                g.fault_halted = true;
+                uint8_t p[8];
+                field_put32(p, e.reason);
+                const lm_status_t stopped = lm_stop(g.ctx, 0, NULL);
+                field_put32(p + 4, stopped);
+                log_add(FIELD_LOG_SDK_FAULT, p, sizeof p);
+                say("FIELD SDK fault reason=%u stop=%u: halted\n", (unsigned)e.reason, (unsigned)stopped);
+            }
             return;
         }
     }
@@ -713,6 +734,10 @@ void field_app_run(uint16_t boot_count) {
         if (line != NULL) run_command(line);
         pump_events();
         const uint64_t now = now_ms();
+        if (g.fault_halted) {
+            field_led_set(FIELD_LED_OFF);
+            continue; // console remains available; no automatic join/telemetry/restart loop
+        }
         retry_reports(now);
         if (g.refresh_now || now >= g.link_at_ms) {
             g.refresh_now = false;

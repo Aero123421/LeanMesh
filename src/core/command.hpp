@@ -38,6 +38,7 @@ enum class CommandKind : uint8_t {
     ChannelRequest,
     GetCapabilities,
     DiagnosticsGet,
+    DiagnosticsSnapshot, // port app: private owner snapshot, without consuming application events
     SleepPrepare,
     SleepTicketGet,
     SleepEnter,

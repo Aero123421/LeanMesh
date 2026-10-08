@@ -15,6 +15,7 @@
 #include "core/wire/cbor.hpp"
 #include "fleet.hpp"
 #include "lmtest.hpp"
+#include "bench_recovery.h"
 #include "core/member/discovery.hpp"
 #include "core/member/proxy.hpp"
 #include "core/route/mesh_wire.hpp"
@@ -420,6 +421,29 @@ uint64_t await_received(MNet &n, unsigned from, lm_operation_id_t op, uint64_t l
     return (n.world.now_us() - t0) / 1000;
 }
 } // namespace
+
+LM_TEST("ISSUE19-3 sim: root FAULT must recover and members reattach without rejoining") {
+    MNet n(3);
+    form_chain(n, 60000);
+    const auto membership1 = n.eng(1).identity().member().membership;
+    const auto membership2 = n.eng(2).identity().member().membership;
+    LM_CHECK(n.until([&] { return !n.eng(0).tx().in_flight(); }, 1000, 1));
+    n.node(0).radio.tx_callback_delay_us = 7000000;
+    n.node(0).radio.start_fault_count = 3;
+    const std::array<uint8_t, 8> frame{'L', 'M', 1, 1, 0, 0, 0, 19};
+    LM_CHECK_OK(n.eng(0).transmit(n.node(1).radio.mac(), ByteView{frame}, 19, n.now(0)));
+    n.node(0).notify();
+    LM_CHECK(n.until([&] { return n.eng(0).radio_state() == RadioState::Faulted; }, 10000, 1));
+    n.node(0).radio.tx_callback_delay_us = 0;
+    lm_status_t stopped;
+    LM_CHECK_EQ(bc_radio_restart(n.ctx(0), &stopped), LM_STATUS_OK);
+    LM_CHECK_EQ(stopped, LM_STATUS_OK);
+    n.run_ms(5000);
+    LM_CHECK(n.eng(0).radio_state() == RadioState::Running);
+    LM_CHECK(n.until([&] { return n.formed(); }, 200000, 5));
+    LM_CHECK(n.eng(1).identity().member().membership == membership1);
+    LM_CHECK(n.eng(2).identity().member().membership == membership2);
+}
 
 LM_TEST("ISSUE19-2 sim: local Busy during attach Probe keeps the established link") {
     for (const Status refused : {Status::Busy, Status::DriverResultUnknown, Status::NoCapacity}) {
