@@ -702,7 +702,7 @@ void Delivery::on_frame_done(const FrameDone &f, HopEnd end, MonoTime now) {
         op.phase = Phase::WaitingReceipt;
         a->round_at = ((op.evidence & ev::end_received) != 0 && op.delivery == LM_APPLIED)
                           ? now + k_result_poll
-                          : now + round_timeout(a->hops) + engine_.power().wait_for_wake(op.dest, now); // [S16] WAIT_WAKE
+                          : now + round_timeout(a->hops, engine_.tx().service_bound()) + engine_.power().wait_for_wake(op.dest, now); // [S16] WAIT_WAKE
         a->next_at = earliest(a->round_at, local_deadline(op.expires, op.term, now));
         return;
     case HopEnd::Failed:
@@ -862,7 +862,7 @@ Reply Delivery::cancel(uint64_t op_id, MonoTime now) {
     a->cancelled = true;
     (void)hop_.withdraw(OwnerKind::Out, h);
     a->st = Active::St::WaitReceipt;
-    a->round_at = now + round_timeout(a->hops == 0 ? 1U : a->hops);
+    a->round_at = now + round_timeout(a->hops == 0 ? 1U : a->hops, engine_.tx().service_bound());
     a->next_at = a->round_at;
     op->phase = Phase::WaitingReceipt;
     return reply(Status::CancelTooLate, op_id);

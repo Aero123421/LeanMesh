@@ -3,7 +3,7 @@
 // Every transmission gets TxToken{driver_generation, sequence}. A completion is credited only to
 // the in-flight record with an equal token: an old callback (older sequence, older driver
 // generation, or one that arrives after the watchdog already declared the result unknown) is never
-// attributed to a later frame. When no callback arrives within 1000 ms the result is UNKNOWN,
+// attributed to a later frame. When no callback arrives within k_watchdog the result is UNKNOWN,
 // further TX is refused (isolated) until the owner re-initialised the radio (new driver generation)
 // and called reinitialised().
 //
@@ -58,6 +58,8 @@ class TxManager {
     [[nodiscard]] bool in_flight() const { return in_flight_; }
     [[nodiscard]] bool isolated() const { return isolated_; }
     [[nodiscard]] const TxStats &stats() const { return stats_; }
+    // Conservative observed service time, not an RF RTT or a hardware-qualified percentile.
+    [[nodiscard]] Duration service_bound() const { return service_bound_; }
     // The most recent outcome (diagnostics and tests; consumers act on it in on_tx_outcome).
     [[nodiscard]] const TxOutcome &last_outcome() const { return last_; }
 
@@ -71,6 +73,7 @@ class TxManager {
     MonoTime deadline_;
     TxOutcome last_;
     TxStats stats_;
+    Duration service_bound_{};
 };
 
 } // namespace lm

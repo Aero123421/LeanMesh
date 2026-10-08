@@ -61,11 +61,13 @@ void HopTx::queue_ack(const MacAddr &mac, const DeviceId &peer, uint64_t counter
 }
 
 Duration HopTx::rto_for(uint8_t attempts) const {
-    Duration d = rto_;
-    for (uint8_t i = 1; i < attempts && d < k_rto_max; ++i) {
+    const Duration floor{engine_.tx().service_bound().us * 2};
+    const Duration ceiling = floor > k_rto_max ? floor : k_rto_max;
+    Duration d = rto_ > floor ? rto_ : floor;
+    for (uint8_t i = 1; i < attempts && d < ceiling; ++i) {
         d = Duration{d.us * 2};
     }
-    return clamp(d, k_rto_min, k_rto_max);
+    return clamp(d, k_rto_min, ceiling);
 }
 
 void HopTx::rtt_sample(Duration r) {
@@ -136,11 +138,17 @@ bool HopTx::on_ack(const MacAddr &src, const wire::HopAck &ack, MonoTime now) {
             f->frame.counter() != ack.acked_link_counter || f->mac != src) {
             continue;
         }
-        // Matched by (peer, link counter), whatever the TX callback did yet: an ACK that beats the
-        // driver callback (D10) still belongs to this frame and to no later one. The callback,
-        // when it comes, finds no frame with its sequence and only frees the radio.
+        if (ack.status == wire::HopAckStatus::Accepted && f->kind == OwnerKind::Out && hooks_.accepted != nullptr) {
+            hooks_.accepted(hooks_.ctx, f->owner(), now);
+        }
         if (f->st == TxFrame::St::OnAir) {
             ++stats_.early_acks;
+            if (!f->has(TxFrame::AckAccepted) && !f->has(TxFrame::AckRejected) && !f->has(TxFrame::AckBusy)) {
+                f->set(ack.status == wire::HopAckStatus::Accepted ? TxFrame::AckAccepted
+                       : ack.status == wire::HopAckStatus::Rejected ? TxFrame::AckRejected : TxFrame::AckBusy);
+                f->at = MonoTime{uint64_t{ack.retry_after_ms} * 1000U}; // not a deadline while OnAir
+            }
+            return true;
         }
         apply_ack(h, *f, ack.status, ack.retry_after_ms, now);
         pump(now);
@@ -164,8 +172,18 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
             } else if (o.result == port::TxResult::Unknown) {
                 ++stats_.tx_unknown;
             }
-            f->st = TxFrame::St::WaitAck;
-            f->at = now + rto_for(f->attempts);
+            if (f->has(TxFrame::AckAccepted) || f->has(TxFrame::AckRejected) || f->has(TxFrame::AckBusy)) {
+                const auto status = f->has(TxFrame::AckAccepted) ? wire::HopAckStatus::Accepted
+                                  : f->has(TxFrame::AckRejected) ? wire::HopAckStatus::Rejected : wire::HopAckStatus::Busy;
+                const auto retry_ms = static_cast<uint16_t>(f->at.to_ms());
+                f->set(TxFrame::AckAccepted, false);
+                f->set(TxFrame::AckRejected, false);
+                f->set(TxFrame::AckBusy, false);
+                apply_ack(h, *f, status, retry_ms, now);
+            } else {
+                f->st = TxFrame::St::WaitAck;
+                f->at = now + rto_for(f->attempts);
+            }
             break;
         }
     }

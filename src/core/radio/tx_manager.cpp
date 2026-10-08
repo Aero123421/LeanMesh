@@ -42,6 +42,10 @@ bool TxManager::on_tx_done(const port::RadioTxDone &done, TxOutcome &out) {
         return false;
     }
     in_flight_ = false;
+    const Duration service = done.at - (deadline_ + Duration{-k_watchdog.us});
+    if (done.result != port::TxResult::Unknown && service.us > service_bound_.us && service <= k_watchdog) {
+        service_bound_ = service;
+    }
     out = TxOutcome{tag_, done.result, done.at};
     last_ = out;
     if (done.result == port::TxResult::MacAcked) {

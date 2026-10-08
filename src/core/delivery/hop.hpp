@@ -96,6 +96,7 @@ class HopTx {
         // Ok = go ahead. Anything else withdraws the frame (reported as Aborted).
         Status (*may_send)(void *ctx, const TxFrame &f, MonoTime now) = nullptr;
         void (*done)(void *ctx, const FrameDone &f, HopEnd end, MonoTime now) = nullptr;
+        void (*accepted)(void *ctx, Handle owner, MonoTime now) = nullptr; // evidence can precede TX completion
     };
 
     HopTx(Engine &engine, link::LinkLayer &link);

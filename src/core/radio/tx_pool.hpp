@@ -48,6 +48,9 @@ struct TxFrame {
         Abandoned = 1, // no more retransmissions (cancel after the frame left)
         Left = 2,      // handed to the radio at least once (it may have arrived)
         AfterBusy = 4, // the next handoff repeats a frame the peer deferred (not an attempt)
+        AckAccepted = 8, // early HOP_ACK latched until this frame's TX completion
+        AckRejected = 16,
+        AckBusy = 32,
     };
     // ---- 32 B of metadata ----
     MonoTime at = MonoTime::never(); // Ready: not before; WaitAck: RTO expiry; else never

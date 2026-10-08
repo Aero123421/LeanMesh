@@ -553,6 +553,7 @@ void Exchange::finish_keys(MonoTime now) {
         return;
     }
     phase_ = Phase::AwaitBind;
+    deadline_ = earliest(hard_deadline_, now + s_.policy.exchange_deadline);
     send_object(staged_, false); // initiator: SESSION_BIND; responder: message_4
     pump(now);
 }

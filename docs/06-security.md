@@ -47,7 +47,7 @@ EDHOC m1〜m4の認証が完了した後、検証済みcredential・候補domain
 
 bootstrap credential取得と候補contextの交換は認証前にはhintにすぎない。credential単体1024B、同時2件、全長/個数/issuer制限を先に確認し、fleet署名を検証する。`JOIN_ONLY` sessionはmembership発行操作にしか使えず、入会後は正規member credentialに結び付いたfresh sessionを作る。session binding recordには共通secretやnetwork group PSKを使わない。
 
-`SESSION_BIND`/ACKはEDHOC carrier内の認証後段階に置き、DATA用sessionの有効化前にも受信できる専用stateを使う。再送は同一ciphertext、IDとnonceを保持し、最大3回/期限30秒。これは鍵交換方式の追加ではなくLM record contextの明示確認であり、独立セキュリティレビュー対象に含める。
+`SESSION_BIND`/ACKはEDHOC carrier内の認証後段階に置き、DATA用sessionの有効化前にも受信できる専用stateを使う。再送は同一ciphertext、IDとnonceを保持し、最大3回/期限30秒。30秒は鍵導出後のbinding段階に適用する。routed endのcredential転送を含む全体期限は開始時に固定し、観測service時間Sが120msを超えるときだけ30秒 + 4*S*h*(2*ceil(1024/C)+6)（h=hop数、C=data_capacity(h)からJoinChunk headerを引いた容量）とする。Sはwatchdog以下の完了実測最大値でUNKNOWNは除外し、fragment到着で全体期限を延長しない。未観測時と1-hop交換は30秒。同時slot/公開鍵job/gateとbinding認証は変更しない。これは鍵交換方式の追加ではなくLM record contextの明示確認であり、独立セキュリティレビュー対象に含める。
 
 ## 10. Powerとの横断契約
 RAM session再利用はtraffic keyだけでなく送信counter・受信window・完全peer identity・credential世代・authorization/key lifetimeの経過上限が保持できる時だけ。Light Sleepしただけでcounter=0に戻さない。相手のrestartはそのsessionを無効化し、全網Joinへ拡大しない。Deep Sleep復帰に新規人間承認を要求しないが、fresh EDHOCの演算/airtimeは発生する。停電復帰を「認証CPU負荷ゼロ」と呼ばない。

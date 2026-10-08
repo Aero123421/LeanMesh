@@ -344,6 +344,26 @@ void set_link(DNet &n, unsigned a, unsigned b, bool up, uint16_t loss = 0, uint1
 
 } // namespace
 
+LM_TEST("ISSUE19-1 sim: a relay waiting for authorization answers Busy without using RF attempts") {
+    DNet n(3);
+    n.set_time();
+    n.routes(0, 2);
+    warm_up(n, 0, 2);
+    auto *peer = n.eng(1).link().neighbors().find_device(n.id(2));
+    LM_CHECK(peer != nullptr);
+    if (peer == nullptr) return;
+    const auto lease = peer->lease;
+    peer->lease.term = RootTerm{99};
+    peer->lease_uncertain = true;
+    const auto send = n.send(0, 2, LM_RECEIVED, LM_VOLATILE, payload_of(19));
+    n.run_ms(5000);
+    LM_CHECK(n.dv(0).hop_stats().ack_busy > 0);
+    LM_CHECK_EQ(n.dv(0).hop_stats().rf_failed, 0u);
+    peer->lease = lease;
+    peer->lease_uncertain = false;
+    LM_CHECK(n.until([&] { return n.op(0, send.op).outcome == LM_OUTCOME_RECEIVED; }, 20000));
+}
+
 LM_TEST("D10 sim: HOP_ACK arrives before the TX callback (500 ms late) and is joined to the right frame") {
     DNet n(2);
     n.set_time();

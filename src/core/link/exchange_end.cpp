@@ -18,6 +18,16 @@
 
 namespace lm::link {
 
+// The 30 s binding limit starts at binding. Credential carriers need a finite route/service budget too.
+void Exchange::budget_end_exchange(MonoTime now) {
+    const std::size_t cap = wire::data_capacity(route_.len) - k_end_obj_header;
+    const int64_t chunks = static_cast<int64_t>((wire::k_bootstrap_max_total + cap - 1) / cap);
+    const Duration service = s_.engine.tx().service_bound();
+    const Duration extra = service.us > 120000 ? Duration{service.us * 4 * route_.len * (2 * chunks + 6)} : Duration{};
+    hard_deadline_ = now + s_.policy.exchange_deadline + extra;
+    deadline_ = hard_deadline_;
+}
+
 Status Exchange::start_end(const DeviceId &peer, const delivery::PathSpec &route, MonoTime now) {
     if (!s_.identity.is_member()) {
         return Status::AuthPending;
@@ -43,6 +53,7 @@ Status Exchange::start_end(const DeviceId &peer, const delivery::PathSpec &route
     peer_id_ = peer;
     peer_known_ = true;
     route_ = route;
+    budget_end_exchange(now);
     end_gate_.touch(peer, now); // we chose to spend a full handshake on this peer
     s_.engine.random(MutByteView{xid_});
     phase_ = Phase::SendCred;

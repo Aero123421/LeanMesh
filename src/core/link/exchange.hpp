@@ -24,7 +24,8 @@
 // (neighbour table / end-session table) only after SESSION_BIND[_ACK] was verified.
 //
 // Retransmission: the initiator repeats the whole current object every RTO (link 1 s, end the round
-// timeout of the route) at most 3 times within 30 s; the responder only answers repeats from what
+// timeout of the route) at most 3 times; binding is limited to 30 s and routed credential transfer
+// has a finite service/hop budget (docs/06 §9); the responder only answers repeats from what
 // it staged. Every public-key step is a worker job (Verify = the peer's credential chain, Hs = one
 // EDHOC step); the exchange's memory stays reserved until the completion is polled (zombie rule).
 #pragma once
@@ -61,7 +62,7 @@ struct LinkPolicy {
     uint64_t rotate_records = sec::k_max_records_per_key - (1ULL << 20);
     Duration prev_grace = Duration::from_s(10);        // old session receives this long (S5-D6)
     Duration handshake_gate = Duration::from_s(30);    // docs/06 §8: one full handshake / peer
-    Duration exchange_deadline = Duration::from_s(30); // registry session_binding.timeout_ms
+    Duration exchange_deadline = Duration::from_ms(gen::aead::session_bind_timeout_ms); // registry session_binding.timeout_ms
     // 1-hop carriers (end mode: route round timeout). It runs from the TX-done of our last fragment and restarts with
     // every fragment of the reply, so it only has to outlast one TX of the peer (ESP-IDF: up to 1.06 s, HIL-F12).
     Duration rto = Duration::from_ms(1500);
@@ -489,6 +490,7 @@ class Exchange {
     void pump(MonoTime now);
     [[nodiscard]] Status send_link_chunk(ByteView obj, MonoTime now);
     void arm_rto(MonoTime now);
+    void budget_end_exchange(MonoTime now);
     [[nodiscard]] Status build_plain(ObjKind kind, uint16_t total, uint16_t offset, ByteView body,
                                      MutByteView out, std::size_t &len) const;
     [[nodiscard]] ByteView own_bundle() const {
@@ -526,7 +528,7 @@ class Exchange {
         route_; // end mode: initiator's route, responder's reverse of the latest carrier
     std::array<uint8_t, 16> xid_{};
     MonoTime deadline_ = MonoTime::never();      // current: the earliest of the phase limits
-    MonoTime hard_deadline_ = MonoTime::never(); // whole exchange, 30 s from its start
+    MonoTime hard_deadline_ = MonoTime::never(); // whole exchange, fixed at start (routed service budget; binding still 30 s)
     MonoTime rto_at_ = MonoTime::never();
     MonoTime retry_at_ =
         MonoTime::never(); // radio/TX pool busy: the pending fragment is tried again then
