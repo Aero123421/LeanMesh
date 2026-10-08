@@ -183,11 +183,13 @@ Bytes request(uint8_t seed, uint8_t method, std::size_t param_bytes) {
 
 } // namespace
 
-LM_TEST("ISSUE19-3 serial: real diagnostics carry recovery through the encrypted USB link") {
+LM_TEST("ISSUE19-3/6 serial: real diagnostics carry recovery and quantized power through the encrypted USB link") {
     Rig r(19);
     serial::Bridge bridge{r.eng(), *r.root, 19};
     LM_CHECK(r.until([&] { return r.both_active(); }, 3000));
     auto &facts = r.node().health.extra;
+    facts.tx_power_valid = true;
+    facts.tx_power_qdbm = 34;
     facts.radio_recovery_valid = true;
     facts.radio_recovery_reason = 256;
     facts.radio_recovery_attempts = 2;
@@ -210,7 +212,7 @@ LM_TEST("ISSUE19-3 serial: real diagnostics carry recovery through the encrypted
     LM_CHECK_OK(response.finish());
     wire::CborReader::Item map;
     LM_CHECK(result.next(map) && map.type == wire::CborType::Map);
-    bool recovery = false;
+    bool power = false, recovery = false;
     for (uint64_t i = 0; i < map.arg; ++i) {
         const ByteView key = result.tstr(1, 64);
         const ByteView value = result.skip_item();
@@ -222,12 +224,13 @@ LM_TEST("ISSUE19-3 serial: real diagnostics carry recovery through the encrypted
             const ByteView name = driver.tstr(1, 64);
             const std::string text(reinterpret_cast<const char *>(name.data()), name.size());
             const uint64_t number = driver.uint_in(0, UINT64_MAX);
+            if (text == "tx_power_qdbm") power = number == 34;
             if (text == "radio_recovery_attempts") recovery = number == 2;
         }
         LM_CHECK_OK(driver.finish());
     }
     LM_CHECK_OK(result.finish());
-    LM_CHECK(recovery);
+    LM_CHECK(power && recovery);
 }
 
 LM_TEST("S09-sim COBS round trip, resync and cap") {

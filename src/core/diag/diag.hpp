@@ -33,6 +33,7 @@ inline constexpr uint64_t heap = 1ULL << 1;
 inline constexpr uint64_t stack = 1ULL << 2;
 inline constexpr uint64_t owner_cpu = 1ULL << 3;
 inline constexpr uint64_t rx_ring = 1ULL << 4;
+inline constexpr uint64_t tx_power = 1ULL << 5;
 inline constexpr uint64_t radio_recovery = 1ULL << 6;
 // sdk
 inline constexpr uint64_t counters = 1ULL << 16; // tx_frames, rx_frames, link_retries, rf_failures, local_busy
@@ -62,6 +63,7 @@ struct Snapshot {
     uint32_t stack_free_bytes = 0;
     uint64_t owner_cpu_us = 0;
     uint32_t rx_ring_depth = 0, rx_ring_dropped = 0;
+    uint32_t tx_power_qdbm = 0;
     uint32_t radio_recovery_uptime_ms = 0, radio_recovery_reason = 0, radio_recovery_status = 0;
     uint32_t radio_recovery_attempts = 0, radio_recovery_tx = 0, radio_recovery_rx = 0;
     uint32_t radio_recovery_previous_boot = 0;

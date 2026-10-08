@@ -131,6 +131,7 @@ Message: `u8 version = 1, u8 count`, then `count` records, at most 160 bytes in 
 | 10 | LOG_LOST | `u16 records_dropped` | the ring dropped records since the last message |
 | 11 | RADIO_FAULT | `u32 reason` (of `LM_EVENT_FAULT`), `u32 restart_status` (`lm_stop`+`lm_start`, 0 = ok) | the SDK gave up on the radio; the app restarted the SDK (a failed restart reboots the board) |
 | 12 | SDK_FAULT | `u32 reason, u32 stop_status` | non-radio FAULT: log once and halt SDK traffic; console stays available |
+| 13 | TX_POWER | `u8 valid, i16 tx_power_qdbm` (quarter dBm, driver readback) | value/validity changed, at most every 10 s; invalid is unknown |
 
 A failed radio recovery is kept in RTC before reboot and re-emitted as RADIO_FAULT with BOOT after reset; cause 2 keeps the reason in the BOOT detail field. Power loss does not preserve that evidence.
 

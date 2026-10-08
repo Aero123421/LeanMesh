@@ -161,7 +161,8 @@ void put_diag(wire::CborWriter &w, const diag::Snapshot &d, const lm_capabilitie
                         {"mac_unknown", d.mac_unknown, has(v::counters)},
                         {"interval_us", d.interval_us, has(v::interval)}}});
     key(w, "driver");
-    put_fields<13>(w, {{{"radio_recovery_uptime_ms", d.radio_recovery_uptime_ms, has(v::radio_recovery)},
+    put_fields<14>(w, {{{"tx_power_qdbm", d.tx_power_qdbm, has(v::tx_power)},
+                       {"radio_recovery_uptime_ms", d.radio_recovery_uptime_ms, has(v::radio_recovery)},
                        {"radio_recovery_reason", d.radio_recovery_reason, has(v::radio_recovery)},
                        {"radio_recovery_status", d.radio_recovery_status, has(v::radio_recovery)},
                        {"radio_recovery_attempts", d.radio_recovery_attempts, has(v::radio_recovery)},

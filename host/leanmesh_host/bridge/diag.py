@@ -14,7 +14,7 @@ RADIO_STATES = ("STOPPED", "RUNNING", "RECOVERING", "FAULTED", "ASLEEP")
 
 # name -> True when the value is a u64 counter (a U63 decimal string in the API), False for a small integer.
 DRIVER = {"reset_reason": False, "min_heap_bytes": False, "stack_free_bytes": False, "owner_cpu_us": True,
-          "rx_ring_depth": False, "rx_ring_dropped": False,
+          "rx_ring_depth": False, "rx_ring_dropped": False, "tx_power_qdbm": False,
           "radio_recovery_uptime_ms": False, "radio_recovery_reason": False, "radio_recovery_status": False,
           "radio_recovery_attempts": False, "radio_recovery_tx": False, "radio_recovery_rx": False,
           "radio_recovery_previous_boot": False}

@@ -26,6 +26,8 @@ IdfRadio *g_radio = nullptr; // the one driver instance; set before the callback
 std::atomic<uint32_t> g_tx_done_max_ms{0};
 std::atomic<uint32_t> g_tx_late{0};
 std::atomic<uint32_t> g_tx_stall_waits{0};
+std::atomic<int16_t> g_tx_power_qdbm{0};
+std::atomic<bool> g_tx_power_valid{false};
 
 // Why the previous boot ended, if the SDK itself restarted it: RTC memory that survives a software reset but not a
 // power loss (then the reset reason says power-on). The magic tells a written record from power-on garbage.
@@ -174,6 +176,7 @@ Status IdfRadio::start_wifi(const port::RfProfile &profile) {
 }
 
 Status IdfRadio::apply_channel_and_power(uint8_t channel, int16_t tx_qdbm) {
+    g_tx_power_valid.store(false);
     if (esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) != ESP_OK ||
         esp_wifi_set_max_tx_power(static_cast<int8_t>(tx_qdbm)) != ESP_OK) {
         return Status::RecoveryRequired;
@@ -187,6 +190,8 @@ Status IdfRadio::apply_channel_and_power(uint8_t channel, int16_t tx_qdbm) {
         power > tx_qdbm) {
         return Status::RecoveryRequired;
     }
+    g_tx_power_qdbm.store(power);
+    g_tx_power_valid.store(true);
     return Status::Ok;
 }
 
@@ -223,6 +228,7 @@ Status IdfRadio::start(const port::RfProfile &profile) {
 }
 
 Status IdfRadio::stop() {
+    g_tx_power_valid.store(false);
     if (!now_ready_ && !wifi_running_) {
         return Status::Ok;
     }
@@ -444,4 +450,6 @@ extern "C" void lm_idf_radio_stats(lm_idf_radio_stats_t *out) {
     out->tx_done_max_ms = lm::idf::g_tx_done_max_ms.load();
     out->tx_late = lm::idf::g_tx_late.load();
     out->tx_stall_waits = lm::idf::g_tx_stall_waits.load();
+    out->tx_power_valid = lm::idf::g_tx_power_valid.load();
+    out->tx_power_qdbm = lm::idf::g_tx_power_qdbm.load();
 }

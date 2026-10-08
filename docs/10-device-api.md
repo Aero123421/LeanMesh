@@ -30,7 +30,8 @@ DURABLEは予めjournal capacityを予約。APPLIEDは受信アプリの`lm_repo
 `lm_diagnostics_get`はvalidity bitsを持ち、不明は0と別に表す。reset cause、peer使用数、retry、loss、queue、CPU、stack、energy指標、current/pendingchannelと世代を公開する。`parent_rssi_dbm`（FIELD）は現在のmesh parentから最後に受信したframeのRSSI（signed int16 dBm）で、validity bit `LM_DIAGNOSTICS_VALID_PARENT_RSSI`（bit 22）が立つときだけ既知。承認済みparentが無い間（rootは常に）と、radio driverがそのframeのRSSIを渡さなかったときはbit clear・値0（0 dBmと混ぜない）。値の取得はRX callbackではなくowner側で、callbackはframeにRSSI（int8）を載せて渡すだけ。frameの送信元MACは未認証なので診断値であり、どの判断もこれを読まない。parentが替わると新parentについて既に聞いたframeの値になる（旧parentの値は残らない）。rootのserial/Host診断mapにはparentが無いため載せない。
 `lm_sleep_prepare`は非同期operationを返し、その完了後にpolicyとpending処理に合意した一回限りticketを取得する。新DATA/未終了commitが入ればticketを失効。`lm_sleep_enter`はticket世代を再検証し、直前のpendingを無視して眠らない。
 
-rootのserial/Host diagnosticsのdriver mapの`radio_recovery_uptime_ms/reason/status/attempts/tx/rx/previous_boot`は復旧decisionの時刻・理由（16 radio FAULT、256 RX stall）・完了status・回数・TX/RX下位32bit・前bootかどうか（bit6）。未観測時は欠落し、C ABI structのbit6は立てない。失敗してrebootする場合はRTCに保持する（電源断の証拠ではない）。
+ESP-IDF拡張の`lm_idf_radio_stats`は`tx_power_valid/tx_power_qdbm`でdriver readbackを返す。設定要求以下の出力を受け入れる条件は維持し、readbackを設定要求で置き換えない。rootのserial/Host diagnosticsのdriver mapに`tx_power_qdbm`（quarter dBm、validity bit5）を載せる。未知は欠落しHostのunknownへ載る。C ABI v2の`lm_diagnostics_t`にはfieldがないためbit5を立てない。
+同mapの`radio_recovery_uptime_ms/reason/status/attempts/tx/rx/previous_boot`は復旧decisionの時刻・理由（16 radio FAULT、256 RX stall）・完了status・回数・TX/RX下位32bit・前bootかどうか（bit6）。未観測時は欠落し、C ABI structのbit6は立てない。失敗してrebootする場合はRTCに保持する（電源断の証拠ではない）。
 
 ## 7. エラーの互換性
 番号はregistry固定。未知のHost response fieldは無視、未知error codeは汎用REMOTE_ERRORとして保持。unknown mandatory feature/悪形式/署名不一致は拒否。未知errorをSUCCESSへ変換しない。C ABIとHostで同じreason意味を使い、任意文字列だけを唯一の根拠にしない。

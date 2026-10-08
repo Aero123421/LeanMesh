@@ -31,6 +31,10 @@ void collect(Engine &e, MonoTime now, Snapshot &s) {
             s.rx_ring_depth = f.rx_ring_depth;
             s.rx_ring_dropped = f.rx_ring_dropped;
         }
+        if (f.tx_power_valid) {
+            s.validity |= valid::tx_power;
+            s.tx_power_qdbm = f.tx_power_qdbm;
+        }
         if (f.radio_recovery_valid) {
             s.validity |= valid::radio_recovery;
             s.radio_recovery_uptime_ms = f.radio_recovery_uptime_ms;

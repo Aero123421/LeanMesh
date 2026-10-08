@@ -412,13 +412,17 @@ def test_the_per_node_state_is_bounded(tmp_path: Path, monkeypatch: pytest.Monke
     rec_.close()
 
 
-def test_issue19_sdk_fault_and_recovery_boot_are_explained() -> None:
-    records = [rec(pr.T_SDK_FAULT, 1, 100, reason=14, stop_status=0)]
+def test_issue19_sdk_fault_power_readback_and_recovery_boot_are_explained() -> None:
+    records = [rec(pr.T_SDK_FAULT, 1, 100, reason=14, stop_status=0),
+               rec(pr.T_TX_POWER, 2, 200, valid=1, tx_power_qdbm=34),
+               rec(pr.T_TX_POWER, 3, 300, valid=0, tx_power_qdbm=0)]
     track = nl.NodeLogTrack()
     text = []
     for record in pr.decode_nodelog(pr.encode_nodelog(records)):
         fed = track.feed(record)
         text.append(nl.describe("node", record, fed, track)[1])
     assert "SDK halted" in text[0] and "14" in text[0]
+    assert "8.5 dBm" in text[1]
+    assert "unknown" in text[2]
     assert "radio recovery failed, reason 16" in nl.boot_text(
         {"reset_reason": 2, "sdk_restart_cause": 2, "detail_ms": 16, "prev_uptime_ms": 1000})

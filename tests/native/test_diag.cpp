@@ -90,9 +90,11 @@ LM_TEST("T19 diagnostics: a value the build cannot know is unknown (bit clear, z
     LM_CHECK((d.validity_bits >> 32) == 0); // FIX7-D12: the app bits have no field in the C struct
 }
 
-LM_TEST("ISSUE19-3 diagnostics: recovery facts are known only with a valid port reading") {
+LM_TEST("ISSUE19-6 diagnostics: power readback and recovery facts are known only with a valid port reading") {
     Net net(1);
     auto &facts = net.world.node(0).health.extra;
+    facts.tx_power_valid = true;
+    facts.tx_power_qdbm = 34; // request 40 can be quantized/capped by the driver
     facts.radio_recovery_valid = true;
     facts.radio_recovery_reason = 256;
     facts.radio_recovery_attempts = 2;
@@ -102,12 +104,16 @@ LM_TEST("ISSUE19-3 diagnostics: recovery facts are known only with a valid port 
     cmd.response = &snap;
     cmd.response_size = sizeof snap;
     LM_CHECK_OK(net.eng(0).execute(cmd, net.world.node(0).clock.now()).status);
+    LM_CHECK_EQ(snap.tx_power_qdbm, 34u);
+    LM_CHECK((snap.validity & diag::valid::tx_power) != 0);
     LM_CHECK_EQ(snap.radio_recovery_reason, 256u);
     LM_CHECK_EQ(snap.radio_recovery_attempts, 2u);
-    LM_CHECK_EQ(net.diag(0).validity_bits & (diag::valid::radio_recovery), 0u); // ABI has no field
+    LM_CHECK_EQ(net.diag(0).validity_bits & (diag::valid::tx_power | diag::valid::radio_recovery), 0u); // ABI has no field
+    facts.tx_power_valid = false;
     facts.radio_recovery_valid = false;
     LM_CHECK_OK(net.eng(0).execute(cmd, net.world.node(0).clock.now()).status);
-    LM_CHECK_EQ(snap.validity & (diag::valid::radio_recovery), 0u);
+    LM_CHECK_EQ(snap.tx_power_qdbm, 0u);
+    LM_CHECK_EQ(snap.validity & (diag::valid::tx_power | diag::valid::radio_recovery), 0u);
 }
 
 LM_TEST("T19 diagnostics: local shortage (BUSY) is not RF loss; a MAC failure is, and only that") {

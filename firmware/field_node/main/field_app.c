@@ -171,8 +171,15 @@ static void log_radio(uint64_t now) {
     g.radio_at_ms = now + 10000;
     lm_idf_radio_stats_t s = {0};
     lm_idf_radio_stats(&s);
+    if (s.tx_power_valid != g.radio_logged.tx_power_valid ||
+        (s.tx_power_valid && s.tx_power_qdbm != g.radio_logged.tx_power_qdbm)) {
+        uint8_t power[3] = {s.tx_power_valid ? 1 : 0, 0, 0};
+        field_put16(power + 1, (uint16_t)s.tx_power_qdbm);
+        log_add(FIELD_LOG_TX_POWER, power, sizeof power);
+    }
     if (s.tx_done_max_ms == g.radio_logged.tx_done_max_ms && s.tx_late == g.radio_logged.tx_late &&
-        s.tx_stall_waits == g.radio_logged.tx_stall_waits) {
+        s.tx_stall_waits == g.radio_logged.tx_stall_waits && s.tx_power_valid == g.radio_logged.tx_power_valid &&
+        s.tx_power_qdbm == g.radio_logged.tx_power_qdbm) {
         return;
     }
     g.radio_logged = s;

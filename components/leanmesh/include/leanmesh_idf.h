@@ -40,6 +40,8 @@ typedef struct {
     uint32_t tx_done_max_ms; /* the longest time from a TX to its completion */
     uint32_t tx_late;        /* completions that took 1 s or longer */
     uint32_t tx_stall_waits; /* radio recoveries that found a completion overdue (watchdog) */
+    bool tx_power_valid;
+    int16_t tx_power_qdbm; /* driver readback, quarter dBm; the requested ceiling may be higher */
 } lm_idf_radio_stats_t;
 void lm_idf_radio_stats(lm_idf_radio_stats_t *out);
 

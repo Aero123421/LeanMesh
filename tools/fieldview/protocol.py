@@ -109,7 +109,7 @@ NODELOG_MAX_BYTES = 160
 _NODELOG_HEAD = struct.Struct(">BB")        # version, count
 _NODELOG_REC = struct.Struct(">BBHI")       # type, len, seq, t_ms (ms since this boot)
 (T_BOOT, T_MEMBER, T_REACHABLE, T_UNREACHABLE, T_TIME_VALID, T_JOIN_END, T_RADIO, T_DEPTH, T_DISPLAY_FAULT,
- T_LOG_LOST, T_RADIO_FAULT, T_SDK_FAULT) = range(1, 13)
+ T_LOG_LOST, T_RADIO_FAULT, T_SDK_FAULT, T_TX_POWER) = range(1, 14)
 # type -> (name, payload layout, field names); a longer payload than the layout is read as a prefix (later additions)
 _NODELOG_TYPES: dict[int, tuple[str, struct.Struct, tuple[str, ...]]] = {
     T_BOOT: ("BOOT", struct.Struct(">BBHII"),
@@ -125,6 +125,7 @@ _NODELOG_TYPES: dict[int, tuple[str, struct.Struct, tuple[str, ...]]] = {
     T_LOG_LOST: ("LOG_LOST", struct.Struct(">H"), ("records_dropped",)),
     T_RADIO_FAULT: ("RADIO_FAULT", struct.Struct(">II"), ("reason", "restart_status")),
     T_SDK_FAULT: ("SDK_FAULT", struct.Struct(">II"), ("reason", "stop_status")),
+    T_TX_POWER: ("TX_POWER", struct.Struct(">Bh"), ("valid", "tx_power_qdbm")),
 }
 RSSI_UNKNOWN = -128
 # lm::port::ResetReason (src/core/diag/health.hpp; the Host's bridge/diag.py names them the same way)
