@@ -274,6 +274,13 @@ jobs:
         run: scripts/build_targets.sh --app example_node --profile ROOT ${{ matrix.target }}
       - name: example_node with the RELAY profile
         run: scripts/build_targets.sh --app example_node --profile RELAY ${{ matrix.target }}
+      - name: field firmware (leaf, relay, display) and HIL ROOT
+        if: matrix.target == 'esp32s3'
+        run: |
+          scripts/field.sh build leaf esp32s3
+          scripts/field.sh build relay esp32s3
+          scripts/field.sh build display esp32s3
+          scripts/hil.sh build root esp32s3
       - name: budget report (SoC compiler sizeof, map, image diff; a report, not a gate)
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
