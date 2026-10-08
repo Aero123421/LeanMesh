@@ -421,6 +421,29 @@ uint64_t await_received(MNet &n, unsigned from, lm_operation_id_t op, uint64_t l
 }
 } // namespace
 
+LM_TEST("ISSUE19-2 sim: local Busy during attach Probe keeps the established link") {
+    for (const Status refused : {Status::Busy, Status::DriverResultUnknown, Status::NoCapacity}) {
+        MNet n(2);
+        n.boot_all();
+        n.set_time();
+        LM_CHECK(n.until([&] { return n.mesh(1).attach_step_id() == 2; }, 30'000, 1));
+        const uint64_t failed = n.mesh(1).stats().attach_failed;
+        const uint64_t probes = n.mesh(1).stats().probes_tx;
+        n.node(0).radio.tx_fault_count = 100'000; // no answer to the first probe, if it already left
+        n.node(1).radio.tx_fault = refused;
+        n.node(1).radio.tx_fault_count = 100'000;
+        n.run_ms(7000); // more than three reply waits, then many local refusals
+        LM_CHECK_EQ(n.mesh(1).stats().attach_failed, failed);
+        LM_CHECK_EQ(n.mesh(1).stats().probes_tx, probes);
+        const auto *peer = n.eng(1).link().neighbors().find_device(n.id(0));
+        LM_CHECK(peer != nullptr && peer->cur.active);
+        n.node(0).radio.tx_fault_count = 0;
+        n.node(1).radio.tx_fault_count = 0;
+        LM_CHECK(n.until([&] { return n.formed(); }, 30'000, 5));
+        LM_CHECK_EQ(n.mesh(1).stats().attach_failed, failed);
+    }
+}
+
 LM_TEST("R01 sim: delivery across the formed mesh, both directions, no static routes") {
     MNet n(21);
     (void)form_chain(n, 120'000);

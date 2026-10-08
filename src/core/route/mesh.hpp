@@ -243,7 +243,7 @@ class Mesh {
     // beacons, probes, trickle
     void send_beacon(bool solicit, MonoTime now);
     void schedule_beacon(MonoTime now, uint16_t max_delay_ms);
-    void send_probe(Cand &c, MonoTime now);
+    [[nodiscard]] Status send_probe(Cand &c, MonoTime now);
     void drop_link(Cand &c);
     void trickle(MonoTime now);
     void trickle_reset(MonoTime now);

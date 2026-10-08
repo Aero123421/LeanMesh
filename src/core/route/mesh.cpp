@@ -560,10 +560,10 @@ void Mesh::drop_link(Cand &c) {
     c.q = LinkQuality{};
 }
 
-void Mesh::send_probe(Cand &c, MonoTime now) {
+Status Mesh::send_probe(Cand &c, MonoTime now) {
     const link::Neighbor *n = neighbor_of(c);
     if (n == nullptr || !n->cur.active) {
-        return;
+        return Status::NoRoute;
     }
     // [S18] A probe that went unanswered is one miss, counted once: a later attempt the radio refuses (Busy) must not
     // count the same probe again (with frequent rotations that turned one lost probe into a dropped parent).
@@ -571,7 +571,7 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
         c.probe_wait = MonoTime::never();
         if (++c.probe_miss >= 3) {
             drop_link(c);
-            return;
+            return Status::NoRoute;
         }
     }
     const member::MemberCredential &mc = engine_.identity().member();
@@ -595,7 +595,7 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
     if (st == Status::Ok) {
         ++stats_.probes_tx;
         c.probe_wait = now + k_probe_wait;
-    } else if (st == Status::Busy || st == Status::DriverResultUnknown) {
+    } else if (st == Status::Busy || st == Status::DriverResultUnknown || is_local_resource_error(st)) {
         ++stats_.tx_busy;
         c.nonce.fill(0);
         attempt_at_ = earliest(attempt_at_, now + k_busy_retry); // Search/Attach re-enter and probe again
@@ -603,6 +603,7 @@ void Mesh::send_probe(Cand &c, MonoTime now) {
             att_.next_at = now + k_busy_retry;
         }
     }
+    return st;
 }
 
 void Mesh::on_route_frame(const link::RxInfo &info, ByteView plain, MonoTime now) {
@@ -728,11 +729,11 @@ void Mesh::trickle(MonoTime now) {
         suspect(now); // the link session is gone (peer restarted): repair like a dead parent
         return;
     }
-    send_probe(p, now);
+    (void)send_probe(p, now);
     for (std::size_t k = 0; k < cands_.size(); ++k) {
         Cand &c = cands_[k];
         if (c.used && static_cast<int>(k) != parent_ && linked(c) && trickle_n_ % 4 == 0) {
-            send_probe(c, now); // spares are measured at a quarter of the rate
+            (void)send_probe(c, now); // spares are measured at a quarter of the rate
         }
     }
     const int best = [&] { // a voluntary move needs 20 % better and 30 s of holding (docs/04 §5)
@@ -799,7 +800,7 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
     } else if (state_ == State::Ready && !c->q.known()) {
         // A spare: first measurement. [S18] Not for a session made again (a rotation): its link is measured, and the
         // responder installs before the initiator, so a probe sent at once would die on an SID the peer lacks yet.
-        send_probe(*c, now);
+        (void)send_probe(*c, now);
     }
 }
 
@@ -892,9 +893,10 @@ void Mesh::attach_step(MonoTime now) {
             attach_fail(now);
             return;
         }
-        ++att_.tries;
         att_.next_at = now + k_probe_wait;
-        send_probe(c, now);
+        if (send_probe(c, now) == Status::Ok) {
+            ++att_.tries; // local refusal has sent no probe and consumes no attempt
+        }
         return;
     }
     delivery::PathSpec route;
