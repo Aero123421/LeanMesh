@@ -45,5 +45,6 @@ RX pool不足はNO_CAPACITY/credit0、古いbulk再組立を先に失効する�
 [22章](22-group-and-sleep.md)がtarget世代、待受、結果集計の追加契約。WAIT_WAKEは結果ではなく待機phaseで、inflight送出枠を占有しない。SUBMITTEDはBEST_EFFORTの送出証拠だけ、PARTIALはgroup集約結果だけで個別targetへ代入しない。parentのRAM保管をDURABLE終端受理へ格上げしない。
 
 ### Issue 19: 継続失敗の抑制
-既存neighbor/end-sessionの有界slotで連続失敗を保持する。通常DATAのhop試行を3回使い切った相手、終端receiptが来ない宛先は1/2/4/8/16/30秒で次の試行を遅らせ、認証済みHOP_ACK/receiptでそれぞれ解除する。再送ciphertext、deadline、全体round上限は変えない。Sleep/予定channel gap、BUSY、APP_PENDINGはこの失敗へ加算しない。control laneは復帰・認証・経路更新のためneighborのDATA抑制に巻き込まない。end sessionを更新しても同じassignment/membershipの宛先の抑制は保持し、別世代へ持ち越さない。所属抹消はroot台帳の証拠だけで行う。期限なしDURABLEも有限roundごとの60秒pauseとこの抑制に従う。
+既存neighbor/end-sessionの有界slotで連続失敗を保持する。通常DATAのhop試行を3回使い切った相手、終端receiptが来ない宛先は1/2/4/8/16/30秒で次の試行を遅らせ、認証済みHOP_ACK/receiptでそれぞれ解除する。再送ciphertext、deadline、全体round上限は変えない。Sleep/予定channel gap、BUSY、APP_PENDINGはこの失敗へ加算しない。control laneは復帰・認証・経路更新のためneighborのDATA抑制に巻き込まない。
+無応答は試行ごとに数える。通常DATAのunicast試行がMAC ACKなしで3回続くごとに（frameをまたいで数え、期限で打ち切られたframeの試行も数える）、3回使い切ったframeと同じ待ちを1段進める。MAC ACKが返れば連続は切れる。1 frameあたり3試行・全体round上限は変えない。理由: 無応答の相手への1試行はdriverのMAC再送で0.3〜0.9秒無線を占有し（2026-10-10現場、LR。ACKありは約25ms）、送信は1本ずつなので、その間ほかの相手へのHOP_ACK・PROBE返信・LEASEが遅れる。「3回使い切ったframe」だけを数えると、期限の短いmessage（3秒のPing）は2試行で期限が来て一度も数えられず、抑制が始まらない（sim: 無応答4台へ10秒ごとのPingで、rootの無応答試行は400秒に320回→修正後は約1/4）。撤回されたframeは待ちの明けを待たずにpoolへ返す。
 relayの次hopがTIME_UNCERTAINならHOP_ACK BUSY/retry_after 2000msを返す（最大16回）。認可を弱めずcredential/時刻の更新を待ち、NoRouteやRF失敗へ混ぜない。

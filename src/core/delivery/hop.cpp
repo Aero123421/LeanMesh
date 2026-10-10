@@ -87,7 +87,9 @@ void HopTx::rtt_sample(Duration r) {
 void HopTx::finish(Handle h, TxFrame &f, HopEnd end, MonoTime now) {
     if (end == HopEnd::Failed && f.cls != sched::Class::Control && f.attempts >= k_link_attempts &&
         !engine_.power().child_asleep(f.mac, now) && !engine_.chan().planned_gap(now)) {
-        if (link::Neighbor *peer = link_.neighbors().find_mac(f.mac)) {
+        // Attempts the radio acknowledged and the hop layer did not answer. (Unacknowledged ones were counted as they
+        // happened, note_mac: a frame made of them alone is not counted twice.)
+        if (link::Neighbor *peer = link_.neighbors().find_mac(f.mac); peer != nullptr && f.mac_failed() < f.attempts) {
             peer->failures = static_cast<uint8_t>(std::min<unsigned>(peer->failures + 1U, 6U));
             peer->retry_at = now + failure_delay(peer->failures);
         }
@@ -97,6 +99,7 @@ void HopTx::finish(Handle h, TxFrame &f, HopEnd end, MonoTime now) {
     d.owner = f.owner();
     d.mac = f.mac;
     d.attempts = f.attempts;
+    d.mac_failed = f.mac_failed();
     d.left = f.has(TxFrame::Left);
     d.counter = f.frame.counter();
     frames_.release(h);
@@ -182,8 +185,12 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
             }
             if (o.result == port::TxResult::MacFailed) {
                 ++stats_.rf_failed; // the only RF-loss sample
+                f->note_mac_failed();
             } else if (o.result == port::TxResult::Unknown) {
                 ++stats_.tx_unknown;
+            }
+            if (f->cls != sched::Class::Control) {
+                note_mac(f->mac, o.result, now);
             }
             if (f->has(TxFrame::AckAccepted) || f->has(TxFrame::AckRejected) || f->has(TxFrame::AckBusy)) {
                 const auto status = f->has(TxFrame::AckAccepted) ? wire::HopAckStatus::Accepted
@@ -201,6 +208,29 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
         }
     }
     pump(now);
+}
+
+// One unacknowledged frame keeps the radio for the driver's own retries, so the wait must not depend on one frame
+// living long enough to use all its attempts: every three unacknowledged attempts in a row, whichever frames they belong
+// to, are one step of the wait (the same step an exhausted frame takes). A MAC ACK ends the run; the wait itself ends
+// with an authenticated HOP_ACK. A sleeping child or a planned channel gap is not counted.
+void HopTx::note_mac(const MacAddr &mac, port::TxResult result, MonoTime now) {
+    link::Neighbor *peer = link_.neighbors().find_mac(mac);
+    if (peer == nullptr || result == port::TxResult::Unknown) {
+        return;
+    }
+    if (result == port::TxResult::MacAcked) {
+        peer->rf_streak = 0;
+        return;
+    }
+    if (engine_.power().child_asleep(mac, now) || engine_.chan().planned_gap(now)) {
+        return;
+    }
+    if (++peer->rf_streak >= k_link_attempts) {
+        peer->rf_streak = 0;
+        peer->failures = static_cast<uint8_t>(std::min<unsigned>(peer->failures + 1U, 6U));
+        peer->retry_at = now + failure_delay(peer->failures);
+    }
 }
 
 void HopTx::on_timer(MonoTime now) {
@@ -323,14 +353,17 @@ void HopTx::pump_once(MonoTime now, bool &sent, bool &progress) {
     for (std::size_t i = 0; i < k_frames; ++i) {
         const Handle h = frames_.handle_at(i);
         TxFrame *f = frames_.get(h);
-        if (f == nullptr || f->st != TxFrame::St::Ready || !(f->at <= now)) {
+        if (f == nullptr || f->st != TxFrame::St::Ready) {
             continue;
         }
-        if (f->has(TxFrame::Abandoned)) {
+        if (f->has(TxFrame::Abandoned)) { // before the hold below: a withdrawn frame does not keep its pool slot
             ++stats_.aborted;
             finish(h, *f, HopEnd::Aborted, now);
             progress = true;
             return;
+        }
+        if (!(f->at <= now)) {
+            continue;
         }
         if (const link::Neighbor *peer = link_.neighbors().find_mac(f->mac);
             f->cls != sched::Class::Control && peer != nullptr && now < peer->retry_at) {

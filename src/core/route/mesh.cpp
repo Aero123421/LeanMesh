@@ -300,7 +300,10 @@ MonoTime Mesh::deadline() const {
         d = earliest(d, trickle_at_);
     }
     if (state_ == State::Ready) {
-        d = earliest(d, earliest(earliest(renew_at_, renew_wait_), spare_at_));
+        d = earliest(d, earliest(renew_wait_, spare_at_));
+        if (att_.step == Step::Idle) {
+            d = earliest(d, renew_at_); // on_timer renews only then: a due renewal must not spin the owner meanwhile
+        }
         if (!lease_lapsed_) {
             d = earliest(d, lease_until_); // when the approved path stops being claimed valid
         }
@@ -1418,14 +1421,19 @@ void Mesh::on_frame_done(const delivery::FrameDone &f, delivery::HopEnd end, Mon
         c->rf_streak = 0;
         alive(*c, now);
     } else if (end == delivery::HopEnd::Failed && f.attempts >= 3 && !engine_.chan().planned_gap(now)) {
-        // Three attempts, no HOP_ACK: targeted RF failures. (Failed after BUSY deferrals has fewer
+        // Three attempts, no HOP_ACK. The attempts the peer's radio did not acknowledge are targeted RF failures. The
+        // ones it did acknowledge are not: the peer is there and did not answer in time (its radio was held by another
+        // frame) or has lost its session; the probes tell which (docs/04 §5). (Failed after BUSY deferrals has fewer
         // attempts and is not counted.)
-        for (int i = 0; i < 3; ++i) {
+        const unsigned rf = std::min<unsigned>(f.mac_failed, 3U);
+        for (unsigned i = 0; i < rf; ++i) {
             note(*c, false, now);
         }
-        c->rf_streak = static_cast<uint8_t>(std::min<int>(c->rf_streak + 3, 250));
+        c->rf_streak = static_cast<uint8_t>(std::min<unsigned>(c->rf_streak + rf, 250U));
         if (index_of(c) == parent_ && c->rf_streak >= k_rf_failures) {
             suspect(now);
+        } else if (rf < 3 && index_of(c) == parent_ && state_ == State::Ready) {
+            trickle_at_ = earliest(trickle_at_, now + Duration::from_ms(300)); // probe it soon
         }
     }
 }

@@ -1,3 +1,5 @@
+#include <cstdio>
+#include <cstdlib>
 #include "port/sim/sim_world.hpp"
 
 #include "core/assert.hpp"
@@ -193,7 +195,7 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
     done.node = from;
     done.node_epoch = sender.epoch();
     done.at_us = now_us_ + air + (dst.is_broadcast() ? 0 : k_mac_ack_us) +
-                 opts_.tx_callback_delay_us + sender.radio.tx_callback_delay_us;
+                 opts_.tx_callback_delay_us + sender.radio.tx_callback_delay_us + (acked ? 0 : opts_.tx_failed_extra_us);
     done.radio.kind = port::RadioEvent::Kind::TxDone;
     done.radio.done.token = token;
     done.radio.done.result = acked ? port::TxResult::MacAcked : port::TxResult::MacFailed;
@@ -266,6 +268,15 @@ void World::run_until(uint64_t t_us) {
         events_.pop();
         if (ev.at_us > now_us_) {
             now_us_ = ev.at_us;
+        }
+        // An owner that asks to be woken "now" again and again never lets virtual time move: on a device that is a
+        // task spinning at full CPU. No scenario has this many events at one instant.
+        same_instant_ = ev.at_us == last_event_us_ ? same_instant_ + 1 : 0;
+        last_event_us_ = ev.at_us;
+        if (same_instant_ > 200'000) {
+            std::fprintf(stderr, "sim: node %u spins at %llu us (event kind %u)\n", static_cast<unsigned>(ev.node),
+                         static_cast<unsigned long long>(ev.at_us), static_cast<unsigned>(ev.kind));
+            std::abort();
         }
         dispatch(ev);
     }

@@ -1071,6 +1071,62 @@ LM_TEST("FIELD sim: a faint shallower candidate does not cost a node its working
     LM_CHECK_EQ(received, 60u);
 }
 
+namespace {
+// Every node hears the root and nobody else (a bench of boards around the root).
+struct Star : MNet {
+    explicit Star(unsigned n_nodes) : MNet(n_nodes) {
+        for (unsigned i = 1; i + 1 < n; ++i) {
+            link(i, i + 1, false);
+        }
+        for (unsigned i = 2; i < n; ++i) {
+            link(0, i);
+        }
+    }
+};
+} // namespace
+
+// 2026-10-10 field: members that are switched off stay listed and the test application pings every listed member.
+// An unacknowledged unicast frame keeps the radio for the driver's own retries (0.3-0.9 s there, 25 ms acknowledged).
+LM_TEST("FIELD sim: frames to members that do not acknowledge cost a live member neither its answers nor its parent") {
+    Star n(6); // root, live 1, 2..5 are switched off
+    n.world.options().tx_failed_extra_us = 400'000;
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 300'000, 20));
+    for (unsigned i = 2; i <= 5; ++i) {
+        n.node(i).power_cut();
+    }
+    unsigned answered = 0;
+    unsigned not_ready_ms = 0;
+    const uint64_t rf_before = n.eng(0).delivery().hop().stats().rf_failed;
+    for (unsigned round = 0; round < 40; ++round) { // a 3 s ping to all five every 10 s
+        n.set_time_at(0);
+        n.set_time_at(1);
+        MNet::Sent live;
+        for (unsigned i = 1; i <= 5; ++i) {
+            const auto s = n.send(0, i, LM_RECEIVED, payload_of(static_cast<uint8_t>(i), 5), 3000);
+            LM_CHECK_EQ(s.st, LM_STATUS_OK);
+            if (i == 1) {
+                live = s;
+            }
+        }
+        for (unsigned t = 0; t < 100; ++t) {
+            n.run_ms(100);
+            not_ready_ms += n.ready(1) ? 0U : 100U;
+        }
+        answered += (n.op(0, live.op).evidence_bits & end_received) != 0 ? 1U : 0U;
+        Received r;
+        while (n.pop_message(1, r)) {
+        }
+    }
+    const uint64_t rf = n.eng(0).delivery().hop().stats().rf_failed - rf_before;
+    std::printf("  4 of 5 members off, 40 ping rounds: live member answered %u/40, not ready %u ms, root unacknowledged frames %llu\n",
+                answered, not_ready_ms, static_cast<unsigned long long>(rf));
+    LM_CHECK_EQ(answered, 40u);
+    LM_CHECK_EQ(not_ready_ms, 0u);
+    LM_CHECK(rf <= 4 * 45); // every three attempts are one step of the 1..30 s wait; 80 per member when only exhausted frames counted
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;

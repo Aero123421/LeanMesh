@@ -32,7 +32,7 @@
 誤ったpathや古いpathはDROP/REPAIRであって通常DATA floodにしない。honest nodeがこの条件を守る限り、1packetが同じnodeへ再転送されない。侵害relayによる破棄・遅延・route改変DoSまで防ぐ保証ではない。E2E本文と宛先の本人性は別に守る。
 
 ## 5. 修復
-送信中の3回の対象RF失敗で親をSUSPECT。pending DATAがあるときは5秒の無応答を追加の修復条件にする。idle時は安定helloが32秒になるため、5秒の無受信だけで断とせず、広告されたhello上限の3倍（既定最大96秒）を不在判定にする。送信が生じれば必要時PROBEを直ちに行う。Sleep予定、BUSY、探索休止は数えない。予備候補へのPROBE→REGISTERを行う。親候補は必要改善20%・最小維持30秒。ただしdead linkからの切替は維持時間を待たない。
+送信中の3回の対象RF失敗で親をSUSPECT。対象RF失敗はMAC ACKが返らなかった試行だけで、MAC ACKは返ったがHOP_ACKが返らなかった試行は数えない（相手の無線は生きていて、別frameの送信で応答が遅れたか、sessionを失っている。PROBEを早めてどちらかを判定する）。pending DATAがあるときは5秒の無応答を追加の修復条件にする。idle時は安定helloが32秒になるため、5秒の無受信だけで断とせず、広告されたhello上限の3倍（既定最大96秒）を不在判定にする。送信が生じれば必要時PROBEを直ちに行う。Sleep予定、BUSY、探索休止は数えない。予備候補へのPROBE→REGISTERを行う。親候補は必要改善20%・最小維持30秒。ただしdead linkからの切替は維持時間を待たない。
 rootは子孫のpathを更新する。子孫へ新版が届くまで旧pathは期限付きで残し、下りでstaleが出たら送信元だけが再解決する。relayが無断で次hopを取り替えない。再送は同じMessageId/intent hash、fresh packet counter。rootがいない場合は既存有効path通信を続け、未登録の新木を成立済みとして広告しない。
 
 ## 6. control量と親score

@@ -58,6 +58,9 @@ struct TraceEntry {
 struct WorldOptions {
     uint64_t seed = 1;
     uint32_t tx_callback_delay_us = 0; // extra delay before the TX-done callback
+    // Extra time before the TX-done callback of a unicast frame nobody acknowledged: the driver repeats it at the MAC
+    // layer before it reports MacFailed (2026-10-10 field, LR: 0.3-0.9 s per unacknowledged frame, 25 ms acknowledged).
+    uint32_t tx_failed_extra_us = 0;
 };
 
 class World {
@@ -135,6 +138,8 @@ class World {
     };
 
     void push(Event ev);
+    uint64_t last_event_us_ = 0;
+    uint64_t same_instant_ = 0;
     void dispatch(const Event &ev);
     [[nodiscard]] static uint64_t airtime_us(std::size_t bytes);
     [[nodiscard]] bool lost(uint16_t permille);

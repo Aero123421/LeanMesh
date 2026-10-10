@@ -59,6 +59,7 @@ struct FrameDone {
     Handle owner;
     MacAddr mac;
     uint8_t attempts = 0;
+    uint8_t mac_failed = 0; // attempts the peer's radio did not acknowledge; the rest were heard and not answered
     bool left = false; // handed to the radio at least once
     uint64_t counter = 0; // link counter of the frame (read from its header)
 };
@@ -152,6 +153,7 @@ class HopTx {
     void pump_once(MonoTime now, bool &sent, bool &progress);
     bool send_ack(MonoTime now, bool &sent, bool &progress);
     void rtt_sample(Duration r);
+    void note_mac(const MacAddr &mac, port::TxResult result, MonoTime now);
 
     Engine &engine_;
     link::LinkLayer &link_;

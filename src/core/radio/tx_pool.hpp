@@ -51,6 +51,7 @@ struct TxFrame {
         AckAccepted = 8, // early HOP_ACK latched until this frame's TX completion
         AckRejected = 16,
         AckBusy = 32,
+        // 64 and 128: the attempts the MAC layer did not acknowledge, 0..3 (mac_failed()); the metadata has no spare byte
     };
     // ---- 32 B of metadata ----
     MonoTime at = MonoTime::never(); // Ready: not before; WaitAck: RTO expiry; else never
@@ -79,6 +80,12 @@ struct TxFrame {
         owner_gen = h.generation;
     }
     [[nodiscard]] bool has(Flag f) const { return (flags & f) != 0; }
+    [[nodiscard]] uint8_t mac_failed() const { return static_cast<uint8_t>(flags >> 6U); } // the only RF-loss evidence
+    void note_mac_failed() {
+        if (mac_failed() < 3) {
+            flags = static_cast<uint8_t>(flags + 64U);
+        }
+    }
     void set(Flag f, bool on = true) { flags = static_cast<uint8_t>(on ? (flags | f) : (flags & ~f)); }
 };
 static_assert(offsetof(TxFrame, frame) == 44, "TX frame metadata is 32 bytes (P7) + the 12 B forward deadline (FIX4-D1)");
