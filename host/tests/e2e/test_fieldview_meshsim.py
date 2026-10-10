@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 import sys
 import time
 from collections.abc import Callable
@@ -64,6 +65,12 @@ class Member:
         payload = pr.encode_nodelog(list(records)).hex()
         r = await self.cmd(f"send 1 root best_effort volatile {pr.NODELOG_PORT} 1 {now_ms + 60_000} {payload}")
         assert r.get("ok") and r["status"] == "OK", r
+
+    async def presence_message(self, port: int, payload: bytes) -> dict[str, Any]:
+        now_ms = int((await self.cmd("status"))["now_us"]) // 1000
+        r = await self.cmd(f"send 1 root received volatile {port} 1 {now_ms + 30_000} {payload.hex()}")
+        assert r.get("ok") and r["status"] == "OK", r
+        return r
 
     async def app(self) -> None:
         """Takes the messages the member receives and answers the ping / display ports as `mode` says."""
@@ -162,3 +169,99 @@ def test_fieldview_reads_telemetry_pings_and_drives_a_display_through_the_real_h
     assert len(ops) == 2
     acked = db_rows(b.host.db, "SELECT name, ack_sequence FROM consumers")  # the Host kept our place
     assert len(acked) == 1 and acked[0][0] == "fieldview" and acked[0][1] >= 1
+
+
+@pytest.mark.e2e
+def test_fieldview_presence_learning_and_k3_received_via_real_root_app(bench, tmp_path):
+    b = bench(42)
+    b.link_and_routes()
+    host = b.start_host()
+    b.await_root()
+
+    async def scenario():
+        cfg = Config(socket=str(host.socket), token=host.token, domain=b.domain, logs_dir=tmp_path,
+                     nodes_poll_s=0.5, events_wait_ms=500, tick_s=0.2)
+        client = HostClient(cfg.socket, cfg.token, cfg.domain)
+        rec = Recorder(tmp_path / "presence-records")
+        fv = FieldView(cfg, client, rec)
+        member = Member(b)
+        await fv.start()
+        try:
+            await until(lambda: not fv._backlog and b.node in fv.api_nodes, "viewer caught up")
+            for seq, presence, learning in ((1, 1, 1), (2, 2, 2), (3, 3, 2)):
+                capture_ms = int((await member.cmd("status"))["now_us"]) // 1000
+                payload = struct.pack(">BBBBQIIHHHHIIIB3s", 1, presence, learning, 7, 900, seq,
+                                      capture_ms, 40, 2400, 2400, 10, 1, 0, 0, 0, b"\0\0\0")
+                await member.presence_message(214, payload)
+                await until(lambda: fv.node_row(b.node)["presence"]["seq"] == seq, "snapshot")
+                row = fv.node_row(b.node)["presence"]
+                assert row["reported"] == {1: "unknown", 2: "vacant", 3: "occupied"}[presence]
+                assert row["learning"] == ("running" if learning == 1 else "done")
+                assert row["state"] == row["reported"] and not row["stale"]
+                assert row["received_utc"] is not None and row["snapshot_age_s"] < 10
+            # Simulated application press captured with the final sensor/key snapshot.
+            payload = struct.pack(">BBHQII", 1, 3, 0, 900, 1, capture_ms)
+            sent = await member.presence_message(215, payload)
+            await until(lambda: fv.node_row(b.node)["presence"]["k3_count"] == 1, "actual K3 received")
+            row = fv.node_row(b.node)["presence"]
+            assert row["state"] == "occupied" and row["learning"] == "done"
+            assert row["k3_last"]["fresh"] and row["k3_last"]["received_utc"] is not None
+            assert "新着" in next(e["text"] for e in fv.log if e["kind"] == "k3-received")
+            # Poll the real sender operation: acceptance alone is insufficient.
+            async def received():
+                end = time.monotonic() + 30
+                while time.monotonic() < end:
+                    op = await member.cmd(f"op 1 {sent['operation']}")
+                    if op.get("evidence_bits", 0) & (1 << 4):
+                        return op
+                    await asyncio.sleep(0.05)
+                raise AssertionError("K3 did not reach END_RECEIVED")
+            op = await received()
+            assert op["outcome"] == 1  # LM_OUTCOME_RECEIVED
+            await member.presence_message(215, payload)  # another mesh message, same application press
+            end = time.monotonic() + 30
+            while time.monotonic() < end:
+                await asyncio.to_thread(rec.sync)
+                path = rec.directory / "k3.ndjson"
+                lines = [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+                if len(lines) == 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(lines) == 2 and lines[-1]["disposition"] == "duplicate"
+            assert fv.node_row(b.node)["presence"]["k3_count"] == 1
+            assert any(e["kind"] == "k3-received" for e in fv.log)
+            await until(lambda: not fv.ack_pending, "fsync then consumer ACK")
+            # A separate real consumer replays the same retained events as backlog. Persisted
+            # receipt UTC survives the later browser observation, but backlog never alerts.
+            historical_client = HostClient(cfg.socket, cfg.token, cfg.domain)
+            historical_rec = Recorder(tmp_path / "presence-history")
+            historical_cfg = Config(socket=cfg.socket, token=cfg.token, domain=cfg.domain,
+                                    logs_dir=tmp_path, consumer="fieldview-history", events_wait_ms=500, tick_s=0.2)
+            history = FieldView(historical_cfg, historical_client, historical_rec)
+            await history.start()
+            try:
+                await until(lambda: not history._backlog, "real retained-event backlog consumed")
+                current = fv.node_row(b.node)["presence"]
+                old = history.node_row(b.node)["presence"]
+                assert old["reported"] == "occupied" and old["state"] == "unknown" and old["stale"]
+                assert old["received_utc"] == current["received_utc"]
+                assert old["k3_count"] == 1 and not old["k3_last"]["fresh"]
+                assert old["k3_last"]["received_utc"] == current["k3_last"]["received_utc"]
+                assert "履歴" in next(e["text"] for e in history.log if e["kind"] == "k3-received")
+            finally:
+                await history.stop()
+                await historical_client.aclose()
+        finally:
+            await fv.stop()
+            await client.aclose()
+
+    asyncio.run(scenario())
+    snapshots = [json.loads(x) for x in (tmp_path / "presence-records" / "presence.ndjson").read_text().splitlines()]
+    presses = [json.loads(x) for x in (tmp_path / "presence-records" / "k3.ndjson").read_text().splitlines()]
+    assert [x["snapshot"]["learning"] for x in snapshots] == [1, 2, 2]
+    assert [x["disposition"] for x in presses] == ["received", "duplicate"]
+    assert presses[0]["received_utc"] is not None and presses[0]["observed_utc"].endswith("Z")
+    assert presses[0]["fresh"] and not presses[1]["fresh"]
+    assert db_rows(host.db, "SELECT count(*) FROM inbox WHERE origin=?", bytes.fromhex(b.node))[0][0] == 5
+    last_seq = int(presses[-1]["cursor"].rpartition(":")[2])
+    assert db_rows(host.db, "SELECT ack_sequence FROM consumers WHERE name='fieldview'")[0][0] >= last_seq

@@ -15,6 +15,15 @@ menu "Field node"
         help
             Passed to setBrightness8 of the panel library. The panel is bright: a low value is plenty on a desk.
 
+    config FIELD_TOF
+        bool "Display-tof: VL53L1X on I2C1 GPIO43/44"
+        depends on FIELD_HUB75
+        default n
+        help
+            One display only has ToF. Long, 33ms budget, 40ms period, 8x8 ROI center199.
+            Keys use PCA9557 I2C0 GPIO1/2: bit1 K1, bit2 K3, active low.
+            Physical K2/K3 labels and reset/download wiring are HIL-unverified.
+
     choice FIELD_LED
         prompt "Status LED"
         default FIELD_LED_ACTIVE_LOW if IDF_TARGET_ESP32C6

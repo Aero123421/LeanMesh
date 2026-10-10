@@ -15,6 +15,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 # The first-party trees that must stay application-neutral (tests, docs, examples, tools and the KG integration notes are not).
 SCANNED = ["src", "api", "protocol", "db", "components", "firmware", "cmake", "host/leanmesh_host", "config"]
+# Explicit application, not the SDK/component or its neutral minimal examples (docs/14 section 9).
+APPLICATION = REPO / "firmware/field_node"
 SUFFIXES = {".c", ".h", ".cpp", ".hpp", ".cmake", ".txt", ".py", ".json", ".cddl", ".sql", ".csv", ".service", ".example",
             "Kconfig", ".defaults"}
 FORBIDDEN = [
@@ -47,6 +49,8 @@ def first_party_files() -> list[Path]:
         if not base.exists():
             continue
         for f in base.rglob("*"):
+            if f.is_relative_to(APPLICATION):
+                continue
             # managed_components: third-party ESP-IDF components the component manager downloads (gitignored)
             if f.is_file() and "__pycache__" not in f.parts and "managed_components" not in f.parts and (
                     f.suffix in SUFFIXES or f.name in SUFFIXES
@@ -72,3 +76,11 @@ def test_the_scan_itself_catches_what_it_is_for() -> None:
     assert scan("uint64_t binding_epoch;")
     assert scan("KG-WIRE v2 codec")
     assert not scan("// install the key group; picosecond timer; https://json-schema.org/draft/2020-12/schema")
+
+
+def test_field_application_is_outside_sdk_scope_but_sdk_firmware_stays_scanned() -> None:
+    files = {f.relative_to(REPO).as_posix() for f in first_party_files()}
+    assert "src/core/engine.cpp" in files
+    assert "firmware/example_node/main/main.c" in files
+    assert "firmware/hil_node/main/main.c" in files
+    assert not any(f.startswith("firmware/field_node/") for f in files)

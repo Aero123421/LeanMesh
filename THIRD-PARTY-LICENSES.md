@@ -15,9 +15,21 @@
 | 名称 | 版/固定点 | 実物のlicense file | SPDX(確認元) | sha256(license file) | 備考 |
 |---|---|---|---|---|---|
 | ESP32-HUB75-MatrixPanel-DMA (mrcodetastic) | tag 3.0.14 / f17fb7fe9d487e9643f919eb5aeedea8d9d1f8d7。`firmware/field_node/main/idf_component.yml` のgit依存(`CONFIG_FIELD_HUB75=y`のときだけ取得)。ソースは同梱せず、configure時にcomponent managerが `managed_components/` (gitignore) へ取得する | `LICENSE.txt` "MIT License, Copyright (c) 2018-2032 Faptastic" | MIT | b7cf5aa4531332fe... | 64x32 HUB75 panel駆動(S3: LCD_CAM+GDMA)。`CONFIG_ESP32_HUB75_USE_GFX=n` (NO_GFX)でAdafruit GFXは使わない。ESP-IDF v6.0.3ではそのままではcompileできず、下記のlocal patchを適用する。leanmesh coreからは使わない。 |
-| 東雲フォント (Shinonome) 16dot の5字 使 用 可 禁 止 | efont。`firmware/field_node/main/field_render.c` に16x16 bitmapを直接埋め込み(U+4F7F, U+7528, U+53EF, U+7981, U+6B62の各16行)。値は権利者の別repo KGuard `firmware/pico-hub75/src/fonts_hybrid.hpp` の生成済みpackからそのまま抜粋した | `third_party/shinonome16/LICENSE` (KGuard repo側): 「すべてのフォントデータ…はPublic Domain」(日本では権利放棄が法的に不可能のため作者が権利を行使しないと宣言する形) | Public Domain (SPDX名なし。上記文面) | a38a9a330458c113... | この5字以外のglyphは取り込んでいない。status行の5x7 fontはこのキットのために手書きした。 |
+| 東雲フォント (Shinonome) 16dot の12字 使 用 可 禁 止 学 習 中 完 了 失 敗 | efont。`firmware/field_node/main/field_render.c` に16x16 bitmapを直接埋め込み(U+4F7F, U+7528, U+53EF, U+7981, U+6B62, U+5B66, U+7FD2, U+4E2D, U+5B8C, U+4E86, U+5931, U+6557の各16行)。値は権利者の別repo KGuard `b80ce46d63f7c1a5d36552f8ee38969b96cca412` の `firmware/pico-hub75/src/fonts_hybrid.hpp` の生成済みpackからそのまま抜粋した | `third_party/shinonome16/LICENSE` (KGuard repo側): 「すべてのフォントデータ…はPublic Domain」(日本では権利放棄が法的に不可能のため作者が権利を行使しないと宣言する形) | Public Domain (SPDX名なし。上記文面) | a38a9a330458c113... | この12字以外のglyphは取り込んでいない。学習中/完了/失敗も同じ16dot font。status行の5x7 fontはこのキットのために手書きした。 |
 
 ## 2. ローカルpatch(第三者コードの改変)
+Field presence additions: owner-authorized, application-only KG `presence_v2`
+(`b80ce46d63f7c1a5d36552f8ee38969b96cca412`) is retained in its attributed namespace
+under `firmware/field_node/main/kg_presence/`; **rights reserved, no invented public
+license**. `PROVENANCE.md` records source paths. The RAM-only field wrapper does not
+import KG persistence or its business ledger.
+
+The `display-tof` variant alone links the Pololu/ST native-IDF VL53L1X driver from
+MOVEI144/KG `1e91d02202ad25c43f21a0274c000f9f5ee1000a`,
+`firmware/display/components/vl53l1x`, under `third_party/field_vl53l1x/`.
+BSD-3-Clause (STMicroelectronics 2017, Pololu 2018–2022); complete original
+`LICENSE.txt` retained. `PROVENANCE.md` describes local source-layout changes.
+
 | 対象 | 状態 | 内容 |
 |---|---|---|
 | libedhoc `library/core/classic/edhoc_classic_message_{2,3,4}.c` | **適用済み** (`third_party/patches/libedhoc-2.3.2-exact-input-consumption.patch`) | CBOR decode後の消費長が入力長と一致しなければ `EDHOC_ERROR_CBOR_FAILURE`。適用後のblob idはRouteLoom 77b5792のvendored版と一致(b1ba890.., f84231d.., 48ac46c..)。 |

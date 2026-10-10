@@ -4,10 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 
-/* 16x16 glyphs of the five characters 使 用 可 禁 止, one uint16 per row, bit 15 = leftmost pixel.
+/* 16x16 glyphs: 使 用 可 禁 止 学 習 中 完 了 失 敗; one uint16 per row, bit 15 = leftmost pixel.
    Source: the Shinonome 16 dot font (kanjic.bit) of the Electronic Font Open Laboratory (efont), public domain
    (their LICENSE: "all font data ... are provided as Public Domain"). The rows were taken unchanged from the generated
-   Shinonome 16x16 pack of the owner's display-board repository (firmware/pico-hub75/src/fonts_hybrid.hpp). */
+   Shinonome 16x16 pack of KG b80ce46d63f7c1a5d36552f8ee38969b96cca412
+   (firmware/pico-hub75/src/fonts_hybrid.hpp). Only these twelve glyphs are embedded. */
 typedef struct {
     uint16_t rows[16];
 } glyph16_t;
@@ -22,6 +23,20 @@ static const glyph16_t k_kin = {{0x0410, 0x0410, 0x7FFF, 0x0C38, 0x0E34, 0x1554,
                                  0x0080, 0x04B0, 0x188C, 0x6082, 0x0180}}; /* U+7981 禁 */
 static const glyph16_t k_shi2 = {{0x0080, 0x0080, 0x0080, 0x0080, 0x0880, 0x0880, 0x08FC, 0x0880, 0x0880, 0x0880, 0x0880,
                                   0x0880, 0x0880, 0x0880, 0x7FFF, 0x0000}}; /* U+6B62 止 */
+static const glyph16_t k_gaku = {{0x1108, 0x0888, 0x0890, 0x7FFE, 0x4002, 0x4002, 0x1FF0, 0x0020, 0x00C0, 0x0100, 0x7FFE,
+                                  0x0100, 0x0100, 0x0100, 0x0100, 0x0300}}; /* U+5B66 学 */
+static const glyph16_t k_shuu = {{0x0000, 0x7FFE, 0x2142, 0x1122, 0x1326, 0x051A, 0x1962, 0x6086, 0x0100, 0x0FF8, 0x0808,
+                                  0x0FF8, 0x0808, 0x0808, 0x0FF8, 0x0000}}; /* U+7FD2 習 */
+static const glyph16_t k_chuu = {{0x0080, 0x0080, 0x0080, 0x3FFE, 0x2082, 0x2082, 0x2082, 0x2082, 0x2082, 0x3FFE, 0x0080,
+                                  0x0080, 0x0080, 0x0080, 0x0080, 0x0080}}; /* U+4E2D 中 */
+static const glyph16_t k_kan = {{0x0100, 0x0100, 0x7FFE, 0x4002, 0x4002, 0x1FF8, 0x0000, 0x0000, 0x7FFE, 0x0240, 0x0240,
+                                 0x0240, 0x0442, 0x0842, 0x1022, 0x601E}}; /* U+5B8C 完 */
+static const glyph16_t k_ryou = {{0x0000, 0x3FFC, 0x0008, 0x0010, 0x0020, 0x00C0, 0x0080, 0x0080, 0x0080, 0x0080, 0x0080,
+                                  0x0080, 0x0080, 0x0080, 0x0080, 0x0180}}; /* U+4E86 了 */
+static const glyph16_t k_shitsu = {{0x0080, 0x0880, 0x0880, 0x0880, 0x0FFC, 0x1080, 0x1080, 0x2080, 0x7FFF, 0x0080, 0x0140,
+                                    0x0140, 0x0220, 0x0410, 0x180C, 0x6003}}; /* U+5931 失 */
+static const glyph16_t k_hai = {{0x0040, 0x3E40, 0x2240, 0x227F, 0x3E44, 0x2244, 0x22C4, 0x3EA4, 0x2328, 0x2228, 0x2210,
+                                 0x3E18, 0x1428, 0x1244, 0x2282, 0x4101}}; /* U+6557 敗 */
 
 /* 5x7 status font, written for this kit: five column bytes per character, bit 0 = top row. */
 typedef struct {
@@ -125,6 +140,38 @@ void field_render(const field_view_t *v, uint16_t frame[FIELD_PANEL_H][FIELD_PAN
         const int gx = (FIELD_PANEL_W - 16 * n) / 2;
         for (int i = 0; i < n; ++i) {
             draw_glyph(frame, gx + 16 * i, 8, g[i], colour);
+        }
+    }
+
+    if (v->feedback != FIELD_FEEDBACK_NONE) {
+        static const char *const labels[] = {"", "", "", "", "NO SENSOR",
+            "SENDING", "RECEIVED", "NOT SENT", "UNCONFIRM"};
+        const unsigned mode = (unsigned)v->feedback;
+        if (mode < sizeof labels / sizeof labels[0]) {
+            memset(frame[8], 0, sizeof(uint16_t) * 22 * FIELD_PANEL_W); // rows 8..29 ONLY
+            const char *label = labels[mode];
+            const int length = (int)strlen(label);
+            const uint16_t colour = v->feedback == FIELD_FEEDBACK_CONFIRMED || v->feedback == FIELD_FEEDBACK_LEARN_DONE
+                ? FIELD_RGB565_GREEN : v->feedback == FIELD_FEEDBACK_NOT_SENT || v->feedback == FIELD_FEEDBACK_LEARN_FAILED
+                ? FIELD_RGB565_RED : FIELD_RGB565_YELLOW;
+            if (v->feedback == FIELD_FEEDBACK_LEARNING || v->feedback == FIELD_FEEDBACK_LEARN_DONE ||
+                v->feedback == FIELD_FEEDBACK_LEARN_FAILED) {
+                static const glyph16_t *const learning[] = {&k_gaku, &k_shuu, &k_chuu};
+                static const glyph16_t *const done[] = {&k_kan, &k_ryou};
+                static const glyph16_t *const failed[] = {&k_shitsu, &k_hai};
+                const glyph16_t *const *glyphs = v->feedback == FIELD_FEEDBACK_LEARNING ? learning
+                    : v->feedback == FIELD_FEEDBACK_LEARN_DONE ? done : failed;
+                const int count = v->feedback == FIELD_FEEDBACK_LEARNING ? 3 : 2;
+                const int start = (FIELD_PANEL_W - count * 16) / 2;
+                for (int i = 0; i < count; ++i) draw_glyph(frame, start + i * 16, 8, glyphs[i], colour);
+            } else {
+                const int start = (FIELD_PANEL_W - (length * FONT_ADVANCE - 1)) / 2;
+                for (int i = 0; i < length; ++i) draw_char(frame, start + i * FONT_ADVANCE, 12, label[i], colour);
+            }
+            if (v->feedback == FIELD_FEEDBACK_SENDING || v->feedback == FIELD_FEEDBACK_LEARNING) {
+                const int x = 8 + (v->animation % 8) * 6;
+                for (int i = 0; i < 5; ++i) put(frame, x + i, 24, colour);
+            }
         }
     }
 

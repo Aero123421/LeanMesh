@@ -1,0 +1,307 @@
+{
+  "record_version": 2,
+  "purpose": "Final-source compile validation and field presence resource comparison; software only",
+  "baseline_commit": "37df3f20ac9b90c9e7b85d429f2d88df88cdb27d",
+  "current_head": "37df3f20ac9b90c9e7b85d429f2d88df88cdb27d",
+  "current_working_tree_dirty": true,
+  "measured_utc": "2026-10-09T15:50:34.798972+00:00",
+  "initial_resource_measurement_utc": "2026-10-09T15:23:13.918951+00:00",
+  "source_tree": "C:\\dev\\job\\LeanMesh",
+  "build_mirror": "/root/leanmesh-work",
+  "independent_baseline": "/root/leanmesh-baseline",
+  "idf": {
+    "version": "v6.0.3",
+    "commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+    "toolchains": "Xtensa and RISC-V GCC esp-15.2.0_20251204, 15.2.0",
+    "optimization": "-Os",
+    "same_pin": true
+  },
+  "source_evidence": {
+    "compiled_source_mirror_matches": true,
+    "compiled_inputs_stable_through_builds_and_collection": true,
+    "normalized_baseline_fingerprint": "320486b9051e53e389420a4eb68b4548404355d36e7690816a89a562b9a34f8b",
+    "normalized_current_fingerprint": "603ee43288dcded1819587253475d1b3f4d7db1ed486f33f5044cdca7b608b67",
+    "previous_current_fingerprint": "96a909326e1c83cd7d2ea9551ff1af86dbfaad921f6c7afac89d49d301290762",
+    "field_render_sha256_normalized": "6e3fb32fcf8102376dc2ccf25b06b48b8af3f209787fd72dbf79785126a7602a",
+    "host_native_tool_sloc_snapshot_fingerprint": "f9a5ae7078bd4c06881b7d1a0e9ce257f37dc710604cd59c7bdc9eab3986407e",
+    "compiled_changed_files_since_initial_measurement": ["firmware/field_node/main/field_render.c"],
+    "source_snapshot_stable_at_collection_end": true,
+    "source_mirror_synced_by_this_worker": false,
+    "retained_prior_build_fingerprints_not_rebound": true,
+    "method": "SHA256 sorted relative-path/hash JSON; CRLF normalized; excludes markdown for compiled-input check, generated dependencies.lock, managed_components and bytecode",
+    "sdk_example_hil_shared_bench_changed_files": [],
+    "native_baseline_comparison": null,
+    "root_binary_baseline_comparison": null,
+    "t01_record_changed": false
+  },
+  "setup_commands": [
+    "test -d /root && test ! -e /root/leanmesh-baseline && git clone --no-hardlinks /mnt/c/dev/job/LeanMesh /root/leanmesh-baseline && git -C /root/leanmesh-baseline checkout --detach 37df3f2 && /root/leanmesh-baseline/scripts/third_party.sh setup && /root/leanmesh-baseline/scripts/third_party.sh verify"
+  ],
+  "builds": [
+    {"label": "baseline-display-esp32s3", "cwd": "/root/leanmesh-baseline", "command": "LEANMESH_BUILD_ROOT=/root/.cache/leanmesh/build-baseline-field scripts/field.sh build display esp32s3", "exit_code": 0, "elapsed_seconds": 125.486, "started_utc": "2026-10-09T15:01:01.285823+00:00", "log_sha256": "75fb4daf9ae0ee39c9bd139eb17f721bc97386dbcab1932f2ba8b3e0260ac538"},
+    {"label": "baseline-relay-esp32s3", "cwd": "/root/leanmesh-baseline", "command": "LEANMESH_BUILD_ROOT=/root/.cache/leanmesh/build-baseline-field scripts/field.sh build relay esp32s3", "exit_code": 0, "elapsed_seconds": 163.622, "started_utc": "2026-10-09T15:03:06.794124+00:00", "log_sha256": "03de0bc1794f2f66be2534b9346e274bee3b7bcf42463b96e4f577a819c028c1"},
+    {"label": "baseline-relay-esp32c6", "cwd": "/root/leanmesh-baseline", "command": "LEANMESH_BUILD_ROOT=/root/.cache/leanmesh/build-baseline-field scripts/field.sh build relay esp32c6", "exit_code": 0, "elapsed_seconds": 176.737, "started_utc": "2026-10-09T15:05:50.438373+00:00", "log_sha256": "24d1d43a8952abcb47d72749e0a7b655f747ecbeb028f1f6dc8f334ca4cf6cde"},
+    {"label": "after-display-esp32s3", "cwd": "/root/leanmesh-work", "command": "scripts/field.sh build display esp32s3", "exit_code": 0, "elapsed_seconds": 96.077, "started_utc": "2026-10-09T15:01:30.847189+00:00", "log_sha256": "d278162512c46cda29e71a7e1e7607825553f7aabc4101d8a0bbd03d9b591c08"},
+    {"label": "after-display-tof-esp32s3", "cwd": "/root/leanmesh-work", "command": "scripts/field.sh build display-tof esp32s3", "exit_code": 0, "elapsed_seconds": 85.225, "started_utc": "2026-10-09T15:03:07.033412+00:00", "log_sha256": "5ea48f4cfcd94c9efb9eb74c30f614a5a49b756d5a9a26240f31cbbdafa28dc0"},
+    {"label": "after-relay-esp32s3", "cwd": "/root/leanmesh-work", "command": "scripts/field.sh build relay esp32s3", "exit_code": 0, "elapsed_seconds": 84.745, "started_utc": "2026-10-09T15:04:32.308578+00:00", "log_sha256": "01a994564629bc7a4e4a81141aea06e9df81116c2a6d7cdc458846d61168114f"},
+    {"label": "after-relay-esp32c6", "cwd": "/root/leanmesh-work", "command": "scripts/field.sh build relay esp32c6", "exit_code": 0, "elapsed_seconds": 103.083, "started_utc": "2026-10-09T15:05:57.147330+00:00", "log_sha256": "a798a61f8d42508b77d39d2dec459b7034794d490f48a01c3389c802ca7cc4f4"},
+    {"label": "after-hil-root-esp32s3", "cwd": "/root/leanmesh-work", "command": "scripts/hil.sh build root esp32s3", "exit_code": 0, "elapsed_seconds": 11.478, "started_utc": "2026-10-09T15:02:46.290423+00:00", "log_sha256": "b89917ec68d97c8c4df7e69d7a57471098d9d5e8fd1e77e07f3939a751fc3c85"},
+    {"label": "example-LEAF", "cwd": "/root/leanmesh-work", "command": "scripts/build_targets.sh --app example_node --profile LEAF esp32s3 esp32c3 esp32c5 esp32c6", "exit_code": 0, "elapsed_seconds": 552.355, "started_utc": "2026-10-09T15:01:01.282103+00:00", "log_sha256": "c0ab9415a998719774bc81ea29fb797add58a85beaf1a42788918597244ea065"},
+    {"label": "example-RELAY", "cwd": "/root/leanmesh-work", "command": "scripts/build_targets.sh --app example_node --profile RELAY esp32s3 esp32c3 esp32c5 esp32c6", "exit_code": 0, "elapsed_seconds": 337.182, "started_utc": "2026-10-09T15:10:13.675311+00:00", "log_sha256": "c14ad0ae1217c3f936330f1727e2f4f37639376bd0f873349fae40bf51ffe7b3"},
+    {"label": "example-ROOT", "cwd": "/root/leanmesh-work", "command": "scripts/build_targets.sh --app example_node --profile ROOT esp32s3 esp32c3 esp32c5 esp32c6", "exit_code": 0, "elapsed_seconds": 345.268, "started_utc": "2026-10-09T15:15:50.876954+00:00", "log_sha256": "5f16f790c601b45fda409da919464205a6118f770c9466244816ed36f7f153c9"},
+    {"label": "japanese-display-esp32s3", "cwd": "/root/leanmesh-work", "command": "scripts/field.sh build display esp32s3", "exit_code": 0, "elapsed_seconds": 31.718, "started_utc": "2026-10-09T15:48:35.428000+00:00", "log_sha256": "c8e79cd0311ee178cb47796bb9510059790535210237c643407f009ddab75748"},
+    {"label": "japanese-display-tof-esp32s3", "cwd": "/root/leanmesh-work", "command": "scripts/field.sh build display-tof esp32s3", "exit_code": 0, "elapsed_seconds": 25.296, "started_utc": "2026-10-09T15:49:07.180532+00:00", "log_sha256": "d6bf23d39dd8fe18b43f5e82fb89c9a4869f37ba054e775660940f8c26c1aebc"}
+  ],
+  "measurement_commands": {
+    "size": "IDF_PYTHON -m esp_idf_size --format json2 MAP",
+    "archives": "IDF_PYTHON -m esp_idf_size --archives --format json2 MAP",
+    "sdk_detail_diff": "IDF_PYTHON -m esp_idf_size --archive-details libleanmesh.a --diff BASE_MAP --format json2 AFTER_MAP",
+    "symbols": "SOC_NM -S -C ELF",
+    "sizeof": "Compile disposable array[sizeof(T)+1] probe using SoC compile_commands.json, SOC_NM -S object, subtract one marker byte",
+    "budget": ". /root/esp/esp-idf-v6.0.3/export.sh >/dev/null && python scripts/budget_report.py --native-build /root/.cache/leanmesh/native --idf-root /root/.cache/leanmesh/build --out-dir /root/.cache/leanmesh/field-budget",
+    "budget_exit_code": 0,
+    "budget_final_elapsed_seconds": 19.217
+  },
+  "resource_columns": ["image_map_bytes", "app_bin_bytes", "dram_bss_bytes", "dram_data_bytes", "iram_text_bytes", "flash_text_bytes", "flash_rodata_bytes"],
+  "resources": {
+    "baseline-display-esp32s3": [994889, 995008, 54080, 20014, 77527, 779936, 115980],
+    "after-display-esp32s3": [1017500, 1017632, 54704, 20089, 78619, 796624, 120736],
+    "after-display-tof-esp32s3": [1025320, 1025440, 56352, 20089, 78619, 804372, 120808],
+    "baseline-relay-esp32s3": [972089, 972208, 49920, 20014, 76879, 764416, 109348],
+    "after-relay-esp32s3": [972137, 972256, 49936, 20014, 76879, 764480, 109332],
+    "baseline-relay-esp32c6": [1141379, 1141760, 55968, 15263, 103154, 893950, 128636],
+    "after-relay-esp32c6": [1141461, 1141840, 55984, 15263, 103154, 894032, 128636],
+    "current-hil-root-esp32s3-reference-only": [1022187, 1022304, 78728, 18696, 76063, 845624, 80372]
+  },
+  "delta_columns": ["image_map_bytes", "app_bin_bytes", "dram_bss_bytes", "dram_data_bytes", "iram_text_bytes", "sdk_flash_text_bytes", "sdk_static_dram_bytes"],
+  "deltas": {
+    "display-esp32s3": [22611, 22624, 624, 75, 1092, 127, 0],
+    "display-tof-esp32s3-vs-original-display": [30431, 30432, 2272, 75, 1092, 191, 0],
+    "relay-esp32s3": [48, 48, 16, 0, 0, 0, 0],
+    "relay-esp32c6": [82, 80, 16, 0, 0, 0, 0],
+    "hil-root-esp32s3": null
+  },
+  "japanese_label_refresh": {
+    "repeated_builds_only": ["display-esp32s3", "display-tof-esp32s3"],
+    "baseline_rebuilt": false,
+    "relay_root_example_builds_repeated": false,
+    "retained_sdk_budget_output_is_initial_resource_run": true,
+    "additional_glyphs": "学 習 中 完 了 失 敗",
+    "labels": ["学習中", "完了", "失敗"],
+    "public_domain_bitmap_bytes": 224,
+    "imported_glyph_definition_sloc_in_field_counter": 14,
+    "label_rows": [8, 23],
+    "learning_animation_row": 24,
+    "mesh_bar_rows": [30, 31],
+    "delta_column_order": ["image_map_bytes", "app_bin_bytes", "flash_text_bytes", "flash_rodata_bytes", "dram_data_bytes", "dram_bss_bytes", "iram_text_bytes"],
+    "display_delta_to_previous_measurement": [344, 352, 104, 240, 0, 0, 0],
+    "tof_display_delta_to_previous_measurement": [348, 336, 108, 240, 0, 0, 0],
+    "native_three_label_cases_added_in_one_render_regression": true
+  },
+  "sdk_columns": ["dram_bss_bytes", "dram_data_bytes", "flash_text_bytes", "flash_rodata_bytes"],
+  "sdk_linked_archive": {
+    "baseline-display-esp32s3": [24640, 24, 237074, 5399],
+    "after-display-esp32s3": [24640, 24, 237201, 5399],
+    "after-display-tof-esp32s3": [24640, 24, 237265, 5399],
+    "baseline-and-after-relay-esp32s3": [24640, 24, 237038, 5399],
+    "baseline-and-after-relay-esp32c6": [24632, 16, 273922, 5393],
+    "current-hil-root-esp32s3-reference-only": [56444, 24, 330637, 5988]
+  },
+  "sdk_probe_comparison": {
+    "soc_compilers": ["esp32s3", "esp32c6"],
+    "all_budget_probe_sizes_identical_before_after": true,
+    "ctx_profile_order": ["LEAF", "RELAY", "ROOT"],
+    "before_bytes": [41688, 46120, 130880],
+    "after_bytes": [41688, 46120, 130880]
+  },
+  "field_s3_sizeof_bytes": {"detector": 1536, "keys": 176, "key_event": 16, "snapshot": 48, "k3": 56, "snapshot_send": 88, "learning_feedback": 16, "acquisition_stats": 40},
+  "task_reservation": {
+    "field_io_stack_bytes_per_display": 6144,
+    "field_io_priority": 4,
+    "basis": "xTaskCreate configuration, dynamic reservation, not measured usage",
+    "existing_main_stack_bytes": 16384,
+    "new_dram_plus_stack_bytes_display": 6843,
+    "new_dram_plus_stack_bytes_tof_display": 8491,
+    "additional_iram_text_bytes_per_display": 1092,
+    "complete_runtime_ram_total": null
+  },
+  "sensor_exclusion": {
+    "command": "SOC_NM -S -C ELF",
+    "match": "kguard::field::presence_v2 or VL53L1X:: or anonymous-namespace detector",
+    "plain_display_matches": 0,
+    "tof_display_matches": 60,
+    "relay_s3_matches": 0,
+    "relay_c6_matches": 0,
+    "root_s3_matches": 0,
+    "tof_detector_symbol": "3fc9edc8 00000600 b (anonymous namespace)::detector",
+    "newly_retained_existing_sdk_symbol": "lm_cancel, 63 B, absent in baseline display; archive diffs also include placement/literal changes"
+  },
+  "sloc_method": {
+    "cpp": "scripts/budget_report.py c_sloc; nonblank/noncomment C/C++ .c .h .cpp .hpp",
+    "python": "scripts/budget_report.py py_sloc; nonblank/not starting #, docstrings counted",
+    "field_first_party": "firmware/field_node/main excluding kg_presence",
+    "js": "C-style comment counter, separate tool metric",
+    "html": "nonblank lines, not C/C++ SLOC",
+    "documentation": "Excluded from SLOC",
+    "generated_managed_vendor": "Excluded from first-party SDK denominator"
+  },
+  "sloc_before_after_delta": {
+    "sdk_core_security_store_capi": [28748, 28748, 0],
+    "sdk_idf": [1820, 1820, 0],
+    "sdk_root": [6185, 6185, 0],
+    "sdk_serial": [3380, 3380, 0],
+    "sdk_total": [40133, 40133, 0],
+    "first_party_field_main": [1266, 2101, 835],
+    "imported_kg_detector": [0, 880, 880],
+    "licensed_driver": [0, 1598, 1598],
+    "native_test_shim": [0, 45, 45],
+    "python_host_excluding_tests": [5667, 5671, 4],
+    "fieldview_python": [2414, 2729, 315],
+    "fieldview_js": [226, 269, 43],
+    "fieldview_html_nonblank": [77, 81, 4],
+    "native_tests_cpp": [22582, 23190, 608],
+    "host_tests_python": [9054, 9597, 543]
+  },
+  "driver_sloc_reconciliation": {"earlier_reference": 1480, "current_cpp": 311, "current_header": 1287, "current_total": 1598},
+  "example_profile_order": ["LEAF", "RELAY", "ROOT"],
+  "current_sdk_fixed_ram_bytes": {
+    "esp32s3": [63784, 69336, 185900],
+    "esp32c3": [63768, 69320, 185880],
+    "esp32c5": [63768, 69320, 185880],
+    "esp32c6": [63768, 69320, 185880]
+  },
+  "example_image_bytes": {
+    "esp32s3": [956305, 961065, 1067933],
+    "esp32c3": [1020182, 1025906, 1147136],
+    "esp32c5": [1121875, 1127599, 1248765],
+    "esp32c6": [1119729, 1125545, 1247943]
+  },
+  "existing_t01_image_reference_bytes": {"esp32s3": 675460, "esp32c3": 707608, "esp32c5": 803417, "esp32c6": 801401},
+  "example_flash_delta_to_existing_t01_bytes": {
+    "esp32s3": [280845, 285605, 392473],
+    "esp32c3": [312574, 318298, 439528],
+    "esp32c5": [318458, 324182, 445348],
+    "esp32c6": [318328, 324144, 446542]
+  },
+  "budget_verdict": {
+    "ram_targets_bytes": [49152, 57344, 163840],
+    "ram_over_builds": 12,
+    "ram_worst_over_bytes": 22060,
+    "flash_target_bytes": 262144,
+    "flash_over_builds": 12,
+    "flash_review_line_bytes": 327680,
+    "flash_over_review_builds": 4,
+    "sdk_sloc_target": 28000,
+    "sdk_sloc_over": 12133,
+    "host_sloc_target": 6000,
+    "host_sloc_verdict": "OK",
+    "registry_hash_16": "1c8682d587ca3b25",
+    "registry_identical_all_12_builds": true,
+    "root_c3_hardware_supported": false
+  },
+  "native_crypto_measurement_by_budget_command": {"worker_stack_bytes": 8792, "psa_heap_bytes": 4368, "total_bytes": 13160, "target_bytes": 24576, "basis": "Actually run x86-64 software model; not target evidence or a baseline feature delta"},
+  "main_owned_test_logs_inspected_not_rerun": [
+    {"path": "/root/.cache/leanmesh/native/Testing/Temporary/LastTest.log", "end": "2026-10-10 00:00 JST", "passed": 31, "failed": 0, "sha256": "fe4938d2a3ac73821249ac4d1bf6da6e331b030a0550756cebcfc3cc6bc562dc"},
+    {"path": "/root/.cache/leanmesh/native-field-asan/Testing/Temporary/LastTest.log", "end": "2026-10-09 23:56 JST", "passed": 4, "failed": 0, "sha256": "17d4f05ce9321c8a14123b2f28622e4ac07aee9ec64c148cedc871c1da626a4a"}
+  ],
+  "main_reported_validation_progress_at_refresh": {
+    "basis": "User/main handoff; not rerun by resource worker; main will append final command evidence",
+    "native_full_passed": 31,
+    "host_initial_full_passed": 605,
+    "host_initial_full_failed": 2,
+    "k06_initial_failure": "Field application wrongly included in core vocabulary scope",
+    "k06_scoped_fix_focused_passed": 3,
+    "e2e_initial_failure": "root_connected observed before domain readiness",
+    "e2e_fix": "await_root readiness race fixed by main; rerun ongoing",
+    "host_final_full_status": "PENDING",
+    "host_final_full_passed": null,
+    "checker_ruff_installed": true,
+    "checker_ruff_final_results": null
+  },
+  "documentation_recheck_at_refresh": {
+    "protocol_join_backoff": "Corrected by main; inspected 2,4,8,15,20,20 seconds",
+    "fieldview_readme_line5": "Still says SDK core・Host本体は変更しない at refresh; main handling; correction not asserted"
+  },
+  "final_software_validation_main_executed": {
+    "base_commit": "37df3f20ac9b90c9e7b85d429f2d88df88cdb27d",
+    "feature_commit": null,
+    "native": {"passed": 31, "failed": 0, "seconds": 24.03},
+    "native_asan_ubsan": {"passed": 31, "failed": 0, "seconds": 312.30},
+    "host_pytest_unit_integration_e2e": {"passed": 608, "failed": 0, "seconds": 641.63},
+    "g0": "PASS",
+    "ruff_0_16_9": "PASS",
+    "diff_check": "PASS",
+    "initial_full_host_failures": [
+      "Domain mirror was read before persistence; fixed with existing await_root evidence wait",
+      "Core vocabulary scope included explicit field application; corrected scope with dedicated regression"
+    ],
+    "independent_review_prior_findings": 6,
+    "independent_followup_critical_high_findings": 0,
+    "hardware_qualification": false,
+    "sanitizer_e2e_rerun": false
+  },
+  "warnings": {
+    "new_field_enum_int_in_final_rebuilds": 0,
+    "firmware_compile_errors": 0,
+    "japanese_refresh_compiler_warnings_per_build": 0,
+    "japanese_refresh_cmake_warnings_per_build": 0,
+    "japanese_refresh_existing_idf_kconfig_notes_per_build": [
+      "bt/host/nimble/Kconfig.in:1453 BT_NIMBLE_MESH_PROVISIONER invalid bool default 0 treated as n",
+      "fatfs/Kconfig:230 FATFS_PRINT_LLI invalid bool default 0 treated as n",
+      "fatfs/Kconfig:235 FATFS_PRINT_FLOAT invalid bool default 0 treated as n"
+    ],
+    "existing": [
+      "src/port/idf/idf_pm.cpp:95:43,151:45 deprecated esp_sleep_get_wakeup_cause [-Wdeprecated-declarations]",
+      "third_party/libedhoc/library/core/edhoc_ead_internal.c:70:12 unused comp_message_number [-Wunused-function]",
+      "third_party/libedhoc/externals/zcbor/src/zcbor_decode.c:1409:17 additional set but unused [-Wunused-but-set-variable]",
+      "Conditional managed HUB75 directory unexpected; initial-pass unknown ESP32_HUB75_USE_GFX; missing Kconfig option triggers reconfigure"
+    ],
+    "unchanged_objects_reused_in_field_rebuilds": true
+  },
+  "measurement_tool_failures_resolved": [
+    "Generated dependencies.lock initially included in source mirror/historical fingerprint comparisons; excluded before collecting measurements",
+    "External budget-report.json metadata collision; reran budget command using budget-command.json for recorder metadata"
+  ],
+  "source_reviewed_cadence_ms_not_hardware_measurement": {"keys": 25, "debounce": 50, "tof": 40, "snapshot_tick": 40, "i2c_transaction_timeout": 20, "init_retry": 3000, "sensor_init_status_timeout": 100, "snapshot_rate_limit": 1000, "snapshot_refresh": 10000},
+  "unverified": {
+    "hardware": false,
+    "flashing_performed": false,
+    "serial_used": false,
+    "git_commit_created": false,
+    "task_stack_high_water_bytes": null,
+    "task_control_i2c_vendor_peak_heap_bytes": null,
+    "minimum_ever_free_heap_bytes": null,
+    "largest_free_block_bytes": null,
+    "idle_cpu_percent": null,
+    "owner_p99_us": null,
+    "rf_airtime": null,
+    "joule_per_report": null,
+    "recovery_energy_j": null,
+    "current_ma": null,
+    "electrical_optical_led_sampling_under_load": null,
+    "real_power_cut_key_custody": null,
+    "host_pytest_ruff_g0_final_results": "main-owned, not asserted by this worker"
+  },
+  "licensing": {
+    "kg_detector_commit": "b80ce46d63f7c1a5d36552f8ee38969b96cca412",
+    "kg_detector": "Owner-authorized field reuse, rights reserved, broader distribution rights pending rights holder",
+    "driver_kg_commit": "1e91d02202ad25c43f21a0274c000f9f5ee1000a",
+    "driver": "Pololu/ST BSD-3-Clause notices retained",
+    "font": "Twelve Shinonome public-domain glyphs, including seven added learning glyphs; KG b80ce46d source pack attribution retained",
+    "sdk_distribution_license_and_release_sbom_custody": "pending"
+  },
+  "raw_output_directory": "/root/.cache/leanmesh/field-budget",
+  "raw_artifacts": {
+    "field-measurements.json": "7890849acecae5975a6fd8c287a3d4f2727275cf005b87a5be86f6c0ce636bd2",
+    "pre-japanese-field-measurements.json": "7ab1e88aaf0b200db0f00273dd36935f13b65887be5c2e7699fcd6982053f9c1",
+    "budget-report.json": "732f5525cc770241d550ca00f300ceb85b09984ee99defb04bf31329d3135f83",
+    "budget-report.md": "6cfe7f50e5896a8aefd47b80e4003a6cde38d8d13d2241d94f445a8d69d3135e"
+  },
+  "after_app_bin_sha256": {
+    "display-esp32s3": "3b93367b88559636e71a6735ba3e5b6ed6a89d1b6ad30083eb2fe3811842ba31",
+    "display-tof-esp32s3": "95adb9675472d8247e936d912ee4e05a5a9999ec809206986f8fb4b5040808a9",
+    "relay-esp32s3": "8cd58813dd6af0851e7d9019970ba4764a690ad67dc036d48756a1aab3eeaf59",
+    "relay-esp32c6": "50e2fb9714b31614f7ad273804d11dfef98c357a9ba58c305038aa107b45fe7a",
+    "hil-root-esp32s3": "bf2d9d94c9708baa44096eac2b399a9c583394be1682646560d38116b6fe673f"
+  }
+}

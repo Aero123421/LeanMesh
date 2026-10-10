@@ -35,11 +35,25 @@ if(CONFIG_FIELD_HUB75)
             endif()
         endforeach()
     endif()
-    list(APPEND field_srcs field_display_hub75.cpp field_render.c)
+    list(APPEND field_srcs field_display_hub75.cpp field_render.c field_control.c
+         field_presence.cpp field_acquisition.cpp)
+    list(APPEND field_requires esp_driver_i2c)
+    if(CONFIG_FIELD_TOF)
+        list(APPEND field_srcs kg_presence/presence_v2.cpp)
+        list(APPEND field_includes kg_presence/include)
+        set(field_vl53l1x "${CMAKE_CURRENT_LIST_DIR}/../../../third_party/field_vl53l1x")
+        list(APPEND field_srcs "${field_vl53l1x}/VL53L1X.cpp")
+        list(APPEND field_includes "${field_vl53l1x}")
+    endif()
 else()
     list(APPEND field_srcs field_display_none.c)
 endif()
 
 idf_component_register(SRCS ${field_srcs}
-                       INCLUDE_DIRS "."
-                       PRIV_REQUIRES leanmesh bench_console nvs_flash esp_driver_gpio esp_driver_usb_serial_jtag esp_system esp_timer esp_hw_support)
+                       INCLUDE_DIRS "." ${field_includes}
+                       PRIV_REQUIRES leanmesh bench_console nvs_flash esp_driver_gpio esp_driver_usb_serial_jtag esp_system esp_timer esp_hw_support ${field_requires})
+if(CONFIG_FIELD_TOF)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FIELD_TOF=1)
+else()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FIELD_TOF=0)
+endif()

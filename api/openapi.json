@@ -3320,6 +3320,11 @@
             "type": "string",
             "contentEncoding": "base64"
           },
+          "received_utc": {
+            "type": "string",
+            "format": "date-time",
+            "description": "MESSAGE_RECEIVED only: persisted events.created_utc_ms as ISO8601 UTC with millisecond precision and Z suffix. Host reception journal-recorded time, not node occurrence time or exact COMMIT completion. Stable across rereads, backlog and deduplicated redelivery; omitted when unknown/null. Never filled from read-time. UTC may reverse; cursor defines event order."
+          },
           "evidence": {
             "$ref": "#/components/schemas/Evidence"
           }

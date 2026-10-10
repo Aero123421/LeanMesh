@@ -1,6 +1,6 @@
 # 14 KGuard適用例 — coreをKG専用にしない
 
-## 1. 最新読取結果
+## 1. 仕様策定時の読取結果（2026-09-28）
 KG `4ed3e1f` の `apps/edge-go/internal/displaylink/transport.go` は現在のWi-Fi parentを差替えるTransportを定義する。keys/verification/meaningはPortが所有し、EventFrameは**未認証**、SendWrittenはserial Write完了でしかない。Go READMEは2026-09-27基準でsitecoreが現場安全判断を持ち、USB S3親機を使い、RouteLoom runtimeは同梱しないと記載する。[KG-CODE-01,02]
 KG #112の2026-09-28 20:37追記はRouteLoom v2の計画を説明し、S3/C3/C5/C6、Device API、EDHOC worker、4KiB object、賢いJoin、手動移設、IDF6.0.3移行を提案している。これは既存mainで完成した証拠ではない。[KG-112-NEW]
 
@@ -58,3 +58,9 @@ QRはasset候補特定、DeviceCredentialの暗号検証が本人確認。SDKの
 
 ## 8. 受入
 KG #109の10ESP自動形成/relay抜去/全台再起動は10台試験であり10hop証明ではない。3表示盤の対象別反映、温度/水位等の実測→KG安全判断→描画→戻り証拠→復旧を通す。#112最新案の5s更新、st p99<2s、reset20回<10s、CURSOR_GAP0は**小規模PoCの目標**であり20hopへそのまま保証しない。古いIssueの一律反復回数を新たな利用者決定として復活させない。
+
+## 9. 本リポジトリのfield試験アプリ
+
+上記はKG適用先の歴史的調査・責務の例で、現在のfield試験機の構成ではない。[field/presence.md](field/presence.md)の表示板は1台のHUB75 S3で通信・検知・描画を行い、Pico/UARTの描画器は使わない。
+
+ユーザー指定のKG人感判定器は `firmware/field_node/` のアプリ側だけで使う。SDKの `src/`、公開API、Wire/DB契約、HostへKGの判定・業務語彙を入れない。K06の語彙検査はこの明示的アプリ領域を除外し、SDKを利用する最小firmware例と親機firmwareは引き続き検査する。出典は保持し、検査を通すために由来を隠さない。

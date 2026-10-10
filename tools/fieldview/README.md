@@ -2,7 +2,7 @@
 
 `docs/field/protocol.md` §5 の実装。LeanMesh Host の隣で動くノートPC用の1プロセスで、**Host API だけ**（Unix socket + bearer token）と話し、
 `127.0.0.1` に1枚のWebページを出す。外部のscript/font/画像は使わない（現地にInternetは無い）。試験用ツールであり製品ではない。
-SDK core・Host本体は変更しない。
+人感判定・ボタン処理は試験アプリ側に置き、SDK coreには入れない。Hostは既に保存している受信記録時刻を汎用の `received_utc` として公開する。
 
 ## 起動
 
@@ -60,6 +60,43 @@ Host が現れると自動でつながる。
 - **Event log**: join / leave（`/v1/nodes` の差分）、親の変更、depth変更、connectivity変更、telemetry欠落、node lost / back
   （telemetry age > 3周期）、reboot（boot_count / seq の巻き戻り）、Hostの event journal の欠落（CURSOR_GAP）、
   **ノードログの重要な記録**（boot とその原因、member / attach までの秒、unreachable、親の変更、TX完了の遅れ、panel故障、記録の欠落）。
+
+## 人の在否・学習・K3（承認契約: `docs/field/presence.md`）
+
+port 214 は **44 byte**、port 215 は **20 byte** の version 1 / big-endian 固定形式。
+予約byte、未定義flag/fault、状態の範囲、非zero boot ID/sequence、距離100..4000 mmと不明値65535を検査する。
+既存の木と表に「人の在否」「学習」「測定」「K3受信」を追加する。無効・不明・人なし・人ありと、
+「古い情報（現在不明）」を区別する。学習やnodeのK3結果はnodeの報告で、Hostの実受信とは別の証拠。
+
+`presence.ndjson` / `k3.ndjson` は既存の有界record queueとfsync-before-consumer-ACKを共有する。
+全受信（不正・重複・過去の情報も）をcursorとpayload付きで残す。`observed_utc` はbrowser取込時刻、
+`received_utc` はHostが受信をjournalに記録したUTC（保存済み `events.created_utc_ms`）であり、
+物理的な押下時刻やCOMMIT完了の厳密な時刻ではない。Host APIのISO8601 UTC文字列を使い、
+再読出し/backlog/同じmessageの再配送でも元の時刻を保持する。browser取込時刻では代用しない。
+無い・未来・不正な時刻は「Host受信時刻不明」や古い情報として扱い、新しい人なしや新着通知を作らない。
+UTC逆行とcapture/sample時刻の矛盾も現在不明として扱う。
+既知のsample ageがcapture uptimeを超える場合は、同じbootの測定として成立しないため現在不明とし、
+K3新着の根拠にも使わない（age不明の65535はこの比較の対象外）。capture uptimeのwrapを推測で補わない。
+
+在否の期限はHost受信UTCから30秒、sample ageも加えた測定の古さは最大10秒（契約のno-sample fault）。
+同一bootでは最も早い「受信UTC − capture uptime」を基準に取得時刻を比較するため、
+遅れて届いたsnapshotの取得uptimeが進んでいなければ取込時刻で測定を新しくしない。
+backlogは履歴だけで現在の在否や新着通知にしない。重複/古いsnapshotは期限を延ばさない。
+journal gapとtelemetryの再起動で在否を無効化し、新しいsnapshotが必要。
+random boot IDの大小は新旧判定に使わない。同一bootのsnapshot sequenceとcapture uptimeは単調。
+別bootへの切替には、再起動後のtelemetry uptimeとUTCに合うsnapshotの証拠が必要。
+これが曖昧なら古いsnapshotを保持して現在不明とする。node uptimeの32bit wrapも推測で解消しない。
+起動時のbacklog telemetryはboot比較の有界baselineとしてのみ保持し、liveなbootの証明にはしない。
+新しいlive telemetryでbootを確認し、そのbootのsnapshotが進んだ後に現在の在否へ復帰する。
+
+device表は既存の256件pruneに参加する。K3の重複排除は各device最大8 boot scope、各scopeは直近256sequenceの
+bitmapで重複排除し、それより古い範囲/9個目以降の未知bootは記録するが件数/新着に加えない。
+snapshotとtelemetryはそれぞれ現在のbootと最大8個の旧boot IDを保持し、保持上限後のboot切替は現在不明とする。
+件数はこのsessionで証明できた受信件数（生涯総数ではない）。表示履歴は最大20件。
+受信済みK3はdevice全ID + boot ID + press sequenceで区別し、後のsnapshotが「未送信」「未確認」でも消さない。
+新着の期限は受信UTCと推定した押下UTCの両方で確認する。boot変更・gap・時計逆行などで新着の根拠を失った
+受信は履歴として保持し、後のsnapshotから新着へ再昇格させない。
+実機のキー・ToF・LED・RF確認はこのbrowser/meshsim試験の範囲外。
 
 ## 記録（`<logs-dir>/<UTC時刻>/`）
 
@@ -159,7 +196,7 @@ telemetryと同じ経路（Host の `MESSAGE_RECEIVED`、`evidence.details.app_p
 
 ```sh
 ~/.cache/leanmesh/host-venv/bin/python -m pytest host/tests/unit/test_fieldview_core.py host/tests/unit/test_fieldview_fake_host.py \
-    host/tests/unit/test_fieldview_nodelog.py \
+    host/tests/unit/test_fieldview_nodelog.py host/tests/unit/test_fieldview_presence.py \
     -q -p no:cacheprovider --basetemp=/tmp/claude-501/pt-fv
 LEANMESH_NATIVE_BUILD=~/.cache/leanmesh/native ~/.cache/leanmesh/host-venv/bin/python -m pytest \
     host/tests/e2e/test_fieldview_meshsim.py -q -s -p no:cacheprovider --basetemp=/tmp/claude-501/pt-fv

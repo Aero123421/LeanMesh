@@ -65,10 +65,14 @@
       <th title="seconds from boot to REACHABLE in the current boot (node log)">attach</th>
       <th title="longest TX completion the radio reported, in ms, with the number of late ones (node log)">TX max</th>
       <th>counters</th><th>ping</th><th>display</th>
+      <th>人の在否</th><th>学習</th><th>測定・情報の古さ</th><th title="Hostの実受信。端末の送信結果とは別。取込UTCをHost受信UTCの代わりにしない">K3受信（履歴）</th>
     </tr></thead>
     <tbody></tbody>
   </table>
   </div>
+  <p class="note">人の在否: センサー無効・不明・人なし・人あり。古い情報は現在不明です。
+    学習は端末の報告。K3件数はこのセッションで確認した実受信（重複を除く）で、クリックすると直近20件の履歴を表示します。
+    Host受信時刻が不明な情報や起動前の履歴を新着にはしません。</p>
 </section>
 
 <section class="card">

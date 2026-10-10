@@ -17,6 +17,86 @@ static uint16_t get16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]);
 
 static uint32_t get32(const uint8_t *p) { return ((uint32_t)get16(p) << 16) | get16(p + 2); }
 
+static void put64(uint8_t *p, uint64_t v) {
+    put32(p, (uint32_t)(v >> 32));
+    put32(p + 4, (uint32_t)v);
+}
+
+static uint64_t get64(const uint8_t *p) { return ((uint64_t)get32(p) << 32) | get32(p + 4); }
+
+static bool presence_structure(const field_presence_snapshot_t *s) {
+    return s != NULL && s->boot_id != 0 && s->seq != 0 && s->presence <= FIELD_PRESENCE_OCCUPIED &&
+        s->learning <= FIELD_LEARN_NO_SENSOR && (s->flags & ~7u) == 0 && (s->fault_bits & ~7u) == 0 &&
+        s->k3_result <= FIELD_K3_UNCONFIRMED &&
+        (s->distance_mm == UINT16_MAX || (s->distance_mm >= 100 && s->distance_mm <= 4000)) &&
+        (s->background_mm == UINT16_MAX || (s->background_mm >= 100 && s->background_mm <= 4000)) &&
+        (s->background_mm != UINT16_MAX || s->noise_mm == 0);
+}
+
+bool field_presence_encode(const field_presence_snapshot_t *s, uint8_t out[FIELD_PRESENCE_BYTES]) {
+    if (out == NULL || !presence_structure(s)) return false;
+    memset(out, 0, FIELD_PRESENCE_BYTES);
+    out[0] = FIELD_PROTO_VERSION;
+    out[1] = s->presence;
+    out[2] = s->learning;
+    out[3] = s->flags;
+    put64(out + 4, s->boot_id);
+    put32(out + 12, s->seq);
+    put32(out + 16, s->capture_ms);
+    put16(out + 20, s->sample_age_ms);
+    put16(out + 22, s->distance_mm);
+    put16(out + 24, s->background_mm);
+    put16(out + 26, s->noise_mm);
+    put32(out + 28, s->learn_request);
+    put32(out + 32, s->fault_bits);
+    put32(out + 36, s->k3_seq);
+    out[40] = s->k3_result;
+    return true;
+}
+
+bool field_presence_decode(const uint8_t *in, size_t n, field_presence_snapshot_t *s) {
+    if (in == NULL || s == NULL || n != FIELD_PRESENCE_BYTES || in[0] != FIELD_PROTO_VERSION ||
+        in[41] != 0 || in[42] != 0 || in[43] != 0) return false;
+    field_presence_snapshot_t v = {0};
+    v.presence = in[1];
+    v.learning = in[2];
+    v.flags = in[3];
+    v.boot_id = get64(in + 4);
+    v.seq = get32(in + 12);
+    v.capture_ms = get32(in + 16);
+    v.sample_age_ms = get16(in + 20);
+    v.distance_mm = get16(in + 22);
+    v.background_mm = get16(in + 24);
+    v.noise_mm = get16(in + 26);
+    v.learn_request = get32(in + 28);
+    v.fault_bits = get32(in + 32);
+    v.k3_seq = get32(in + 36);
+    v.k3_result = in[40];
+    if (!presence_structure(&v)) return false;
+    *s = v;
+    return true;
+}
+
+bool field_key_encode(const field_key_notice_t *s, uint8_t out[FIELD_KEY_BYTES]) {
+    if (s == NULL || out == NULL || s->boot_id == 0 || s->seq == 0) return false;
+    memset(out, 0, FIELD_KEY_BYTES);
+    out[0] = FIELD_PROTO_VERSION;
+    out[1] = 3;
+    put64(out + 4, s->boot_id);
+    put32(out + 12, s->seq);
+    put32(out + 16, s->press_ms);
+    return true;
+}
+
+bool field_key_decode(const uint8_t *in, size_t n, field_key_notice_t *s) {
+    if (in == NULL || s == NULL || n != FIELD_KEY_BYTES || in[0] != FIELD_PROTO_VERSION ||
+        in[1] != 3 || in[2] != 0 || in[3] != 0 || get64(in + 4) == 0 || get32(in + 12) == 0) return false;
+    s->boot_id = get64(in + 4);
+    s->seq = get32(in + 12);
+    s->press_ms = get32(in + 16);
+    return true;
+}
+
 void field_telemetry_encode(const field_telemetry_t *t, uint8_t out[FIELD_TELEMETRY_BYTES]) {
     out[0] = FIELD_PROTO_VERSION;
     out[1] = t->role;

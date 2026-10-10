@@ -22,6 +22,20 @@ const fmt = (v, d = "-") => (v === null || v === undefined ? d : v);
 const pct = (v) => (v === null || v === undefined ? "-" : v.toFixed(v < 10 ? 1 : 0) + " %");
 const age = (v) => (v === null || v === undefined ? "-" : v < 120 ? v.toFixed(0) + " s" : (v / 60).toFixed(1) + " min");
 const utcShort = (t) => (t ? t.slice(11, 19) : "-");
+const presenceLabels = {disabled: "センサー無効", unknown: "不明", vacant: "人なし", occupied: "人あり"};
+const learningLabels = {unlearned: "未学習", running: "学習中", done: "完了", failed: "失敗", no_sensor: "センサーなし"};
+const k3Labels = {idle: "待機", sending: "送信中", confirmed: "確認済み", not_sent: "未送信", unconfirmed: "未確認"};
+function hasPresence(n) { return n.presence && (n.role === "display" || n.presence.reported || n.presence.k3_count); }
+function presenceText(p) { return p.stale ? "古い情報（現在不明）" : (presenceLabels[p.state] || "未受信"); }
+function presenceTitle(p) {
+  const faults = [[1, "センサー"], [2, "背景"], [4, "学習"]].filter(([bit]) => p.faults & bit).map(([, label]) => label);
+  return `報告: ${presenceLabels[p.reported] || "未受信"}\nHost受信UTC: ${p.received_utc || "不明"}` +
+    `\n取込UTC: ${p.observed_utc || "不明"}\n起動ID: ${p.boot_id || "不明"} / snapshot #${fmt(p.seq)}` +
+    `\n取得uptime: ${fmt(p.uptime_ms)} ms / 学習要求 #${fmt(p.learning_request)}` +
+    `\n準備: センサー ${p.flags & 1 ? "済" : "未"}・背景 ${p.flags & 2 ? "有効" : "不明"}・キー ${p.flags & 4 ? "済" : "未"}` +
+    `\n障害: ${faults.join("・") || "なし"}\n背景: ${fmt(p.background_mm)} mm / ノイズ: ${fmt(p.noise_mm)} mm` +
+    `\n端末K3: #${fmt(p.last_k3_seq)} ${k3Labels[p.k3_result] || "不明"}（Host実受信とは別）`;
+}
 
 async function api(path, body) {
   const opt = body === undefined ? {} : {
@@ -37,7 +51,7 @@ let last = null;
 let displaySelected = null;
 
 // ---- topology -----------------------------------------------------------------------------------------------------
-const X = 118, Y = 96, BW = 104, BH = 38;
+const X = 164, Y = 140, BW = 150, BH = 86;
 
 function layout(root) {
   let slot = 0;
@@ -81,11 +95,20 @@ function drawTopology(tree) {
     const g = s("g", { class: cls, transform: `translate(${px(n) - BW / 2},${py(n)})` });
     const tip = [n.name, n.short, n.role && "role " + n.role, n.depth != null && "depth " + n.depth,
                  n.membership, n.connectivity, n.silent && !n.root && !n.group ? "no live telemetry" : null,
-                 n.placeholder ? "parent not listed by the Host" : null].filter(Boolean).join("\n");
+                 n.placeholder ? "parent not listed by the Host" : null,
+                 hasPresence(n) ? presenceTitle(n.presence) : null].filter(Boolean).join("\n");
     g.append(s("title", {}, tip), s("rect", { width: BW, height: BH, rx: 7 }));
     g.append(s("text", { x: BW / 2, y: 16, "text-anchor": "middle" }, n.name.length > 15 ? n.name.slice(0, 14) + "…" : n.name));
     const sub = n.root ? "root" : n.group ? "" : [n.role, n.depth != null ? "d" + n.depth : null].filter(Boolean).join(" ");
     g.append(s("text", { class: "sub", x: BW / 2, y: 30, "text-anchor": "middle" }, sub));
+    if (hasPresence(n)) {
+      const p = n.presence;
+      g.append(s("text", { class: "sub", x: BW / 2, y: 45, "text-anchor": "middle" }, presenceText(p)));
+      g.append(s("text", { class: "sub", x: BW / 2, y: 59, "text-anchor": "middle" },
+        `学習: ${learningLabels[p.learning] || "未受信"}`));
+      g.append(s("text", { class: "sub", x: BW / 2, y: 73, "text-anchor": "middle" },
+        `K3受信 ${p.k3_count}件${p.k3_last && p.k3_last.fresh ? "（新着）" : ""}`));
+    }
     nodeLayer.append(g);
   }
   $("topo").replaceChildren(svg);
@@ -130,6 +153,18 @@ function attachTitle(n) {
     `\nunreachable events: ${n.unreachable}`;
 }
 
+function k3Cell(p) {
+  if (!p.k3_last) return "受信なし";
+  const latest = p.k3_last;
+  const entries = [...p.k3_history].reverse().map((e) => h("div", {},
+    `#${e.seq} / 起動ID ${e.boot_id} / 押下uptime ${e.uptime_ms} ms / ` +
+    `Host受信UTC ${e.received_utc || "不明"} / 取込UTC ${e.observed_utc} / ${e.fresh ? "新着" : "履歴"}`));
+  return h("details", {}, h("summary", {}, `${p.k3_count}件 · ${latest.fresh ? "新着" : "履歴"} · ` +
+    (latest.received_utc ? latest.received_utc + " UTC" : "Host受信時刻不明")),
+    p.limited ? h("div", {}, "重複排除の保持範囲外あり（件数は確定できた範囲のみ）") : "",
+    ...entries);
+}
+
 function drawNodes(st) {
   const rows = st.nodes.map((n) => {
     const p = n.ping, lastKind = p.last ? p.last.kind : null;
@@ -164,7 +199,14 @@ function drawNodes(st) {
       td(pingCell, "", `answered ${answered}, no answer ${p.noanswer} (late answers ${p.late}), rejected ${p.rejected}, ` +
          `not sent ${p.notsent}, unknown ${p.unknown}, skipped (busy) ${p.skipped}` +
          (p.last ? `\nlast: ${p.last.kind} ${p.last.detail}` : "")),
-      td(dsp));
+       td(dsp),
+       td(hasPresence(n) ? presenceText(n.presence) : "-", "", hasPresence(n) ? presenceTitle(n.presence) : ""),
+       td(hasPresence(n) ? (learningLabels[n.presence.learning] || "未受信") +
+         (n.presence.stale ? "（過去の報告）" : "") : "-"),
+       td(hasPresence(n) ? `距離 ${fmt(n.presence.distance_mm)} mm · 測定の古さ ` +
+         (n.presence.sample_age_ms == null ? "不明" : age(n.presence.sample_age_ms / 1000)) +
+         ` · snapshot ${age(n.presence.snapshot_age_s)}` : "-"),
+       td(hasPresence(n) ? k3Cell(n.presence) : "-"));
   });
   $("nodes").tBodies[0].replaceChildren(...rows);
 }
@@ -218,7 +260,9 @@ function drawDisplay(st) {
 function drawLog(st) {
   const box = $("log");
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-  box.replaceChildren(...st.events.map((e) => h("div", {}, utcShort(e.t) + " ", h("span", { class: "k k-" + e.kind }, e.kind), e.text)));
+  const labels = {presence: "在否・学習", "k3-received": "K3受信", k3: "K3データ"};
+  box.replaceChildren(...st.events.map((e) => h("div", {}, utcShort(e.t) + " ",
+    h("span", { class: "k k-" + e.kind }, labels[e.kind] || e.kind), e.text)));
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 

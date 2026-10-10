@@ -23,6 +23,7 @@ READ、SEND、APPROVE、REVOKE、TRANSFER、CONFIGURE、UPDATE_FIRMWAREをprinci
 
 ## Cursor/consumer
 GET events after省略は最古保持位置から返す。明示cursor不一致は410と現在journal_id。consumer ACKはmonotonic、存在するjournal+domain範囲、consumer所有者一致を検査。future ACKを拒否する。ACK応答は空events pageとacknowledged位置をnext_cursorに返す。SSEは通知でしかない。
+`MESSAGE_RECEIVED` の任意field `received_utc` は保存済み `events.created_utc_ms` のISO8601 UTC表現（millisecond精度、末尾Z）。Hostが受信をjournalに記録した時刻であり、nodeでの発生時刻、受領の物理時刻、厳密なCOMMIT完了時刻ではない。同一eventの再読出し/backlogとinbox dedupによる再配送で変えない。不明/nullなら省略し、read-nowで補わない。他のevent kindでは省略する。UTC逆行でeventを並べ替えたり新しい受信を推定したりせず、順序はcursorを使う。
 
 ## Operation queries/cancel
 GET unknown operationは404。expired query windowは410と区別する。cancel後にもlate APP_APPLIEDを追加可能で、その履歴を削除しない。別principalのID推測で情報を返さない。epoch close/cancel/consumer ACKは単調冪等であり、同じ要求の再実行で仕事を増やさない。

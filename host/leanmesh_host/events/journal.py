@@ -18,6 +18,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ..api.codec import U63_MAX, canonical_json, encode_b64
@@ -184,7 +185,7 @@ _EVENT_FIELDS = ("intent_hash", "assignment_generation", "payload_b64", "evidenc
 
 
 def _event_json(conn: sqlite3.Connection, journal: str, row: tuple[Any, ...]) -> dict[str, Any]:
-    seq, kind, domain, origin, message_id, payload_json = row
+    seq, kind, domain, origin, message_id, payload_json, created_utc_ms = row
     body = json.loads(payload_json)
     out: dict[str, Any] = {"cursor": f"{journal}:{seq}", "kind": kind, "domain_id": bytes(domain).hex()}
     if origin is not None:
@@ -192,6 +193,9 @@ def _event_json(conn: sqlite3.Connection, journal: str, row: tuple[Any, ...]) ->
     if message_id is not None:
         out["message_id"] = bytes(message_id).hex()
     out.update({k: body[k] for k in _EVENT_FIELDS if k in body})
+    if kind == "MESSAGE_RECEIVED" and created_utc_ms is not None:
+        out["received_utc"] = datetime.fromtimestamp(created_utc_ms / 1000, UTC).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
     return out
 
 
@@ -201,7 +205,7 @@ def read_page(conn: sqlite3.Connection, domain: bytes, after: str | None, limit:
     start = parse_cursor(conn, domain, after) if after is not None else 0
     journal = _journal_hex(conn)
     rows = conn.execute(
-        "SELECT sequence,kind,domain,origin,message_id,payload_json FROM events "
+        "SELECT sequence,kind,domain,origin,message_id,payload_json,created_utc_ms FROM events "
         "WHERE domain=? AND sequence>? ORDER BY sequence LIMIT ?", (domain, start, limit)).fetchall()
     events: list[dict[str, Any]] = []
     used = 0

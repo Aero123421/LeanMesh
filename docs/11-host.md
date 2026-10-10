@@ -24,6 +24,7 @@ rootやadapterの世代は接続path identityの一部。同じUSB port名だけ
 
 ## 5. 受信とcursor
 root→Host durable requestを読んだら、inbox dedup、event journal、consumer可視化を1commitしてからHOST_STORE_ACK。ACK lossなら同じIDを再受信して保存済みcommitを返す。event cursorは`journal_id:seq`、seqはSQLite AUTOINCREMENT、journal_idはDBのdurable128bitでプロセス再起動では変えない。
+`MESSAGE_RECEIVED.received_utc` は、保存済み `events.created_utc_ms` をmillisecond精度のISO8601 UTC文字列（末尾Z）で公開する。Hostが受信をjournalへ記録した時刻であり、物理的な発生時刻やCOMMIT完了の厳密な時刻ではない。再読出し・backlog・同じmessageの再配送でも元の値を保持し、GET時の現在時刻を入れない。不明/nullの場合はfieldを省略する。他のevent kindには追加しない。UTC時計の逆行は順序の証拠にせず、cursor順と区別する。
 consumerは自分のDBへ保存してからconsumer_ack。Host→KGとroot→Hostのcommitは分散transactionではないが、同じIDの再配送でat-least-onceを成立させる。保持下限より古いcursorは410 CURSOR_GAPと最古/最新を返し、黙って現在から続けない。
 
 ## 6. SQLite

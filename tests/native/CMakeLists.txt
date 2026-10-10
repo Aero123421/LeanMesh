@@ -114,5 +114,26 @@ lm_add_test(test_field SOURCES test_field.cpp ${LM_FIELD_NODE_MAIN}/field_proto.
             ${LM_BENCH_CONSOLE}/bench_line.c LABELS "unit;field")
 target_include_directories(test_field PRIVATE ${LM_FIELD_NODE_MAIN} ${LM_BENCH_CONSOLE}/include)
 target_sources(test_field PRIVATE ${LM_BENCH_CONSOLE}/bench_recovery.c)
+target_sources(test_field PRIVATE test_field_presence.cpp ${LM_FIELD_NODE_MAIN}/field_control.c
+               ${LM_FIELD_NODE_MAIN}/field_presence.cpp ${LM_FIELD_NODE_MAIN}/kg_presence/presence_v2.cpp)
+target_include_directories(test_field PRIVATE ${LM_FIELD_NODE_MAIN}/kg_presence/include)
+target_compile_definitions(test_field PRIVATE FIELD_TOF=1)
+lm_add_test(test_field_driver SOURCES test_field_driver.cpp ${LM_REPO_ROOT}/third_party/field_vl53l1x/VL53L1X.cpp
+            ${LM_FIELD_NODE_MAIN}/field_acquisition.cpp ${LM_FIELD_NODE_MAIN}/field_presence.cpp
+            ${LM_FIELD_NODE_MAIN}/field_control.c ${LM_FIELD_NODE_MAIN}/field_proto.c
+            ${LM_FIELD_NODE_MAIN}/kg_presence/presence_v2.cpp
+            LABELS "unit;field")
+target_include_directories(test_field_driver PRIVATE ${LM_REPO_ROOT}/third_party/field_vl53l1x
+                           ${LM_REPO_ROOT}/firmware/field_node/native ${LM_FIELD_NODE_MAIN}
+                           ${LM_FIELD_NODE_MAIN}/kg_presence/include)
+target_compile_definitions(test_field_driver PRIVATE CONFIG_FIELD_TOF=1 FIELD_TOF=1)
+lm_add_test(test_field_disabled SOURCES test_field_disabled.cpp ${LM_FIELD_NODE_MAIN}/field_presence.cpp LABELS "unit;field")
+target_include_directories(test_field_disabled PRIVATE ${LM_FIELD_NODE_MAIN})
+target_compile_definitions(test_field_disabled PRIVATE FIELD_TOF=0)
+find_program(LM_FIELD_NM nm REQUIRED)
+add_test(NAME test_field_disabled_symbols
+         COMMAND ${CMAKE_COMMAND} "-DNM=${LM_FIELD_NM}" "-DEXE=$<TARGET_FILE:test_field_disabled>"
+                 -P ${LM_REPO_ROOT}/firmware/field_node/native/check_no_sensor.cmake)
+set_tests_properties(test_field_disabled_symbols PROPERTIES LABELS "unit;field" TIMEOUT 30)
 # Sim-heavy suites that take over 120 s under ASan/UBSan on a CI runner (they finish in seconds otherwise).
 set_tests_properties(test_power test_channel test_group test_delivery PROPERTIES TIMEOUT 900)

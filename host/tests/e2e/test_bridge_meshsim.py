@@ -628,7 +628,7 @@ def test_nodes_report_parent_and_depth_and_follow_a_parent_change(meshsim: Calla
     try:
         dev = [b.device(i) for i in range(4)]
         b.start_host()
-        wait_for(lambda: b.status().get("root_connected"), 25, "root_connected")
+        b.await_root()  # USB ACTIVE precedes the committed domain/node mirror; wait for that evidence too.
         root = bytes(db_rows(b.host.db, "SELECT root_device FROM domains")[0][0]).hex()
 
         def shape(want: dict[int, tuple[int, int | None]]) -> bool:

@@ -1,8 +1,8 @@
 /*
  * BENCH / FIELD TEST ONLY: the autonomous node application of the field test kit; see field_app.h and
  * docs/field/protocol.md. One task (the main task): the loop waits at most 50 ms for a console line, drains the SDK's
- * event queue, and every second looks at the membership and the connectivity (join, LED, panel). Telemetry is due
- * every 10 s; nothing here polls faster than the 50 ms event drain and nothing runs inside an SDK callback.
+ * event queue, and every second looks at membership/connectivity. Display key/sensor I/O has its own
+ * bounded application task; this main task owns SDK sends and rendering. No work runs in SDK callbacks.
  *
  * Console after provisioning (nothing depends on it):
  *   info | status | field | join | ev [on|off] | safe | reboot
@@ -31,6 +31,9 @@
 #include "leanmesh_idf.h"
 #include "nvs.h"
 #include "sdkconfig.h"
+#if CONFIG_FIELD_HUB75
+#include "field_acquisition.h"
+#endif
 
 #if CONFIG_LEANMESH_PROFILE_ROOT
 #error "field_node is a relay or leaf image (the root is firmware/hil_node)"
@@ -115,6 +118,14 @@ static struct {
     uint32_t disp_seq;
     field_view_t shown;
     bool shown_valid;
+#if CONFIG_FIELD_HUB75
+    uint64_t application_boot_id;
+    field_presence_snapshot_t sensing;
+    field_acquisition_stats_t acquisition;
+    field_k3_t k3;
+    bool k3_cancel_requested;
+    field_snapshot_send_t snapshot_send;
+#endif
     /* node event log (protocol 3.4) */
     field_log_t log;
     uint64_t log_at_ms, radio_at_ms;
@@ -294,12 +305,21 @@ static field_view_t current_view(void) {
             v.parent_rssi_dbm = field_rssi8(d.parent_rssi_dbm, (d.validity_bits & LM_DIAGNOSTICS_VALID_PARENT_RSSI) != 0);
         }
     }
+#if CONFIG_FIELD_HUB75
+    const uint64_t now = now_ms();
+    v.feedback = field_feedback_select(&g.acquisition.learning_feedback, &g.k3, g.sensing.learning, now);
+    if (v.feedback == FIELD_FEEDBACK_LEARN_DONE || v.feedback == FIELD_FEEDBACK_LEARN_FAILED ||
+        v.feedback == FIELD_FEEDBACK_NO_SENSOR) v.feedback_token = g.acquisition.learning_feedback.token;
+    if (v.feedback == FIELD_FEEDBACK_SENDING || v.feedback == FIELD_FEEDBACK_LEARNING)
+        v.animation = (uint8_t)((now / 250) % 8);
+#endif
     return v;
 }
 
 static bool same_view(const field_view_t *a, const field_view_t *b) {
     return a->link == b->link && a->root_depth == b->root_depth && a->parent_rssi_dbm == b->parent_rssi_dbm &&
-           a->state_valid == b->state_valid && a->forbid == b->forbid;
+           a->state_valid == b->state_valid && a->forbid == b->forbid &&
+           a->feedback == b->feedback && a->animation == b->animation && a->feedback_token == b->feedback_token;
 }
 
 /* The panel comes up at boot and, when it did not, again every DISPLAY_INIT_RETRY_MS, DISPLAY_INIT_ATTEMPTS times in
@@ -324,6 +344,9 @@ static void draw_if_changed(uint64_t now) {
     g.render_fault = !field_display_show(&v);
     if (g.render_fault && !was_fault) log_two(FIELD_LOG_DISPLAY_FAULT, 2, 0);
     if (!g.render_fault) {
+#if CONFIG_FIELD_HUB75
+        if (v.feedback_token != 0) field_acquisition_feedback_shown(v.feedback_token, now_ms());
+#endif
         g.shown = v;
         g.shown_valid = true;
     } else {
@@ -332,6 +355,89 @@ static void draw_if_changed(uint64_t now) {
 }
 
 /* ---- join ---- */
+
+#if CONFIG_FIELD_HUB75
+/* Only main calls the SDK. Fixed one-operation slots; no per-sample sends.
+   A refused K3 admission is not sent. An accepted op is never recreated. */
+static lm_status_t display_send(uint16_t port, const uint8_t *wire, size_t bytes,
+                                uint64_t deadline_ms, lm_operation_id_t *op) {
+    const uint64_t now = now_ms();
+    if (now >= deadline_ms) return LM_STATUS_EXPIRED;
+    if (!g.was_reachable) return LM_STATUS_NO_ROUTE;
+    lm_root_time_t t = {.struct_size = sizeof t, .abi_version = LM_ABI_VERSION};
+    if (lm_root_time_get(g.ctx, &t) != LM_STATUS_OK || !t.valid) return LM_STATUS_TIME_UNCERTAIN;
+    const uint64_t remaining = deadline_ms - now;
+    if (t.earliest_root_ms > UINT64_MAX - remaining) return LM_STATUS_INVALID_ARGUMENT;
+    lm_send_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION};
+    r.destination.kind = LM_DEST_ROOT_APP;
+    r.app_port = port;
+    r.delivery = LM_RECEIVED;
+    r.storage = LM_VOLATILE;
+    r.queue_mode = LM_FIFO;
+    r.priority = LM_PRIORITY_NORMAL;
+    r.root_term = t.root_term;
+    r.expires_root_ms = t.earliest_root_ms + remaining;
+    return lm_send(g.ctx, &r, wire, bytes, op);
+}
+
+static void display_io_tick(uint64_t now) {
+    field_acquisition_latest(&g.sensing, &g.acquisition);
+    if (g.k3.operation != 0) {
+        lm_operation_t o = {.struct_size = sizeof o, .abi_version = LM_ABI_VERSION};
+        const bool known = lm_get_operation(g.ctx, g.k3.operation, &o) == LM_STATUS_OK;
+        field_k3_observe(&g.k3, known ? o.operation_id : g.k3.operation,
+            !known || o.phase == LM_PHASE_FINAL,
+            known && (o.evidence_bits & LM_EVIDENCE_SENT) != 0,
+            known && (o.evidence_bits & LM_EVIDENCE_END_RECEIVED) != 0, now);
+    }
+    if (g.k3.pending && now >= g.k3.deadline_ms && g.k3.operation != 0 && !g.k3_cancel_requested) {
+        (void)lm_cancel(g.ctx, g.k3.operation);
+        g.k3_cancel_requested = true;
+    }
+    field_k3_tick(&g.k3, now);
+    for (unsigned i = 0; i < FIELD_KEY_QUEUE_CAPACITY; ++i) {
+        field_key_event_t key;
+        if (!field_acquisition_key(&key)) break;
+        if (key.button != 3) continue; // K1 belongs to the acquisition owner
+        now = now_ms();
+        if (!field_k3_press(&g.k3, key.seq, key.at_ms, now)) continue;
+        g.k3_cancel_requested = false;
+        if (!g.k3.pending) continue; // expired in the bounded key queue
+        const field_key_notice_t notice = {g.application_boot_id, key.seq, (uint32_t)key.at_ms};
+        uint8_t wire[FIELD_KEY_BYTES];
+        lm_operation_id_t op = 0;
+        if (field_key_encode(&notice, wire) &&
+            display_send(FIELD_PORT_KEY, wire, sizeof wire, g.k3.deadline_ms, &op) == LM_STATUS_OK) {
+            field_k3_accepted(&g.k3, op);
+        } else {
+            field_k3_refused(&g.k3, now_ms());
+        }
+    }
+    now = now_ms();
+    g.sensing.boot_id = g.application_boot_id;
+    field_k3_snapshot(&g.k3, &g.sensing);
+    field_snapshot_send_t *t = &g.snapshot_send;
+    if (t->operation != 0) {
+        lm_operation_t o = {.struct_size = sizeof o, .abi_version = LM_ABI_VERSION};
+        if (lm_get_operation(g.ctx, t->operation, &o) != LM_STATUS_OK || o.phase == LM_PHASE_FINAL) t->operation = 0;
+        else if (now >= t->operation_until_ms) {
+            (void)lm_cancel(g.ctx, t->operation);
+            t->operation_until_ms = UINT64_MAX; // request once; retain slot until settled
+        }
+    }
+    if (g.was_reachable && field_snapshot_due(t, &g.sensing, now)) {
+        g.sensing.seq = t->seq + 1; // refused wrap at UINT32_MAX by due()
+        uint8_t wire[FIELD_PRESENCE_BYTES];
+        lm_operation_id_t op = 0;
+        if (!field_presence_encode(&g.sensing, wire) ||
+            display_send(FIELD_PORT_PRESENCE, wire, sizeof wire, now + 30000, &op) != LM_STATUS_OK) op = 0;
+        field_snapshot_attempt(t, &g.sensing, now, op);
+    }
+    draw_if_changed(now_ms());
+}
+#else
+static void display_io_tick(uint64_t now) { (void)now; }
+#endif
 
 static bool join_blocked(void) { return g.m.state == LM_MEMBER_REVOKED || g.m.state == LM_QUARANTINED; }
 
@@ -486,6 +592,9 @@ static void display_command(const lm_event_t *e, const uint8_t *p, size_t n) {
     field_view_t v = current_view();
     v.state_valid = true;
     v.forbid = cmd.state == FIELD_DISPLAY_FORBID;
+    v.feedback = FIELD_FEEDBACK_NONE; // commanded frame gets its own DMA evidence before APPLIED
+    v.animation = 0;
+    v.feedback_token = 0;
     display_try_init(now_ms()); /* a command is a reason to try a panel that is down (still at most once a minute) */
     if (!g.display_up || !field_display_show(&v)) {
         if (!g.render_fault) log_two(FIELD_LOG_DISPLAY_FAULT, 2, 0);
@@ -503,7 +612,7 @@ static void display_command(const lm_event_t *e, const uint8_t *p, size_t n) {
     g.shown_valid = true;
     ++g.display_cmds;
     if (!display_store()) say("FIELD display state not stored in NVS\n"); /* it is on the panel; a restart shows the old one */
-    report(e, LM_OUTCOME_APPLIED); /* the frame is on the panel */
+    report(e, LM_OUTCOME_APPLIED); /* DMA evidence for the commanded frame; physical LEDs are not measured */
 }
 
 static void on_message(const lm_event_t *e, size_t n) {
@@ -614,7 +723,14 @@ static void cmd_field(void) {
     lm_idf_radio_stats(&rs);
     bc_outf(" log_pending=%u log_dropped=%u log_next_seq=%u tx_done_max_ms=%u tx_late=%u tx_stall_waits=%u", (unsigned)g.log.count,
             (unsigned)g.log.dropped, (unsigned)g.log.next_seq, (unsigned)rs.tx_done_max_ms, (unsigned)rs.tx_late,
-            (unsigned)rs.tx_stall_waits);
+             (unsigned)rs.tx_stall_waits);
+#if CONFIG_FIELD_HUB75
+    bc_outf(" presence=%u learning=%u sensor_flags=%u distance=%u background=%u faults=%u keys_dropped=%u key_errors=%u sensor_errors=%u k3_seq=%u k3_result=%u k3_busy=%u k3_presses=%u learning_busy=%u",
+        g.sensing.presence, g.sensing.learning, g.sensing.flags, g.sensing.distance_mm, g.sensing.background_mm,
+        (unsigned)g.sensing.fault_bits, (unsigned)g.acquisition.key_dropped, (unsigned)g.acquisition.key_errors,
+        (unsigned)g.acquisition.sensor_errors, (unsigned)g.k3.seq, g.k3.result, (unsigned)g.k3.busy,
+        (unsigned)g.acquisition.k3_presses, (unsigned)g.acquisition.learning_busy);
+#endif
     bc_out("\n");
 }
 
@@ -722,6 +838,11 @@ void field_app_run(uint16_t boot_count) {
     /* The first join ask waits 0..2 s: boards powered on together do not all ask the root in the same instant (the root
        runs one handshake at a time). */
     g.join_at_ms = now_ms() + esp_random() % 2000u;
+#if CONFIG_FIELD_HUB75
+    do { esp_fill_random(&g.application_boot_id, sizeof g.application_boot_id); } while (g.application_boot_id == 0);
+    if (!field_acquisition_start()) say("FIELD acquisition task unavailable: keys/sensor unknown\n");
+    field_acquisition_latest(&g.sensing, &g.acquisition);
+#endif
     /* The panel comes after the SDK's workspace: if memory is short the panel fails (render fault), not the mesh. */
     display_try_init(now_ms());
     draw_if_changed(now_ms());
@@ -752,6 +873,7 @@ void field_app_run(uint16_t boot_count) {
             link_tick(now);
         }
         if (g.was_reachable && now >= g.tele_at_ms) telemetry_send(now);
+        display_io_tick(now);
         log_send(now);
         field_led_tick(now);
     }

@@ -40,6 +40,7 @@ from typing import Any
 from . import protocol as pr
 from .hostclient import HostClient, HostUnreachable, Reply, SendUnknown
 from .nodelog import NodeLogTrack, describe
+from .presence import PresenceTrack, receipt_utc
 from .recorder import Recorder, utc_text
 from .stats import PingTrack, TelemetryTrack
 from .topology import NodeView, build_tree, short_id
@@ -183,6 +184,7 @@ class FieldView:
         self.first_listed: dict[str, float] = {}
         self.tele: dict[str, TelemetryTrack] = {}
         self.nodelog: dict[str, NodeLogTrack] = {}
+        self.presence: dict[str, PresenceTrack] = {}
         self.ping: dict[str, PingTrack] = {}
         self.node_state: dict[str, str] = {}
         self.silent_noted: set[str] = set()
@@ -207,6 +209,8 @@ class FieldView:
         self.other_messages = 0
         self.bad_telemetry = 0
         self.bad_nodelog = 0
+        self.bad_presence = 0
+        self.bad_k3 = 0
         self._segments: deque[Segment] = deque()
         self._page_holds: set[str] = set()
         self._ack_lock = asyncio.Lock()
@@ -413,6 +417,8 @@ class FieldView:
         self.warn("gap", text)
         for t in self.tele.values():
             t.rebaseline()
+        for p in self.presence.values():
+            p.invalidate("journal_gap")
         self._segments.clear()
         journal, oldest = details.get("journal_id"), details.get("oldest_cursor")
         if journal and oldest:
@@ -434,6 +440,8 @@ class FieldView:
                 self._on_telemetry(ev, backlog)
             elif pr.event_app_port(ev) == pr.NODELOG_PORT:
                 self._on_nodelog(ev, backlog)
+            elif pr.event_app_port(ev) in (pr.PRESENCE_PORT, pr.K3_PORT):
+                self._on_presence(ev, backlog)
             else:
                 self.other_messages += 1
         elif kind == "OPERATION_UPDATE":
@@ -442,6 +450,8 @@ class FieldView:
         elif kind == "EVENT_GAP":
             for t in self.tele.values():
                 t.rebaseline()
+            for p in self.presence.values():
+                p.invalidate("journal_gap")
             self.note("gap", "EVENT_GAP: the Host dropped events it was not asked to keep; telemetry counts restart")
             self.warn("gap", "EVENT_GAP seen: some events are missing (see the event log)")
         else:
@@ -458,6 +468,7 @@ class FieldView:
             self.note("telemetry", f"unreadable telemetry from {self.name_of(device)}: {exc}", device)
             return
         track = self.tele.setdefault(device, TelemetryTrack())
+        self.presence.setdefault(device, PresenceTrack()).telemetry(t, receipt_utc(ev), self.utcnow(), backlog)
         was_lost = self.node_state.get(device) == "lost"
         before_lost = track.lost
         happened = track.feed(t, self.mono(), live=not backlog)
@@ -474,6 +485,46 @@ class FieldView:
         if was_lost:
             self.node_state[device] = "ok"
             self.note("back", f"{self.name_of(device)} sends telemetry again", device)
+
+    # ---- display presence and actual K3 reception ---------------------------------------------------------------
+    def _on_presence(self, ev: dict[str, Any], backlog: bool) -> None:
+        device = ev.get("origin", "")
+        is_snapshot = pr.event_app_port(ev) == pr.PRESENCE_PORT
+        stream = "presence" if is_snapshot else "k3"
+        now, received = self.utcnow(), receipt_utc(ev)
+        line = {"device": device, "name": self.name_of(device), "cursor": ev.get("cursor"),
+                "backlog": backlog, "payload_b64": ev.get("payload_b64"),
+                "received_utc": received.isoformat() if received else None, "observed_utc": utc_text(now)}
+        try:
+            payload = pr.event_payload(ev)
+            decoded = pr.decode_presence(payload) if is_snapshot else pr.decode_k3(payload)
+        except ValueError as exc:
+            if is_snapshot:
+                self.bad_presence += 1
+            else:
+                self.bad_k3 += 1
+            self.rec.log(stream, {**line, "error": str(exc)})
+            self.note(stream, f"{self.name_of(device)}: 在否/K3の不正な受信データ ({exc})", device)
+            return
+        track = self.presence.setdefault(device, PresenceTrack())
+        if is_snapshot:
+            disposition = track.snapshot(decoded, received, now, backlog)
+            self.rec.log(stream, {**line, "disposition": disposition, "snapshot": decoded.as_dict()})
+            if disposition in ("accepted", "new_boot"):
+                stale_text = "（過去の報告・現在不明）" if track.as_dict(now)["stale"] else ""
+                self.note("presence", f"{self.name_of(device)}: 在否報告 {('無効', '不明', '人なし', '人あり')[decoded.presence]}・"
+                          f"学習 {('未学習', '学習中', '完了', '失敗', 'センサーなし')[decoded.learning]}"
+                          + ("（履歴）" if backlog else stale_text), device)
+        else:
+            disposition, entry = track.k3(decoded, received, now, backlog)
+            self.rec.log(stream, {**line, "disposition": disposition, "press": decoded.as_dict(),
+                                  "estimated_press_utc": entry.get("estimated_press_utc"),
+                                  "fresh": entry.get("fresh", False)})
+            if disposition == "received":
+                time_text = entry["received_utc"] or "Host受信時刻不明"
+                self.note("k3-received", f"{self.name_of(device)}: K3受信 #{decoded.seq}・{time_text}"
+                          + ("（新着）" if entry["fresh"] else "（履歴・取込UTC " + utc_text(now) + "）"), device)
+        self._forget_stale_devices()
 
     # ---- node event log (§3.4) ----------------------------------------------------------------------------------
     def _on_nodelog(self, ev: dict[str, Any], backlog: bool) -> None:
@@ -1133,7 +1184,7 @@ class FieldView:
         """The per-node tables follow what the Host lists; a node that is not listed any more (revoked, replaced) is
         dropped, oldest first, once a table is beyond DEVICES_MAX (a Host holds at most 64 members)."""
         tables: list[dict[str, Any]] = [self.tele, self.ping, self.node_state, self.display, self.first_listed,
-                                        self.nodelog]
+                                        self.nodelog, self.presence]
         for table in tables:
             extra = len(table) - DEVICES_MAX
             if extra > 0:
@@ -1167,7 +1218,7 @@ class FieldView:
 
     # ---- the picture ----------------------------------------------------------------------------------------------
     def devices(self) -> list[str]:
-        return sorted(set(self.api_nodes) | {d for d, t in self.tele.items() if t.last is not None},
+        return sorted(set(self.api_nodes) | set(self.presence) | {d for d, t in self.tele.items() if t.last is not None},
                       key=lambda d: (self.name_of(d), d))
 
     def state_of(self, device: str) -> str:
@@ -1207,13 +1258,15 @@ class FieldView:
             "display_state": t.display_state if t else None, "display_seq": t.display_seq if t else None,
             "render_fault": t.render_fault if t else None, "ping": ping.as_dict(),
             **(self.nodelog.get(device) or NodeLogTrack()).as_dict(),
+            "presence": (self.presence.get(device) or PresenceTrack()).as_dict(self.utcnow()),
         }
 
     def snapshot(self) -> dict[str, Any]:
         rows = [self.node_row(d) for d in self.devices()]
         views = {r["device"]: NodeView(
             name=r["name"], role=r["role"], rssi=r["rssi_dbm"], loss_pct=r["recent_loss_pct"],
-            silent=r["state"] not in ("ok",), lost=r["state"] == "lost", depth=r["depth"]) for r in rows}
+            silent=r["state"] not in ("ok",), lost=r["state"] == "lost", depth=r["depth"],
+            presence=r["presence"]) for r in rows}
         tree = build_tree(list(self.api_nodes.values()), views, self.cfg.root_id, self.cfg.root_name)
         unlisted = [r["device"] for r in rows if r["state"] == "unlisted"]
         warnings = list(self.warnings.values())
@@ -1228,7 +1281,7 @@ class FieldView:
             "host": {**self.host, "requests": self.client.requests, "rate_limited": self.client.rate_limited,
                      "cursor": self.cursor, "backlog_events": self.backlog_events, "live_events": self.live_events,
                      "other_messages": self.other_messages, "bad_telemetry": self.bad_telemetry,
-                     "bad_nodelog": self.bad_nodelog},
+                     "bad_nodelog": self.bad_nodelog, "bad_presence": self.bad_presence, "bad_k3": self.bad_k3},
             "warnings": warnings, "tree": tree, "nodes": rows, "unlisted": unlisted,
             "events": list(self.log)[-200:], "ping": ps, "display": self.display,
             "display_nodes": [{"device": d, "name": self.name_of(d)} for d in self.display_nodes()],

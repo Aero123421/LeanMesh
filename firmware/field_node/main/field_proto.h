@@ -15,6 +15,31 @@ extern "C" {
 #define FIELD_PORT_PING 211u
 #define FIELD_PORT_DISPLAY 212u
 #define FIELD_PORT_LOG 213u
+#define FIELD_PORT_PRESENCE 214u
+#define FIELD_PORT_KEY 215u
+#define FIELD_PRESENCE_BYTES 44u
+#define FIELD_KEY_BYTES 20u
+
+enum { FIELD_PRESENCE_DISABLED, FIELD_PRESENCE_UNKNOWN, FIELD_PRESENCE_VACANT, FIELD_PRESENCE_OCCUPIED };
+enum { FIELD_LEARN_IDLE, FIELD_LEARN_RUNNING, FIELD_LEARN_DONE, FIELD_LEARN_FAILED, FIELD_LEARN_NO_SENSOR };
+enum { FIELD_K3_IDLE, FIELD_K3_SENDING, FIELD_K3_CONFIRMED, FIELD_K3_NOT_SENT, FIELD_K3_UNCONFIRMED };
+enum { FIELD_SENSOR_READY = 1, FIELD_BACKGROUND_VALID = 2, FIELD_KEYS_READY = 4 };
+typedef struct {
+    uint8_t presence, learning, flags;
+    uint64_t boot_id;
+    uint32_t seq, capture_ms;
+    uint16_t sample_age_ms, distance_mm, background_mm, noise_mm;
+    uint32_t learn_request, fault_bits, k3_seq;
+    uint8_t k3_result;
+} field_presence_snapshot_t;
+typedef struct {
+    uint64_t boot_id;
+    uint32_t seq, press_ms;
+} field_key_notice_t;
+bool field_presence_encode(const field_presence_snapshot_t *s, uint8_t out[FIELD_PRESENCE_BYTES]);
+bool field_presence_decode(const uint8_t *in, size_t n, field_presence_snapshot_t *s);
+bool field_key_encode(const field_key_notice_t *s, uint8_t out[FIELD_KEY_BYTES]);
+bool field_key_decode(const uint8_t *in, size_t n, field_key_notice_t *s);
 
 #define FIELD_PROTO_VERSION 1u
 #define FIELD_TELEMETRY_BYTES 44u

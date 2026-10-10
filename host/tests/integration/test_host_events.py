@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,69 @@ def test_inbox_commit_dedups_conflicts_and_refuses_when_full(tmp_path: Path) -> 
             h.db(lambda c: journal.ingest(c, h.hub.cfg, **{**args, "message_id": b"\x09" * 16}))
         assert full.value.http_status == 507
         assert h.db(lambda c: c.execute("SELECT COUNT(*) FROM inbox").fetchone()[0]) == 3
+
+
+def test_received_utc_is_persisted_stable_on_reads_redelivery_backlog_and_restart(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1_791_547_200_123]
+    monkeypatch.setattr(journal, "now_ms", lambda: clock[0])
+    args = dict(domain=bytes.fromhex(DOMAIN), origin=bytes.fromhex(NODE), assignment_generation=3,
+                message_id=b"\x05" * 16, intent_hash=b"\x06" * 32, payload=b"reading",
+                assurance={"kind": "ROOT_DELIVERED", "assurance": "END_VERIFIED"})
+    settings = make_settings(tmp_path)
+    with running(settings) as h:
+        first = h.db(lambda c: journal.ingest(c, h.hub.cfg, **args))
+        persisted = h.db(lambda c: c.execute("SELECT created_utc_ms FROM events WHERE kind='MESSAGE_RECEIVED'")
+                         .fetchone()[0])
+        expected = datetime.fromtimestamp(persisted / 1000, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        page = h.get("/v1/events", domain_id=DOMAIN)
+        check("read_events", page)  # response must match the normative Event schema
+        original = page.json()["events"][0]
+        assert original["received_utc"] == expected
+        clock[0] += 120_000  # read time and redelivery time differ from the persisted reception
+        assert h.get("/v1/events", domain_id=DOMAIN).json()["events"] == [original]
+        again = h.db(lambda c: journal.ingest(c, h.hub.cfg, **args))
+        assert again.duplicate and again.cursor == first.cursor
+        jid = first.cursor.partition(":")[0]
+        backlog = h.get("/v1/events", domain_id=DOMAIN, after=f"{jid}:0")
+        check("read_events", backlog)
+        assert backlog.json()["events"] == [original]
+        assert h.db(lambda c: c.execute("SELECT count(*) FROM inbox").fetchone()[0]) == 1
+    with running(settings, domain=False) as h:
+        replay = h.get("/v1/events", domain_id=DOMAIN)
+        check("read_events", replay)
+        assert replay.json()["events"] == [original]
+        assert replay.json()["events"][0]["received_utc"] == expected
+
+
+def test_received_utc_keeps_clock_reversal_and_is_only_on_messages(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1_791_547_200_123]
+    monkeypatch.setattr(journal, "now_ms", lambda: clock[0])
+    args = dict(domain=bytes.fromhex(DOMAIN), origin=bytes.fromhex(NODE), assignment_generation=3,
+                message_id=b"\x05" * 16, intent_hash=b"\x06" * 32, payload=b"reading",
+                assurance={"kind": "ROOT_DELIVERED", "assurance": "END_VERIFIED"})
+    with running(make_settings(tmp_path)) as h:
+        h.db(lambda c: journal.ingest(c, h.hub.cfg, **args))
+        clock[0] -= 1000
+        h.db(lambda c: journal.ingest(c, h.hub.cfg, **{**args, "message_id": b"\x07" * 16}))
+        h.db(lambda c: journal.append(c, h.hub.cfg, bytes.fromhex(DOMAIN), "NOTE", False, {}))
+        page = h.get("/v1/events", domain_id=DOMAIN)
+        check("read_events", page)
+        first, second, other = page.json()["events"]
+        assert first["received_utc"] == "2026-10-09T12:00:00.123Z"
+        assert second["received_utc"] == "2026-10-09T11:59:59.123Z"
+        assert int(first["cursor"].rpartition(":")[2]) < int(second["cursor"].rpartition(":")[2])
+        assert "received_utc" not in other
+
+
+def test_unknown_message_recorded_time_is_omitted_not_replaced_by_now(tmp_path: Path) -> None:
+    with running(make_settings(tmp_path)) as h:
+        # The current DB column is NOT NULL; exercise the contract's unknown-time serialization
+        # without creating a fake persisted timestamp or changing the schema.
+        row = (1, "MESSAGE_RECEIVED", bytes.fromhex(DOMAIN), bytes.fromhex(NODE), b"\x05" * 16, "{}", None)
+        ev = h.db(lambda c: journal._event_json(c, "00" * 16, row))
+        assert "received_utc" not in ev
 
 
 @pytest.mark.scenario("H05")

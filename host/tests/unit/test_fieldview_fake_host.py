@@ -313,7 +313,7 @@ def test_a_display_that_cannot_draw_answers_rejected(fake: FakeHost, tmp_path: P
     async def scenario() -> None:
         async with view(fake, tmp_path) as fv:
             telemetry(fake, C, 1, role=3)
-            await until(lambda: fv.display_nodes() == [C], "display")
+            await until(lambda: fv.display_nodes() == [C] and not fv._backlog, "display and live-event phase")
             await fv.send_display(C, "USABLE")
             await until(lambda: fv.display[C]["result"] == "rejected", "REJECTED", 5)
             assert fv.display[C]["arrived"] is True and fv.display[C]["drawn"] is False
@@ -801,7 +801,7 @@ def test_an_operation_given_up_on_is_still_read_when_the_host_reports_it_later(f
 
     async def scenario() -> None:
         async with view(fake, tmp_path) as fv:
-            await until(lambda: fv.active_nodes(), "node")
+            await until(lambda: fv.active_nodes() and not fv._backlog, "node and live-event phase")
             rnd = await fv.ping_round(3.0)
             (p,) = fv.pending.values()
             p.deadline -= 20.0                                      # the safety net gives up (deadline + 8 s have passed)

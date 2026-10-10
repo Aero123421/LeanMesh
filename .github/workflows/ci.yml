@@ -280,7 +280,11 @@ jobs:
           scripts/field.sh build leaf esp32s3
           scripts/field.sh build relay esp32s3
           scripts/field.sh build display esp32s3
+          scripts/field.sh build display-tof esp32s3
           scripts/hil.sh build root esp32s3
+      - name: field XIAO C6 relay (sensor-free)
+        if: matrix.target == 'esp32c6'
+        run: scripts/field.sh build relay esp32c6
       - name: budget report (SoC compiler sizeof, map, image diff; a report, not a gate)
         run: |
           . "$IDF_PATH/export.sh" >/dev/null

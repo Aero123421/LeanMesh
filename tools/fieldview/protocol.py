@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import base64
 import struct
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 TELEMETRY_PORT, PING_PORT, DISPLAY_PORT, NODELOG_PORT = 210, 211, 212, 213
+PRESENCE_PORT, K3_PORT = 214, 215
 TELEMETRY_LEN = 44
 # version role chip flags | seq uptime | boot reset depth rssi reserved | interval | tx rx rf busy heap display_seq
 _TELEMETRY = struct.Struct(">BBBBIIHBBbBHIIIIII")
@@ -101,6 +102,77 @@ def encode_telemetry(*, role: int = 1, chip: int = 1, flags: int = 0, seq: int =
     """The node's side of §3.1, for tests and the fake Host (raw values: 0xFF / -128 / 0xFFFFFFFF mean unknown)."""
     return _TELEMETRY.pack(1, role, chip, flags, seq, uptime_s, boot_count, reset_reason, depth, rssi, 0,
                            interval_s, tx, rx, rf, busy, heap, display_seq)
+
+
+# ---- display presence (docs/field/presence.md, approved version 1) ----------------------------------------------
+
+_PRESENCE = struct.Struct(">BBBBQIIHHHHIIIB3s")
+_K3 = struct.Struct(">BBHQII")
+assert _PRESENCE.size == 44 and _K3.size == 20
+PRESENCE_STATES = ("disabled", "unknown", "vacant", "occupied")
+LEARNING_STATES = ("unlearned", "running", "done", "failed", "no_sensor")
+K3_RESULTS = ("idle", "sending", "confirmed", "not_sent", "unconfirmed")
+
+
+@dataclass(frozen=True)
+class PresenceSnapshot:
+    presence: int
+    learning: int
+    flags: int
+    boot_id: int
+    seq: int
+    uptime_ms: int
+    sample_age_ms: int | None
+    distance_mm: int | None
+    background_mm: int | None
+    noise_mm: int
+    learning_request: int
+    faults: int
+    last_k3_seq: int
+    k3_result: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "boot_id": f"{self.boot_id:016x}"}
+
+
+@dataclass(frozen=True)
+class K3Press:
+    boot_id: int
+    seq: int
+    uptime_ms: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "boot_id": f"{self.boot_id:016x}"}
+
+
+def decode_presence(data: bytes) -> PresenceSnapshot:
+    if len(data) != 44:
+        raise ValueError(f"presence is {len(data)} bytes, expected 44")
+    (version, presence, learning, flags, boot, seq, uptime, age, distance, background, noise,
+     request, faults, press, result, reserved) = _PRESENCE.unpack(data)
+    if version != 1 or presence > 3 or learning > 4 or result > 4:
+        raise ValueError("unknown presence version/status")
+    if flags & ~7 or faults & ~7 or reserved != b"\0\0\0":
+        raise ValueError("undefined presence flags/faults or nonzero reserved bytes")
+    if not boot or not seq:
+        raise ValueError("presence boot ID and sequence must be nonzero")
+    for distance_value in (distance, background):
+        if distance_value != 65535 and not 100 <= distance_value <= 4000:
+            raise ValueError("distance/background outside 100..4000 mm")
+    if background == 65535 and noise != 0:
+        raise ValueError("unlearned background must have zero noise")
+    return PresenceSnapshot(presence, learning, flags, boot, seq, uptime,
+                            None if age == 65535 else age, None if distance == 65535 else distance,
+                            None if background == 65535 else background, noise, request, faults, press, result)
+
+
+def decode_k3(data: bytes) -> K3Press:
+    if len(data) != 20:
+        raise ValueError(f"K3 is {len(data)} bytes, expected 20")
+    version, button, reserved, boot, seq, uptime = _K3.unpack(data)
+    if version != 1 or button != 3 or reserved or not boot or not seq:
+        raise ValueError("invalid K3 version/button/reserved/boot ID/sequence")
+    return K3Press(boot, seq, uptime)
 
 
 # ---- node event log (§3.4) --------------------------------------------------------------------------------------

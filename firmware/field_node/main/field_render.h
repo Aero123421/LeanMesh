@@ -26,12 +26,21 @@ typedef enum {
     FIELD_LINK_REVOKED,   /* revoked / quarantined: the node stops asking: "REVOKED", blue bar */
 } field_link_t;
 
+typedef enum {
+    FIELD_FEEDBACK_NONE, FIELD_FEEDBACK_LEARNING, FIELD_FEEDBACK_LEARN_DONE,
+    FIELD_FEEDBACK_LEARN_FAILED, FIELD_FEEDBACK_NO_SENSOR, FIELD_FEEDBACK_SENDING,
+    FIELD_FEEDBACK_CONFIRMED, FIELD_FEEDBACK_NOT_SENT, FIELD_FEEDBACK_UNCONFIRMED
+} field_feedback_t;
+
 typedef struct {
     field_link_t link;
     uint8_t root_depth; /* 0xFF unknown */
     int8_t parent_rssi_dbm; /* -128 unknown */
     bool state_valid;   /* a display state is known; else the main area stays blank */
     bool forbid;        /* FORBID (red, 使用禁止) else USABLE (green, 使用可) */
+    field_feedback_t feedback;
+    uint8_t animation;  /* 250ms animation phase; no mesh bar effects */
+    uint32_t feedback_token; /* retained learning result carried by this frame; 0 otherwise */
 } field_view_t;
 
 /* The status line text (at most 11 characters plus NUL): "H2 -67", "H2 --", "JOIN", "LOST", "REVOKED". */

@@ -45,6 +45,7 @@ class NodeView:
     silent: bool = False             # no live telemetry (never seen, or lost)
     lost: bool = False               # telemetry age beyond 3 intervals after having been seen
     depth: int | None = None
+    presence: dict[str, Any] | None = None
 
 
 def _leaf(device: str, item: dict[str, Any] | None, view: NodeView | None) -> dict[str, Any]:
@@ -56,6 +57,7 @@ def _leaf(device: str, item: dict[str, Any] | None, view: NodeView | None) -> di
         "membership": (item or {}).get("membership"), "connectivity": (item or {}).get("connectivity"),
         "listed": item is not None, "silent": v.silent, "lost": v.lost, "rssi": v.rssi, "loss_pct": v.loss_pct,
         "quality": link_quality(v.rssi, v.loss_pct, v.silent), "children": [],
+        "presence": v.presence,
     }
 
 

@@ -28,7 +28,7 @@ All nodes run ALWAYS_RX (no sleep) during field tests.
 - The root is PREAPPROVED (`hil.py policy PREAPPROVED`); each board's ExpectedSet page is installed through the Host
   (`hil.py expected`). No approval step in the field.
 - In the field: power on. A provisioned node that is not an ACTIVE member asks `lm_join(NEW)` by itself and keeps asking
-  (backoff 5, 10, 20, 40, 60, 60 ... s) until it is ACTIVE; an ACTIVE member re-attaches by the SDK itself. A node that
+  (backoff 2, 4, 8, 15, 20, 20 ... s) until it is ACTIVE; an ACTIVE member re-attaches by the SDK itself. A node that
   is REVOKED stops asking. Mesh formation (parent choice, relaying, repair) is the SDK's.
 
 ## 3. Application messages
@@ -137,6 +137,12 @@ A failed radio recovery is kept in RTC before reboot and re-emitted as RADIO_FAU
 
 Unknown types are skipped by `len`. fieldview writes every record to `nodelog.ndjson` and shows the important ones
 (BOOT with its cause, MEMBER / REACHABLE with the time since boot, UNREACHABLE, RADIO with a late completion) in its log.
+
+### 3.5 Display sensor/key status and K3 notification, app_ports 214 / 215
+
+The single-S3 display's TOF400C detection, K1 explicit background learning, K3 receipt-driven animation, binary layouts,
+bounded queues, wiring and browser semantics are specified in [presence.md](presence.md). These are field application
+messages, not new SDK core features. Sensor-disabled panels never report vacant; the bottom mesh status bar is unchanged.
 
 ## 4. Panel (64 x 32)
 
