@@ -296,6 +296,18 @@ def ndjson(path: Path) -> list[dict]:
     return [json.loads(x) for x in path.read_text().splitlines()]
 
 
+def test_the_sdk_debug_line_is_recorded_as_text_and_is_not_an_unknown_message(tmp_path: Path) -> None:
+    fv, rec_ = make_engine(tmp_path, [100.0])
+    text = "mesh=4 step=0 reg=1 attach_fail=3 | end start=5 ok=1 fail=4 | cand=7728@1/n1/rf0/f2/-89w 6fc8@3/n2/rf0/f0/-52 "
+    fv._on_event(event(DEV["b"], text.encode(), 1, port=pr.DEBUG_PORT), backlog=False)
+    fv._on_event(event(DEV["b"], b"\xff\xfecut", 2, port=pr.DEBUG_PORT), backlog=True)  # never refused for its bytes
+    assert fv.other_messages == 0
+    rec_.close()
+    lines = ndjson(tmp_path / "rec" / "debug.ndjson")
+    assert [(x["name"], x["backlog"], x["cursor"]) for x in lines] == [("display-2", False, "j:1"), ("display-2", True, "j:2")]
+    assert lines[0]["text"] == text and lines[1]["text"].endswith("cut")
+
+
 def test_records_become_nodelog_lines_events_row_and_summary(tmp_path: Path) -> None:
     clock = [100.0]
     fv, rec_ = make_engine(tmp_path, clock)

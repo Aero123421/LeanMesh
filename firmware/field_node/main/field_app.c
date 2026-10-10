@@ -128,7 +128,7 @@ static struct {
 #endif
     /* node event log (protocol 3.4) */
     field_log_t log;
-    uint64_t log_at_ms, radio_at_ms;
+    uint64_t log_at_ms, radio_at_ms, debug_at_ms;
     bool was_member, time_valid, fault_halted;
     uint8_t last_depth;
     lm_idf_radio_stats_t radio_logged;
@@ -222,6 +222,31 @@ static void log_send(uint64_t now) {
     lm_operation_id_t op = 0;
     if (lm_send(g.ctx, &r, buf, n, &op) == LM_STATUS_OK) field_log_consume(&g.log, taken); /* else: kept for the next try */
     g.log_at_ms = now + FIELD_LOG_INTERVAL_MS;
+}
+
+/* The SDK's own counters (handshakes, end sessions, attach failures, the candidates with their RSSI) as the text of the
+   console `debug` command: right after the node became REACHABLE - they are counts since boot, so this one message tells
+   what the node went through while it had no path - and every 5 min after that. BULK, best effort (protocol 3.6). */
+static void debug_send(uint64_t now) {
+    if (!g.was_reachable || now < g.debug_at_ms) return;
+    static char text[FIELD_DEBUG_MAX];
+    lm_root_time_t t = {.struct_size = sizeof t, .abi_version = LM_ABI_VERSION};
+    if (lmb_debug(g.ctx, text, sizeof text) != LM_STATUS_OK || lm_root_time_get(g.ctx, &t) != LM_STATUS_OK || !t.valid) {
+        g.debug_at_ms = now + 2000;
+        return;
+    }
+    lm_send_request_t r = {.struct_size = sizeof r, .abi_version = LM_ABI_VERSION};
+    r.destination.kind = LM_DEST_ROOT_APP;
+    r.app_port = FIELD_PORT_DEBUG;
+    r.delivery = LM_BEST_EFFORT;
+    r.storage = LM_VOLATILE;
+    r.priority = LM_PRIORITY_BULK;
+    r.queue_mode = LM_FIFO;
+    r.root_term = t.root_term;
+    r.expires_root_ms = t.earliest_root_ms + FIELD_TELEMETRY_DEADLINE_MS;
+    lm_operation_id_t op = 0;
+    const lm_status_t st = lm_send(g.ctx, &r, (const uint8_t *)text, strnlen(text, sizeof text), &op);
+    g.debug_at_ms = now + (st == LM_STATUS_OK ? FIELD_DEBUG_INTERVAL_MS : 2000u);
 }
 
 /* ---- display state in NVS ---- */
@@ -577,6 +602,7 @@ static void link_tick(uint64_t now) {
     g.time_valid = time_valid;
     log_radio(now);
     if (reachable && !g.was_reachable) g.tele_at_ms = now; /* the first telemetry right after REACHABLE (also after a loss) */
+    if (reachable && !g.was_reachable) g.debug_at_ms = now + 3000; /* and what the SDK counted meanwhile, behind it */
     g.was_reachable = reachable;
 }
 
@@ -875,6 +901,7 @@ void field_app_run(uint16_t boot_count) {
         if (g.was_reachable && now >= g.tele_at_ms) telemetry_send(now);
         display_io_tick(now);
         log_send(now);
+        debug_send(now);
         field_led_tick(now);
     }
 }

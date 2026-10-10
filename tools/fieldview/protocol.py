@@ -11,6 +11,7 @@ from typing import Any
 
 TELEMETRY_PORT, PING_PORT, DISPLAY_PORT, NODELOG_PORT = 210, 211, 212, 213
 PRESENCE_PORT, K3_PORT = 214, 215
+DEBUG_PORT = 216  # the SDK debug line as text (docs/field/protocol.md 3.6)
 TELEMETRY_LEN = 44
 # version role chip flags | seq uptime | boot reset depth rssi reserved | interval | tx rx rf busy heap display_seq
 _TELEMETRY = struct.Struct(">BBBBIIHBBbBHIIIIII")

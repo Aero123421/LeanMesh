@@ -144,6 +144,19 @@ The single-S3 display's TOF400C detection, K1 explicit background learning, K3 r
 bounded queues, wiring and browser semantics are specified in [presence.md](presence.md). These are field application
 messages, not new SDK core features. Sensor-disabled panels never report vacant; the bottom mesh status bar is unchanged.
 
+### 3.6 SDK debug line (node -> root application), app_port 216
+
+Why: on 2026-10-10 two boards had no path for 5 to 8 minutes and nothing told why: which neighbours they heard and how
+strong, how many handshakes and end sessions failed, how often an attach was given up. The SDK counts all of this (the
+console `debug` command, `lmb_debug`), but in the field no board has a console.
+
+The node sends that line as UTF-8 text, at most 480 bytes, 3 s after it became REACHABLE and every 5 min while it is.
+The counters are counts since boot, so the first message after a loss covers the time without a path. Delivery
+`LM_BEST_EFFORT`, `LM_VOLATILE`, priority BULK, deadline 30 s. Nothing is kept when it cannot be sent. Candidates are
+written `<mac4>@<address>/n<depth entries>/rf<streak>/f<fails>/<rssi dBm, 0 unknown>[w][*]`; `w` marks a weak candidate
+(docs/04 section 6), `*` the one being tried. fieldview writes the text to `debug.ndjson`; the Host keeps the message in
+its event journal like any other.
+
 ## 4. Panel (64 x 32)
 
 - rows 0..7: status line in a 5x7 font: hop count and parent RSSI (`H2 -67`), or `JOIN` / `LOST` / `REVOKED`

@@ -17,6 +17,9 @@ extern "C" {
 #define FIELD_PORT_LOG 213u
 #define FIELD_PORT_PRESENCE 214u
 #define FIELD_PORT_KEY 215u
+#define FIELD_PORT_DEBUG 216u /* the SDK debug line as text (protocol 3.6) */
+#define FIELD_DEBUG_MAX 480u
+#define FIELD_DEBUG_INTERVAL_MS 300000u
 #define FIELD_PRESENCE_BYTES 44u
 #define FIELD_KEY_BYTES 20u
 

@@ -449,11 +449,12 @@ lm_status_t lmb_debug(lm_context_t *ctx, char *out, size_t cap) {
         n += std::snprintf(out + n, cap - static_cast<size_t>(n), "| cand=");
     }
     e.mesh().for_each_candidate([&](const MacAddr &mac, uint16_t addr, uint8_t entries, uint8_t streak, uint8_t fails,
-                                    bool target) {
-        if (n > 0 && static_cast<size_t>(n) < cap) {
-            n += std::snprintf(out + n, cap - static_cast<size_t>(n), "%02x%02x@%u/n%u/rf%u/f%u%s ", mac.bytes[4],
+                                    bool target, int rssi_dbm, bool weak) {
+        if (n > 0 && static_cast<size_t>(n) < cap) { // rssi 0 = unknown; w = weak (tried last, never moved to)
+            n += std::snprintf(out + n, cap - static_cast<size_t>(n), "%02x%02x@%u/n%u/rf%u/f%u/%d%s%s ", mac.bytes[4],
                                mac.bytes[5], static_cast<unsigned>(addr), static_cast<unsigned>(entries),
-                               static_cast<unsigned>(streak), static_cast<unsigned>(fails), target ? "*" : "");
+                               static_cast<unsigned>(streak), static_cast<unsigned>(fails), rssi_dbm, weak ? "w" : "",
+                               target ? "*" : "");
         }
     });
     return to_abi(Status::Ok);

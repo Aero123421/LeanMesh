@@ -162,12 +162,14 @@ class Mesh {
     [[nodiscard]] const uint16_t *path() const { return path_.data(); }
     [[nodiscard]] PathRevision path_revision() const { return PathRevision{rev_}; }
     [[nodiscard]] MonoTime ready_since() const { return ready_since_; }
-    // Bench diagnostics (leanmesh_bench.h): f(mac, address, depth_entries, rf_streak, fails, is_attach_target).
+    // Bench diagnostics (leanmesh_bench.h): f(mac, address, depth_entries, rf_streak, fails, is_attach_target,
+    // rssi_dbm (0: unknown), weak).
     template <class F> void for_each_candidate(F &&f) const {
         for (std::size_t i = 0; i < cands_.size(); ++i) {
             const Cand &c = cands_[i];
             if (c.used) {
-                f(c.mac, c.addr, c.n, c.rf_streak, c.fails, att_.cand == static_cast<int>(i));
+                f(c.mac, c.addr, c.n, c.rf_streak, c.fails, att_.cand == static_cast<int>(i),
+                  c.rssi_valid ? static_cast<int>(c.rssi_dbm) : 0, weak(c));
             }
         }
     }

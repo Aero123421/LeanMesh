@@ -442,6 +442,10 @@ class FieldView:
                 self._on_nodelog(ev, backlog)
             elif pr.event_app_port(ev) in (pr.PRESENCE_PORT, pr.K3_PORT):
                 self._on_presence(ev, backlog)
+            elif pr.event_app_port(ev) == pr.DEBUG_PORT:
+                device = ev.get("origin", "")
+                self.rec.log("debug", {"device": device, "name": self.name_of(device), "cursor": ev.get("cursor"),
+                                       "backlog": backlog, "text": pr.event_payload(ev).decode("utf-8", "replace")})
             else:
                 self.other_messages += 1
         elif kind == "OPERATION_UPDATE":
