@@ -38,7 +38,8 @@
     "hello_max_ms": 32000,
     "active_parent_silence_ms": 5000,
     "idle_liveness_multiplier": 3,
-    "weak_link_rssi_below_neg_dbm": 80
+    "weak_link_rssi_below_neg_dbm": 80,
+    "weak_link_margin_db": 6
   },
   "channel": {
     "automatic": true,

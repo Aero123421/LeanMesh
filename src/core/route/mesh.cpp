@@ -420,8 +420,19 @@ bool Mesh::linked(const Cand &c) const {
     return n != nullptr && n->cur.active && n->address.value() == c.addr;
 }
 
+// Below the floor and clearly below the best candidate heard: both, so that a site where every link is below the
+// floor still tells its usable links from its faint ones, and a lone candidate is never weak.
 bool Mesh::weak(const Cand &c) const {
-    return c.rssi_valid && c.rssi_dbm < -static_cast<int>(gen::defaults::routing::weak_link_rssi_below_neg_dbm);
+    if (!c.rssi_valid || c.rssi_dbm >= -static_cast<int>(gen::defaults::routing::weak_link_rssi_below_neg_dbm)) {
+        return false;
+    }
+    int best = INT8_MIN;
+    for (const Cand &o : cands_) {
+        if (o.used && o.rssi_valid && o.n != 0) {
+            best = std::max<int>(best, o.rssi_dbm);
+        }
+    }
+    return c.rssi_dbm + static_cast<int>(gen::defaults::routing::weak_link_margin_db) < best;
 }
 
 uint32_t Mesh::score_of(const Cand &c, MonoTime now) const {
@@ -565,6 +576,14 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
             lose_path(now); // a relay kept its link session: register again through it
         }
         return;
+    }
+    // The candidate being tried became a weak one (a better one is heard now) and has no link yet: the order of the
+    // first beacons must not decide. Its handshake ends by itself; the search picks again.
+    if (state_ == State::Attach && !att_.switching && att_.step == Step::Link && att_.cand >= 0 &&
+        att_.cand != index_of(c) && weak(cands_[static_cast<std::size_t>(att_.cand)]) && !weak(*c)) {
+        att_ = Attach{};
+        state_ = State::Search;
+        attempt_at_ = now;
     }
     if (fresh && !weak(*c) && (state_ == State::Search || state_ == State::Listen)) { // a weak one waits for the others
         // A candidate that is ready: no reason to wait for the end of the listen. A beacon is unauthenticated: it may

@@ -1103,6 +1103,55 @@ LM_TEST("FIELD sim: a candidate heard below the weak-link floor is tried last an
     LM_CHECK_EQ(elsewhere_ms, 0u);
 }
 
+// The building of 2026-10-10 as a protocol bench (numbers a test sets, not an RF model): the root on floor 1, boards
+// on floors 3, 5 and 7. Two floors apart is a usable but weak, lossy link; four floors apart is faint (beacons and
+// the odd short frame); six floors apart is nothing.
+LM_TEST("FIELD sim: root and three boards two floors apart each form a chain and keep delivering") {
+    MNet n(4); // 0 root (1F), 1 (3F), 2 (5F), 3 (7F)
+    n.world.options().tx_failed_extra_us = 400'000;
+    auto link_at = [&](unsigned a, unsigned b, int16_t dbm, uint16_t loss_permille) {
+        LinkParams p;
+        p.up = true;
+        p.rssi_valid = true;
+        p.rssi_dbm = dbm;
+        p.loss_permille = loss_permille;
+        n.world.set_link(static_cast<uint16_t>(a), static_cast<uint16_t>(b), p);
+    };
+    for (unsigned i = 0; i < 3; ++i) {
+        link_at(i, i + 1, -84, 50);
+    }
+    link_at(0, 2, -91, 600);
+    link_at(1, 3, -91, 600);
+    n.boot_all();
+    n.set_time();
+    const bool formed = n.until([&] { return n.formed(); }, 300'000, 20);
+    if (!formed) {
+        n.dump();
+    }
+    LM_CHECK(formed);
+    const uint64_t t_formed = (n.world.now_us() - n.t_boot_us) / 1000;
+    unsigned off_chain_ms = 0;
+    unsigned sent = 0;
+    unsigned received = 0;
+    for (unsigned round = 0; round < 60; ++round) { // 10 min: the top board reports to the root every 10 s
+        n.set_time();
+        const auto s = n.send(3, 0, LM_RECEIVED, payload_of(static_cast<uint8_t>(round), 24), 8000);
+        sent += s.st == LM_STATUS_OK ? 1U : 0U;
+        for (unsigned t = 0; t < 100; ++t) {
+            n.run_ms(100);
+            off_chain_ms += n.formed() ? 0U : 100U;
+        }
+        received += s.st == LM_STATUS_OK && (n.op(3, s.op).evidence_bits & end_received) != 0 ? 1U : 0U;
+        Received r;
+        while (n.pop_message(0, r)) {
+        }
+    }
+    std::printf("  building: formed in %llu ms; 10 min: off the chain %u ms, %u/%u reports received\n",
+                static_cast<unsigned long long>(t_formed), off_chain_ms, received, sent);
+    LM_CHECK(off_chain_ms <= 30'000);
+    LM_CHECK(received >= 57u);
+}
+
 LM_TEST("FIELD sim: a weak candidate that is the only one is used") {
     MNet n(2);
     LinkParams p;
