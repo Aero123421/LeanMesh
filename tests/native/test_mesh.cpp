@@ -1010,6 +1010,67 @@ LM_TEST("FIELD sim: a medium without RSSI leaves parent RSSI unknown even in a f
     LM_CHECK(!parent_rssi(n, 2).valid);
 }
 
+namespace {
+// A link on which the neighbour session forms and probes pass, but no hop frame gets through (docs/04 §3).
+LinkParams faint_link() {
+    LinkParams p;
+    p.up = true;
+    p.drop_kinds = static_cast<uint16_t>((1U << static_cast<unsigned>(wire::FrameKind::Data)) |
+                                         (1U << static_cast<unsigned>(wire::FrameKind::Control)));
+    return p;
+}
+} // namespace
+
+// 2026-10-10 field (and the bench the same morning: 15 end sessions failed, attach_failed 0): a board that hears the
+// root faintly tried it for ever and never tried the relay next to it.
+LM_TEST("FIELD sim: a candidate whose end session never completes is given up, the relay next to it is used") {
+    MNet n(3); // 0 root - 1 relay - 2 node, and a faint direct link root - node
+    n.world.set_link(0, 2, faint_link());
+    n.boot_all();
+    n.set_time();
+    const bool ok = n.until([&] { return n.ready(2) && n.mesh(2).depth() == 2; }, 300'000, 20);
+    if (!ok) {
+        n.dump();
+    }
+    LM_CHECK(ok);
+    LM_CHECK(n.mesh(2).stats().attach_failed >= 1u);
+    LM_CHECK_EQ(n.mesh(2).parent_addr().value(), n.addr(1));
+}
+
+// The same board, once it is attached through the relay: the faint root keeps advertising one hop less. Trying it must
+// not cost the path that works.
+LM_TEST("FIELD sim: a faint shallower candidate does not cost a node its working path through the relay") {
+    MNet n(3);
+    n.world.set_link(0, 2, faint_link());
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(2) && n.mesh(2).depth() == 2; }, 300'000, 20));
+    const uint64_t suspects = n.mesh(2).stats().suspects;
+    unsigned not_ready_ms = 0;
+    unsigned sent = 0;
+    unsigned received = 0;
+    for (unsigned round = 0; round < 60; ++round) { // 10 min, a message to the root every 10 s
+        n.set_time();
+        const auto s = n.send(2, 0, LM_RECEIVED, payload_of(static_cast<uint8_t>(round), 24), 8000);
+        sent += s.st == LM_STATUS_OK ? 1U : 0U;
+        for (unsigned t = 0; t < 100; ++t) {
+            n.run_ms(100);
+            not_ready_ms += n.ready(2) ? 0U : 100U;
+        }
+        if (s.st == LM_STATUS_OK && (n.op(2, s.op).evidence_bits & end_received) != 0) {
+            ++received;
+        }
+        Received r;
+        while (n.pop_message(0, r)) { // the root's application reads its events (a full queue is BUSY, not loss)
+        }
+    }
+    std::printf("  faint shallower candidate, 10 min: not ready %u ms, %u/%u messages received, attach_failed %llu, suspects +%llu\n",
+                not_ready_ms, received, sent, static_cast<unsigned long long>(n.mesh(2).stats().attach_failed),
+                static_cast<unsigned long long>(n.mesh(2).stats().suspects - suspects));
+    LM_CHECK_EQ(not_ready_ms, 0u);
+    LM_CHECK_EQ(received, 60u);
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;

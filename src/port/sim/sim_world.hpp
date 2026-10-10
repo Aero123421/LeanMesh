@@ -27,6 +27,9 @@ struct LinkParams {
     uint16_t loss_permille = 0;     // frame not received
     uint16_t ack_loss_permille = 0; // received, but the sender sees MacFailed
     uint32_t delay_us = 1000;       // propagation + receiver driver latency
+    // Bit k: frames of link kind k (registry frame_kinds) are lost on this link. Not an RF model: a bench knob for
+    // "the neighbour session forms and probes pass, but nothing else gets through" (a link that carries short frames).
+    uint16_t drop_kinds = 0;
     // RSSI the receiver's driver reports for frames over this link. Not an RF model: a number a test sets. Unknown
     // by default (the medium reports no RSSI, docs/03 §4), so a test that does not care sees none.
     bool rssi_valid = false;

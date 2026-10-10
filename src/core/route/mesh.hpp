@@ -198,7 +198,8 @@ class Mesh {
     struct Attach {
         Step step = Step::Idle;
         int cand = -1;
-        uint8_t tries = 0;
+        uint8_t tries = 0;         // of the current step
+        uint8_t session_fails = 0; // end sessions with the root that failed through this candidate (docs/04 §3)
         uint32_t sequence = 0;
         uint32_t revision = 0; // granted, applied only when READY is answered
         uint8_t n = 0;

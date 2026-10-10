@@ -172,7 +172,8 @@ void World::medium_transmit(uint16_t from, const MacAddr &dst, ByteView frame,
             trace_add(TraceKind::Lost, j, frame.size(), 2, token.sequence);
             continue;
         }
-        if (lost(static_cast<uint16_t>(lp.loss_permille + noise(j, sender.radio.channel())))) {
+        const bool kind_dropped = frame.size() > 3 && frame[3] < 16 && ((lp.drop_kinds >> frame[3]) & 1U) != 0;
+        if (kind_dropped || lost(static_cast<uint16_t>(lp.loss_permille + noise(j, sender.radio.channel())))) {
             trace_add(TraceKind::Lost, j, frame.size(), 1, token.sequence);
             continue;
         }

@@ -17,6 +17,8 @@
 6. rootはpath_revisionを増やし、ACKに有効leaseとcanonical pathを返す。自Nodeが適用してROUTE_READYを返すまではroot側pending。ACKを失った場合は同じrequest_idで照会する。
 7. 登録済みpathを使った終端往復が成功するとReachable。単に近隣が1台見えるだけならDegraded。
 
+候補1件への取り付けは有界にする。手順3〜6のどの段で失敗しても、失敗は段をまたいで数え、上限（rootとの終端session確立は3回）に達したらその候補を一定時間避けて次の候補へ進む。近隣sessionとPROBEが通ることは、その候補経由で登録できる証拠ではない（短いframeだけが通るlinkがある）。段を移るたびに数え直して同じ候補に留まり続けてはならない（2026-10-10現場: rootの電波が弱く届く階で、近くのrelayを一度も試さなかった）。
+
 候補が同時に互いを親に選んでも、rootが1件ずつ検証することで承認木にcycleを入れない。**`parent.rank < self.rank`だけでは古い広告がある非同期系のloop-free証明にならない**。rankは候補優先度であり安全証拠ではない。
 
 ## 4. 各hopの転送条件

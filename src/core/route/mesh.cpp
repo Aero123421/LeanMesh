@@ -1108,7 +1108,9 @@ void Mesh::on_session(const DeviceId &peer, Status st, MonoTime now) {
         return;
     }
     cands_[static_cast<std::size_t>(att_.cand)].unproven = true; // the link may be dead at the peer (ARCH2-D2)
-    if (++att_.tries >= 3) {
+    // Counted across the steps: the probe that proves the link again and the session step it returns to both start
+    // their own `tries` at 0, and a link that carries probes but no end session would be tried for ever.
+    if (++att_.session_fails >= 3) {
         attach_fail(now);
     } else {
         att_.next_at = now + Duration::from_s(2); // RateLimited (30 s gate) and friends: try again
