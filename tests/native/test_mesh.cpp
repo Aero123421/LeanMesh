@@ -1071,6 +1071,51 @@ LM_TEST("FIELD sim: a faint shallower candidate does not cost a node its working
     LM_CHECK_EQ(received, 60u);
 }
 
+// 2026-10-10 field: a board two floors above the relay heard the root at -86..-89 dBm, took it (one hop less) and
+// lost it again and again; once it left a -53 dBm relay for the -89 dBm root within 2 s.
+LM_TEST("FIELD sim: a candidate heard below the weak-link floor is tried last and is not moved to") {
+    MNet n(3); // 0 root - 1 relay - 2 node at -50 dBm, and the root reaches the node directly at -89 dBm
+    auto link_at = [&](unsigned a, unsigned b, int16_t dbm) {
+        LinkParams p;
+        p.up = true;
+        p.rssi_valid = true;
+        p.rssi_dbm = dbm;
+        n.world.set_link(static_cast<uint16_t>(a), static_cast<uint16_t>(b), p);
+    };
+    link_at(0, 1, -50);
+    link_at(1, 2, -50);
+    link_at(0, 2, -89);
+    n.boot(0);
+    n.boot(1);
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(1); }, 60'000, 20));
+    n.boot(2); // a board switched on in a network that is up
+    n.set_time_at(2);
+    LM_CHECK(n.until([&] { return n.ready(2); }, 60'000, 20));
+    LM_CHECK_EQ(n.mesh(2).depth(), 2u);
+    LM_CHECK_EQ(n.mesh(2).parent_addr().value(), n.addr(1));
+    LM_CHECK_EQ(n.mesh(2).stats().attach_failed, 0u);
+    unsigned elsewhere_ms = 0;
+    for (unsigned t = 0; t < 3000; ++t) { // 5 min: the weak root is linked as a spare and measured, and stays a spare
+        n.run_ms(100);
+        elsewhere_ms += n.ready(2) && n.mesh(2).parent_addr().value() == n.addr(1) ? 0U : 100U;
+    }
+    LM_CHECK_EQ(elsewhere_ms, 0u);
+}
+
+LM_TEST("FIELD sim: a weak candidate that is the only one is used") {
+    MNet n(2);
+    LinkParams p;
+    p.up = true;
+    p.rssi_valid = true;
+    p.rssi_dbm = -89;
+    n.world.set_link(0, 1, p);
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.formed(); }, 60'000, 20));
+    LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
+}
+
 namespace {
 // Every node hears the root and nobody else (a bench of boards around the root).
 struct Star : MNet {

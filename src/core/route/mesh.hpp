@@ -241,6 +241,8 @@ class Mesh {
     [[nodiscard]] int index_of(const Cand *c) const { return static_cast<int>(c - cands_.data()); }
     [[nodiscard]] const link::Neighbor *neighbor_of(const Cand &c) const;
     [[nodiscard]] bool linked(const Cand &c) const;
+    [[nodiscard]] bool weak(const Cand &c) const; // heard below the floor (docs/04 §6): tried last, never moved to
+    [[nodiscard]] int pick_among(MonoTime now, bool weak_ones) const;
     [[nodiscard]] int pick_candidate(MonoTime now) const;
     [[nodiscard]] uint32_t score_of(const Cand &c, MonoTime now) const;
 
@@ -320,6 +322,9 @@ class Mesh {
     MonoTime attempt_at_ = MonoTime::never(); // Search: look at the candidates then
     MonoTime probe_retry_at_ = MonoTime::never();
     MonoTime beacon_at_ = MonoTime::never();  // a beacon is due (answer to a solicit, change, or TX busy)
+    MacAddr last_rx_mac_{}; // the frame being handled: a beacon makes its candidate after the RSSI was reported
+    bool last_rx_rssi_valid_ = false;
+    int8_t last_rx_rssi_dbm_ = 0;
     MonoTime term_hint_at_{};                  // HIL-F9: the next newer-term hint may act from then
     bool beacon_solicit_ = false;
     MonoTime trickle_at_ = MonoTime::never();

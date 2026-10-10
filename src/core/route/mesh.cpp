@@ -186,6 +186,9 @@ bool Mesh::parent_link(MacAddr &mac, DeviceId &dev) const {
 }
 
 void Mesh::on_radio_rx(const port::RadioRx &rx) {
+    last_rx_mac_ = rx.src;
+    last_rx_rssi_valid_ = rx.rssi_valid;
+    last_rx_rssi_dbm_ = static_cast<int8_t>(std::clamp<int>(rx.rssi_dbm, INT8_MIN, INT8_MAX));
     for (Cand &c : cands_) {
         if (c.used && c.mac == rx.src) {
             c.rssi_valid = rx.rssi_valid;
@@ -417,6 +420,10 @@ bool Mesh::linked(const Cand &c) const {
     return n != nullptr && n->cur.active && n->address.value() == c.addr;
 }
 
+bool Mesh::weak(const Cand &c) const {
+    return c.rssi_valid && c.rssi_dbm < -static_cast<int>(gen::defaults::routing::weak_link_rssi_below_neg_dbm);
+}
+
 uint32_t Mesh::score_of(const Cand &c, MonoTime now) const {
     return parent_score(c.n, c.q, c.inst.penalty(now));
 }
@@ -424,6 +431,11 @@ uint32_t Mesh::score_of(const Cand &c, MonoTime now) const {
 // Measured candidates go by the integer score of docs/04 §6; an unmeasured one is never "best"
 // against a measured one, and among unmeasured ones the lowest depth is tried first.
 int Mesh::pick_candidate(MonoTime now) const {
+    const int strong = pick_among(now, false);
+    return strong >= 0 ? strong : pick_among(now, true); // weak candidates only when no other can be chosen
+}
+
+int Mesh::pick_among(MonoTime now, bool weak_ones) const {
     Candidate measured[k_cands];
     int index[k_cands];
     std::size_t m = 0;
@@ -434,7 +446,7 @@ int Mesh::pick_candidate(MonoTime now) const {
             std::find(c.path.begin(), c.path.begin() + c.n, avoid_relay_) != c.path.begin() + c.n) {
             continue;
         }
-        if (!c.used || now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth) {
+        if (!c.used || now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth || weak(c) != weak_ones) {
             continue;
         }
         if (linked(c) && c.q.known()) {
@@ -527,6 +539,10 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
         *c = Cand{};
         c->used = true;
         c->mac = src;
+        if (last_rx_mac_ == src) {
+            c->rssi_valid = last_rx_rssi_valid_;
+            c->rssi_dbm = last_rx_rssi_dbm_;
+        }
     }
     c->addr = b.path[b.n - 1U];
     c->revision = b.revision;
@@ -550,7 +566,7 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
         }
         return;
     }
-    if (fresh && (state_ == State::Search || state_ == State::Listen)) {
+    if (fresh && !weak(*c) && (state_ == State::Search || state_ == State::Listen)) { // a weak one waits for the others
         // A candidate that is ready: no reason to wait for the end of the listen. A beacon is unauthenticated: it may
         // end a backoff only through the rate-limited hint bucket, never reset it (review finding 1).
         state_ = State::Search;
@@ -777,7 +793,7 @@ void Mesh::trickle(MonoTime now) {
         for (std::size_t k = 0; k < cands_.size(); ++k) {
             const Cand &c = cands_[k];
             if (static_cast<int>(k) != parent_ && c.used && linked(c) && c.q.known() && now >= c.avoid_until &&
-                c.n <= gen::limits::root_depth &&
+                c.n <= gen::limits::root_depth && (!weak(c) || weak(p)) &&
                 (b < 0 || score_of(c, now) < score_of(cands_[static_cast<std::size_t>(b)], now))) {
                 b = static_cast<int>(k);
             }
