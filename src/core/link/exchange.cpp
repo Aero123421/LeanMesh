@@ -93,7 +93,7 @@ void Exchange::begin_common(Mode mode, bool initiator, MonoTime now) {
     handle_ = Handle{0, ++handle_gen_ == 0 ? ++handle_gen_ : handle_gen_};
     hard_deadline_ = now + s_.policy.exchange_deadline;
     deadline_ = hard_deadline_;
-    rto_at_ = retry_at_ = MonoTime::never();
+    rto_at_ = retry_at_ = idle_at_ = MonoTime::never();
     attempts_ = 0;
     rx_len_ = rx_total_ = 0;
     tx_active_ = tx_inflight_ = false;
@@ -161,7 +161,7 @@ void Exchange::finish_idle() {
     pend_.wipe();
     stage_release();
     tx_active_ = rto_after_tx_ = false;
-    rto_at_ = retry_at_ = deadline_ = MonoTime::never();
+    rto_at_ = retry_at_ = deadline_ = idle_at_ = MonoTime::never();
     rx_len_ = 0;
     phase_ = Phase::Idle;
 }
@@ -170,7 +170,9 @@ MonoTime Exchange::deadline() const {
     if (phase_ == Phase::Idle || phase_ == Phase::Zombie) {
         return MonoTime::never();
     }
-    return earliest(earliest(deadline_, rto_at_), retry_at_);
+    // (the same condition as on_timer: a time the timer would not act on must not wake the owner)
+    const MonoTime idle = !initiator_ && phase_ != Phase::Linger ? idle_at_ : MonoTime::never();
+    return earliest(earliest(deadline_, rto_at_), earliest(retry_at_, idle));
 }
 
 // ---- jobs ----
@@ -237,6 +239,7 @@ void Exchange::on_job_done(Handle slot, Status job_status, MonoTime now) {
     }
     const Job j = job_;
     job_ = Job::None;
+    heard_initiator(now); // our own public-key work is not the initiator's silence
     if (job_status != Status::Ok) {
         if (j == Job::Hs) {
             (void)hs_.complete(job_status); // aborts the handshake, wipes the secrets

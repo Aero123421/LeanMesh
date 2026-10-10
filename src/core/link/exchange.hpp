@@ -490,6 +490,7 @@ class Exchange {
     void pump(MonoTime now);
     [[nodiscard]] Status send_link_chunk(ByteView obj, MonoTime now);
     void arm_rto(MonoTime now);
+    void heard_initiator(MonoTime now);
     void budget_end_exchange(MonoTime now);
     [[nodiscard]] Status build_plain(ObjKind kind, uint16_t total, uint16_t offset, ByteView body,
                                      MutByteView out, std::size_t &len) const;
@@ -530,6 +531,9 @@ class Exchange {
     MonoTime deadline_ = MonoTime::never();      // current: the earliest of the phase limits
     MonoTime hard_deadline_ = MonoTime::never(); // whole exchange, fixed at start (routed service budget; binding still 30 s)
     MonoTime rto_at_ = MonoTime::never();
+    // Responder: the initiator has given up when nothing of it arrived for this long (it repeats max_attempts times).
+    // The one slot is not kept for it until the 30 s limit (docs/06 §8).
+    MonoTime idle_at_ = MonoTime::never();
     MonoTime retry_at_ =
         MonoTime::never(); // radio/TX pool busy: the pending fragment is tried again then
     uint8_t attempts_ = 0;

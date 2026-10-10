@@ -87,6 +87,7 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
               (phase_ == Phase::AwaitBind || phase_ == Phase::Linger)) ||
              (initiator_ && f.kind == ObjKind::BindAck && phase_ == Phase::AwaitBind));
         if (repeat_cred || repeat_msg) {
+            heard_initiator(now);
             if (f.offset == 0) { // the initiator did not see our answer: repeat it byte for byte
                 if (o.family == Family::End) {
                     route_ = *o.reply;
@@ -104,6 +105,7 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
             route_ = *o.reply; // the responder answers over the reverse of the latest route
         }
     }
+    heard_initiator(now);
     if (!cred && f.offset == 0 && f.body.size() == f.total) {
         obj_complete(f.kind, f.body, o, now); // a whole object in one fragment: no copy
         return;
@@ -309,6 +311,18 @@ ByteView Exchange::tx_object() const {
     return f != nullptr ? ByteView{f->frame.bytes.data(), stage_len_} : ByteView{};
 }
 
+// A responder waits for the initiator's next object or repeat. The initiator repeats an object max_attempts times, one
+// RTO (end mode: one route round) apart, and then gives up: after that many silent intervals nothing more will come.
+void Exchange::heard_initiator(MonoTime now) {
+    if (initiator_ || phase_ == Phase::Idle || phase_ == Phase::Zombie || phase_ == Phase::Linger) {
+        return;
+    }
+    const Duration service = s_.engine.tx().service_bound();
+    const Duration step = mode_ == Mode::End ? delivery::round_timeout(route_.len, service)
+                                             : Duration{s_.policy.rto.us + 2 * service.us};
+    idle_at_ = now + Duration{step.us * (s_.policy.max_attempts + 1)};
+}
+
 void Exchange::arm_rto(MonoTime now) {
     if (!initiator_) {
         if (phase_ == Phase::SendCred) { // CredR is out: wait for message_1, but not for long
@@ -384,6 +398,7 @@ Status Exchange::send_link_chunk(ByteView obj, MonoTime now) {
 }
 
 void Exchange::on_tx_outcome(const TxOutcome &o, MonoTime now) {
+    heard_initiator(now); // our own fragment was on the air until now
     if (is_link_tag(o.tag) && mode_ != Mode::End) {
         tx_inflight_ = false;
         if (rto_after_tx_) {
@@ -411,6 +426,10 @@ void Exchange::on_timer(MonoTime now) {
         } else {
             abort(Status::Expired);
         }
+        return;
+    }
+    if (now >= idle_at_ && !initiator_ && phase_ != Phase::Linger) {
+        abort(Status::Expired); // the initiator went silent: the slot is free for the next one
         return;
     }
     if (now >= rto_at_ && initiator_) {

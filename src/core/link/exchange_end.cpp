@@ -150,6 +150,7 @@ void Exchange::on_end_frame_done(Handle owner, bool accepted, MonoTime now) {
         return;
     }
     tx_inflight_ = false;
+    heard_initiator(now); // our own fragment was on its way until now
     if (!accepted) {
         // The object is broken; the initiator's next RTO repeats it as a whole, the responder waits
         // for the initiator's repeat.
