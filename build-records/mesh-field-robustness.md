@@ -41,3 +41,22 @@ field_nodeのRAM増は試験アプリのdebug行用buffer（480 B）。SDKの静
 ## 測っていないもの
 
 stack、peak heap、定常CPU、airtime、復帰エネルギーは測定していない。実機・電波・全台・長時間・電源断は未検証。3 mode共通engineの変更だが、WINDOWED_RX/Deep Sleepのwake予算への影響は実機で見ていない（nativeのpower試験は通過）。
+
+## 追加: 返事のない隣へのrotationの繰り返し（2026-10-11）
+
+現場記録のうち原因不明だった「panel3の13分間の送信失敗」を、コードと記録の突き合わせで特定し、simで再現してから直した（経緯は [docs/hil/2026-10-10-field-floors.md](../docs/hil/2026-10-10-field-floors.md)、規則は docs/06 §7）。上の表の後に重ねた変更で、基準は直前のcommit `95b1263`。
+
+| 試験 | 修正前 | 修正後 |
+|---|---|---|
+| 隣を電源断にしてcredential更新を待つ（`test_lifecycle` の `FIELD sim:`、更新から隣のlease切れまで270秒） | rotation 30回、handshake 449 frame | 4回、60 frame。READYは保ったまま、sessionは従来どおり隣のleaseで終了 |
+| 返事のない隣と届く隣を同時にrotation（`test_link` の `S10 rotation: a silent neighbour ...`） | 届く隣のrotationが始まらない | 届く隣は作り直され、返事のない隣は戻って30秒以内に作り直される |
+
+| 検査 | 結果 |
+|---|---|
+| native（`ctest -j 6`） | 31/31 |
+| native ASan/UBSan | 31/31 |
+| Host・fieldview・meshsim E2E（pytest） | 609 passed |
+| 仕様検査(G0) | PASS（`ruff check host tools/fieldview` も指摘なし） |
+| firmware build（上と同じ8件） | 8件とも成功 |
+
+資源差分（`95b1263` 比）: app binaryは +160〜+304 B（example_node RELAY c3 +304、c5 +304、c6 +288、s3 +256、hil_node ROOT s3 +160、field_node display s3 +256、relay c6 +288、relay s3 +240）。data+bssは8件とも±0。neighbourの記録は1件あたり8 B増える見込みだが（表はアプリが渡すworkspace内のlm_contextにある）、lm_contextの大きさそのものは測っていない。stack・CPU・airtime・復帰エネルギーも未測定。実機・電波は未検証。

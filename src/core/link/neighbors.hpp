@@ -59,6 +59,10 @@ struct Neighbor {
     // (LinkPolicy::renew_window), so that the peer can reach its root and get its credential renewed.
     bool renew_only = false;
     bool rotate_wanted = false; // tx record threshold reached (seal() sets it), or our credential was renewed
+    // docs/06 §7: rotations of this session that did not complete in a row, and the time before which the next one
+    // is not started (30, 60 ... 480 s). An authenticated frame from the neighbour brings it back to 30 s.
+    uint8_t rotate_misses = 0;
+    MonoTime rotate_after{};
     // [S8-D1] JOIN_ONLY session (docs/06 §4 membership 0): carries the join control objects only,
     // never DATA/ROUTE, never rotates, and is invisible to find_device(). One per joining device.
     bool join_only = false;

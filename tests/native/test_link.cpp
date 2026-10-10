@@ -862,6 +862,31 @@ LM_TEST("S10 rotation with lost exchange keeps the old session until the new one
     LM_CHECK_EQ(m.eng(0).peers().regular_count(), 0u);
 }
 
+// docs/06 §7: a neighbour that does not answer the rotation is tried again after 30, 60, 120 s ...; the other
+// neighbours are rotated meanwhile, and a frame from the silent one brings its rotation back within 30 s.
+LM_TEST("S10 rotation: a silent neighbour is retried with a growing wait and does not hold up the others") {
+    Net n(3);
+    LM_CHECK_OK(n.connect(1, 0));
+    n.run_ms(2000);
+    LM_CHECK_OK(n.connect(2, 0));
+    n.run_ms(2000);
+    LM_CHECK(n.paired(0, 1) && n.paired(0, 2));
+    const uint32_t sid1 = n.nb(0, 1)->cur.rx_sid;
+    const uint32_t sid2 = n.nb(0, 2)->cur.rx_sid;
+    n.lnk(0).policy().rotate_lower_id = Duration::from_s(60); // node 0 rotates both sessions at one minute
+    n.lnk(0).policy().rotate_higher_id = Duration::from_s(60);
+    n.world.set_link(0, 1, LinkParams{false, 0, 0, 1000}); // node 1 is out of reach
+    n.run_s(100);
+    LM_CHECK(n.nb(0, 2)->cur.rx_sid != sid2);           // the reachable neighbour was rotated
+    LM_CHECK(n.nb(0, 1)->cur.rx_sid == sid1);
+    LM_CHECK(n.lnk(0).stats().rotations_started <= 4u); // node 2 once; node 1 at 60 s and 30 s after that try ended
+    n.world.set_link(0, 1, LinkParams{true, 0, 0, 1000}); // node 1 is back and heard under the old session
+    LM_CHECK_OK(n.send(1, 0, payload_of(77)));
+    n.run_s(40);
+    LM_CHECK(n.paired(0, 1));
+    LM_CHECK(n.nb(0, 1)->cur.rx_sid != sid1);
+}
+
 LM_TEST("S10 rotation by record count: threshold reached, fresh EDHOC, no loss") {
     Net n(2);
     n.lnk(0).policy().rotate_records = 6;

@@ -131,6 +131,8 @@ class LinkLayer {
     DiscoverySink disc_sink_ = nullptr;
     void *disc_ctx_ = nullptr;
     MonoTime rotation_retry_ = MonoTime{0};
+    MacAddr rotating_; // the neighbour whose rotation exchange we started (docs/06 §7)
+    bool rotating_set_ = false;
 };
 
 } // namespace lm::link

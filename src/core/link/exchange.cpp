@@ -737,6 +737,8 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
     n->cur = std::move(pend_);
     pend_.wipe();
     n->rotate_wanted = false;
+    n->rotate_misses = 0;
+    n->rotate_after = MonoTime{};
     // SEC-D3: the session lives no longer than the peer's lease; unprovable, it carries no application DATA.
     n->lease = member::lease_of(peer_state_.mc);
     n->lease_uncertain = lease != DeadlineCheck::Before;

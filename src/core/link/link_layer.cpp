@@ -1,5 +1,7 @@
 #include "core/link/link_layer.hpp"
 
+#include <algorithm>
+
 #include "core/engine.hpp"
 #include "core/route/forward.hpp"
 
@@ -7,6 +9,7 @@ namespace lm::link {
 namespace {
 
 constexpr Duration k_rotation_retry = Duration::from_s(5);
+constexpr unsigned k_rotation_misses_max = 5; // docs/06 §7: 30, 60, 120, 240, 480 s
 
 bool is_session_kind(wire::FrameKind k) {
     return k == wire::FrameKind::Data || k == wire::FrameKind::HopAck ||
@@ -118,6 +121,10 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
         }
         which->rec.accept(h.link_counter); // only after the tag and the minimum checks (docs/06 §6)
         ++stats_.rx_accepted;
+        if (n->rotate_misses != 0) { // the neighbour is back: its rotation is tried again within the gate time
+            n->rotate_misses = 0;
+            n->rotate_after = earliest(n->rotate_after, now + policy_.handshake_gate);
+        }
         return deliver(*n, h, op, false);
     case Status::Replay:
         if (op.verdict == sec::ReplayVerdict::Duplicate) {
@@ -223,11 +230,10 @@ MonoTime LinkLayer::rotation_time(const Neighbor &n) const {
     if (shared_.engine.power().child_asleep(n.mac, shared_.engine.step_time())) {
         return MonoTime::never(); // [S16] a sleeping child is not asked for a handshake; its next poll re-arms this
     }
-    if (n.rotate_wanted) {
-        return MonoTime{0};
-    }
     const bool lower = identity_.self() < n.device;
-    return n.cur.born + (lower ? policy_.rotate_lower_id : policy_.rotate_higher_id);
+    const MonoTime due =
+        n.rotate_wanted ? MonoTime{0} : n.cur.born + (lower ? policy_.rotate_lower_id : policy_.rotate_higher_id);
+    return due < n.rotate_after ? n.rotate_after : due; // a neighbour that did not answer waits its turn (docs/06 §7)
 }
 
 void LinkLayer::on_timer(MonoTime now) {
@@ -238,7 +244,18 @@ void LinkLayer::on_timer(MonoTime now) {
         ++stats_.sessions_expired;
     }
     exchange_.on_timer(now);
-    if (exchange_.busy() || !identity_.is_member() || now < rotation_retry_) {
+    if (exchange_.busy()) {
+        return;
+    }
+    if (rotating_set_) { // the rotation we started is over; a completed one replaced the session and is not due
+        rotating_set_ = false;
+        Neighbor *nb = neighbors_.find_mac(rotating_);
+        if (nb != nullptr && now >= rotation_time(*nb)) {
+            nb->rotate_misses = static_cast<uint8_t>(std::min<unsigned>(nb->rotate_misses + 1U, k_rotation_misses_max));
+            nb->rotate_after = now + Duration{policy_.handshake_gate.us << (nb->rotate_misses - 1U)};
+        }
+    }
+    if (!identity_.is_member() || now < rotation_retry_) {
         return;
     }
     Neighbor *due = nullptr;
@@ -251,6 +268,9 @@ void LinkLayer::on_timer(MonoTime now) {
         ++stats_.rotations_started;
         if (exchange_.start_initiator(due->mac, now) != Status::Ok) {
             rotation_retry_ = now + k_rotation_retry; // gate/busy/capacity: try again later
+        } else {
+            rotating_ = due->mac;
+            rotating_set_ = true;
         }
     }
 }

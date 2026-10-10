@@ -3638,3 +3638,31 @@ LM_TEST("ISSUE5 sim: a revocation in the backup is still in force at the restore
     const member::Floors::Entry f2 = n.eng(1).identity().floors().floor_of(stranger.id);
     LM_CHECK(f2.assignment == 5 && f2.membership == 6);
 }
+
+// 2026-10-10 field: from a board's credential renewal until the lease of a neighbour that had been carried out of
+// reach ran out (13 min), the board sent ~1.7 handshake frames per second, none acknowledged (docs/06 §7).
+LM_TEST("FIELD sim: after its renewal a relay does not keep re-keying towards a neighbour that is gone") {
+    LNet n({Spec{}, Spec{Role::Relay}, Spec{Role::Relay}});
+    n.world.options().tx_failed_extra_us = 300'000;
+    for (unsigned i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    n.run_ms(240'000);
+    n.node(2).power_cut(); // its frames stop and nobody acknowledges ours; its lease (15 min) ends at 900 s
+    const uint64_t hs = n.eng(1).link().stats().tx_frames_hs;
+    unsigned not_ready_ms = 0;
+    while (n.root_ms() < 960'000) {
+        n.run_ms(1000);
+        not_ready_ms += n.ready(1) ? 0U : 1000U;
+    }
+    const uint64_t frames = n.eng(1).link().stats().tx_frames_hs - hs;
+    std::printf("  neighbour gone, renewal to its lease end: %llu rotations started, %llu handshake frames, not ready %u ms\n",
+                static_cast<unsigned long long>(n.eng(1).link().stats().rotations_started),
+                static_cast<unsigned long long>(frames), not_ready_ms);
+    LM_CHECK(n.eng(1).membership().stats().renewals >= 1u);
+    LM_CHECK(n.eng(1).link().stats().rotations_started >= 1u);
+    LM_CHECK(frames <= 60); // 30 s, 60 s, 120 s apart: four tries of 15 frames at most in the 270 s (it was ~430)
+    LM_CHECK_EQ(n.lease_at(1, 2), 0u); // the session ended with the neighbour's lease, as before
+    LM_CHECK_EQ(not_ready_ms, 0u);
+}
