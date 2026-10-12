@@ -164,12 +164,12 @@ class Mesh {
     [[nodiscard]] MonoTime ready_since() const { return ready_since_; }
     // Bench diagnostics (leanmesh_bench.h): f(mac, address, depth_entries, rf_streak, fails, is_attach_target,
     // rssi_dbm (0: unknown), weak).
-    template <class F> void for_each_candidate(F &&f) const {
+    template <class F> void for_each_candidate(MonoTime now, F &&f) const {
         for (std::size_t i = 0; i < cands_.size(); ++i) {
             const Cand &c = cands_[i];
             if (c.used) {
                 f(c.mac, c.addr, c.n, c.rf_streak, c.fails, att_.cand == static_cast<int>(i),
-                  c.rssi_valid ? static_cast<int>(c.rssi_dbm) : 0, weak(c));
+                  c.rssi_valid ? static_cast<int>(c.rssi_dbm) : 0, weak(c, now));
             }
         }
     }
@@ -245,7 +245,8 @@ class Mesh {
     [[nodiscard]] int index_of(const Cand *c) const { return static_cast<int>(c - cands_.data()); }
     [[nodiscard]] const link::Neighbor *neighbor_of(const Cand &c) const;
     [[nodiscard]] bool linked(const Cand &c) const;
-    [[nodiscard]] bool weak(const Cand &c) const; // heard below the floor (docs/04 §6): tried last, never moved to
+    // Heard below the floor and well below the best candidate still heard (docs/04 §6): tried last, never moved to.
+    [[nodiscard]] bool weak(const Cand &c, MonoTime now) const;
     [[nodiscard]] int pick_among(MonoTime now, bool weak_ones) const;
     [[nodiscard]] int pick_candidate(MonoTime now) const;
     [[nodiscard]] uint32_t score_of(const Cand &c, MonoTime now) const;
@@ -335,6 +336,7 @@ class Mesh {
     Duration trickle_i_ = Duration::from_ms(gen::defaults::routing::hello_min_ms);
     uint8_t trickle_n_ = 0;
     MonoTime spare_at_ = MonoTime::never();
+    int8_t spare_cand_ = -1; // the candidate whose spare handshake we started last (its outcome is read once)
     MonoTime last_solicit_answer_{};
     uint32_t seq_counter_ = 0;
     uint8_t next_qid_ = 1;

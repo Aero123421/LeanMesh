@@ -1255,6 +1255,47 @@ LM_TEST("FIELD sim: a spare candidate that is heard but never answers is asked l
     }, 500'000, 100));
 }
 
+// Review 2026-10-12: a candidate that fell silent stays in the table. Measured against its old RSSI every remaining
+// candidate was "weak", the weak rule cancelled itself, and the node took the faint root instead of the usable relay.
+LM_TEST("FIELD sim: a strong candidate that is gone does not make the usable relay look as weak as the faint root") {
+    MNet n(4); // 0 root; 1 relay heard at -84; 2 relay heard at -50 (then switched off); 3 the node; root at -91
+    auto link_at = [&](unsigned a, unsigned b, int16_t dbm) {
+        LinkParams p;
+        p.up = true;
+        p.rssi_valid = true;
+        p.rssi_dbm = dbm;
+        n.world.set_link(static_cast<uint16_t>(a), static_cast<uint16_t>(b), p);
+    };
+    n.world.set_link(1, 2, LinkParams{});
+    n.world.set_link(2, 3, LinkParams{});
+    link_at(0, 1, -50);
+    link_at(0, 2, -50);
+    link_at(1, 3, -84);
+    link_at(2, 3, -50);
+    link_at(0, 3, -91);
+    for (unsigned i = 0; i < 3; ++i) {
+        n.boot(i);
+    }
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(1) && n.ready(2); }, 60'000, 20));
+    n.boot(3);
+    n.set_time_at(3);
+    LM_CHECK(n.until([&] { return n.ready(3); }, 60'000, 20));
+    LM_CHECK_EQ(n.mesh(3).parent_addr().value(), n.addr(2)); // the strong relay
+    n.run_ms(60'000);                                        // the other two are heard and measured
+    n.node(2).power_cut();
+    LM_CHECK(n.until([&] { return n.ready(3) && n.mesh(3).parent_addr().value() != n.addr(2); }, 300'000, 100));
+    unsigned on_root_ms = 0;
+    for (unsigned t = 0; t < 6000; ++t) { // 10 min: well past the time the strong relay counts as heard
+        n.run_ms(100);
+        on_root_ms += n.ready(3) && n.mesh(3).depth() == 1 ? 100U : 0U;
+    }
+    std::printf("  strong relay gone, 10 min: on the faint root %u ms, parent %u, depth %u\n", on_root_ms,
+                static_cast<unsigned>(n.mesh(3).parent_addr().value()), static_cast<unsigned>(n.mesh(3).depth()));
+    LM_CHECK_EQ(n.mesh(3).parent_addr().value(), n.addr(1));
+    LM_CHECK(on_root_ms <= 120'000); // it may pass through the root while the gone relay still counts as heard (96 s)
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;

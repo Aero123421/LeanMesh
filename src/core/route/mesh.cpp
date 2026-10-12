@@ -422,13 +422,15 @@ bool Mesh::linked(const Cand &c) const {
 
 // Below the floor and clearly below the best candidate heard: both, so that a site where every link is below the
 // floor still tells its usable links from its faint ones, and a lone candidate is never weak.
-bool Mesh::weak(const Cand &c) const {
+bool Mesh::weak(const Cand &c, MonoTime now) const {
     if (!c.rssi_valid || c.rssi_dbm >= -static_cast<int>(gen::defaults::routing::weak_link_rssi_below_neg_dbm)) {
         return false;
     }
     int best = INT8_MIN;
+    // Measured against the candidates that could be taken now: one that fell silent stays in the table with its old
+    // RSSI, and one that is being avoided (it just failed) is no alternative either.
     for (const Cand &o : cands_) {
-        if (o.used && o.rssi_valid && o.n != 0) {
+        if (o.used && o.rssi_valid && o.n != 0 && now - o.heard < k_silence && now >= o.avoid_until) {
             best = std::max<int>(best, o.rssi_dbm);
         }
     }
@@ -457,7 +459,7 @@ int Mesh::pick_among(MonoTime now, bool weak_ones) const {
             std::find(c.path.begin(), c.path.begin() + c.n, avoid_relay_) != c.path.begin() + c.n) {
             continue;
         }
-        if (!c.used || now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth || weak(c) != weak_ones) {
+        if (!c.used || now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth || weak(c, now) != weak_ones) {
             continue;
         }
         if (linked(c) && c.q.known()) {
@@ -581,14 +583,14 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
     // the order of the first beacons must not decide. Its handshake is stopped, so the one exchange slot is free for
     // the better candidate, and the search picks again.
     if (state_ == State::Attach && !att_.switching && att_.step == Step::Link && att_.cand >= 0 &&
-        att_.cand != index_of(c) && now >= c->avoid_until && weak(cands_[static_cast<std::size_t>(att_.cand)]) &&
-        !weak(*c)) {
+        att_.cand != index_of(c) && now >= c->avoid_until &&
+        weak(cands_[static_cast<std::size_t>(att_.cand)], now) && !weak(*c, now)) {
         engine_.link().abandon_connect(cands_[static_cast<std::size_t>(att_.cand)].mac);
         att_ = Attach{};
         state_ = State::Search;
         attempt_at_ = now;
     }
-    if (fresh && !weak(*c) && (state_ == State::Search || state_ == State::Listen)) { // a weak one waits for the others
+    if (fresh && !weak(*c, now) && (state_ == State::Search || state_ == State::Listen)) { // a weak one waits for the others
         // A candidate that is ready: no reason to wait for the end of the listen. A beacon is unauthenticated: it may
         // end a backoff only through the rate-limited hint bucket, never reset it (review finding 1).
         state_ = State::Search;
@@ -815,7 +817,7 @@ void Mesh::trickle(MonoTime now) {
         for (std::size_t k = 0; k < cands_.size(); ++k) {
             const Cand &c = cands_[k];
             if (static_cast<int>(k) != parent_ && c.used && linked(c) && c.q.known() && now >= c.avoid_until &&
-                c.n <= gen::limits::root_depth && (!weak(c) || weak(p)) &&
+                c.n <= gen::limits::root_depth && (!weak(c, now) || (p.rssi_valid && c.rssi_valid && p.rssi_dbm < c.rssi_dbm)) &&
                 (b < 0 || score_of(c, now) < score_of(cands_[static_cast<std::size_t>(b)], now))) {
                 b = static_cast<int>(k);
             }
@@ -838,6 +840,15 @@ void Mesh::connect_spare(MonoTime now) {
     if (state_ != State::Ready || att_.step != Step::Idle || engine_.link().exchange().busy()) {
         return;
     }
+    if (spare_cand_ >= 0) { // the spare handshake we started is over
+        Cand &p = cands_[static_cast<std::size_t>(spare_cand_)];
+        spare_cand_ = -1;
+        const Status why = engine_.link().exchange().last_failure();
+        if (p.used && !linked(p) && p.spare_tries > 0 && (why == Status::Busy || is_local_resource_error(why))) {
+            --p.spare_tries; // our shortage (worker, pool, radio), not the candidate's silence: no longer wait for it
+            p.spare_after = p.avoid_until;
+        }
+    }
     for (std::size_t k = 0; k < cands_.size(); ++k) {
         Cand &c = cands_[k];
         if (c.used && static_cast<int>(k) != parent_ && !linked(c) && now >= c.avoid_until && now >= c.spare_after &&
@@ -848,6 +859,7 @@ void Mesh::connect_spare(MonoTime now) {
                 // docs/04 §5: 30, 60, 120, 240, 480 s between the tries that did not link (on_link_up resets it)
                 c.spare_after = now + Duration::from_s(int64_t{30} << c.spare_tries);
                 c.spare_tries = static_cast<uint8_t>(std::min<unsigned>(c.spare_tries + 1U, 4U));
+                spare_cand_ = static_cast<int8_t>(k);
                 return;
             }
             if (st == Status::Busy || st == Status::NoCapacity) {

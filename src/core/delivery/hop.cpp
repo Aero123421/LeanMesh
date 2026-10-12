@@ -184,13 +184,18 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
             if (f == nullptr || f->st != TxFrame::St::OnAir || f->air_seq != seq) {
                 continue;
             }
+            // An early HOP_ACK (accepted, rejected or busy) is the peer's authenticated answer to this very attempt:
+            // the frame arrived, only the radio's ACK was lost. Not an attempt the peer missed (BUSY is not RF loss).
+            const bool answered = f->has(TxFrame::AckAccepted) || f->has(TxFrame::AckRejected) || f->has(TxFrame::AckBusy);
             if (o.result == port::TxResult::MacFailed) {
-                ++stats_.rf_failed; // the only RF-loss sample
-                f->note_mac_failed();
+                ++stats_.rf_failed; // the radio's sample; what it means for the peer is decided below
+                if (!answered) {
+                    f->note_mac_failed();
+                }
             } else if (o.result == port::TxResult::Unknown) {
                 ++stats_.tx_unknown;
             }
-            if (f->cls != sched::Class::Control && !f->has(TxFrame::AckAccepted)) { // an early HOP_ACK: it arrived
+            if (f->cls != sched::Class::Control && !answered) {
                 note_mac(f->mac, o.result, now);
             }
             if (f->has(TxFrame::AckAccepted) || f->has(TxFrame::AckRejected) || f->has(TxFrame::AckBusy)) {
@@ -238,6 +243,13 @@ void HopTx::on_timer(MonoTime now) {
     for (std::size_t i = 0; i < k_frames; ++i) {
         const Handle h = frames_.handle_at(i);
         TxFrame *f = frames_.get(h);
+        if (f != nullptr && f->st == TxFrame::St::Ready && f->has(TxFrame::Abandoned)) {
+            // Withdrawn while it waited (peer hold, BUSY deferral): it needs no airtime and no radio, so it ends here
+            // even while another frame is on the air. deadline() reports it as due now.
+            ++stats_.aborted;
+            finish(h, *f, HopEnd::Aborted, now);
+            continue;
+        }
         if (f == nullptr || f->st != TxFrame::St::WaitAck || now < f->at) {
             continue;
         }
@@ -265,7 +277,9 @@ MonoTime HopTx::deadline() const {
         if (f == nullptr) {
             continue;
         }
-        if (f->st == TxFrame::St::WaitAck || (f->st == TxFrame::St::Ready && !(f->at <= now_))) {
+        if (f->st == TxFrame::St::Ready && f->has(TxFrame::Abandoned)) {
+            next = earliest(next, now_); // withdrawn while it waited for a hold: it ends at the next pump, not at `at`
+        } else if (f->st == TxFrame::St::WaitAck || (f->st == TxFrame::St::Ready && !(f->at <= now_))) {
             next = earliest(next, f->at);
         }
     }

@@ -418,7 +418,7 @@ lm_status_t lmb_debug(lm_context_t *ctx, char *out, size_t cap) {
                           (unsigned long long)m.suspects, (unsigned long long)m.attach_failed,
                           (unsigned long long)m.tx_busy);
     const auto room = [&] { return n > 0 && static_cast<size_t>(n) < cap; };
-    e.mesh().for_each_candidate([&](const MacAddr &mac, uint16_t addr, uint8_t entries, uint8_t streak, uint8_t fails,
+    e.mesh().for_each_candidate(e.step_time(), [&](const MacAddr &mac, uint16_t addr, uint8_t entries, uint8_t streak, uint8_t fails,
                                     bool target, int rssi_dbm, bool weak) {
         if (room()) { // rssi 0 = unknown; w = weak (tried last, never moved to)
             n += std::snprintf(out + n, cap - static_cast<size_t>(n), "%02x%02x@%u/n%u/rf%u/f%u/%d%s%s ", mac.bytes[4],

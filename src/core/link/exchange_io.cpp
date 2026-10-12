@@ -16,6 +16,7 @@ constexpr Duration k_pump_retry =
 // message_1 right after CredR (its 3 x 1 s retransmissions of CredI fit).
 constexpr Duration k_msg1_wait = Duration::from_s(4);
 constexpr Duration k_proxied_join_slack = Duration::from_s(4); // Membership::apply_pacing: 200 ms x up to 20 hops
+constexpr Duration k_slow_hop_service = Duration::from_ms(500); // an unacknowledged TX holds a radio about this long
 
 } // namespace
 
@@ -319,7 +320,9 @@ void Exchange::heard_initiator(MonoTime now) {
         return;
     }
     const Duration service = s_.engine.tx().service_bound();
-    Duration step = mode_ == Mode::End ? delivery::round_timeout(route_.len, service)
+    // Over a route the initiator's frames use up to three hop attempts each, at its own TX speed, which this side
+    // cannot see: a round is sized for a slow hop (k_slow_hop_service) even while our own radio is fast.
+    Duration step = mode_ == Mode::End ? delivery::round_timeout(route_.len, service > k_slow_hop_service ? service : k_slow_hop_service)
                                        : Duration{s_.policy.rto.us + 2 * service.us};
     if (mode_ == Mode::JoinResp) {
         step = step + k_proxied_join_slack; // the joiner may sit behind relays and repeat that much later

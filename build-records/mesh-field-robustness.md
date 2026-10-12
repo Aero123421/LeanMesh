@@ -106,3 +106,27 @@ stack、peak heap、定常CPU、airtime、復帰エネルギーは測定して�
 | firmware build（上と同じ8件） | 8件とも成功 |
 
 資源差分（`f21dee3` 比）: app binaryは +192〜+368 B（example_node RELAY 4 SoCとも +192、hil_node ROOT s3 +192、field_node display s3 +368、relay c6 +288、relay s3 +352）。data+bssはfield_nodeのs3 2件が +16 B（試験アプリの時刻1つ）、ほか±0。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。
+
+## 追加: 別モデルによる2回目のレビュー（Codex CLI、gpt-6-astra、reasoning effort max、read-only）とその修正（2026-10-12）
+
+`bfb8d2e..01ddd3a` を対象にした。指摘は5件で、5件ともコードを読んで確かめてから直した。基準は直前のcommit `01ddd3a`。
+
+| 指摘 | 直したこと |
+|---|---|
+| 経路越し（end）の応答側は、自分の送信が速いと約3.4秒で枠を空け、開始側のhop再送（3回目は約5.4秒後）で届いたmessage_3を捨てる | 応答側は1 hopの送信時間を500 ms以上として1往復を見積もる（1 hopで約10秒、2 hopで約18秒）。docs/06 §8 |
+| HOP_ACK(Busy)が先に届いたあとMAC ACKが失われると、その試行が「無応答」に数えられる（BUSYとRF損失の混同） | Accepted・Rejected・Busyのどれでも、先に届いていれば数えない。docs/08 |
+| いなくなった強い候補の古いRSSIが表に残り、使える親（−84）まで弱い扱いになって、かすかなroot（−91）へ移れる | 弱いかどうかは今選べる候補（直近96秒に聞こえ、回避中でない）と比べる。弱い候補へ移るのは親がそれよりさらに弱いときだけ。docs/04 §6 |
+| 予備候補の待ちが、自分側の不足で終わった試行でも伸びる | 自分側の不足で終わった試行は数えない。docs/04 §5 |
+| 相手の待ちで止まっているframeを取り下げても、待ちが明けるまでpoolの枠を持ち続ける | timerで即座に終わらせる（最初の直し方は送信中に空回りし、simのspin guardが止めた。timer側で終わらせる形に改めた） |
+
+追加した回帰試験: `test_mesh` の `FIELD sim: a strong candidate that is gone ...`（修正前: いなくなった後の10分間ずっとroot直結。修正後: 0 ms、使えるrelayの下に付く）。HOP_ACK(Busy)と取り下げframe、end応答側の見積もりには専用の試験を足していない（既存の31件とASanで退行がないことだけ確認）。
+
+| 検査 | 結果 |
+|---|---|
+| native（`ctest -j 6`） | 31/31 |
+| native ASan/UBSan | 31/31 |
+| Host・fieldview・meshsim E2E（pytest） | 609 passed |
+| 仕様検査(G0)・ruff | PASS／指摘なし |
+| firmware build（上と同じ8件） | 8件とも成功 |
+
+資源差分（`01ddd3a` 比）: app binaryは +176〜+320 B（example_node RELAY c3 +288、c5 +288、c6 +304、s3 +176、hil_node ROOT s3 +288、field_node display s3 +192、relay c6 +320、relay s3 +192）。data+bssは8件とも±0。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。
