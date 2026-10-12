@@ -60,3 +60,21 @@ stack、peak heap、定常CPU、airtime、復帰エネルギーは測定して�
 | firmware build（上と同じ8件） | 8件とも成功 |
 
 資源差分（`95b1263` 比）: app binaryは +160〜+304 B（example_node RELAY c3 +304、c5 +304、c6 +288、s3 +256、hil_node ROOT s3 +160、field_node display s3 +256、relay c6 +288、relay s3 +240）。data+bssは8件とも±0。neighbourの記録は1件あたり8 B増える見込みだが（表はアプリが渡すworkspace内のlm_contextにある）、lm_contextの大きさそのものは測っていない。stack・CPU・airtime・復帰エネルギーも未測定。実機・電波は未検証。
+
+## 追加: 張れない予備候補への試行の繰り返し（2026-10-11）
+
+上のrotationを調べる途中のsimで見つけた。現場の記録に直接の証拠はない（規則は docs/04 §5）。基準は直前のcommit `f0e131a`。
+
+| 試験 | 修正前 | 修正後 |
+|---|---|---|
+| beaconは届くがこちらのframeが届かない予備候補が1つ、10分（`test_mesh` の `FIELD sim: a spare candidate ...`） | handshake 18回、270 frame（すべてMAC ACKなし） | 5回、75 frame。READYは保ったまま、届くようになれば次の試行で張れる |
+
+| 検査 | 結果 |
+|---|---|
+| native（`ctest -j 6`） | 31/31 |
+| native ASan/UBSan | 31/31 |
+| Host・fieldview・meshsim E2E（pytest） | 609 passed |
+| 仕様検査(G0)・ruff | PASS／指摘なし |
+| firmware build（上と同じ8件） | 8件とも成功 |
+
+資源差分（`f0e131a` 比）: app binaryは +64〜+272 B（example_node RELAY c3 +64、c5 +80、c6 +80、s3 +256、hil_node ROOT s3 +176、field_node display s3 +272、relay c6 +80、relay s3 +256）。data+bssは8件とも±0。 候補の記録（3件）は1件あたり最大16 B増える見込みで、lm_contextの大きさは測っていない。実機・電波は未検証。

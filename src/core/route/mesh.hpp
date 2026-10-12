@@ -195,6 +195,8 @@ class Mesh {
         uint8_t fails = 0;
         uint8_t rf_streak = 0; // consecutive MacFailed samples
         uint8_t probe_miss = 0; // probes in a row that got no reply although the radio acked them
+        uint8_t spare_tries = 0; // spare handshakes started since the last one that linked (docs/04 §5)
+        MonoTime spare_after{};  // the next spare handshake is not started before this
     };
     enum class Step : uint8_t { Idle, Link, Probe, Session, Register, Confirm };
     struct Attach {

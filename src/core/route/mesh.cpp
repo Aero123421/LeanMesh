@@ -837,10 +837,14 @@ void Mesh::connect_spare(MonoTime now) {
     }
     for (std::size_t k = 0; k < cands_.size(); ++k) {
         Cand &c = cands_[k];
-        if (c.used && static_cast<int>(k) != parent_ && !linked(c) && now >= c.avoid_until && now - c.heard < k_silence) {
+        if (c.used && static_cast<int>(k) != parent_ && !linked(c) && now >= c.avoid_until && now >= c.spare_after &&
+            now - c.heard < k_silence) {
             const Status st = engine_.link().connect(c.mac, now);
             if (st == Status::Ok) {
                 c.avoid_until = now + Duration::from_s(30); // one try per candidate per 30 s (docs/06 §8 gate)
+                // docs/04 §5: 30, 60, 120, 240, 480 s between the tries that did not link (on_link_up resets it)
+                c.spare_after = now + Duration::from_s(int64_t{30} << c.spare_tries);
+                c.spare_tries = static_cast<uint8_t>(std::min<unsigned>(c.spare_tries + 1U, 4U));
                 return;
             }
             if (st == Status::Busy || st == Status::NoCapacity) {
@@ -862,6 +866,8 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
         return;
     }
     c->addr = n->address.value();
+    c->spare_tries = 0;
+    c->spare_after = MonoTime{};
     if (avoid_relay_ != 0) {
         c->avoid_until =
             MonoTime{}; // a successful spare handshake can serve an explicit evacuation

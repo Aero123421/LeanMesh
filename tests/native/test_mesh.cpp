@@ -1221,6 +1221,40 @@ LM_TEST("FIELD sim: frames to members that do not acknowledge cost a live member
     LM_CHECK(rf <= 4 * 45); // every three attempts are one step of the 1..30 s wait; 80 per member when only exhausted frames counted
 }
 
+// docs/04 §5: a board hears the beacons of a candidate its own frames do not reach. The spare handshake to it
+// never completes; trying it every 30 s kept the board's one exchange slot busy about a third of the time.
+LM_TEST("FIELD sim: a spare candidate that is heard but never answers is asked less and less often") {
+    MNet n(3); // 0 root, 1 the board, 2 a member of the root whose beacons reach 1 while 1's frames do not reach it
+    n.world.options().tx_failed_extra_us = 300'000;
+    LinkParams up;
+    up.up = true;
+    n.world.set_link(1, 2, LinkParams{});
+    n.world.set_link(0, 2, up);
+    n.world.set_link_one_way(2, 1, up);
+    n.boot_all();
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 300'000, 20));
+    const uint64_t started = n.eng(1).link().stats().hs_started;
+    const uint64_t frames = n.eng(1).link().stats().tx_frames_hs;
+    unsigned not_ready_ms = 0;
+    for (unsigned t = 0; t < 600; ++t) {
+        n.run_ms(1000);
+        not_ready_ms += n.ready(1) ? 0U : 1000U;
+    }
+    const uint64_t tries = n.eng(1).link().stats().hs_started - started;
+    std::printf("  spare heard but unreachable, 10 min: %llu handshakes started, %llu handshake frames, not ready %u ms\n",
+                static_cast<unsigned long long>(tries),
+                static_cast<unsigned long long>(n.eng(1).link().stats().tx_frames_hs - frames), not_ready_ms);
+    LM_CHECK(tries >= 1u);
+    LM_CHECK(tries <= 6u); // 30, 60, 120, 240 s apart (it was 18, about one every 30 s)
+    LM_CHECK_EQ(not_ready_ms, 0u);
+    n.world.set_link(1, 2, up); // the candidate is in reach now: it becomes a linked spare at the next try
+    LM_CHECK(n.until([&] {
+        const link::Neighbor *nb = n.eng(1).link().neighbors().find_device(n.id(2));
+        return nb != nullptr && nb->cur.active;
+    }, 500'000, 100));
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;
