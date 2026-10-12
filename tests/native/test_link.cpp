@@ -876,15 +876,61 @@ LM_TEST("S10 rotation: a silent neighbour is retried with a growing wait and doe
     n.lnk(0).policy().rotate_lower_id = Duration::from_s(60); // node 0 rotates both sessions at one minute
     n.lnk(0).policy().rotate_higher_id = Duration::from_s(60);
     n.world.set_link(0, 1, LinkParams{false, 0, 0, 1000}); // node 1 is out of reach
-    n.run_s(100);
-    LM_CHECK(n.nb(0, 2)->cur.rx_sid != sid2);           // the reachable neighbour was rotated
+    n.run_s(250);
+    LM_CHECK(n.nb(0, 2)->cur.rx_sid != sid2); // the reachable neighbour was rotated
     LM_CHECK(n.nb(0, 1)->cur.rx_sid == sid1);
-    LM_CHECK(n.lnk(0).stats().rotations_started <= 4u); // node 2 once; node 1 at 60 s and 30 s after that try ended
+    // Node 1 was tried at 60 s, then 30 s and 60 s after each try ended: three failed handshakes (a try every 30 s
+    // would be six by now). Node 2's rotations complete and are not among them.
+    LM_CHECK_EQ(n.lnk(0).stats().hs_failed, 3u);
+    n.run_s(46); // the try 120 s later has failed too: the next one would be 240 s away
+    LM_CHECK_EQ(n.nb(0, 1)->rotate_misses, 4u);
     n.world.set_link(0, 1, LinkParams{true, 0, 0, 1000}); // node 1 is back and heard under the old session
     LM_CHECK_OK(n.send(1, 0, payload_of(77)));
     n.run_s(40);
     LM_CHECK(n.paired(0, 1));
     LM_CHECK(n.nb(0, 1)->cur.rx_sid != sid1);
+}
+
+// docs/06 §8: the responder frees the one exchange slot when the initiator went silent, and the node's other frames
+// (acks, data, beacons) do not count as a sign of the initiator. Review 2026-10-12: every TX outcome re-armed the limit.
+LM_TEST("S5 responder: a silent initiator frees the slot within seconds although the node keeps sending other frames") {
+    Net n(3);
+    LM_CHECK_OK(n.connect(2, 0));
+    n.run_ms(2000);
+    LM_CHECK(n.paired(0, 2));
+    LM_CHECK_OK(n.connect(1, 0));
+    bool responding = false;
+    for (int i = 0; i < 200 && !responding; ++i) {
+        n.run_ms(1);
+        responding = n.lnk(0).exchange().busy();
+    }
+    LM_CHECK(responding);
+    n.world.set_link(0, 1, LinkParams{false, 0, 0, 1000}); // the initiator is gone in the middle of the handshake
+    for (int i = 0; i < 20; ++i) {                        // 10 s of ordinary traffic from the responder's node
+        (void)n.send(0, 2, payload_of(static_cast<uint8_t>(i)));
+        n.run_ms(500);
+    }
+    LM_CHECK(!n.lnk(0).exchange().busy()); // 4 x (1.5 s + 2 x TX service time), not the 30 s exchange deadline
+    LM_CHECK(!n.session(0, 1));
+}
+
+// docs/04 §6: giving up a handshake that was started (a better candidate is heard) frees the slot for the next one.
+LM_TEST("S5 initiator: an abandoned handshake frees the exchange slot at once") {
+    Net n(3);
+    n.world.set_link(0, 1, LinkParams{false, 0, 0, 1000}); // node 1 does not answer
+    LM_CHECK_OK(n.connect(0, 1));
+    n.run_ms(300);
+    LM_CHECK(n.lnk(0).exchange().busy());
+    LM_CHECK(n.connect(0, 2) == Status::Busy); // one slot
+    const uint64_t failed = n.lnk(0).stats().hs_failed;
+    n.lnk(0).abandon_connect(n.mac(2)); // another peer's handshake is not ours to end
+    LM_CHECK(n.lnk(0).exchange().busy());
+    n.lnk(0).abandon_connect(n.mac(1));
+    LM_CHECK(!n.lnk(0).exchange().busy());
+    LM_CHECK_EQ(n.lnk(0).stats().hs_failed, failed); // given up, not failed
+    LM_CHECK_OK(n.connect(0, 2));
+    n.run_ms(2000);
+    LM_CHECK(n.paired(0, 2));
 }
 
 LM_TEST("S10 rotation by record count: threshold reached, fresh EDHOC, no loss") {

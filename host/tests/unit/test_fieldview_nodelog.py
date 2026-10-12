@@ -301,11 +301,15 @@ def test_the_sdk_debug_line_is_recorded_as_text_and_is_not_an_unknown_message(tm
     text = "mesh=4 step=0 reg=1 attach_fail=3 | end start=5 ok=1 fail=4 | cand=7728@1/n1/rf0/f2/-89w 6fc8@3/n2/rf0/f0/-52 "
     fv._on_event(event(DEV["b"], text.encode(), 1, port=pr.DEBUG_PORT), backlog=False)
     fv._on_event(event(DEV["b"], b"\xff\xfecut", 2, port=pr.DEBUG_PORT), backlog=True)  # never refused for its bytes
+    broken = event(DEV["b"], b"x", 3, port=pr.DEBUG_PORT)
+    broken["payload_b64"] = "not base64 !"  # the loop that reads events must survive it
+    fv._on_event(broken, backlog=False)
     assert fv.other_messages == 0
     rec_.close()
     lines = ndjson(tmp_path / "rec" / "debug.ndjson")
-    assert [(x["name"], x["backlog"], x["cursor"]) for x in lines] == [("display-2", False, "j:1"), ("display-2", True, "j:2")]
-    assert lines[0]["text"] == text and lines[1]["text"].endswith("cut")
+    assert [(x["name"], x["backlog"], x["cursor"]) for x in lines] == [
+        ("display-2", False, "j:1"), ("display-2", True, "j:2"), ("display-2", False, "j:3")]
+    assert lines[0]["text"] == text and lines[1]["text"].endswith("cut") and lines[2]["text"] == ""
 
 
 def test_records_become_nodelog_lines_events_row_and_summary(tmp_path: Path) -> None:

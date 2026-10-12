@@ -150,7 +150,10 @@ Why: on 2026-10-10 two boards had no path for 5 to 8 minutes and nothing told wh
 strong, how many handshakes and end sessions failed, how often an attach was given up. The SDK counts all of this (the
 console `debug` command, `lmb_debug`), but in the field no board has a console.
 
-The node sends that line as UTF-8 text, at most 480 bytes, 3 s after it became REACHABLE and every 5 min while it is.
+The node sends that line as UTF-8 text, at most 480 bytes, 3 to 7 s after it became REACHABLE and every 5 min while it
+is. A path that comes back within 60 s of the last line sends no extra one (a flapping link would send one per flap).
+The line starts with the mesh counters and the candidates; the handshake, receive and end-session counters, the
+neighbours and the stack marks follow, and a line longer than 480 bytes loses its tail, never the candidates.
 The counters are counts since boot, so the first message after a loss covers the time without a path. Delivery
 `LM_BEST_EFFORT`, `LM_VOLATILE`, priority BULK, deadline 30 s. Nothing is kept when it cannot be sent. Candidates are
 written `<mac4>@<address>/n<depth entries>/rf<streak>/f<fails>/<rssi dBm, 0 unknown>[w][*]`; `w` marks a weak candidate

@@ -406,57 +406,62 @@ lm_status_t lmb_debug(lm_context_t *ctx, char *out, size_t cap) {
     const link::LinkStats &l = e.link().stats();
     const route::Mesh::Stats &m = e.mesh().stats();
     const link::EndStats &es = e.delivery().end_stats();
+    // Every piece is appended only while the text still fits: snprintf returns the length it wanted, so `n` can pass
+    // `cap` and nothing may be written after that. The candidates come first: a caller with a small buffer (the field
+    // app's 480 B message) loses the tail, never them.
     int n = std::snprintf(out, cap,
                           "mesh=%u step=%u bcn_rx=%llu probes_tx=%llu reg=%llu lease=%llu ready=%llu suspect=%llu "
-                          "attach_fail=%llu tx_busy=%llu | hs start=%llu ok=%llu fail=%llu ratelim=%llu busydrop=%llu "
-                          "retx=%llu cred_rej=%llu cred_time=%llu bind_bad=%llu tx_rf_fail=%llu | rx ok=%llu "
-                          "unknown_sid=%llu auth_fail=%llu no_id=%llu inadm=%llu lease_restr=%llu | end start=%llu "
-                          "ok=%llu fail=%llu | nb=",
+                          "attach_fail=%llu tx_busy=%llu | cand=",
                           static_cast<unsigned>(e.mesh().state()), static_cast<unsigned>(e.mesh().attach_step_id()),
                           (unsigned long long)m.beacons_rx, (unsigned long long)m.probes_tx,
                           (unsigned long long)m.registers, (unsigned long long)m.leases, (unsigned long long)m.readies,
                           (unsigned long long)m.suspects, (unsigned long long)m.attach_failed,
-                          (unsigned long long)m.tx_busy, (unsigned long long)l.hs_started,
-                          (unsigned long long)l.hs_completed, (unsigned long long)l.hs_failed,
-                          (unsigned long long)l.hs_rate_limited, (unsigned long long)l.hs_busy_drop,
-                          (unsigned long long)l.hs_retransmits, (unsigned long long)l.cred_rejected,
-                          (unsigned long long)l.cred_time_uncertain, (unsigned long long)l.bind_bad,
-                          (unsigned long long)l.tx_rf_failed, (unsigned long long)l.rx_accepted,
-                          (unsigned long long)l.rx_unknown_sid, (unsigned long long)l.rx_auth_fail,
-                          (unsigned long long)l.rx_no_identity, (unsigned long long)l.rx_inadmissible,
-                          (unsigned long long)l.rx_lease_restricted, (unsigned long long)es.started,
-                          (unsigned long long)es.completed, (unsigned long long)es.failed);
-    e.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
-        if (n > 0 && static_cast<size_t>(n) < cap) {
-            n += std::snprintf(out + n, cap - static_cast<size_t>(n), "%02x%02x@%u%s%s ", nb.mac.bytes[4], nb.mac.bytes[5],
-                               static_cast<unsigned>(nb.address.value()), nb.join_only ? "J" : "",
-                               nb.lease_uncertain ? "U" : "");
-        }
-    });
-    // Stack high-water marks per SDK task (bytes never used since boot); the public diagnostics report only the least.
-    if (n > 0 && static_cast<size_t>(n) < cap) {
-        n += std::snprintf(out + n, cap - static_cast<size_t>(n), "| stack_free");
-        for (const char *name : {"lm_owner", "lm_worker", "lm_usb", "main"}) {
-            const TaskHandle_t t = xTaskGetHandle(name);
-            if (t != nullptr && n > 0 && static_cast<size_t>(n) < cap) {
-                n += std::snprintf(out + n, cap - static_cast<size_t>(n), " %s=%u", name,
-                                   static_cast<unsigned>(uxTaskGetStackHighWaterMark(t)));
-            }
-        }
-        n += std::snprintf(out + n, cap - static_cast<size_t>(n), " ");
-    }
-    if (n > 0 && static_cast<size_t>(n) < cap) {
-        n += std::snprintf(out + n, cap - static_cast<size_t>(n), "| cand=");
-    }
+                          (unsigned long long)m.tx_busy);
+    const auto room = [&] { return n > 0 && static_cast<size_t>(n) < cap; };
     e.mesh().for_each_candidate([&](const MacAddr &mac, uint16_t addr, uint8_t entries, uint8_t streak, uint8_t fails,
                                     bool target, int rssi_dbm, bool weak) {
-        if (n > 0 && static_cast<size_t>(n) < cap) { // rssi 0 = unknown; w = weak (tried last, never moved to)
+        if (room()) { // rssi 0 = unknown; w = weak (tried last, never moved to)
             n += std::snprintf(out + n, cap - static_cast<size_t>(n), "%02x%02x@%u/n%u/rf%u/f%u/%d%s%s ", mac.bytes[4],
                                mac.bytes[5], static_cast<unsigned>(addr), static_cast<unsigned>(entries),
                                static_cast<unsigned>(streak), static_cast<unsigned>(fails), rssi_dbm, weak ? "w" : "",
                                target ? "*" : "");
         }
     });
+    if (room()) {
+        n += std::snprintf(out + n, cap - static_cast<size_t>(n),
+                           "| hs start=%llu ok=%llu fail=%llu ratelim=%llu busydrop=%llu retx=%llu cred_rej=%llu "
+                           "cred_time=%llu bind_bad=%llu tx_rf_fail=%llu rot=%llu | rx ok=%llu unknown_sid=%llu "
+                           "auth_fail=%llu no_id=%llu inadm=%llu lease_restr=%llu | end start=%llu ok=%llu fail=%llu "
+                           "| nb=",
+                           (unsigned long long)l.hs_started, (unsigned long long)l.hs_completed,
+                           (unsigned long long)l.hs_failed, (unsigned long long)l.hs_rate_limited,
+                           (unsigned long long)l.hs_busy_drop, (unsigned long long)l.hs_retransmits,
+                           (unsigned long long)l.cred_rejected, (unsigned long long)l.cred_time_uncertain,
+                           (unsigned long long)l.bind_bad, (unsigned long long)l.tx_rf_failed,
+                           (unsigned long long)l.rotations_started, (unsigned long long)l.rx_accepted,
+                           (unsigned long long)l.rx_unknown_sid, (unsigned long long)l.rx_auth_fail,
+                           (unsigned long long)l.rx_no_identity, (unsigned long long)l.rx_inadmissible,
+                           (unsigned long long)l.rx_lease_restricted, (unsigned long long)es.started,
+                           (unsigned long long)es.completed, (unsigned long long)es.failed);
+    }
+    e.link().neighbors().for_each([&](Handle, link::Neighbor &nb) {
+        if (room()) {
+            n += std::snprintf(out + n, cap - static_cast<size_t>(n), "%02x%02x@%u%s%s ", nb.mac.bytes[4], nb.mac.bytes[5],
+                               static_cast<unsigned>(nb.address.value()), nb.join_only ? "J" : "",
+                               nb.lease_uncertain ? "U" : "");
+        }
+    });
+    // Stack high-water marks per SDK task (bytes never used since boot); the public diagnostics report only the least.
+    if (room()) {
+        n += std::snprintf(out + n, cap - static_cast<size_t>(n), "| stack_free");
+    }
+    for (const char *name : {"lm_owner", "lm_worker", "lm_usb", "main"}) {
+        const TaskHandle_t t = xTaskGetHandle(name);
+        if (t != nullptr && room()) {
+            n += std::snprintf(out + n, cap - static_cast<size_t>(n), " %s=%u", name,
+                               static_cast<unsigned>(uxTaskGetStackHighWaterMark(t)));
+        }
+    }
     return to_abi(Status::Ok);
 }
 

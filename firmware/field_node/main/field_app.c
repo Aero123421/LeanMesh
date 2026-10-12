@@ -128,7 +128,7 @@ static struct {
 #endif
     /* node event log (protocol 3.4) */
     field_log_t log;
-    uint64_t log_at_ms, radio_at_ms, debug_at_ms;
+    uint64_t log_at_ms, radio_at_ms, debug_at_ms, debug_sent_ms;
     bool was_member, time_valid, fault_halted;
     uint8_t last_depth;
     lm_idf_radio_stats_t radio_logged;
@@ -247,6 +247,7 @@ static void debug_send(uint64_t now) {
     lm_operation_id_t op = 0;
     const lm_status_t st = lm_send(g.ctx, &r, (const uint8_t *)text, strnlen(text, sizeof text), &op);
     g.debug_at_ms = now + (st == LM_STATUS_OK ? FIELD_DEBUG_INTERVAL_MS : 2000u);
+    if (st == LM_STATUS_OK) g.debug_sent_ms = now;
 }
 
 /* ---- display state in NVS ---- */
@@ -602,7 +603,10 @@ static void link_tick(uint64_t now) {
     g.time_valid = time_valid;
     log_radio(now);
     if (reachable && !g.was_reachable) g.tele_at_ms = now; /* the first telemetry right after REACHABLE (also after a loss) */
-    if (reachable && !g.was_reachable) g.debug_at_ms = now + 3000; /* and what the SDK counted meanwhile, behind it */
+    /* ... and what the SDK counted meanwhile, behind it: 3..7 s later (the nodes of a recovered relay do not all
+       send at once), and not again for a path that comes and goes within a minute of the last line. */
+    if (reachable && !g.was_reachable && (g.debug_sent_ms == 0 || now - g.debug_sent_ms >= FIELD_DEBUG_MIN_GAP_MS))
+        g.debug_at_ms = now + 3000u + esp_random() % 4000u;
     g.was_reachable = reachable;
 }
 

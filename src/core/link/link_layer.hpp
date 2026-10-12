@@ -50,6 +50,8 @@ class LinkLayer {
     // Opens a session with the neighbour at `mac` (initiator). Conflict when a live session exists
     // and `replace` is false; other errors as Exchange::start_initiator().
     [[nodiscard]] Status connect(const MacAddr &mac, MonoTime now, bool replace = false);
+    // The caller no longer wants the handshake it started with connect(): the exchange slot is free again.
+    void abandon_connect(const MacAddr &mac) { exchange_.abandon(mac); }
     // Seals one frame for the neighbour with a live session. AuthPending: no session yet.
     // SessionRefreshRequired: key lifetime over. The bytes are what a retransmission sends again.
     [[nodiscard]] Status seal(const DeviceId &peer, wire::FrameKind kind, ByteView plain,

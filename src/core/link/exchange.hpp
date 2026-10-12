@@ -344,6 +344,8 @@ class Exchange {
     [[nodiscard]] MonoTime deadline() const;
     // Engine stop: aborts, wipes, and keeps the memory reserved while a job is in flight.
     void stop();
+    // Ends our own 1-hop link handshake towards `mac`, if that is what runs (not a failure: nothing is counted).
+    void abandon(const MacAddr &mac);
 
     // The slot is taken. A lingering responder (only keeping its ACK for bind retransmits) is free:
     // a new exchange replaces it and forgets the cached ACK.

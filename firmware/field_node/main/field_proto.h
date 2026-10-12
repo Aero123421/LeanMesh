@@ -20,6 +20,7 @@ extern "C" {
 #define FIELD_PORT_DEBUG 216u /* the SDK debug line as text (protocol 3.6) */
 #define FIELD_DEBUG_MAX 480u
 #define FIELD_DEBUG_INTERVAL_MS 300000u
+#define FIELD_DEBUG_MIN_GAP_MS 60000u /* a path that comes back sooner after the last line sends no extra one */
 #define FIELD_PRESENCE_BYTES 44u
 #define FIELD_KEY_BYTES 20u
 

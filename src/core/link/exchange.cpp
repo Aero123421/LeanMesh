@@ -152,6 +152,12 @@ void Exchange::stop() {
     }
 }
 
+void Exchange::abandon(const MacAddr &mac) {
+    if (initiator_ && mode_ == Mode::Link && mac_ == mac) {
+        stop();
+    }
+}
+
 void Exchange::wipe() {
     (void)hs_.cancel();
     pend_.wipe();

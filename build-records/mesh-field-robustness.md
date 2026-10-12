@@ -78,3 +78,31 @@ stack、peak heap、定常CPU、airtime、復帰エネルギーは測定して�
 | firmware build（上と同じ8件） | 8件とも成功 |
 
 資源差分（`f0e131a` 比）: app binaryは +64〜+272 B（example_node RELAY c3 +64、c5 +80、c6 +80、s3 +256、hil_node ROOT s3 +176、field_node display s3 +272、relay c6 +80、relay s3 +256）。data+bssは8件とも±0。 候補の記録（3件）は1件あたり最大16 B増える見込みで、lm_contextの大きさは測っていない。実機・電波は未検証。
+
+## 追加: 枝全体のコードレビューと、その指摘の修正（2026-10-12）
+
+`bfb8d2e..f21dee3` を2系統（coreの差分／試験アプリ・viewer・sim・試験）で読み直した。指摘のうち、コードを読んで確かめられたものを直した。基準は直前のcommit `f21dee3`。
+
+| 指摘 | 直したこと |
+|---|---|
+| 応答側の「開始側が黙ったら枠を空ける」待ちが、同じnodeのどの送信完了でも延びていた（送信の絶えないrootでは30秒まで空かない） | 自分のhandshake frameの送信完了だけで延ばす。proxy越しのjoinには再送の遅さ4秒を足す（docs/06 §8） |
+| 弱い候補への試行をやめても、始めていたhandshakeがexchange slotを持ったままで、良い候補へのhandshakeがBusyのまま失敗に数えられる | やめるときにhandshakeも止める。良い候補が回避中ならやめない（docs/04 §6） |
+| 認証済みHOP_ACKが返っても「MAC ACKなしの連続」が切れず、MAC ACKだけ失われる相手を3 frameごとに待たせる | Accepted のHOP_ACKで連続を切る。HOP_ACKが先に届いたframeの試行は数えない（docs/08 Issue 19） |
+| 2回目以降で届いたframeの前の試行を、MAC ACKの有無にかかわらずRF失敗に数えていた | MAC ACKのなかった試行だけ数える（docs/04 §5の規則どおり） |
+| 自分側の不足で終わったrotationも、隣の未完了として30〜480秒待たせていた | 自分側の不足は数えず5秒後に試す（docs/06 §7） |
+| `lmb_debug`: 文字列が容量を超えたあとの追記に容量検査がなく、範囲外へ書きうる（試験アプリの480 Bで到達しうる） | すべての追記を容量内に限る。候補の一覧を先頭側へ移し、480 Bで切れても候補は残す |
+| 試験アプリ: debug行をpathが戻るたびに送る（揺れるlinkで毎回480 B）、全nodeが同時刻に送る | 前回から60秒以内は追加で送らない。3〜7秒にばらす（docs/field/protocol.md 3.6） |
+| fieldview: payloadの壊れたdebug eventで読取りloopが同じ頁を読み続ける | 空文字として記録し、loopを進める |
+| 試験の弱さ（rotationの2試験が、下限なし・30秒固定の再試行でも通る） | 下限と3段の待ちを検査。応答側の枠解放と、やめたhandshakeの枠解放の試験を追加（前者は修正前に失敗することを確認） |
+
+直していない指摘: `test_mesh` の3試験（「faint shallower」「do not acknowledge」「three boards」）は、狙った状況が起きたことの検査がない／しきい値が乱数の並びに依存する。`lmb_debug` は計数を所有thread外から読む（値が1件ずれて読める程度）。`weak()` の「最良」は回避中・最近聞こえていない候補も含む。
+
+| 検査 | 結果 |
+|---|---|
+| native（`ctest -j 6`） | 31/31 |
+| native ASan/UBSan | 31/31 |
+| Host・fieldview・meshsim E2E（pytest） | 609 passed |
+| 仕様検査(G0)・ruff | PASS／指摘なし |
+| firmware build（上と同じ8件） | 8件とも成功 |
+
+資源差分（`f21dee3` 比）: app binaryは +192〜+368 B（example_node RELAY 4 SoCとも +192、hil_node ROOT s3 +192、field_node display s3 +368、relay c6 +288、relay s3 +352）。data+bssはfield_nodeのs3 2件が +16 B（試験アプリの時刻1つ）、ほか±0。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。

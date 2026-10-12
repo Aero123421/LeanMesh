@@ -250,9 +250,15 @@ void LinkLayer::on_timer(MonoTime now) {
     if (rotating_set_) { // the rotation we started is over; a completed one replaced the session and is not due
         rotating_set_ = false;
         Neighbor *nb = neighbors_.find_mac(rotating_);
+        const Status why = exchange_.last_failure();
         if (nb != nullptr && now >= rotation_time(*nb)) {
-            nb->rotate_misses = static_cast<uint8_t>(std::min<unsigned>(nb->rotate_misses + 1U, k_rotation_misses_max));
-            nb->rotate_after = now + Duration{policy_.handshake_gate.us << (nb->rotate_misses - 1U)};
+            if (why == Status::Busy || is_local_resource_error(why)) {
+                rotation_retry_ = now + k_rotation_retry; // our shortage (pool, job, radio): not the neighbour's miss
+            } else {
+                nb->rotate_misses =
+                    static_cast<uint8_t>(std::min<unsigned>(nb->rotate_misses + 1U, k_rotation_misses_max));
+                nb->rotate_after = now + Duration{policy_.handshake_gate.us << (nb->rotate_misses - 1U)};
+            }
         }
     }
     if (!identity_.is_member() || now < rotation_retry_) {

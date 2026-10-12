@@ -15,6 +15,7 @@ constexpr Duration k_pump_retry =
 // An unauthenticated CredI may hold the single slot only this long: the honest initiator sends
 // message_1 right after CredR (its 3 x 1 s retransmissions of CredI fit).
 constexpr Duration k_msg1_wait = Duration::from_s(4);
+constexpr Duration k_proxied_join_slack = Duration::from_s(4); // Membership::apply_pacing: 200 ms x up to 20 hops
 
 } // namespace
 
@@ -318,8 +319,11 @@ void Exchange::heard_initiator(MonoTime now) {
         return;
     }
     const Duration service = s_.engine.tx().service_bound();
-    const Duration step = mode_ == Mode::End ? delivery::round_timeout(route_.len, service)
-                                             : Duration{s_.policy.rto.us + 2 * service.us};
+    Duration step = mode_ == Mode::End ? delivery::round_timeout(route_.len, service)
+                                       : Duration{s_.policy.rto.us + 2 * service.us};
+    if (mode_ == Mode::JoinResp) {
+        step = step + k_proxied_join_slack; // the joiner may sit behind relays and repeat that much later
+    }
     idle_at_ = now + Duration{step.us * (s_.policy.max_attempts + 1)};
 }
 
@@ -398,8 +402,8 @@ Status Exchange::send_link_chunk(ByteView obj, MonoTime now) {
 }
 
 void Exchange::on_tx_outcome(const TxOutcome &o, MonoTime now) {
-    heard_initiator(now); // our own fragment was on the air until now
     if (is_link_tag(o.tag) && mode_ != Mode::End) {
+        heard_initiator(now); // our own fragment was on the air until now (other frames of the node do not count)
         tx_inflight_ = false;
         if (rto_after_tx_) {
             rto_after_tx_ = false;

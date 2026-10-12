@@ -3651,6 +3651,7 @@ LM_TEST("FIELD sim: after its renewal a relay does not keep re-keying towards a 
     n.run_ms(240'000);
     n.node(2).power_cut(); // its frames stop and nobody acknowledges ours; its lease (15 min) ends at 900 s
     const uint64_t hs = n.eng(1).link().stats().tx_frames_hs;
+    const uint64_t hs_failed = n.eng(1).link().stats().hs_failed;
     unsigned not_ready_ms = 0;
     while (n.root_ms() < 960'000) {
         n.run_ms(1000);
@@ -3661,8 +3662,13 @@ LM_TEST("FIELD sim: after its renewal a relay does not keep re-keying towards a 
                 static_cast<unsigned long long>(n.eng(1).link().stats().rotations_started),
                 static_cast<unsigned long long>(frames), not_ready_ms);
     LM_CHECK(n.eng(1).membership().stats().renewals >= 1u);
-    LM_CHECK(n.eng(1).link().stats().rotations_started >= 1u);
-    LM_CHECK(frames <= 60); // 30 s, 60 s, 120 s apart: four tries of 15 frames at most in the 270 s (it was ~430)
+    // Tries 30, 60 and 120 s apart: at least two and at most five of them fall into the ~270 s between the renewal
+    // and the neighbour's lease end, 15 frames each (it was 30 tries, ~430 frames).
+    const uint64_t tries = n.eng(1).link().stats().hs_failed - hs_failed;
+    LM_CHECK(tries >= 2u);
+    LM_CHECK(tries <= 5u);
+    LM_CHECK(frames >= 30);
+    LM_CHECK(frames <= 75);
     LM_CHECK_EQ(n.lease_at(1, 2), 0u); // the session ended with the neighbour's lease, as before
     LM_CHECK_EQ(not_ready_ms, 0u);
 }

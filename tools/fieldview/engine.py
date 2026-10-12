@@ -444,8 +444,12 @@ class FieldView:
                 self._on_presence(ev, backlog)
             elif pr.event_app_port(ev) == pr.DEBUG_PORT:
                 device = ev.get("origin", "")
+                try:
+                    text = pr.event_payload(ev).decode("utf-8", "replace")
+                except (ValueError, TypeError):  # no or malformed payload: recorded as such, the loop goes on
+                    text = ""
                 self.rec.log("debug", {"device": device, "name": self.name_of(device), "cursor": ev.get("cursor"),
-                                       "backlog": backlog, "text": pr.event_payload(ev).decode("utf-8", "replace")})
+                                       "backlog": backlog, "text": text})
             else:
                 self.other_messages += 1
         elif kind == "OPERATION_UPDATE":

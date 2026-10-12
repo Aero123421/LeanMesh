@@ -154,6 +154,7 @@ bool HopTx::on_ack(const MacAddr &src, const wire::HopAck &ack, MonoTime now) {
         if (ack.status == wire::HopAckStatus::Accepted) {
             if (link::Neighbor *peer = link_.neighbors().find_mac(src)) {
                 peer->failures = 0;
+                peer->rf_streak = 0;
                 peer->retry_at = {};
             }
         }
@@ -189,7 +190,7 @@ void HopTx::on_tx_outcome(const TxOutcome &o, MonoTime now) {
             } else if (o.result == port::TxResult::Unknown) {
                 ++stats_.tx_unknown;
             }
-            if (f->cls != sched::Class::Control) {
+            if (f->cls != sched::Class::Control && !f->has(TxFrame::AckAccepted)) { // an early HOP_ACK: it arrived
                 note_mac(f->mac, o.result, now);
             }
             if (f->has(TxFrame::AckAccepted) || f->has(TxFrame::AckRejected) || f->has(TxFrame::AckBusy)) {

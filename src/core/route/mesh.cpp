@@ -577,10 +577,13 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
         }
         return;
     }
-    // The candidate being tried became a weak one (a better one is heard now) and has no link yet: the order of the
-    // first beacons must not decide. Its handshake ends by itself; the search picks again.
+    // The candidate being tried became a weak one (a better one that may be tried is heard now) and has no link yet:
+    // the order of the first beacons must not decide. Its handshake is stopped, so the one exchange slot is free for
+    // the better candidate, and the search picks again.
     if (state_ == State::Attach && !att_.switching && att_.step == Step::Link && att_.cand >= 0 &&
-        att_.cand != index_of(c) && weak(cands_[static_cast<std::size_t>(att_.cand)]) && !weak(*c)) {
+        att_.cand != index_of(c) && now >= c->avoid_until && weak(cands_[static_cast<std::size_t>(att_.cand)]) &&
+        !weak(*c)) {
+        engine_.link().abandon_connect(cands_[static_cast<std::size_t>(att_.cand)].mac);
         att_ = Attach{};
         state_ = State::Search;
         attempt_at_ = now;
@@ -1455,8 +1458,8 @@ void Mesh::on_frame_done(const delivery::FrameDone &f, delivery::HopEnd end, Mon
         return;
     }
     if (end == delivery::HopEnd::Accepted) {
-        for (uint8_t i = 1; i < f.attempts && i < 3 && !engine_.chan().planned_gap(now); ++i) {
-            note(*c, false, now); // earlier attempts of this frame got no HOP_ACK
+        for (uint8_t i = 1; i < f.attempts && i <= f.mac_failed && i < 3 && !engine_.chan().planned_gap(now); ++i) {
+            note(*c, false, now); // earlier attempts of this frame that the peer's radio did not acknowledge
         }
         note(*c, true, now);
         c->rf_streak = 0;
