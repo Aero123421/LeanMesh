@@ -179,7 +179,8 @@ def decode_k3(data: bytes) -> K3Press:
 # ---- node event log (§3.4) --------------------------------------------------------------------------------------
 
 NODELOG_MAX_BYTES = 160
-_NODELOG_HEAD = struct.Struct(">BB")        # version, count
+NODELOG_VERSION = 2                         # 2: the message names the boot of its records
+_NODELOG_HEAD = struct.Struct(">BBH")       # version, count, boot_count
 _NODELOG_REC = struct.Struct(">BBHI")       # type, len, seq, t_ms (ms since this boot)
 (T_BOOT, T_MEMBER, T_REACHABLE, T_UNREACHABLE, T_TIME_VALID, T_JOIN_END, T_RADIO, T_DEPTH, T_DISPLAY_FAULT,
  T_LOG_LOST, T_RADIO_FAULT, T_SDK_FAULT, T_TX_POWER) = range(1, 14)
@@ -219,6 +220,7 @@ class NodeRecord:
     seq: int
     t_ms: int
     fields: dict[str, int | None] | None = None   # None: a type this tool does not know (skipped by its length)
+    boot: int = 0                                 # the boot_count the message named (the node's ring is per boot)
 
     @property
     def name(self) -> str:
@@ -231,7 +233,8 @@ class NodeRecord:
 
 
 def decode_nodelog(data: bytes) -> list[NodeRecord]:
-    """§3.4: `u8 version = 1, u8 count`, then count records `u8 type, u8 len, u16 seq, u32 t_ms, payload`. Unknown types
+    """§3.4: `u8 version = 2, u8 count, u16 boot_count`, then count records `u8 type, u8 len, u16 seq, u32 t_ms, payload`,
+    each of that boot. Unknown types
     are skipped by len (and returned with fields None). A message that is malformed anywhere - another version, more than
     160 bytes, a record that runs past the end, a known type with a payload shorter than its layout, bytes left over after
     `count` records - is refused as a whole: NodeLogError, nothing of it is used."""
@@ -239,8 +242,8 @@ def decode_nodelog(data: bytes) -> list[NodeRecord]:
         raise NodeLogError(f"node log message is {len(data)} bytes, at most {NODELOG_MAX_BYTES}")
     if len(data) < _NODELOG_HEAD.size:
         raise NodeLogError(f"node log message is {len(data)} bytes, shorter than its header")
-    version, count = _NODELOG_HEAD.unpack_from(data)
-    if version != 1:
+    version, count, boot = _NODELOG_HEAD.unpack_from(data)
+    if version != NODELOG_VERSION:
         raise NodeLogError(f"unknown node log version {version}")
     pos, out = _NODELOG_HEAD.size, []
     for index in range(count):
@@ -254,7 +257,7 @@ def decode_nodelog(data: bytes) -> list[NodeRecord]:
         pos += length
         known = _NODELOG_TYPES.get(rtype)
         if known is None:
-            out.append(NodeRecord(rtype, seq, t_ms))
+            out.append(NodeRecord(rtype, seq, t_ms, None, boot))
             continue
         name, layout, names = known
         if length < layout.size:
@@ -262,16 +265,16 @@ def decode_nodelog(data: bytes) -> list[NodeRecord]:
         fields: dict[str, int | None] = dict(zip(names, layout.unpack_from(payload), strict=True))
         if fields.get("parent_rssi_dbm") == RSSI_UNKNOWN:
             fields["parent_rssi_dbm"] = None   # as in telemetry: -128 is "unknown"
-        out.append(NodeRecord(rtype, seq, t_ms, fields))
+        out.append(NodeRecord(rtype, seq, t_ms, fields, boot))
     if pos != len(data):
         raise NodeLogError(f"{len(data) - pos} byte(s) left after {count} record(s)")
     return out
 
 
-def encode_nodelog(records: list[tuple[int, int, int, bytes]]) -> bytes:
-    """The node's side of §3.4 for tests and the fake Host: (type, seq, t_ms, payload) per record."""
+def encode_nodelog(records: list[tuple[int, int, int, bytes]], boot_count: int) -> bytes:
+    """The node's side of §3.4 for tests and the fake Host: (type, seq, t_ms, payload) per record, all of `boot_count`."""
     body = b"".join(_NODELOG_REC.pack(rtype, len(payload), seq, t_ms) + payload for rtype, seq, t_ms, payload in records)
-    return _NODELOG_HEAD.pack(1, len(records)) + body
+    return _NODELOG_HEAD.pack(NODELOG_VERSION, len(records), boot_count) + body
 
 
 def nodelog_payload(rtype: int, **values: int) -> bytes:

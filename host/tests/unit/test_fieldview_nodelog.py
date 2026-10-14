@@ -48,17 +48,24 @@ def reachable(seq: int, t_ms: int, depth: int = 2, rssi: int = -61) -> tuple[int
     return rec(pr.T_REACHABLE, seq, t_ms, depth=depth, parent_rssi_dbm=rssi)
 
 
+def enc(records: list[tuple[int, int, int, bytes]], boot: int | None = None) -> bytes:
+    """A message as the node sends it: of the boot its BOOT record names, else of `boot` (BOOT_STALL's 7 by default)."""
+    if boot is None:
+        boot = next((int.from_bytes(p[2:4], "big") for t, _s, _m, p in records if t == pr.T_BOOT and len(p) >= 4), 7)
+    return pr.encode_nodelog(records, boot)
+
+
 # ---- the wire --------------------------------------------------------------------------------------------------------
 
 def test_a_boot_record_is_read_at_the_offsets_of_the_table() -> None:
     # written byte by byte, independent of the codec: reset_reason, sdk cause, boot_count, prev_uptime_ms, detail_ms
     payload = bytes([3, 1]) + (513).to_bytes(2, "big") + (86_400_000).to_bytes(4, "big") + (3012).to_bytes(4, "big")
-    data = bytes([1, 1, 1, 12]) + (9).to_bytes(2, "big") + (40).to_bytes(4, "big") + payload
+    data = bytes([2, 1, 2, 1, 1, 12]) + (9).to_bytes(2, "big") + (40).to_bytes(4, "big") + payload   # boot 513
     [r] = pr.decode_nodelog(data)
-    assert (r.type, r.name, r.seq, r.t_ms) == (1, "BOOT", 9, 40)
+    assert (r.type, r.name, r.seq, r.t_ms, r.boot) == (1, "BOOT", 9, 40, 513)
     assert r.fields == {"reset_reason": 3, "sdk_restart_cause": 1, "boot_count": 513, "prev_uptime_ms": 86_400_000,
                         "detail_ms": 3012}
-    assert pr.encode_nodelog([(1, 9, 40, payload)]) == data
+    assert pr.encode_nodelog([(1, 9, 40, payload)], 513) == data
 
 
 def test_the_first_ten_types_round_trip_with_their_named_fields() -> None:
@@ -74,10 +81,10 @@ def test_the_first_ten_types_round_trip_with_their_named_fields() -> None:
         rec(pr.T_DISPLAY_FAULT, 9, 25_000, code=2),
         rec(pr.T_LOG_LOST, 10, 26_000, records_dropped=65_535),
     ]
-    out = pr.decode_nodelog(pr.encode_nodelog(records[:5]))
+    out = pr.decode_nodelog(enc(records[:5]))
     assert [r.name for r in out] == ["BOOT", "MEMBER", "REACHABLE", "UNREACHABLE", "TIME_VALID"]
     # at most 160 bytes a message: the other five in a second one
-    out += pr.decode_nodelog(pr.encode_nodelog(records[5:]))
+    out += pr.decode_nodelog(enc(records[5:]))
     assert [(r.type, r.seq, r.t_ms) for r in out] == [(r[0], r[1], r[2]) for r in records]
     by = {r.name: r.fields for r in out}
     assert by["BOOT"] == BOOT_STALL
@@ -92,12 +99,12 @@ def test_the_first_ten_types_round_trip_with_their_named_fields() -> None:
 
 
 def test_an_unknown_rssi_is_none_as_in_telemetry() -> None:
-    [r] = pr.decode_nodelog(pr.encode_nodelog([reachable(1, 5, rssi=-128)]))
+    [r] = pr.decode_nodelog(enc([reachable(1, 5, rssi=-128)]))
     assert r.fields == {"depth": 2, "parent_rssi_dbm": None}
 
 
 def test_an_unknown_type_is_skipped_by_its_length_and_the_next_record_is_read() -> None:
-    data = pr.encode_nodelog([boot(), (200, 2, 50, b"\x01\x02\x03\x04\x05"), (201, 3, 60, b""), bare(pr.T_MEMBER, 4, 70)])
+    data = enc([boot(), (200, 2, 50, b"\x01\x02\x03\x04\x05"), (201, 3, 60, b""), bare(pr.T_MEMBER, 4, 70)])
     out = pr.decode_nodelog(data)
     assert [(r.type, r.name, r.known) for r in out] == [(1, "BOOT", True), (200, "type200", False), (201, "type201", False),
                                                         (2, "MEMBER", True)]
@@ -105,25 +112,25 @@ def test_an_unknown_type_is_skipped_by_its_length_and_the_next_record_is_read() 
 
 
 def test_a_known_type_with_a_longer_payload_is_read_as_a_prefix() -> None:
-    [r] = pr.decode_nodelog(pr.encode_nodelog([(pr.T_DISPLAY_FAULT, 1, 5, b"\x02\xAA\xBB")]))
+    [r] = pr.decode_nodelog(enc([(pr.T_DISPLAY_FAULT, 1, 5, b"\x02\xAA\xBB")]))
     assert r.fields == {"code": 2}
 
 
 def good() -> bytes:
-    return pr.encode_nodelog([boot(), bare(pr.T_MEMBER, 2, 100)])
+    return enc([boot(), bare(pr.T_MEMBER, 2, 100)])
 
 
 MALFORMED = {
     "empty": b"",
-    "header only half": b"\x01",
-    "unknown version": b"\x02" + good()[1:],
+    "header only half": b"\x02\x01\x00",
+    "version 1 (no boot)": b"\x01" + good()[1:],
     "version 0": b"\x00" + good()[1:],
-    "count too big": bytes([1, 3]) + good()[2:],
+    "count too big": bytes([2, 3]) + good()[2:],
     "record cut in its header": good()[:-3],
     "payload runs past the end": good()[:15],
-    "known type, payload too short": pr.encode_nodelog([(pr.T_BOOT, 1, 5, b"\x00" * 11)]),
-    "bytes left after count records": bytes([1, 1]) + good()[2:],
-    "more than 160 bytes": pr.encode_nodelog([(200, i, i, b"\x00" * 10) for i in range(11)]),
+    "known type, payload too short": enc([(pr.T_BOOT, 1, 5, b"\x00" * 11)]),
+    "bytes left after count records": bytes([2, 1]) + good()[2:],
+    "more than 160 bytes": enc([(200, i, i, b"\x00" * 10) for i in range(11)]),
 }
 
 
@@ -134,19 +141,19 @@ def test_a_malformed_message_is_refused_as_a_whole(name: str) -> None:
 
 
 def test_exactly_160_bytes_is_still_a_message() -> None:
-    records = [(200, i, i, b"\x00" * 11) for i in range(7)] + [(201, 9, 9, b"\x00" * 17)]   # 2 + 7 * 19 + 25 = 160
-    data = pr.encode_nodelog(records)
+    records = [(200, i, i, b"\x00" * 11) for i in range(7)] + [(201, 9, 9, b"\x00" * 15)]   # 4 + 7 * 19 + 23 = 160
+    data = enc(records)
     assert len(data) == 160 and len(pr.decode_nodelog(data)) == 8
 
 
 def test_an_empty_message_has_no_records() -> None:
-    assert pr.decode_nodelog(struct.pack(">BB", 1, 0)) == []
+    assert pr.decode_nodelog(struct.pack(">BBH", 2, 0, 1)) == []
 
 
 # ---- one node: boots, the timeline of a boot, record loss ------------------------------------------------------------
 
-def feed(track: nl.NodeLogTrack, *records: tuple[int, int, int, bytes]) -> list[nl.Fed]:
-    return [track.feed(r) for r in pr.decode_nodelog(pr.encode_nodelog(list(records)))]
+def feed(track: nl.NodeLogTrack, *records: tuple[int, int, int, bytes], boot: int | None = None) -> list[nl.Fed]:
+    return [track.feed(r) for r in pr.decode_nodelog(enc(list(records), boot))]
 
 
 def test_the_attach_timeline_belongs_to_the_current_boot_and_a_reboot_resets_it() -> None:
@@ -162,7 +169,7 @@ def test_the_attach_timeline_belongs_to_the_current_boot_and_a_reboot_resets_it(
     assert (t.member_ms, t.time_valid_ms, t.reachable_ms, t.attach_s, t.reachable, t.depth) == (None,) * 6
     assert (t.boots_seen, t.boot_count, t.last_seq) == (2, 8, 1)
     assert t.as_dict()["attach_s"] is None and t.boot_cause == "watchdog"
-    feed(t, bare(pr.T_MEMBER, 2, 900), reachable(3, 4100, depth=3, rssi=-70))
+    feed(t, bare(pr.T_MEMBER, 2, 900), reachable(3, 4100, depth=3, rssi=-70), boot=8)   # boot 8's next message
     assert (t.attach_s, t.member_ms) == (4.1, 900) and t.records_lost == 0
 
 
@@ -204,10 +211,23 @@ def test_the_sequence_wraps_without_being_a_restart() -> None:
 def test_a_restart_whose_boot_record_never_arrived_is_seen_and_not_mixed_into_the_old_boot() -> None:
     t = nl.NodeLogTrack()
     feed(t, boot(1, 10), bare(pr.T_MEMBER, 2, 100), reachable(3, 200), bare(pr.T_TIME_VALID, 40, 40_000))
-    [fed] = feed(t, bare(pr.T_MEMBER, 3, 700))                     # seq fell back from 40 to 3, boot time from 40 s to 0.7 s
+    [fed] = feed(t, bare(pr.T_MEMBER, 3, 700), boot=8)             # the message names boot 8; its BOOT never came
     assert fed.unseen_boot and not fed.late
-    assert (t.boots_unseen, t.boot_count, t.reachable_ms, t.time_valid_ms, t.member_ms) == (1, None, None, None, 700)
+    assert (t.boots_unseen, t.boot_count, t.reachable_ms, t.time_valid_ms, t.member_ms) == (1, 8, None, None, 700)
+    assert t.boot is None and t.boot_cause is None                 # boot 7's cause is not boot 8's
     assert t.records_lost == 36                                    # the old boot's own gap 3 -> 40; the restart adds none
+
+
+def test_a_restart_is_seen_although_sequence_and_boot_time_went_on() -> None:
+    # 2026-10-12 field: boot 9 sent seq up to 12 at 405 s; boot 10 lost its BOOT and first records, and its next ones
+    # (seq 13 at 443 s) looked like boot 9 going on. They were shown under boot 9. The message names its boot.
+    t = nl.NodeLogTrack()
+    feed(t, boot(1, 10, boot_count=9), bare(pr.T_MEMBER, 2, 1_900), rec(pr.T_DEPTH, 12, 404_800, depth=2,
+                                                                         parent_rssi_dbm=-83))
+    [fed] = feed(t, rec(pr.T_RADIO, 13, 443_430, tx_done_max_ms=483, tx_late=0, tx_stall_waits=0), boot=10)
+    assert fed.unseen_boot and (t.boot_count, t.boots_unseen, t.depth, t.member_ms) == (10, 1, None, None)
+    [late] = feed(t, rec(pr.T_RADIO, 12, 400_000, tx_done_max_ms=1, tx_late=0, tx_stall_waits=0), boot=9)
+    assert late.late and t.boot_count == 10 and t.as_dict()["tx_done_max_ms"] == 483   # boot 9's record changes nothing
 
 
 def test_a_huge_jump_is_not_a_count_of_lost_records() -> None:
@@ -236,7 +256,7 @@ def test_totals_unreachable_radio_and_lost_log_records() -> None:
 def test_the_words_of_the_records() -> None:
     t = nl.NodeLogTrack()
     said = []
-    for r in pr.decode_nodelog(pr.encode_nodelog([
+    for r in pr.decode_nodelog(enc([
             boot(1, 10), bare(pr.T_MEMBER, 2, 1_200), reachable(3, 8_400),
             rec(pr.T_UNREACHABLE, 4, 20_000, connectivity_state=3, reason=9),
             reachable(5, 31_000, depth=2, rssi=-128),
@@ -257,7 +277,7 @@ def test_the_words_of_the_records() -> None:
 
 def test_a_radio_fault_record_round_trips_and_says_how_the_app_recovered() -> None:
     t = nl.NodeLogTrack()
-    out = pr.decode_nodelog(pr.encode_nodelog([
+    out = pr.decode_nodelog(enc([
         boot(1, 10), rec(pr.T_RADIO_FAULT, 2, 95_000, reason=0x0000_0010, restart_status=0),
         rec(pr.T_RADIO_FAULT, 3, 140_000, reason=0x0000_0010, restart_status=7)]))
     assert out[1].name == "RADIO_FAULT" and out[1].fields == {"reason": 16, "restart_status": 0}
@@ -317,10 +337,10 @@ def test_records_become_nodelog_lines_events_row_and_summary(tmp_path: Path) -> 
     fv, rec_ = make_engine(tmp_path, clock)
     fv._on_nodes([{"device_id": DEV["b"], "membership": "ACTIVE", "connectivity": "REACHABLE",
                    "parent_device_id": "ff" * 32, "root_depth": 1}])
-    fv._on_event(event(DEV["b"], pr.encode_nodelog([
+    fv._on_event(event(DEV["b"], enc([
         boot(1, 10), bare(pr.T_MEMBER, 2, 1_200), reachable(3, 8_400, depth=1, rssi=-52),
         bare(pr.T_TIME_VALID, 4, 9_000)]), 1), backlog=False)
-    fv._on_event(event(DEV["b"], pr.encode_nodelog([
+    fv._on_event(event(DEV["b"], enc([
         rec(pr.T_RADIO, 7, 20_000, tx_done_max_ms=1350, tx_late=2, tx_stall_waits=0),  # 5, 6 never arrived
         rec(pr.T_UNREACHABLE, 8, 21_000, connectivity_state=3, reason=4), (222, 9, 22_000, b"xyz")]), 2), backlog=False)
     assert fv.other_messages == 0 and fv.bad_nodelog == 0
@@ -371,7 +391,7 @@ def test_a_node_without_a_log_has_empty_columns_not_zeros(tmp_path: Path) -> Non
 def test_a_malformed_message_is_counted_recorded_and_never_crashes_the_engine(tmp_path: Path, name: str) -> None:
     fv, rec_ = make_engine(tmp_path, [0.0])
     fv._on_event(event(DEV["a"], MALFORMED[name], 1), backlog=False)
-    fv._on_event(event(DEV["a"], pr.encode_nodelog([boot()]), 2), backlog=False)       # the next message is read normally
+    fv._on_event(event(DEV["a"], enc([boot()]), 2), backlog=False)       # the next message is read normally
     assert fv.bad_nodelog == 1 and fv.nodelog[DEV["a"]].boots_seen == 1
     assert fv.snapshot()["host"]["bad_nodelog"] == 1
     assert any(e["kind"] == "nodelog" and "unreadable node log" in e["text"] for e in fv.log)
@@ -391,7 +411,7 @@ def test_a_message_that_is_not_base64_is_bad_not_a_crash(tmp_path: Path) -> None
 
 def test_a_backlog_message_updates_the_node_but_says_nothing_in_the_event_log(tmp_path: Path) -> None:
     fv, rec_ = make_engine(tmp_path, [0.0])
-    fv._on_event(event(DEV["a"], pr.encode_nodelog([boot(), reachable(2, 6_000)]), 1), backlog=True)
+    fv._on_event(event(DEV["a"], enc([boot(), reachable(2, 6_000)]), 1), backlog=True)
     assert fv.nodelog[DEV["a"]].attach_s == 6.0 and fv.nodelog[DEV["a"]].boots_seen == 1
     assert not [e for e in fv.log if e["kind"] in ("boot", "attach")]
     rec_.close()
@@ -401,9 +421,9 @@ def test_a_backlog_message_updates_the_node_but_says_nothing_in_the_event_log(tm
 def test_a_port_213_message_is_not_telemetry_and_telemetry_is_not_a_node_log(tmp_path: Path) -> None:
     fv, rec_ = make_engine(tmp_path, [0.0])
     fv._on_event(event(DEV["a"], pr.encode_telemetry(seq=1), 1, port=210), backlog=False)
-    fv._on_event(event(DEV["a"], pr.encode_nodelog([boot()]), 2), backlog=False)
+    fv._on_event(event(DEV["a"], enc([boot()]), 2), backlog=False)
     assert (fv.tele[DEV["a"]].received, fv.bad_telemetry, fv.bad_nodelog, fv.other_messages) == (1, 0, 0, 0)
-    fv._on_event(event(DEV["a"], pr.encode_nodelog([boot()]), 3, port=210), backlog=False)   # a log on the telemetry port
+    fv._on_event(event(DEV["a"], enc([boot()]), 3, port=210), backlog=False)   # a log on the telemetry port
     assert fv.bad_telemetry == 1
     rec_.close()
 
@@ -412,16 +432,16 @@ def test_the_per_node_state_is_bounded(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(engine_mod, "DEVICES_MAX", 5)
     fv, rec_ = make_engine(tmp_path, [0.0])
     for i in range(40):                                  # 40 nodes that the root does not list any more
-        fv._on_event(event(f"{i:064x}", pr.encode_nodelog([boot(), reachable(2, 100)]), i), backlog=False)
+        fv._on_event(event(f"{i:064x}", enc([boot(), reachable(2, 100)]), i), backlog=False)
     assert len(fv.nodelog) == 40
     fv._forget_stale_devices()
     assert len(fv.nodelog) <= 5
     # what one node keeps does not grow with its records: a flood of records changes numbers, not the size of the state
     one = DEV["a"]
-    fv._on_event(event(one, pr.encode_nodelog([boot()]), 100), backlog=False)
+    fv._on_event(event(one, enc([boot()]), 100), backlog=False)
     size = len(vars(fv.nodelog[one]))
     for n in range(300):
-        fv._on_event(event(one, pr.encode_nodelog([rec(pr.T_RADIO, 2 + n, 100 + n, tx_done_max_ms=n, tx_late=n,
+        fv._on_event(event(one, enc([rec(pr.T_RADIO, 2 + n, 100 + n, tx_done_max_ms=n, tx_late=n,
                                                        tx_stall_waits=0)]), 200 + n), backlog=False)
     assert len(vars(fv.nodelog[one])) == size
     assert len(fv.log) <= engine_mod.EVENT_LOG_KEEP
@@ -434,7 +454,7 @@ def test_issue19_sdk_fault_power_readback_and_recovery_boot_are_explained() -> N
                rec(pr.T_TX_POWER, 3, 300, valid=0, tx_power_qdbm=0)]
     track = nl.NodeLogTrack()
     text = []
-    for record in pr.decode_nodelog(pr.encode_nodelog(records)):
+    for record in pr.decode_nodelog(enc(records)):
         fed = track.feed(record)
         text.append(nl.describe("node", record, fed, track)[1])
     assert "SDK halted" in text[0] and "14" in text[0]

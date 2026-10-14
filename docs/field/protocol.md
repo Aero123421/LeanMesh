@@ -114,8 +114,11 @@ records are pending. Delivery `LM_BEST_EFFORT`, `LM_VOLATILE`, priority BULK (be
 commands), deadline 30 s on the root clock. Records carry a per-boot sequence number, so the laptop sees gaps. Nothing is
 written to flash for it; the SDK's own restart cause survives a software reset in RTC memory (`lm_idf_last_restart`).
 
-Message: `u8 version = 1, u8 count`, then `count` records, at most 160 bytes in all. Record:
-`u8 type, u8 len, u16 seq, u32 t_ms (ms since this boot), len bytes of payload`.
+Message: `u8 version = 2, u8 count, u16 boot_count`, then `count` records, at most 160 bytes in all. Record:
+`u8 type, u8 len, u16 seq, u32 t_ms (ms since this boot), len bytes of payload`. The ring is RAM, so every record of a
+message is of the boot it names (`boot_count` as in telemetry). Version 1 had no boot field: when a boot's BOOT record
+was lost, the laptop could tell the next boot only by a fall of `seq` or `t_ms`, and a boot whose numbers went on past
+the last ones seen was read as the old one (2026-10-12 field: records of boot 10 shown under boot 9).
 
 | type | name | payload | when |
 |---|---|---|---|

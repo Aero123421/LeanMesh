@@ -59,10 +59,10 @@ class Member:
         r = await self.cmd(f"send 1 root best_effort volatile 210 1 {now_ms + 60_000} {payload}")
         assert r.get("ok") and r["status"] == "OK", r
 
-    async def nodelog(self, *records: tuple[int, int, int, bytes]) -> None:
+    async def nodelog(self, *records: tuple[int, int, int, bytes], boot: int = 7) -> None:  # the BOOT record's
         """One node event log message (§3.4, app port 213) to the root application."""
         now_ms = int((await self.cmd("status"))["now_us"]) // 1000
-        payload = pr.encode_nodelog(list(records)).hex()
+        payload = pr.encode_nodelog(list(records), boot).hex()
         r = await self.cmd(f"send 1 root best_effort volatile {pr.NODELOG_PORT} 1 {now_ms + 60_000} {payload}")
         assert r.get("ok") and r["status"] == "OK", r
 

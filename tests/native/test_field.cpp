@@ -352,7 +352,7 @@ LM_TEST_MAIN()
 
 // ---- node event log (docs/field/protocol.md section 3.4) ----
 
-LM_TEST("FIELD log: records encode as type, len, seq, t_ms, payload after version and count") {
+LM_TEST("FIELD log: records encode as type, len, seq, t_ms, payload after version, count and boot") {
     field_log_t log;
     field_log_init(&log);
     const uint8_t rch[2] = {2, static_cast<uint8_t>(-61)};
@@ -360,19 +360,19 @@ LM_TEST("FIELD log: records encode as type, len, seq, t_ms, payload after versio
     field_log_add(&log, FIELD_LOG_REACHABLE, 0x01020304, rch, 2);
     uint8_t out[FIELD_LOG_MESSAGE_MAX];
     unsigned taken = 0;
-    const size_t n = field_log_encode(&log, 5000, out, sizeof out, &taken);
-    LM_CHECK_EQ(n, 2u + 8u + 10u);
+    const size_t n = field_log_encode(&log, 0x0102, 5000, out, sizeof out, &taken);
+    LM_CHECK_EQ(n, 4u + 8u + 10u);
     LM_CHECK_EQ(taken, 2u);
-    const uint8_t want[] = {1, 2,                                          // version, count
+    const uint8_t want[] = {2, 2, 1, 2,                                    // version, count, boot 0x0102
                             FIELD_LOG_MEMBER, 0, 0, 1, 0, 0, 0x04, 0xD2,     // seq 1, t 1234
                             FIELD_LOG_REACHABLE, 2, 0, 2, 1, 2, 3, 4, 2, static_cast<uint8_t>(-61)};
     LM_CHECK(std::memcmp(out, want, sizeof want) == 0);
     field_log_consume(&log, taken);
-    LM_CHECK_EQ(field_log_encode(&log, 5000, out, sizeof out, &taken), 0u); // nothing left
+    LM_CHECK_EQ(field_log_encode(&log, 0x0102, 5000, out, sizeof out, &taken), 0u); // nothing left
     field_log_add(&log, FIELD_LOG_TIME_VALID, 9, nullptr, 0);
-    LM_CHECK_EQ(field_log_encode(&log, 5000, out, sizeof out, &taken), 10u);
-    LM_CHECK_EQ(out[4], 0); // seq 3 continues after a consumed message
-    LM_CHECK_EQ(out[5], 3);
+    LM_CHECK_EQ(field_log_encode(&log, 0x0102, 5000, out, sizeof out, &taken), 12u);
+    LM_CHECK_EQ(out[6], 0); // seq 3 continues after a consumed message
+    LM_CHECK_EQ(out[7], 3);
 }
 
 LM_TEST("FIELD log: a full ring drops the oldest and the next message starts with LOG_LOST") {
@@ -385,15 +385,15 @@ LM_TEST("FIELD log: a full ring drops the oldest and the next message starts wit
     LM_CHECK_EQ(log.dropped, 3u);
     uint8_t out[FIELD_LOG_MESSAGE_MAX];
     unsigned taken = 0;
-    const size_t n = field_log_encode(&log, 77, out, sizeof out, &taken);
+    const size_t n = field_log_encode(&log, 1, 77, out, sizeof out, &taken);
     LM_CHECK(n <= FIELD_LOG_MESSAGE_MAX);
-    LM_CHECK_EQ(out[2], FIELD_LOG_LOST);
-    LM_CHECK_EQ(out[3], 2);           // len
-    LM_CHECK_EQ(out[4] | out[5], 0);  // seq 0: not part of the record stream
-    LM_CHECK_EQ(out[10], 0);          // records dropped, big-endian
-    LM_CHECK_EQ(out[11], 3);
-    LM_CHECK_EQ(out[12], FIELD_LOG_DEPTH);
-    LM_CHECK_EQ(out[15], 4);          // the oldest kept record is seq 4
+    LM_CHECK_EQ(out[4], FIELD_LOG_LOST);
+    LM_CHECK_EQ(out[5], 2);           // len
+    LM_CHECK_EQ(out[6] | out[7], 0);  // seq 0: not part of the record stream
+    LM_CHECK_EQ(out[12], 0);          // records dropped, big-endian
+    LM_CHECK_EQ(out[13], 3);
+    LM_CHECK_EQ(out[14], FIELD_LOG_DEPTH);
+    LM_CHECK_EQ(out[17], 4);          // the oldest kept record is seq 4
     LM_CHECK_EQ(out[1], taken + 1);   // count includes LOG_LOST
     const unsigned left = log.count - taken;
     field_log_consume(&log, taken);
@@ -410,9 +410,9 @@ LM_TEST("FIELD log: a message never exceeds 160 bytes and keeps whole records") 
     }
     uint8_t out[400];
     unsigned taken = 0;
-    const size_t n = field_log_encode(&log, 0, out, sizeof out, &taken);
+    const size_t n = field_log_encode(&log, 1, 0, out, sizeof out, &taken);
     LM_CHECK(n <= FIELD_LOG_MESSAGE_MAX);
-    LM_CHECK_EQ(n, 2u + taken * 20u); // 8-byte head + 12-byte payload each
+    LM_CHECK_EQ(n, 4u + taken * 20u); // 8-byte head + 12-byte payload each
     LM_CHECK_EQ(out[1], taken);
 }
 

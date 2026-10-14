@@ -241,11 +241,12 @@ static size_t put_record(uint8_t *p, uint8_t type, uint8_t len, uint16_t seq, ui
     return FIELD_LOG_RECORD_HEAD + len;
 }
 
-size_t field_log_encode(const field_log_t *log, uint32_t now_ms, uint8_t *out, size_t cap, unsigned *taken) {
+size_t field_log_encode(const field_log_t *log, uint16_t boot_count, uint32_t now_ms, uint8_t *out, size_t cap,
+                        unsigned *taken) {
     *taken = 0;
     if (cap > FIELD_LOG_MESSAGE_MAX) cap = FIELD_LOG_MESSAGE_MAX;
-    if ((log->count == 0 && log->dropped == 0) || cap < 2 + FIELD_LOG_RECORD_HEAD + 2) return 0;
-    size_t n = 2;
+    if ((log->count == 0 && log->dropped == 0) || cap < FIELD_LOG_MESSAGE_HEAD + FIELD_LOG_RECORD_HEAD + 2) return 0;
+    size_t n = FIELD_LOG_MESSAGE_HEAD;
     unsigned records = 0;
     if (log->dropped != 0) {
         uint8_t lost[2];
@@ -260,8 +261,9 @@ size_t field_log_encode(const field_log_t *log, uint32_t now_ms, uint8_t *out, s
         ++*taken;
         ++records;
     }
-    out[0] = FIELD_PROTO_VERSION;
+    out[0] = FIELD_LOG_VERSION;
     out[1] = (uint8_t)records;
+    field_put16(out + 2, boot_count);
     return n;
 }
 

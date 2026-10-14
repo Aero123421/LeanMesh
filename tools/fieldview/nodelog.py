@@ -9,8 +9,6 @@ from typing import Any
 
 from . import protocol as pr
 
-LATE_MAX = 16          # a record this many sequence numbers behind (or fewer) is a late arrival, not a restart
-LATE_T_MS = 60_000     # a record whose boot time is this much behind the last one is from another boot
 MAX_GAP = 1000         # a bigger sequence jump is not a count of lost records we can trust
 
 
@@ -19,7 +17,7 @@ class Fed:
     """What one record did to the track (the engine turns it into log lines)."""
     late: bool = False             # a duplicate or an older record than one already seen: it changed no state
     new_boot: bool = False         # a BOOT record
-    unseen_boot: bool = False      # sequence / boot time fell back with no BOOT: the BOOT record never arrived
+    unseen_boot: bool = False      # the message names a newer boot and this record is no BOOT: the BOOT never arrived
     missing: int = 0               # records missing before this one (sequence gap)
     jump: bool = False             # a gap too big to count
     first_reachable: bool = False  # the first REACHABLE of this boot
@@ -37,8 +35,8 @@ class NodeLogTrack:
     boots_seen: int = 0
     boots_unseen: int = 0
     sdk_restarts: int = 0
-    boot: dict[str, Any] | None = None       # the last BOOT record's fields
-    boot_count: int | None = None            # None until a BOOT is seen, and after a boot whose BOOT never arrived
+    boot: dict[str, Any] | None = None       # the BOOT record's fields of the current boot (None: it never arrived)
+    boot_count: int | None = None            # the boot the last message named; None before the first one
     # the current boot
     boot_seq: int | None = None
     last_seq: int | None = None
@@ -64,40 +62,46 @@ class NodeLogTrack:
         self.radio = None
 
     def feed(self, rec: pr.NodeRecord) -> Fed:
+        """The message names the boot of its records (§3.4), so a record is put to its own boot even when that boot's
+        BOOT record never arrived (2026-10-12 field: records were shown under the previous boot's number)."""
         fed = Fed()
         self.records += 1
         if not rec.known:
             self.unknown_types += 1
-        if rec.type == pr.T_BOOT:
-            f = rec.fields or {}
-            if self.boot_seq == rec.seq and self.boot_count == f.get("boot_count") and self.last_seq is not None:
-                fed.late = True            # the same BOOT again
+        if self.boot_count is not None and rec.boot != self.boot_count:
+            if (rec.boot - self.boot_count) & 0xFFFF >= 0x8000:
+                fed.late = True            # a record of an earlier boot, arriving after the next boot's: no state
                 self.late += 1
                 return fed
-            fed.new_boot = True
-            self.boots_seen += 1
-            if f.get("sdk_restart_cause"):
-                self.sdk_restarts += 1
+            if rec.type != pr.T_BOOT:
+                fed.unseen_boot = True     # a newer boot whose BOOT record never arrived
+                self.boots_unseen += 1
             self._new_boot()
-            self.boot, self.boot_count = f, f.get("boot_count")
-            self.boot_seq = self.last_seq = rec.seq
-            self.last_t_ms = rec.t_ms
-            return fed
+            self.boot = None
+            self.boot_seq = self.last_seq = None
+        self.boot_count = rec.boot
         if self.last_seq is not None:
             ahead = (rec.seq - self.last_seq) & 0xFFFF   # u16 sequence: modular distance, so a wrap is no restart
-            behind = (0x10000 - ahead) & 0xFFFF
-            if (ahead >= 0x8000 and behind > LATE_MAX) or rec.t_ms + LATE_T_MS < self.last_t_ms:
-                fed.unseen_boot = True     # the sequence (or the boot time) started over without a BOOT
-                self.boots_unseen += 1
-                self._new_boot()
-                self.boot_count = self.boot_seq = None
-            elif ahead == 0 or ahead >= 0x8000:
+            if ahead == 0 or ahead >= 0x8000:
                 fed.late = True            # a duplicate, or older than one already seen: it changes no state
                 self.late += 1
                 if ahead:                  # older, not a duplicate: it was counted as missing when its successor came
                     self.records_lost = max(0, self.records_lost - 1)
                 return fed
-            elif ahead > 1:
+        if rec.type == pr.T_BOOT:
+            f = rec.fields or {}
+            fed.new_boot = True
+            self.boots_seen += 1
+            if f.get("sdk_restart_cause"):
+                self.sdk_restarts += 1
+            self._new_boot()
+            self.boot = f
+            self.boot_seq = self.last_seq = rec.seq
+            self.last_t_ms = rec.t_ms
+            return fed
+        if self.last_seq is not None:
+            ahead = (rec.seq - self.last_seq) & 0xFFFF
+            if ahead > 1:
                 if ahead - 1 > MAX_GAP:
                     fed.jump = True
                 else:

@@ -129,6 +129,8 @@ enum {
 #define FIELD_LOG_PAYLOAD_MAX 12u
 #define FIELD_LOG_MESSAGE_MAX 160u
 #define FIELD_LOG_RECORD_HEAD 8u /* type, len, seq u16, t_ms u32 */
+#define FIELD_LOG_VERSION 2u      /* version 2: the message names its boot */
+#define FIELD_LOG_MESSAGE_HEAD 4u /* version, count, boot_count u16 */
 #define FIELD_LOG_INTERVAL_MS 2000u
 
 typedef struct {
@@ -151,8 +153,10 @@ void field_log_init(field_log_t *log);
 /* Adds a record; a payload longer than FIELD_LOG_PAYLOAD_MAX is cut. */
 void field_log_add(field_log_t *log, uint8_t type, uint32_t t_ms, const uint8_t *payload, uint8_t len);
 /* Builds one message from the oldest records (a LOG_LOST record first when records were dropped), at most
-   FIELD_LOG_MESSAGE_MAX bytes. Returns its length (0: nothing to send) and in *taken how many ring records it holds. */
-size_t field_log_encode(const field_log_t *log, uint32_t now_ms, uint8_t *out, size_t cap, unsigned *taken);
+   FIELD_LOG_MESSAGE_MAX bytes. The ring is RAM, so every record is of this boot, `boot_count`, which the message names.
+   Returns its length (0: nothing to send) and in *taken how many ring records it holds. */
+size_t field_log_encode(const field_log_t *log, uint16_t boot_count, uint32_t now_ms, uint8_t *out, size_t cap,
+                        unsigned *taken);
 /* The message of field_log_encode went out (the SDK accepted it): its records and the drop count are done. */
 void field_log_consume(field_log_t *log, unsigned taken);
 /* Payload helpers (big-endian). */

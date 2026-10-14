@@ -206,7 +206,7 @@ static void log_send(uint64_t now) {
     if (!g.was_reachable || now < g.log_at_ms) return;
     uint8_t buf[FIELD_LOG_MESSAGE_MAX];
     unsigned taken = 0;
-    const size_t n = field_log_encode(&g.log, (uint32_t)now, buf, sizeof buf, &taken);
+    const size_t n = field_log_encode(&g.log, g.boot_count, (uint32_t)now, buf, sizeof buf, &taken);
     if (n == 0) return;
     lm_root_time_t t = {.struct_size = sizeof t, .abi_version = LM_ABI_VERSION};
     if (lm_root_time_get(g.ctx, &t) != LM_STATUS_OK || !t.valid) return;

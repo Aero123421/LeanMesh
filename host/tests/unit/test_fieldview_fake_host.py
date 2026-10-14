@@ -864,8 +864,8 @@ def test_the_tables_stay_bounded_in_a_long_session(
 
 # ---- the node event log, app port 213 (docs/field/protocol.md §3.4) ----------------------------------------------------
 
-def nodelog(fake: FakeHost, device: str, *records: tuple[int, int, int, bytes]) -> int:
-    return fake.emit_telemetry(device, pr.encode_nodelog(list(records)), port=pr.NODELOG_PORT)
+def nodelog(fake: FakeHost, device: str, *records: tuple[int, int, int, bytes], boot: int = 7) -> int:  # NL_BOOT's
+    return fake.emit_telemetry(device, pr.encode_nodelog(list(records), boot), port=pr.NODELOG_PORT)
 
 
 NL_BOOT = (pr.T_BOOT, 1, 20, pr.nodelog_payload(pr.T_BOOT, reset_reason=2, sdk_restart_cause=1, boot_count=7,
