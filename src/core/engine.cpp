@@ -35,8 +35,9 @@ void hook_session_up(void *ctx, bool initiator, const MacAddr &mac, const Device
         e.membership().session_up(initiator, mac, peer, bundle, e.step_time());
     }
 }
-void hook_exchange_failed(void *ctx, Status why) {
+void hook_exchange_failed(void *ctx, const MacAddr &mac, Status why) {
     Engine &e = eng(ctx);
+    e.mesh().on_link_failed(mac, why, e.step_time()); // the attach waiting for this handshake goes on (docs/04 §3)
     if (!root_role(e)) {
         e.membership().exchange_failed(why, e.step_time());
     }

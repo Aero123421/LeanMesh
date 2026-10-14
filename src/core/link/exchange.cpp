@@ -124,7 +124,7 @@ void Exchange::abort(Status why) {
         }
         if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && initiator_)) &&
             s_.join.exchange_failed != nullptr) {
-            s_.join.exchange_failed(s_.join.ctx, why); // [S8] the joiner learns the attempt is over
+            s_.join.exchange_failed(s_.join.ctx, mac_, why); // [S8] the joiner / the attach learns the attempt is over
         }
     }
     if (peer_transient_ && !peer_.is_none()) {

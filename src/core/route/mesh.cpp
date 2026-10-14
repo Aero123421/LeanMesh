@@ -11,8 +11,11 @@ namespace {
 
 constexpr Duration k_probe_wait = Duration::from_ms(1500);
 constexpr Duration k_probe_fresh = Duration::from_s(20); // a candidate not heard for this long is probed before use
-constexpr Duration k_link_wait = Duration::from_s(6); // default progress check; slow TX waits for the exchange limit
 constexpr Duration k_session_wait = Duration::from_ms(gen::aead::session_bind_timeout_ms); // registry session_binding.timeout_ms
+// docs/04 §3: a link handshake's end is reported (on_link_up / on_link_failed); this only bounds one never reported.
+constexpr Duration k_link_wait = k_session_wait + Duration::from_s(1);
+constexpr uint8_t k_link_tries = 2;                         // failed handshakes before the next candidate
+constexpr Duration k_local_wait_max = Duration::from_s(60); // own slot / gate / pool: then choose again, no blame
 constexpr Duration k_busy_retry = Duration::from_ms(20);   // radio/TX pool busy: local, not a failure
 constexpr Duration k_slot_retry = Duration::from_ms(250);
 constexpr Duration k_term_hint_gap = Duration::from_s(30); // HIL-F9: an unauthenticated newer-term hint, at most this often
@@ -217,6 +220,8 @@ void Mesh::on_wake(MonoTime now, bool fresh_sessions) {
     asks_ = {};
     if (att_.step != Step::Idle) {
         att_.tries = 0;
+        att_.started = false;
+        att_.waiting_since = MonoTime::never();
         att_.next_at = now;
     }
     if (state_ == State::Search) {
@@ -896,6 +901,20 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
     }
 }
 
+// The handshake the attach started ended without a session: the attach goes on now, not when its wait runs out
+// (2026-10-12 field: 30 s after each failed handshake). One that ended for this node's own shortage is no try.
+void Mesh::on_link_failed(const MacAddr &mac, Status why, MonoTime now) {
+    if (state_ == State::Off || att_.step != Step::Link || !att_.started || att_.cand < 0 ||
+        cands_[static_cast<std::size_t>(att_.cand)].mac != mac) {
+        return;
+    }
+    if (why == Status::Busy || is_local_resource_error(why)) {
+        att_.started = false;
+        att_.waiting_since = earliest(att_.waiting_since, now);
+    }
+    att_.next_at = now;
+}
+
 // ---- search and attach ----
 void Mesh::search_step(MonoTime now) {
     attempt_at_ = MonoTime::never();
@@ -952,7 +971,14 @@ void Mesh::attach_step(MonoTime now) {
             return; // the handshake runs: on_link_up continues
         }
         if (!budget && att_.step != Step::Link) {
-            attach_fail(now);
+            // The search's handshake budget is spent (docs/07 §3): this node's own limit, not the candidate's failure.
+            // The next search (Discovery's Resumed) picks again; counted against the candidate, the avoidance it earned
+            // could keep it out of every later search (docs/04 §3).
+            att_ = Attach{};
+            if (state_ == State::Attach) {
+                state_ = State::Search;
+            }
+            attempt_at_ = MonoTime::never();
             return;
         }
         const Status st = engine_.link().connect(c.mac, now);
@@ -961,10 +987,15 @@ void Mesh::attach_step(MonoTime now) {
                 disc_.note_handshake();
             }
             att_.step = Step::Link;
-            const Duration wait = engine_.tx().service_bound().us > 120000 ? k_session_wait : k_link_wait;
-            att_.next_at = now + wait;
+            att_.started = true;
+            att_.waiting_since = MonoTime::never();
+            // on_link_up / on_link_failed go on when it ends; a handshake that ended inside connect() is over now
+            att_.next_at = engine_.link().exchange().busy() ? now + k_link_wait : now;
         } else if (st == Status::Busy || st == Status::RateLimited || st == Status::NoCapacity) {
+            // this node's own slot, the handshake gate or the pool: a wait, no try of the candidate (docs/04 §3)
             att_.step = Step::Link;
+            att_.started = false;
+            att_.waiting_since = earliest(att_.waiting_since, now);
             att_.next_at = now + (st == Status::RateLimited ? Duration::from_s(2) : Duration::from_ms(500));
         } else if (st != Status::Conflict) {
             attach_fail(now);
@@ -1110,12 +1141,19 @@ void Mesh::attach_timer(MonoTime now) {
     case Step::Link:
         if (linked(cands_[static_cast<std::size_t>(att_.cand)])) {
             attach_step(now);
-        } else if (++att_.tries > 8) {
-            attach_fail(now);
-        } else {
-            att_.step = Step::Link;
-            attach_step(now);
+            return;
         }
+        if (att_.started) { // our handshake ended without a session (or its end was never reported)
+            att_.started = false;
+            if (++att_.tries >= k_link_tries) {
+                attach_fail(now);
+                return;
+            }
+        } else if (!att_.waiting_since.is_never() && now - att_.waiting_since >= k_local_wait_max) {
+            attach_fail(now, true); // only this node's own waits held it: choose again, the candidate is not to blame
+            return;
+        }
+        attach_step(now);
         return;
     case Step::Probe:
     case Step::Session:
@@ -1132,7 +1170,8 @@ void Mesh::attach_timer(MonoTime now) {
 
 void Mesh::attach_fail(MonoTime now, bool soft) {
     if (att_.cand >= 0 && soft) {
-        // The root answered: it only wants the parent approved first (a restarted root rebuilds top down).
+        // Not the candidate's doing: the root answered and only wants the parent approved first (a restarted root
+        // rebuilds top down), or this node's own waits held the handshake. A short pause, no failure counted.
         cands_[static_cast<std::size_t>(att_.cand)].avoid_until = now + Duration::from_s(3) + Duration::from_ms(jitter(3000));
     } else if (att_.cand >= 0) {
         Cand &c = cands_[static_cast<std::size_t>(att_.cand)];

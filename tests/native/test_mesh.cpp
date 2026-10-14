@@ -1296,6 +1296,64 @@ LM_TEST("FIELD sim: a strong candidate that is gone does not make the usable rel
     LM_CHECK(on_root_ms <= 120'000); // it may pass through the root while the gone relay still counts as heard (96 s)
 }
 
+// 2026-10-12 field (Issue #24): a board found its parent gone at once and then took 162 s to attach again. Its
+// handshakes failed five times in that time; the attach learnt of none of them and sat out its whole wait after each
+// (30 s while the radio's TX completions were slow), and eight such waits to give a candidate up.
+LM_TEST("FIELD sim: a candidate whose handshakes fail is given up after two, for one that answers") {
+    MNet n(4); // 0 root; 1 relay whose handshake frames to the board are lost; 2 the board; 3 a relay that comes later
+    n.world.options().tx_callback_delay_us = 300'000; // TX completions over 120 ms: the slow-radio wait
+    LinkParams up;
+    up.up = true;
+    LinkParams lossy = up;
+    lossy.drop_kinds = static_cast<uint16_t>(1U << static_cast<unsigned>(wire::FrameKind::Edhoc));
+    n.world.set_link(2, 3, LinkParams{});
+    n.world.set_link(0, 3, up);
+    n.world.set_link(1, 2, lossy);
+    n.boot(0);
+    n.boot(1);
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(1); }, 120'000, 20));
+    n.boot(2);
+    n.set_time_at(2);
+    LM_CHECK(n.until([&] { return n.eng(2).link().stats().hs_failed >= 1; }, 120'000, 10));
+    n.world.set_link(2, 3, up); // the other relay comes up while the board is still on the first
+    n.boot(3);
+    n.set_time_at(3);
+    LM_CHECK(n.until([&] { return n.ready(3); }, 120'000, 20));
+    const uint64_t t0 = n.world.now_us();
+    LM_CHECK(n.until([&] { return n.ready(2); }, 600'000, 20));
+    const uint64_t ms = (n.world.now_us() - t0) / 1000;
+    std::printf("  first relay's handshakes fail: the board attached %llu ms after the other relay was ready "
+                "(%llu handshakes failed)\n",
+                static_cast<unsigned long long>(ms), static_cast<unsigned long long>(n.eng(2).link().stats().hs_failed));
+    LM_CHECK_EQ(n.mesh(2).parent_addr().value(), n.addr(3));
+    // Two failed handshakes (about 9 s each here, the gate's 5 s between), then the other relay at once. It took 36 s
+    // when the attach waited out 30 s after a handshake whatever became of it.
+    LM_CHECK(ms <= 25'000);
+}
+
+// docs/04 §3: waiting for this node's own exchange slot (or the handshake gate) is not a failure of the candidate.
+// Counted as one, eight looks 0.5 s apart made the candidate "failed" and avoided while it was never even asked.
+LM_TEST("FIELD sim: waiting for its own busy exchange slot costs the candidate nothing") {
+    MNet n(2);
+    n.boot(0);
+    n.boot(1);
+    n.set_time();
+    uint8_t k = 0;
+    const uint64_t t_end = n.world.now_us() + 20'000'000;
+    while (n.world.now_us() < t_end) { // the slot is kept busy by handshakes to MACs nobody has
+        if (!n.eng(1).link().exchange().busy()) {
+            const MacAddr nobody{{0x02, 0x00, 0x00, 0x00, 0x5E, ++k}};
+            (void)n.eng(1).link().connect(nobody, n.now(1));
+            n.node(1).notify();
+        }
+        n.run_ms(50);
+    }
+    LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
+    LM_CHECK(n.until([&] { return n.formed(); }, 30'000, 20));
+    LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;

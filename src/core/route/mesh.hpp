@@ -68,6 +68,8 @@ class Mesh {
         return p.rssi_valid;
     }
     void on_link_up(const DeviceId &peer, MonoTime now);
+    // A link handshake this node started with `mac` ended without a session (docs/04 §3).
+    void on_link_failed(const MacAddr &mac, Status why, MonoTime now);
     void on_tx_outcome(const TxOutcome &o, MonoTime now);
     [[nodiscard]] static bool is_mesh_tag(uint32_t tag) { return (tag & 0xFFFF0000U) == k_tag_mesh; }
 
@@ -202,7 +204,7 @@ class Mesh {
     struct Attach {
         Step step = Step::Idle;
         int cand = -1;
-        uint8_t tries = 0;         // of the current step
+        uint8_t tries = 0;         // of the current step (Link: handshakes that ended without a session)
         uint8_t session_fails = 0; // end sessions with the root that failed through this candidate (docs/04 §3)
         uint32_t sequence = 0;
         uint32_t revision = 0; // granted, applied only when READY is answered
@@ -211,6 +213,8 @@ class Mesh {
         MonoTime next_at = MonoTime::never();
         Handle tx_owner;
         bool switching = false; // a voluntary move: the old path keeps serving
+        bool started = false;   // Link: a handshake of ours runs; its end continues the attach
+        MonoTime waiting_since = MonoTime::never(); // Link: only this node's own slot / gate / pool held the attach since
     };
     struct Ask { // one ROUTE_QUERY in flight (or a recent refusal, kept 5 s so a sender does not hammer the root)
         bool used = false;

@@ -225,8 +225,8 @@ struct JoinHooks {
     // context).
     void (*session_up)(void *ctx, bool initiator, const MacAddr &mac, const DeviceId &peer,
                        ByteView peer_bundle, const Sha256Digest &peer_dc_hash) = nullptr;
-    // The joiner's exchange ended without a session (why != Ok).
-    void (*exchange_failed)(void *ctx, Status why) = nullptr;
+    // A 1-hop exchange we initiated (a link or a join handshake with `mac`) ended without a session (why != Ok).
+    void (*exchange_failed)(void *ctx, const MacAddr &mac, Status why) = nullptr;
     // JOIN_PROXY carriers that are not an exchange object (hello / offer discovery).
     void (*discovery)(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c, uint32_t domain_hint) = nullptr;
     // Authenticated CONTROL frame of a JOIN_ONLY session / of an ordinary link session.
