@@ -168,6 +168,7 @@ void Routes::on_register(const DeviceId &peer, ShortAddr addr, uint64_t gen, con
     l.status = st;
     if (st == Status::Ok) {
         ++stats_.grants;
+        last_grant_ = now;
         l.revision = g.revision.value();
         l.n = g.len;
         std::copy(g.path.begin(), g.path.begin() + g.len, l.path.begin());

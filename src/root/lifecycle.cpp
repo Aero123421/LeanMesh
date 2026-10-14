@@ -30,6 +30,9 @@ void Ledger::renew_due(const DeviceId &device, uint32_t term, uint64_t lease_ms,
         lease_ms > root_ms + static_cast<uint64_t>(k_renew_before.to_ms())) {
         return; // not due yet
     }
+    if (renew_mask_ == 0) {
+        renew_asked_ = now;
+    }
     renew_mask_ |= 1ULL << static_cast<std::size_t>(e - entries_.data());
     maintenance(now);
 }
@@ -37,6 +40,16 @@ void Ledger::renew_due(const DeviceId &device, uint32_t term, uint64_t lease_ms,
 // Holder -2 (maintenance). The entry record holds the credential the join issued (or provisioning wrote); the
 // renewal repeats every field of it but the lease, the term and the request id.
 void Ledger::start_renew(MonoTime now) {
+    // The tree forms first (docs/04 §7): a member asks for its renewal at its attach, while others still attach. Each
+    // renewal costs a signature, a CONTROL along the path and then the member's re-keying of its links (desynchronised
+    // over 30 s); during the formation that churn slowed it down (R07 sim, 21 nodes / 20 hops: mean 40 -> 94 s).
+    const MonoTime grant = engine_.routes().last_grant();
+    if (!grant.is_never() && now < grant + k_formation_quiet && now < renew_asked_ + k_renew_hold) {
+        ++stats_.renew_deferred;
+        maint_retry_ = earliest(grant + k_formation_quiet, renew_asked_ + k_renew_hold);
+        release(-2);
+        return;
+    }
     while (renew_mask_ != 0) {
         const auto slot = static_cast<std::size_t>(__builtin_ctzll(renew_mask_));
         renew_mask_ &= renew_mask_ - 1U;

@@ -59,6 +59,10 @@ inline constexpr Duration k_approval_timeout = Duration::from_ms(300000);
 inline constexpr Duration k_member_lease = Duration::from_s(15 * 60); // docs/06 §7: at most 15 min
 inline constexpr Duration k_renew_before = Duration::from_s(5 * 60);  // docs/06 §7: renewed after ~10 min
 inline constexpr Duration k_renew_gap = Duration::from_s(60);         // one renewal per member per READY period
+// docs/04 §7: the tree forms first. Renewals wait until no path was granted for this long, and no longer than
+// k_renew_hold after the oldest of them was asked for (no later than the first lease refresh, as before).
+inline constexpr Duration k_formation_quiet = Duration::from_s(3);
+inline constexpr Duration k_renew_hold = Duration::from_s(60);
 
 enum class EntryState : uint8_t { Free = 0, Expected = 1, Prepared = 2, Active = 3, Left = 4, Aborted = 5, Blocked = 6 };
 static_assert(k_ledger_slots <= 64, "the manifest's used-slot bitmap is 64 bits");
@@ -618,6 +622,7 @@ class Ledger {
     Confirm confirm_;
     bool confirm_pending_ = false;
     uint64_t renew_mask_ = 0; // [S18] ledger slots whose credential is to be renewed (one at a time)
+    MonoTime renew_asked_ = MonoTime::never(); // when the oldest renewal still in renew_mask_ was asked for
     // [S18] the one lifecycle install in progress (verify job output, then the commits it makes)
     // The decoded lifecycle object: one install at a time, so one of them (the verify job starts its lifetime).
     union LcObject {

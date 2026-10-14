@@ -47,6 +47,8 @@ class Routes {
     [[nodiscard]] bool path_to_addr(ShortAddr dest, delivery::PathSpec &out, MonoTime now);
 
     [[nodiscard]] const Topology &topology() const { return topo_; }
+    // When the root last granted a path (a member attached or moved): the tree is still forming shortly after.
+    [[nodiscard]] MonoTime last_grant() const { return last_grant_; }
     struct Stats {
         uint64_t registers = 0, grants = 0, refused = 0, readies = 0, queries = 0, pushes = 0;
     };
@@ -78,6 +80,7 @@ class Routes {
     Stats stats_;
     uint64_t push_mask_ = 0; // ledger slot (address - 2) of every member whose path changed
     MonoTime push_at_ = MonoTime::never();
+    MonoTime last_grant_ = MonoTime::never();
 };
 
 // Leaf/relay builds carry no tree (docs/02 §4).

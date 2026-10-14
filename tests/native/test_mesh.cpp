@@ -593,6 +593,9 @@ LM_TEST("R07 sim: 20 cold boots of the whole network converge again, memberships
     std::printf("  R07-sim 20 cold boots (21 nodes, 20 hops): formation min %llu / mean %llu / max %llu ms\n",
                 static_cast<unsigned long long>(lo), static_cast<unsigned long long>(sum / times.size()),
                 static_cast<unsigned long long>(hi));
+    // The renewals of the new term follow the formation (docs/04 §7): each member asks at its attach, the root waits for
+    // the tree. Renewed at once, the re-keying they start slowed the formation down to a mean of 94 s.
+    LM_CHECK(sum / times.size() <= 50'000);
     // Delivery works after the last cycle without any hand-made route. Every cold boot was a new root term (ARCH2-D1):
     // application DATA over a link needs both ends' credentials of the new term, which the root re-issues at each
     // member's attach (docs/04 §7), so the send waits for those renewals.
