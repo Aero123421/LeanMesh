@@ -595,7 +595,7 @@ LM_TEST("R07 sim: 20 cold boots of the whole network converge again, memberships
                 static_cast<unsigned long long>(hi));
     // Delivery works after the last cycle without any hand-made route. Every cold boot was a new root term (ARCH2-D1):
     // application DATA over a link needs both ends' credentials of the new term, which the root re-issues at each
-    // member's first lease refresh after its attach (<= 66 s), so the send waits for those renewals.
+    // member's attach (docs/04 §7), so the send waits for those renewals.
     const uint64_t t_formed = n.world.now_us();
     const bool renewed = n.until([&] {
         for (unsigned i = 0; i < n.n; ++i) {
@@ -1352,6 +1352,41 @@ LM_TEST("FIELD sim: waiting for its own busy exchange slot costs the candidate n
     LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
     LM_CHECK(n.until([&] { return n.formed(); }, 30'000, 20));
     LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
+}
+
+// 2026-10-12 field (Issue #24): after the root was plugged in again (a new root term) a board that attached through a
+// relay had its application data refused by the relay for about 75 s: its credential was of the old term, and its
+// renewal was asked for only at the first lease refresh, 60 s after the attach. Once the renewed credential reached the
+// relay (with the next handshake), the waiting send still sat out the rest of its doubled retry wait (up to 32 s).
+LM_TEST("FIELD sim: after a root restart a board behind a relay sends application data without the lease refresh wait") {
+    MNet n(3); // 0 root, 1 relay, 2 the board
+    (void)form_chain(n, 120'000);
+    n.power_cycle_all(); // the root boots into a new term; the members keep credentials of the old one
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.formed(); }, 300'000, 20));
+    n.set_time();
+    const auto s = n.send(2, 0, LM_RECEIVED, payload_of(3, 20), 120'000);
+    LM_CHECK_EQ(s.st, LM_STATUS_OK);
+    const uint64_t ms = await_received(n, 2, s.op, 120'000);
+    std::printf("  root restarted: data from the board behind the relay END_RECEIVED %llu ms after formation\n",
+                static_cast<unsigned long long>(ms));
+    LM_CHECK(ms <= 45'000); // the renewal at the attach, then the desynchronised rotation (<= 30 s) and one handshake
+}
+
+// 2026-10-15 sim: a renewal leaves as a CONTROL dated on the root's clock of its term. While the root could not date
+// one, it loaded and signed the renewal again every few ms, each time with the exchange's scratch lent: a member behind
+// a relay found the root's handshake slot busy and never got its end session.
+LM_TEST("FIELD sim: a root whose clock cannot date a renewal keeps its handshake slot for the members") {
+    MNet n(3); // 0 root, 1 relay, 2 the board
+    (void)form_chain(n, 120'000);
+    n.power_cycle_all(); // a new root term: both members ask for their renewal at the attach
+    n.set_time_at(1);    // the root's own clock is not set (its Host sets it, here nobody): it can date nothing
+    n.set_time_at(2);
+    LM_CHECK(n.until([&] { return n.formed(); }, 120'000, 20));
+    std::printf("  root clock unknown: formed, renewals %llu, deferred %llu\n",
+                static_cast<unsigned long long>(n.eng(0).ledger().stats().renewals),
+                static_cast<unsigned long long>(n.eng(0).ledger().stats().renew_deferred));
+    LM_CHECK_EQ(n.eng(0).ledger().stats().renewals, 0u); // nothing could be dated: nothing was sent either
 }
 
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {

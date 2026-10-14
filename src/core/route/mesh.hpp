@@ -295,7 +295,7 @@ class Mesh {
     void query_timer(MonoTime now);
     void connect_spare(MonoTime now);
     [[nodiscard]] uint32_t next_sequence();
-    [[nodiscard]] uint64_t credential_lease(bool attach) const;
+    [[nodiscard]] uint64_t credential_lease() const;
 
     uint32_t drain_sequence_ = 0, drain_ack_term_ = 0;
     bool draining_ = false, drain_ok_ = false;

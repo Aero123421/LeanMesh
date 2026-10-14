@@ -141,7 +141,7 @@ LM_TEST("codec golden: mesh REGISTER / READY / QUERY are byte-exact and strict")
     wrong_op[0] = 0xE3;
     LM_CHECK(route::decode(view(wrong_op), rg2) == Status::BadFrame);
 
-    for (const uint64_t lease : {uint64_t{0}, uint64_t{0x0102030405060708}, UINT64_MAX}) { // ARCH2-D1 meanings
+    for (const uint64_t lease : {uint64_t{0}, uint64_t{0x0102030405060708}, UINT64_MAX}) { // due now (an older term's credential), a lease, the largest
         route::Ready rd;
         rd.term = 0xA1B2C3D4;
         rd.revision = 9;

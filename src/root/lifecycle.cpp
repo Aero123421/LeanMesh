@@ -45,9 +45,13 @@ void Ledger::start_renew(MonoTime now) {
         }
         rec_->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(k_rec_ledger_base + slot));
         job_slot_index_ = slot;
-        // The renewal leaves by the one control lane: while it carries another object, loading and signing now would
-        // only be done again (ARCH2-D1: after a root restart every member is renewed, one after the other).
-        if (!engine_.delivery().control_lane_free() ||
+        // The renewal leaves by the one control lane, as a CONTROL dated on the root's clock of its term: while the lane
+        // carries another object or the clock cannot date it (TIME_UNCERTAIN), loading and signing now would only be
+        // done again, each time with the exchange's scratch lent, so that handshakes find the slot busy (ARCH2-D1: after
+        // a root restart every member is renewed, one after the other; 2026-10-15 sim: re-signed every 4 ms while it
+        // had no clock of its term, and a member behind a relay never got its end session).
+        const RootTimeBound clock = engine_.delivery().root_time(now);
+        if (!engine_.delivery().control_lane_free() || !clock.valid || !(clock.term == engine_.identity().member().root_term) ||
             submit(Step::RenewLoad, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
             renew_mask_ |= 1ULL << slot;
             ++stats_.renew_deferred;

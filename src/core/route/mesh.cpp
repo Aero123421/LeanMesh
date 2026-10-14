@@ -80,14 +80,12 @@ uint16_t Mesh::jitter(uint16_t modulus) {
 }
 
 // [S18] The lease READY shows the root (it renews a credential that is due). A lease of an older term is no lease on
-// the root's clock at all (ARCH2-D1): the READY that confirms an attach says "not now" (UINT64_MAX: the tree forms
-// first, renewals are maintenance), the next lease refresh says "due now" (0).
-uint64_t Mesh::credential_lease(bool attach) const {
+// the root's clock at all (ARCH2-D1): it is due now (0), at the READY that confirms an attach too. Until it is renewed
+// no link but the root's carries this node's application DATA (SEC-D3); 2026-10-12 field: 75 s behind a relay while the
+// renewal waited for the first lease refresh (docs/04 §7).
+uint64_t Mesh::credential_lease() const {
     const member::MemberCredential &mc = engine_.identity().member();
-    if (mc.root_term == term()) {
-        return mc.lease_expires_root_ms;
-    }
-    return attach ? UINT64_MAX : 0;
+    return mc.root_term == term() ? mc.lease_expires_root_ms : 0;
 }
 
 // ARCH2-D1: the root is in a newer term. Its tree of the old term is gone (docs/04 §7 "旧termの未確定登録は破棄"): a
@@ -1107,7 +1105,7 @@ void Mesh::send_ready(MonoTime now) {
     Ready r;
     r.term = term().value();
     r.revision = att_.revision;
-    r.credential_lease_ms = credential_lease(true); // [S18] the root renews it when due
+    r.credential_lease_ms = credential_lease(); // [S18] the root renews it when due
     if (!route_via(att_.path.data(), static_cast<uint8_t>(att_.n - 1U), att_.revision, route) ||
         encode(r, MutByteView{body}, len) != Status::Ok) {
         attach_fail(now);
@@ -1420,7 +1418,7 @@ void Mesh::renew(MonoTime now) {
     Ready r;
     r.term = term().value();
     r.revision = rev_;
-    r.credential_lease_ms = credential_lease(false); // [S18]
+    r.credential_lease_ms = credential_lease(); // [S18]
     if (path_n_ < 2 || !route_via(path_.data(), static_cast<uint8_t>(path_n_ - 1U), rev_, route) ||
         encode(r, MutByteView{body}, len) != Status::Ok) {
         return;
