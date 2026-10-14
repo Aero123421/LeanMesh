@@ -271,10 +271,10 @@ void LinkLayer::on_timer(MonoTime now) {
         }
     });
     if (due != nullptr) {
-        ++stats_.rotations_started;
         if (exchange_.start_initiator(due->mac, now) != Status::Ok) {
             rotation_retry_ = now + k_rotation_retry; // gate/busy/capacity: try again later
         } else {
+            ++stats_.rotations_started; // a rotation that went out, not one that was refused here
             rotating_ = due->mac;
             rotating_set_ = true;
         }
