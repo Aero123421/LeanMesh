@@ -855,7 +855,7 @@ void Mesh::connect_spare(MonoTime now) {
     for (std::size_t k = 0; k < cands_.size(); ++k) {
         Cand &c = cands_[k];
         if (c.used && static_cast<int>(k) != parent_ && !linked(c) && now >= c.avoid_until && now >= c.spare_after &&
-            now - c.heard < k_silence) {
+            now - c.heard < k_silence && !weak(c, now)) { // docs/04 §5: a weak candidate is no spare
             const Status st = engine_.link().connect(c.mac, now);
             if (st == Status::Ok) {
                 c.avoid_until = now + Duration::from_s(30); // one try per candidate per 30 s (docs/06 §8 gate)

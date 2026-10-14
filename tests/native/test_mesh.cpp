@@ -1389,6 +1389,38 @@ LM_TEST("FIELD sim: a root whose clock cannot date a renewal keeps its handshake
     LM_CHECK_EQ(n.eng(0).ledger().stats().renewals, 0u); // nothing could be dated: nothing was sent either
 }
 
+// docs/04 §5: a spare is a candidate linked in advance for a repair. A weak one (2026-10-12 field: -90 dBm and below)
+// costs handshakes that often fail, in the node's one exchange slot, for a link no repair picks first.
+LM_TEST("FIELD sim: a weak candidate is not linked as a spare") {
+    MNet n(3); // 0 root heard by the board at -91, 1 relay heard at -50, 2 the board
+    auto link_at = [&](unsigned a, unsigned b, int16_t dbm) {
+        LinkParams p;
+        p.up = true;
+        p.rssi_valid = true;
+        p.rssi_dbm = dbm;
+        n.world.set_link(static_cast<uint16_t>(a), static_cast<uint16_t>(b), p);
+    };
+    link_at(0, 1, -50);
+    link_at(1, 2, -50);
+    link_at(0, 2, -91);
+    n.boot(0);
+    n.boot(1);
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(1); }, 60'000, 20));
+    n.boot(2);
+    n.set_time_at(2);
+    LM_CHECK(n.until([&] { return n.ready(2); }, 60'000, 20));
+    LM_CHECK_EQ(n.mesh(2).parent_addr().value(), n.addr(1));
+    const uint64_t started = n.eng(2).link().stats().hs_started;
+    n.run_ms(300'000);
+    const link::Neighbor *nb = n.eng(2).link().neighbors().find_device(n.id(0));
+    std::printf("  weak root heard for 5 min: %llu handshakes started, linked %d\n",
+                static_cast<unsigned long long>(n.eng(2).link().stats().hs_started - started),
+                static_cast<int>(nb != nullptr && nb->cur.active));
+    LM_CHECK(nb == nullptr || !nb->cur.active);
+    LM_CHECK_EQ(n.mesh(2).parent_addr().value(), n.addr(1));
+}
+
 LM_TEST("mesh wire: beacon, probe and root records round-trip; malformed input is refused") {
     using namespace lm::route;
     Beacon b;
