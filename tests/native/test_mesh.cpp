@@ -1327,6 +1327,7 @@ LM_TEST("FIELD sim: a candidate whose handshakes fail is given up after two, for
                 "(%llu handshakes failed)\n",
                 static_cast<unsigned long long>(ms), static_cast<unsigned long long>(n.eng(2).link().stats().hs_failed));
     LM_CHECK_EQ(n.mesh(2).parent_addr().value(), n.addr(3));
+    LM_CHECK_EQ(n.eng(2).link().stats().hs_failed, 2u); // the first relay is given up after two, not one
     // Two failed handshakes (about 9 s each here, the gate's 5 s between), then the other relay at once. It took 36 s
     // when the attach waited out 30 s after a handshake whatever became of it.
     LM_CHECK(ms <= 25'000);
@@ -1352,6 +1353,27 @@ LM_TEST("FIELD sim: waiting for its own busy exchange slot costs the candidate n
     LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
     LM_CHECK(n.until([&] { return n.formed(); }, 30'000, 20));
     LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u);
+}
+
+// Review 2026-10-15: a handshake that ends for this node's own shortage inside connect() (the radio refuses its first
+// frame) was counted against the candidate; and every new start forgot how long such waits had lasted, so they had no
+// bound. They cost the candidate nothing, and after 60 s the attach chooses again.
+LM_TEST("FIELD sim: handshakes the node's own radio refuses cost the candidate nothing, and the wait is bounded") {
+    MNet n(2);
+    n.boot(0);
+    n.boot(1);
+    n.set_time();
+    n.node(1).radio.tx_fault = Status::NoCapacity;
+    n.node(1).radio.tx_fault_count = 1'000'000;
+    n.run_ms(20'000);
+    LM_CHECK_EQ(n.mesh(1).stats().attach_failed, 0u); // no try of the candidate counted
+    n.run_ms(70'000);
+    const uint64_t soft = n.mesh(1).stats().attach_failed;
+    std::printf("  radio refuses every frame for 90 s: attach given up %llu times (local waits only)\n",
+                static_cast<unsigned long long>(soft));
+    LM_CHECK(soft >= 1u && soft <= 2u); // after 60 s of nothing but its own waits, then once more at most
+    n.node(1).radio.tx_fault_count = 0;
+    LM_CHECK(n.until([&] { return n.formed(); }, 60'000, 20));
 }
 
 // 2026-10-12 field (Issue #24): after the root was plugged in again (a new root term) a board that attached through a

@@ -259,6 +259,7 @@ void Exchange::switch_to_responder(const Origin &o) {
         peer_known_ = false; // the winner is verified like any responder's peer
     } else {
         s_.gate.forget(mac_);
+        yielded_ = true; // the attach that started it waits for this exchange's end
     }
     initiator_ = false;
     xid_ = rx_xid_;

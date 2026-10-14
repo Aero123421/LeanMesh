@@ -89,6 +89,7 @@ Status Exchange::acquire_link_peer(const MacAddr &mac) {
 void Exchange::begin_common(Mode mode, bool initiator, MonoTime now) {
     mode_ = mode;
     initiator_ = initiator;
+    yielded_ = false;
     gate_spent_ = false;
     handle_ = Handle{0, ++handle_gen_ == 0 ? ++handle_gen_ : handle_gen_};
     hard_deadline_ = now + s_.policy.exchange_deadline;
@@ -122,7 +123,7 @@ void Exchange::abort(Status why) {
         if (gate_spent_ && why != Status::RateLimited && mode_ != Mode::End) {
             s_.gate.failed(mac_, s_.engine.step_time());
         }
-        if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && initiator_)) &&
+        if ((mode_ == Mode::JoinInit || (mode_ == Mode::Link && (initiator_ || yielded_))) &&
             s_.join.exchange_failed != nullptr) {
             s_.join.exchange_failed(s_.join.ctx, mac_, why); // [S8] the joiner / the attach learns the attempt is over
         }
@@ -757,8 +758,8 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
         ++s_.stats.renew_only;
     }
     if (s_.join.link_up != nullptr) {
-        s_.join.link_up(s_.join.ctx, n->device,
-                        n->role); // [S8] e.g. the root confirmation still owed
+        s_.join.link_up(s_.join.ctx, n->device, n->role,
+                        initiator_); // [S8] e.g. the root confirmation still owed
     }
     return Status::Ok;
 }

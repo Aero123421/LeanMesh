@@ -116,7 +116,8 @@ written to flash for it; the SDK's own restart cause survives a software reset i
 
 Message: `u8 version = 2, u8 count, u16 boot_count`, then `count` records, at most 160 bytes in all. Record:
 `u8 type, u8 len, u16 seq, u32 t_ms (ms since this boot), len bytes of payload`. The ring is RAM, so every record of a
-message is of the boot it names (`boot_count` as in telemetry). Version 1 had no boot field: when a boot's BOOT record
+message is of the boot it names (`boot_count` as in telemetry; 0 when the node could not store its counter, a boot
+never taken for an earlier one). Version 1 had no boot field: when a boot's BOOT record
 was lost, the laptop could tell the next boot only by a fall of `seq` or `t_ms`, and a boot whose numbers went on past
 the last ones seen was read as the old one (2026-10-12 field: records of boot 10 shown under boot 9).
 

@@ -225,7 +225,8 @@ struct JoinHooks {
     // context).
     void (*session_up)(void *ctx, bool initiator, const MacAddr &mac, const DeviceId &peer,
                        ByteView peer_bundle, const Sha256Digest &peer_dc_hash) = nullptr;
-    // A 1-hop exchange we initiated (a link or a join handshake with `mac`) ended without a session (why != Ok).
+    // A 1-hop exchange we initiated (a link or a join handshake with `mac`, also a link handshake that yielded to the
+    // peer's simultaneous start) ended without a session (why != Ok).
     void (*exchange_failed)(void *ctx, const MacAddr &mac, Status why) = nullptr;
     // JOIN_PROXY carriers that are not an exchange object (hello / offer discovery).
     void (*discovery)(void *ctx, const MacAddr &src, const wire::BootstrapCarrier &c, uint32_t domain_hint) = nullptr;
@@ -233,7 +234,7 @@ struct JoinHooks {
     void (*join_control)(void *ctx, const RxInfo &info, ByteView plain) = nullptr;
     bool (*link_control)(void *ctx, const RxInfo &info, ByteView plain) = nullptr;
     // An ordinary link session with `peer` was installed (fresh or rotated).
-    void (*link_up)(void *ctx, const DeviceId &peer, uint8_t role) = nullptr;
+    void (*link_up)(void *ctx, const DeviceId &peer, uint8_t role, bool initiator) = nullptr;
 };
 
 // [S9] What the delivery module lends the exchange for end mode (it owns end sessions and routed
@@ -521,6 +522,7 @@ class Exchange {
     JoinPeerOut *join_out_ = nullptr;
     std::size_t own_len_ = 0; // JoinResp: length of the bundle staged in rx_
     bool initiator_ = false;
+    bool yielded_ = false; // a link initiator that yielded to the peer's start (glare): its end is still reported
     bool gate_spent_ = false; // this exchange spent its peer's handshake gate (a failure then backs off, RateGate)
     MacAddr mac_; // 1-hop modes: the peer's MAC and driver registration
     PeerHandle peer_;

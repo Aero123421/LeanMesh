@@ -369,6 +369,8 @@ class Delivery {
                                      MonoTime now);
     // Paths changed (repair, new lease): sends that waited for a route go on now.
     void routes_changed(MonoTime now) { kick_all_waiting(now); }
+    // A new link session: the sends that wait for a usable first hop go at `at` (now: at once).
+    void retry_waiting(MonoTime at, MonoTime now);
     void invalidate_routes() { routes_.clear(); }
     // The owner or the membership generation of `a` changed (docs/04 §7): every route to it or through it goes;
     // routes that never touch it stay.

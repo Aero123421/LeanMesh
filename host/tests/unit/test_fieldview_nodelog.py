@@ -230,6 +230,14 @@ def test_a_restart_is_seen_although_sequence_and_boot_time_went_on() -> None:
     assert late.late and t.boot_count == 10 and t.as_dict()["tx_done_max_ms"] == 483   # boot 9's record changes nothing
 
 
+def test_boot_zero_is_an_unknown_boot_and_never_an_earlier_one() -> None:
+    # the node could not store its boot counter: its messages name boot 0, which must not read as "older than 9"
+    t = nl.NodeLogTrack()
+    feed(t, boot(1, 10, boot_count=9), bare(pr.T_MEMBER, 2, 100))
+    fed = feed(t, boot(1, 10, boot_count=0), reachable(2, 4_000))
+    assert fed[0].new_boot and not fed[0].late and (t.boot_count, t.boots_seen, t.reachable_ms) == (0, 2, 4_000)
+
+
 def test_a_huge_jump_is_not_a_count_of_lost_records() -> None:
     t = nl.NodeLogTrack()
     feed(t, boot(1, 10))
@@ -330,6 +338,17 @@ def test_the_sdk_debug_line_is_recorded_as_text_and_is_not_an_unknown_message(tm
     assert [(x["name"], x["backlog"], x["cursor"]) for x in lines] == [
         ("display-2", False, "j:1"), ("display-2", True, "j:2"), ("display-2", False, "j:3")]
     assert lines[0]["text"] == text and lines[1]["text"].endswith("cut") and lines[2]["text"] == ""
+
+
+def test_a_late_record_of_an_earlier_boot_is_written_with_its_own_boot(tmp_path: Path) -> None:
+    fv, rec_ = make_engine(tmp_path, [100.0])
+    fv._on_event(event(DEV["b"], enc([boot(1, 10, boot_count=10), bare(pr.T_MEMBER, 2, 900)]), 1), backlog=False)
+    fv._on_event(event(DEV["b"], enc([rec(pr.T_RADIO, 12, 400_000, tx_done_max_ms=1, tx_late=0, tx_stall_waits=0)], 9),
+                       2), backlog=False)
+    rec_.close()
+    lines = ndjson(tmp_path / "rec" / "nodelog.ndjson")
+    assert [(x["type"], x["boot_count"]) for x in lines] == [("BOOT", 10), ("MEMBER", 10), ("RADIO", 9)]
+    assert lines[-1].get("late") is True and fv.nodelog[DEV["b"]].boot_count == 10
 
 
 def test_records_become_nodelog_lines_events_row_and_summary(tmp_path: Path) -> None:

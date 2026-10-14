@@ -16,6 +16,9 @@ constexpr Duration k_session_wait = Duration::from_ms(gen::aead::session_bind_ti
 constexpr Duration k_link_wait = k_session_wait + Duration::from_s(1);
 constexpr uint8_t k_link_tries = 2;                         // failed handshakes before the next candidate
 constexpr Duration k_local_wait_max = Duration::from_s(60); // own slot / gate / pool: then choose again, no blame
+
+// A handshake that ended for this node's own shortage (worker, frame pool, radio), not for the candidate.
+bool local_end(Status why) { return why == Status::Busy || is_local_resource_error(why); }
 constexpr Duration k_busy_retry = Duration::from_ms(20);   // radio/TX pool busy: local, not a failure
 constexpr Duration k_slot_retry = Duration::from_ms(250);
 constexpr Duration k_term_hint_gap = Duration::from_s(30); // HIL-F9: an unauthenticated newer-term hint, at most this often
@@ -906,7 +909,7 @@ void Mesh::on_link_failed(const MacAddr &mac, Status why, MonoTime now) {
         cands_[static_cast<std::size_t>(att_.cand)].mac != mac) {
         return;
     }
-    if (why == Status::Busy || is_local_resource_error(why)) {
+    if (local_end(why)) {
         att_.started = false;
         att_.waiting_since = earliest(att_.waiting_since, now);
     }
@@ -986,9 +989,15 @@ void Mesh::attach_step(MonoTime now) {
             }
             att_.step = Step::Link;
             att_.started = true;
-            att_.waiting_since = MonoTime::never();
-            // on_link_up / on_link_failed go on when it ends; a handshake that ended inside connect() is over now
-            att_.next_at = engine_.link().exchange().busy() ? now + k_link_wait : now;
+            att_.next_at = now + k_link_wait; // on_link_up / on_link_failed go on when it ends
+            if (!engine_.link().exchange().busy()) { // it ended inside connect(): its failure was reported before now
+                att_.next_at = now;
+                if (local_end(engine_.link().exchange().last_failure())) { // e.g. the radio refused its first frame
+                    att_.started = false;
+                    att_.waiting_since = earliest(att_.waiting_since, now);
+                    att_.next_at = now + Duration::from_ms(500);
+                }
+            }
         } else if (st == Status::Busy || st == Status::RateLimited || st == Status::NoCapacity) {
             // this node's own slot, the handshake gate or the pool: a wait, no try of the candidate (docs/04 §3)
             att_.step = Step::Link;
@@ -1143,6 +1152,7 @@ void Mesh::attach_timer(MonoTime now) {
         }
         if (att_.started) { // our handshake ended without a session (or its end was never reported)
             att_.started = false;
+            att_.waiting_since = MonoTime::never(); // the 60 s bound counts only waits with no try in between
             if (++att_.tries >= k_link_tries) {
                 attach_fail(now);
                 return;

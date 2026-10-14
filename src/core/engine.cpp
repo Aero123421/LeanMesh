@@ -65,15 +65,18 @@ bool hook_link_control(void *ctx, const link::RxInfo &info, ByteView plain) {
     return root_role(e) ? e.ledger().link_control(info, plain, e.step_time())
                         : e.membership().link_control(info, plain, e.step_time());
 }
-void hook_link_up(void *ctx, const DeviceId &peer, uint8_t role) {
+void hook_link_up(void *ctx, const DeviceId &peer, uint8_t role, bool initiator) {
     Engine &e = eng(ctx);
-    e.mesh().on_link_up(peer, e.step_time()); // [SLICE:S11]
+    const MonoTime now = e.step_time();
+    e.mesh().on_link_up(peer, now); // [SLICE:S11]
     // A new session may carry what waited for one: a first hop that had none, or whose lease could not be proven
-    // (SEC-D3: a renewed credential reaches the neighbour only with the next handshake). The waiting sends go now,
-    // not at the end of their doubled retry wait (2026-10-12 field: up to 32 s more after the restriction ended).
-    e.delivery().routes_changed(e.step_time());
+    // (SEC-D3: a renewed credential reaches the neighbour only with the next handshake). The waiting sends go then,
+    // not at the end of their doubled retry wait (2026-10-12 field: up to 32 s more after the restriction ended). The
+    // initiator installs after the peer's SESSION_BIND_ACK: the peer has the session. The responder installs before it
+    // sends that ACK: sent at once they would arrive before the initiator has the keys, so one link RTO later.
+    e.delivery().retry_waiting(initiator ? now : now + e.link().policy().rto, now);
     if (!root_role(e)) {
-        e.membership().link_up(peer, role, e.step_time());
+        e.membership().link_up(peer, role, now);
     }
 }
 } // namespace

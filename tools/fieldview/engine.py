@@ -554,7 +554,7 @@ class FieldView:
         for rec in records:
             fed = track.feed(rec)
             line: dict[str, Any] = {"device": device, "name": name, "cursor": ev.get("cursor"), "backlog": backlog,
-                                    "boot_count": track.boot_count, "seq": rec.seq, "t_ms": rec.t_ms,
+                                    "boot_count": rec.boot, "seq": rec.seq, "t_ms": rec.t_ms,
                                     "type": rec.name, "type_id": rec.type, "fields": rec.fields}
             for flag in ("late", "new_boot", "unseen_boot", "jump"):
                 if getattr(fed, flag):

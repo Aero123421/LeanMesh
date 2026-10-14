@@ -69,7 +69,8 @@ class NodeLogTrack:
         if not rec.known:
             self.unknown_types += 1
         if self.boot_count is not None and rec.boot != self.boot_count:
-            if (rec.boot - self.boot_count) & 0xFFFF >= 0x8000:
+            # 0 is a boot whose number the node could not store (§3.4): it is never "earlier" than another
+            if rec.boot != 0 and self.boot_count != 0 and (rec.boot - self.boot_count) & 0xFFFF >= 0x8000:
                 fed.late = True            # a record of an earlier boot, arriving after the next boot's: no state
                 self.late += 1
                 return fed
