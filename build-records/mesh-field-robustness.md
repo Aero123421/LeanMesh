@@ -130,3 +130,33 @@ stack、peak heap、定常CPU、airtime、復帰エネルギーは測定して�
 | firmware build（上と同じ8件） | 8件とも成功 |
 
 資源差分（`01ddd3a` 比）: app binaryは +176〜+320 B（example_node RELAY c3 +288、c5 +288、c6 +304、s3 +176、hil_node ROOT s3 +288、field_node display s3 +192、relay c6 +320、relay s3 +192）。data+bssは8件とも±0。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。
+
+## 追加: 10/12現場再試験の修正（Issue #24、外部レビュー＋Codex CLIの3回目のレビュー、2026-10-15）
+
+基準は `6ded24a`。対象は `0909ba0..862afd3` の7 commit。原因の特定と記録は `docs/hil/2026-10-12-field-retest.md`。
+
+| 変更 | commit | 試験（修正前→後、いずれもsim） |
+|---|---|---|
+| attachはhandshakeの終わりを受けて進む。自分側の待ちは候補の失敗に数えない（docs/04 §3） | `0909ba0` | 失敗するrelayを2回で諦めて次へ: 36秒→20秒。自分のslotの待ち: attach_failed 2→0 |
+| 旧termのcredentialの更新をattachで求める。新しい近隣sessionで待っていた送信を送り直す。rootは時計のないとき更新を始めない（docs/04 §7、docs/08） | `32583c5` | root再起動後のrelay越しのアプリDATA: 91.5秒→33秒。時計のないroot: 形成できず（再署名の延期29896回）→形成 |
+| 弱い候補を予備にしない（docs/04 §5） | `ee588b6` | 5分でhandshake 1回（張られた）→0回 |
+| `rotations_started` は始まったものだけ | `7928624` | — |
+| node logのmessageが起動回を持つ（docs/field/protocol.md 3.4、version 2） | `e91ac4e` | 記録が前の起動に付く誤りを再現して修正 |
+| 3回目のレビューの指摘6件 | `6c125e7` | 下表 |
+| 再発行は木ができてから（新しいpathの3秒後、最長60秒） | `862afd3` | R07 全台停電20回: 形成の平均 93.9→43.3秒（最大146.6→45.8）、全memberの再発行は形成の91.7→39.6秒後 |
+
+3回目のレビュー（`6ded24a..e91ac4e`、Codex CLI gpt-6-astra、read-only）の指摘7件: 6件を直し、1件（試験の境界）は試験を強めた。自分側の待ちの上限が効かない／connect()内の自分側の不足を数える／glareで譲ったhandshakeの失敗が伝わらない／応答側がsessionを入れた直後に送ると開始側が捨てる／遅れて届いた前の起動の記録を今の番号で書く／boot_count 0を前の起動と読む。glareと応答側の遅らせには専用の試験がない。
+
+途中で見つけて直したもの（レビューより前）: 探索のhandshake予算が尽きたことを候補の失敗に数えると、500秒切断のあと戻ったlinkへ付き直せない（`test_lifecycle` G01が失敗して判明、`0909ba0` に含む）。
+
+見立てを変えたもの: 外部レビューの指摘のうち、親へのPROBEを32秒ごとにしか数えない点は、simで中継の再起動に子が12秒で別経路から付け直したので、この版では変えていない。
+
+| 検査 | 結果 |
+|---|---|
+| native（`ctest -j 6`） | 31/31 |
+| native ASan/UBSan | 31/31 |
+| Host・fieldview・meshsim E2E（pytest） | 612 passed |
+| 仕様検査(G0)・ruff | PASS／指摘なし |
+| firmware build（example_node RELAY c3/c5/c6/s3、hil_node ROOT s3、field_node display s3・relay c6・relay s3） | 8件とも成功 |
+
+資源差分（`6ded24a` 比）: app binaryは +304〜+544 B（example_node RELAY c3 +528、c5 +528、c6 +512、s3 +304、hil_node ROOT s3 +512、field_node display s3 +336、relay c6 +544、relay s3 +336）。data+bssは、s3の4件が −16 B（試験アプリ以外のs3でも同じ。node logの時刻の変数が1つ減った分）、ほか±0。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。
