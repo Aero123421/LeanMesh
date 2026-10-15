@@ -159,4 +159,4 @@ stack、peak heap、定常CPU、airtime、復帰エネルギーは測定して�
 | 仕様検査(G0)・ruff | PASS／指摘なし |
 | firmware build（example_node RELAY c3/c5/c6/s3、hil_node ROOT s3、field_node display s3・relay c6・relay s3） | 8件とも成功 |
 
-資源差分（`6ded24a` 比）: app binaryは +304〜+544 B（example_node RELAY c3 +528、c5 +528、c6 +512、s3 +304、hil_node ROOT s3 +512、field_node display s3 +336、relay c6 +544、relay s3 +336）。data+bssは、s3の4件が −16 B（試験アプリ以外のs3でも同じ。node logの時刻の変数が1つ減った分）、ほか±0。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。
+資源差分（`6ded24a` 比）: app binaryは +304〜+544 B（example_node RELAY c3 +528、c5 +528、c6 +512、s3 +304、hil_node ROOT s3 +512、field_node display s3 +336、relay c6 +544、relay s3 +336）。data+bssは、s3の4件が −16 B、ほか±0（s3だけ減る理由は調べていない）。stack・heap・CPU・airtimeは未測定。実機・電波は未検証。
