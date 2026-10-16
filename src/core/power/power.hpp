@@ -137,6 +137,7 @@ class Power {
     [[nodiscard]] Reply get_operation(uint64_t id, lm_operation_t &out) const;
 
     // ---- hooks other modules call ----
+    [[nodiscard]] Status check_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) const;
     [[nodiscard]] Status admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now);
     [[nodiscard]] bool search_allowed(MonoTime now);
     // ---- channel search of a battery node (FIX10-D3, docs/20 §8/§9) ----

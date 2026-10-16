@@ -464,7 +464,7 @@ void Ledger::stop() {
     exp_active_ = false;
     bk_ = Backup{}; // [ISSUE5] (a step the stop cut ends with the engine's stop; nothing is signed or written after it)
     rs_ = Restore{};
-    renew_mask_ = 0;
+    renew_mask_ = renew_urgent_ = 0;
     lc_.active = false;
     lc_.retry_at = MonoTime::never();
     dirty_ = doubt_ = 0; // (a stricter state that never became durable is decided again by the records at the next load)

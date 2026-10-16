@@ -126,6 +126,9 @@ class SimJobs final : public port::Jobs {
     void set_epoch(uint32_t epoch) { epoch_ = epoch; }
     // Virtual execution time of every job (models worker latency; late-completion tests raise it).
     uint32_t latency_us = 2000;
+    // The next completions report a port failure after running the real job (fault injection only).
+    Status completion_fault = Status::Busy;
+    uint32_t completion_fault_count = 0;
 
   private:
     World &world_;

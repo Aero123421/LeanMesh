@@ -3672,3 +3672,118 @@ LM_TEST("FIELD sim: after its renewal a relay does not keep re-keying towards a 
     LM_CHECK_EQ(n.lease_at(1, 2), 0u); // the session ended with the neighbour's lease, as before
     LM_CHECK_EQ(not_ready_ms, 0u);
 }
+LM_TEST("REVIEW16 sim: a sleeping renewal does not monopolize signing or block an awake member") {
+    LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}});
+    n.link(1, 2, false);
+    n.link(0, 2);
+    for (unsigned i = 0; i < 3; ++i) n.boot(i);
+    const bool formed = n.until([&] { return n.all_ready(); }, 90'000);
+    LM_CHECK(formed);
+    if (!formed) {
+        for (unsigned i = 0; i < 3; ++i) {
+            std::printf("node %u mesh %u hs %llu/%llu/%llu sid %llu phase %u failure %u\n", i,
+                unsigned(n.eng(i).mesh().state()),
+                (unsigned long long)n.eng(i).link().stats().hs_started,
+                (unsigned long long)n.eng(i).link().stats().hs_completed,
+                (unsigned long long)n.eng(i).link().stats().hs_failed,
+                (unsigned long long)n.eng(i).link().stats().rx_unknown_sid,
+                unsigned(n.eng(i).link().exchange().phase()), unsigned(n.eng(i).link().exchange().last_failure()));
+        }
+        return;
+    }
+    n.run_ms(4000);
+    power::Report report;
+    report.mode = LM_POWER_REPORT_ONLY;
+    report.quality = power::k_quality_bounded;
+    report.earliest_ms = 120'000;
+    report.latest_ms = 121'000;
+    std::array<uint8_t, 64> body{};
+    std::size_t len = 0;
+    LM_CHECK_OK(power::encode(report, MutByteView{body}, len));
+    auto &e = n.eng(0);
+    const MonoTime now = n.node(0).clock.now();
+    e.power().on_report(n.id(1), ShortAddr{2}, ByteView{body.data(), len}, now);
+    const auto renewals = e.ledger().stats().renewals;
+    const auto deferred = e.ledger().stats().renew_deferred;
+    e.ledger().renew_due(n.id(1), e.identity().term().value(), 0, now);
+    e.ledger().renew_due(n.id(2), e.identity().term().value(), 0, now);
+    n.node(0).notify();
+    n.run_ms(10'000);
+    LM_CHECK_EQ(e.ledger().stats().renewals - renewals, 1u);
+    LM_CHECK(e.ledger().stats().renew_deferred - deferred < 100u);
+    LM_CHECK(n.eng(2).membership().stats().renewals >= 1u);
+    // A new awake report makes the queued request eligible after its own wake deadline.
+    report.mode = LM_POWER_ALWAYS_RX;
+    report.quality = power::k_quality_unknown;
+    LM_CHECK_OK(power::encode(report, MutByteView{body}, len));
+    e.power().on_report(n.id(1), ShortAddr{2}, ByteView{body.data(), len}, n.node(0).clock.now());
+    LM_CHECK(n.until([&] { return n.eng(1).membership().stats().renewals >= 1u; }, 125'000));
+}
+
+LM_TEST("REVIEW16 sim: READY during renewal load and signing is coalesced") {
+    LNet n({Spec{}, Spec{Role::Leaf}});
+    n.boot(0); n.boot(1);
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    n.run_ms(4000);
+    auto &e = n.eng(0);
+    n.node(0).jobs.latency_us = 200'000;
+    const auto renewals = e.ledger().stats().renewals;
+    const uint32_t term = e.identity().term().value();
+    const auto request = [&] { e.ledger().renew_due(n.id(1), term, 0, n.node(0).clock.now()); n.node(0).notify(); };
+    request();
+    n.run_ms(100); request(); // RenewLoad in flight
+    n.run_ms(200); request(); // RenewSign in flight
+    n.run_ms(5000);
+    LM_CHECK_EQ(e.ledger().stats().renewals - renewals, 1u);
+    LM_CHECK(n.eng(1).membership().stats().renewals >= 1u);
+}
+
+LM_TEST("REVIEW16 sim: failed renewal loads and signatures retain a coalesced request") {
+    for (bool fail_sign : {false, true}) {
+        LNet n({Spec{}, Spec{Role::Leaf}});
+        n.boot(0); n.boot(1);
+        LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+        n.run_ms(4000);
+        auto &e = n.eng(0);
+        auto &jobs = n.node(0).jobs;
+        jobs.latency_us = 200'000;
+        const auto count = e.ledger().stats().renewals;
+        const auto deferred = e.ledger().stats().renew_deferred;
+        e.ledger().renew_due(n.id(1), e.identity().term().value(), 0, n.node(0).clock.now());
+        n.node(0).notify();
+        if (fail_sign) n.run_ms(250);
+        jobs.completion_fault_count = 1;
+        jobs.completion_fault = fail_sign ? Status::Busy : Status::StorageFailure;
+        n.run_ms(5000);
+        LM_CHECK_EQ(jobs.completion_fault_count, 0u);
+        LM_CHECK_EQ(e.ledger().stats().renewals - count, 1u);
+        LM_CHECK(e.ledger().stats().renew_deferred > deferred);
+        LM_CHECK(n.eng(1).membership().stats().renewals >= 1u);
+    }
+}
+
+LM_TEST("REVIEW16 sim: a control lane taken during signing postpones only that renewal and retries") {
+    LNet n({Spec{}, Spec{Role::Leaf}});
+    n.boot(0); n.boot(1);
+    LM_CHECK(n.until([&] { return n.all_ready(); }, 90'000));
+    n.run_ms(4000);
+    auto &e = n.eng(0);
+    n.node(0).jobs.latency_us = 200'000;
+    const auto count = e.ledger().stats().renewals;
+    const auto deferred = e.ledger().stats().renew_deferred;
+    e.ledger().renew_due(n.id(1), e.identity().term().value(), 0, n.node(0).clock.now());
+    n.node(0).notify();
+    n.run_ms(250); // the worker is signing; acceptance was still possible before it started
+    n.node(0).radio.tx_fault_count = 10'000;
+    std::array<uint8_t, 512> payload{};
+    const delivery::ControlSendRequest request{n.id(1), e.identity().term().value(), n.root_ms() + 30'000};
+    const Reply blocker = e.delivery().send_control(request, ByteView{payload}, n.node(0).clock.now());
+    LM_CHECK_OK(blocker.status);
+    n.node(0).notify();
+    n.run_ms(500);
+    LM_CHECK_EQ(e.ledger().stats().renewals, count);
+    LM_CHECK(e.ledger().stats().renew_deferred > deferred);
+    n.node(0).radio.tx_fault_count = 0;
+    LM_CHECK(n.until([&] { return n.eng(1).membership().stats().renewals >= 1u; }, 20'000));
+    LM_CHECK_EQ(e.ledger().stats().renewals - count, 1u);
+}

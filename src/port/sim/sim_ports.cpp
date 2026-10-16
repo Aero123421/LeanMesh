@@ -182,7 +182,12 @@ void SimJobs::complete(const port::JobCompletion &c) {
     if (queued_ > 0) {
         --queued_;
     }
-    (void)done_.push(c); // capacity is reserved at submit
+    auto result = c;
+    if (completion_fault_count != 0) {
+        --completion_fault_count;
+        result.status = completion_fault;
+    }
+    (void)done_.push(result); // capacity is reserved at submit
 }
 
 void SimJobs::power_cut() {

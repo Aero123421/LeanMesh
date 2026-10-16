@@ -30,10 +30,21 @@ void Ledger::renew_due(const DeviceId &device, uint32_t term, uint64_t lease_ms,
         lease_ms > root_ms + static_cast<uint64_t>(k_renew_before.to_ms())) {
         return; // not due yet
     }
+    const uint64_t bit = 1ULL << static_cast<std::size_t>(e - entries_.data());
+    const auto *verified = engine_.delivery().sessions().find_peer(device);
+    if (verified != nullptr && verified->rec.active() &&
+        verified->peer_assignment.value() == e->assignment && verified->peer_membership.value() == e->membership &&
+        verified->peer_lease.term == engine_.identity().member().root_term &&
+        verified->peer_lease.ms != 0 && verified->peer_lease.ms <= root_ms) {
+        renew_urgent_ |= bit; // verified expiry, not the READY's self-reported lease; do not miss a short wake
+    }
+    if ((renew_mask_ & bit) != 0) {
+        return; // the same member/generations are queued or already loading/signing
+    }
     if (renew_mask_ == 0) {
         renew_asked_ = now;
     }
-    renew_mask_ |= 1ULL << static_cast<std::size_t>(e - entries_.data());
+    renew_mask_ |= bit;
     maintenance(now);
 }
 
@@ -44,41 +55,98 @@ void Ledger::start_renew(MonoTime now) {
     // renewal costs a signature, a CONTROL along the path and then the member's re-keying of its links (desynchronised
     // over 30 s); during the formation that churn slowed it down (R07 sim, 21 nodes / 20 hops: mean 40 -> 94 s).
     const MonoTime grant = engine_.routes().last_grant();
-    if (!grant.is_never() && now < grant + k_formation_quiet && now < renew_asked_ + k_renew_hold) {
-        ++stats_.renew_deferred;
-        maint_retry_ = earliest(grant + k_formation_quiet, renew_asked_ + k_renew_hold);
-        release(-2);
-        return;
-    }
-    while (renew_mask_ != 0) {
-        const auto slot = static_cast<std::size_t>(__builtin_ctzll(renew_mask_));
-        renew_mask_ &= renew_mask_ - 1U;
+    const bool forming = !grant.is_never() && now < grant + k_formation_quiet && now < renew_asked_ + k_renew_hold;
+    const MonoTime quiet = forming ? earliest(grant + k_formation_quiet, renew_asked_ + k_renew_hold) : MonoTime::never();
+    uint64_t pending = renew_mask_;
+    MonoTime next = MonoTime::never();
+    while (pending != 0) {
+        const auto slot = static_cast<std::size_t>(__builtin_ctzll(pending));
+        pending &= pending - 1U;
+        Entry &e = entries_[slot];
         if (retired_ || !authorizes(entries_[slot])) {
+            renew_mask_ &= ~(1ULL << slot);
+            renew_urgent_ &= ~(1ULL << slot);
             continue; // FIX5-D2: revoked (or this root retired) since the renewal was asked for
         }
+        if (!e.reserved_until.is_never() && now < e.reserved_until) {
+            next = earliest(next, e.reserved_until);
+            continue; // another maintenance completion cannot cancel this member's wait
+        }
+        if (forming && (renew_urgent_ & (1ULL << slot)) == 0) {
+            ++stats_.renew_deferred;
+            next = earliest(next, quiet);
+            continue;
+        }
+        MonoTime wake;
+        if (engine_.power().target_wake(e.device, 0, now, wake) == power::Power::WakeWait::Wait) {
+            e.reserved_until = wake;
+            e.renew_wait = RenewWait::Wake;
+            e.renew_status = engine_.power().check_send(e.device, now.to_ms() + 30000, now);
+            next = earliest(next, wake);
+            ++stats_.renew_deferred;
+            continue;
+        }
+        const Status admission = engine_.power().check_send(e.device, now.to_ms() + 30000, now);
+        if (admission != Status::Ok) {
+            defer_renew(slot, admission, now);
+            next = earliest(next, e.reserved_until);
+            continue;
+        }
+        e.renew_wait = RenewWait::None;
+        e.renew_status = Status::Ok;
         rec_->arm(store::RecordJob::Op::Load, static_cast<uint16_t>(k_rec_ledger_base + slot));
         job_slot_index_ = slot;
+        job_entry_ = e;
         // The renewal leaves by the one control lane, as a CONTROL dated on the root's clock of its term: while the lane
         // carries another object or the clock cannot date it (TIME_UNCERTAIN), loading and signing now would only be
         // done again, each time with the exchange's scratch lent, so that handshakes find the slot busy (ARCH2-D1: after
         // a root restart every member is renewed, one after the other; 2026-10-15 sim: re-signed every 4 ms while it
         // had no clock of its term, and a member behind a relay never got its end session).
         const RootTimeBound clock = engine_.delivery().root_time(now);
-        if (!engine_.delivery().control_lane_free() || !clock.valid || !(clock.term == engine_.identity().member().root_term) ||
-            submit(Step::RenewLoad, JobClass::Flash, &store::record_job, rec_, -2) != Status::Ok) {
-            renew_mask_ |= 1ULL << slot;
-            ++stats_.renew_deferred;
-            maint_retry_ = now + k_retry;
+        const Status start = !engine_.delivery().control_lane_free() ? Status::NoCapacity
+            : !clock.valid || !(clock.term == engine_.identity().member().root_term) ? Status::TimeUncertain
+            : submit(Step::RenewLoad, JobClass::Flash, &store::record_job, rec_, -2);
+        if (start != Status::Ok) {
+            defer_renew(slot, start, now);
             release(-2);
         }
         return;
     }
+    maint_retry_ = earliest(maint_retry_, next);
     release(-2);
+}
+
+void Ledger::defer_renew(std::size_t slot, Status why, MonoTime now) {
+    Entry &e = entries_[slot];
+    renew_mask_ |= 1ULL << slot;
+    e.renew_wait = RenewWait::Local;
+    e.renew_status = why;
+    e.reserved_until = now + k_retry;
+    MonoTime wake;
+    if (engine_.power().target_wake(e.device, 0, now, wake) == power::Power::WakeWait::Wait) {
+        e.renew_wait = RenewWait::Wake;
+        e.reserved_until = wake;
+    }
+    ++stats_.renew_deferred;
+    maint_retry_ = earliest(maint_retry_, e.reserved_until);
 }
 
 void Ledger::renew_step(Step step, Status s, MonoTime now) {
     const std::size_t slot = job_slot_index_;
     Entry &e = entries_[slot];
+    const bool same = e.device == job_entry_.device && e.assignment == job_entry_.assignment &&
+                      e.membership == job_entry_.membership && !retired_ && authorizes(e);
+    if (!same) {
+        renew_mask_ &= ~(1ULL << slot);
+        renew_urgent_ &= ~(1ULL << slot);
+        release(-2);
+        return;
+    }
+    if (s != Status::Ok) {
+        defer_renew(slot, s, now); // retain/coalesce the request through transient load/sign failures
+        release(-2);
+        return;
+    }
     if (step == Step::RenewLoad) {
         Entry stored;
         ByteView cose;
@@ -90,6 +158,8 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
             stored.membership != e.membership ||
             member::peek_signed(cose, member::k_type_member_credential, env, data) != Status::Ok ||
             member::decode_member_credential(data, mc) != Status::Ok || mc.device != e.device) {
+            renew_mask_ &= ~(1ULL << slot);
+            renew_urgent_ &= ~(1ULL << slot);
             release(-2); // the record is the truth: nothing to renew from (the member asks again at its next READY)
             return;
         }
@@ -106,10 +176,9 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
         a.env.issuer = id.self();
         a.env.revision = mc.membership.value();
         a.out = scratch_.from(detail::k_cose_off);
-        if (submit(Step::RenewSign, JobClass::PublicKey, &sign_job, this, -2) != Status::Ok) {
-            renew_mask_ |= 1ULL << slot; // the one public-key slot is busy (a handshake): later
-            ++stats_.renew_deferred;
-            maint_retry_ = now + k_retry;
+        const Status sign = submit(Step::RenewSign, JobClass::PublicKey, &sign_job, this, -2);
+        if (sign != Status::Ok) {
+            defer_renew(slot, sign, now);
             release(-2);
         }
         return;
@@ -117,14 +186,16 @@ void Ledger::renew_step(Step step, Status s, MonoTime now) {
     // RenewSign: the signed credential goes to the member as one control object over its end session.
     const delivery::ControlSendRequest cr{e.device, engine_.identity().member().root_term.value(), now.to_ms() + 30000};
     const ByteView cose{scratch_.data() + detail::k_cose_off, sargs_.len};
-    const bool still = !retired_ && authorizes(e); // FIX5-D2: not revoked (floors) while the worker signed
-    if (s == Status::Ok && still && sargs_.len != 0 && engine_.delivery().send_control(cr, cose, now).status == Status::Ok) {
+    const Status sent = sargs_.len != 0 ? engine_.delivery().send_control(cr, cose, now).status : Status::RecoveryRequired;
+    if (sent == Status::Ok) {
         ++stats_.renewals;
-        e.reserved_until = now + k_renew_gap; // a READY racing the delivery does not sign again
-    } else if (s == Status::Ok && still) {
-        renew_mask_ |= 1ULL << slot; // the control lane is busy (a snapshot page, another renewal): later
-        ++stats_.renew_deferred;
-        maint_retry_ = now + k_retry;
+        renew_mask_ &= ~(1ULL << slot);
+        renew_urgent_ &= ~(1ULL << slot);
+        e.renew_wait = RenewWait::None;
+        e.renew_status = Status::Ok;
+        e.reserved_until = now + k_renew_gap; // acceptance is not proof of adoption
+    } else {
+        defer_renew(slot, sent, now);
     }
     release(-2);
 }

@@ -111,6 +111,8 @@ inline constexpr uint8_t k_window_record_version = 1; // 36 B
                                                uint16_t &record_id, MutByteView out, std::size_t &len);
 enum class JoinMode : uint8_t { Closed = 0, External = 1, Preapproved = 2 };
 
+enum class RenewWait : uint8_t { None, Wake, Local };
+
 struct Entry {
     DeviceId device;
     Sha256Digest hash{};      // Expected: SHA-256 of the granting ticket; else SHA-256 of the JoinRequest content
@@ -124,7 +126,9 @@ struct Entry {
     EntryState state = EntryState::Free;
     bool confirmed = false;   // Active: the device's own JOIN_ACTIVE evidence was recorded
     bool recovered = false;   // Prepared and read at boot: its reservation deadline is unknown
-    // RAM only: the reservation deadline while Prepared; while Active [S18] the earliest next renewal.
+    RenewWait renew_wait = RenewWait::None; // RAM only; never a membership/authorization state
+    Status renew_status = Status::Ok;       // last deferred admission/job result
+    // RAM only: the reservation deadline while Prepared; while Active [S18] the earliest next renewal attempt (retry or post-acceptance gap).
     MonoTime reserved_until = MonoTime::never();
 };
 
@@ -484,6 +488,7 @@ class Ledger {
     void confirm_done(MonoTime now);
     // [S18] lifecycle.cpp
     void start_renew(MonoTime now);
+    void defer_renew(std::size_t slot, Status why, MonoTime now);
     void renew_step(Step step, Status s, MonoTime now);
     static Status lc_verify_job(port::JobEnv &env, void *arg);
     void lc_step(Step step, Status s, MonoTime now);
@@ -621,7 +626,8 @@ class Ledger {
     };
     Confirm confirm_;
     bool confirm_pending_ = false;
-    uint64_t renew_mask_ = 0; // [S18] ledger slots whose credential is to be renewed (one at a time)
+    uint64_t renew_urgent_ = 0; // same-term expired verified credentials must fit the current wake window
+    uint64_t renew_mask_ = 0; // [S18] ledger slots queued or loading/signing a renewal (one at a time)
     MonoTime renew_asked_ = MonoTime::never(); // when the oldest renewal still in renew_mask_ was asked for
     // [S18] the one lifecycle install in progress (verify job output, then the commits it makes)
     // The decoded lifecycle object: one install at a time, so one of them (the verify job starts its lifetime).

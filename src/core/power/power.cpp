@@ -376,7 +376,7 @@ bool Power::handshake_allowed(MonoTime now) const {
 }
 
 // ---- admission --------------------------------------------------------------------------------------
-Status Power::admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) {
+Status Power::check_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) const {
     if (!locks_ok()) {
         return Status::Busy; // fail closed: no new work while a lock it needs is not confirmed (retried every step)
     }
@@ -388,7 +388,11 @@ Status Power::admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTim
             return Status::PowerBudgetExhausted;
         }
     }
-    const Status t = root_check_target(dest, expires_root_ms, now);
+    return root_check_target(dest, expires_root_ms, now);
+}
+
+Status Power::admit_send(const DeviceId &dest, uint64_t expires_root_ms, MonoTime now) {
+    const Status t = check_send(dest, expires_root_ms, now);
     if (t == Status::Ok) {
         ++state_gen_; // a new operation: a sleep ticket in hand is stale
     }
