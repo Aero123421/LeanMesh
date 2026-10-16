@@ -348,8 +348,10 @@ void Exchange::arm_rto(MonoTime now) {
         if (phase_ == Phase::SendCred) { // CredR is out: wait for message_1, but not for long
             phase_ = Phase::AwaitMsg;
             expect_ = ObjKind::Msg1;
-            if (mode_ != Mode::End) {
-                deadline_ = earliest(deadline_, now + k_msg1_wait);
+            const Duration service = s_.engine.tx().service_bound();
+            if (mode_ != Mode::End || service.us <= 120000) {
+                const Duration wait = mode_ == Mode::End ? delivery::round_timeout(route_.len, service) : k_msg1_wait;
+                deadline_ = earliest(deadline_, now + (wait > k_msg1_wait ? wait : k_msg1_wait));
             }
             // A routed CredR has only reached its first hop here; its remaining fragments may still
             // be forwarding. The bounded responder idle timer covers that tail and message_1's return.
@@ -361,7 +363,7 @@ void Exchange::arm_rto(MonoTime now) {
         if (mode_ == Mode::End) {
             const Duration service = s_.engine.tx().service_bound();
             wait = delivery::round_timeout(route_.len, service);
-            if (phase_ == Phase::SendCred) {
+            if (phase_ == Phase::SendCred && service.us > 120000) {
                 const std::size_t cap = wire::data_capacity(route_.len) - k_end_obj_header;
                 const auto chunks = static_cast<int64_t>((wire::k_bootstrap_max_total + cap - 1) / cap);
                 wait = wait + Duration{2 * service.us * chunks}; // the fragmented CredR, not just one frame
