@@ -1,0 +1,48 @@
+Extra review regression evidence; baseline SDK source is immutable 1ea5604.
+Only appended regression tests differ in the baseline worktree; libedhoc carries the repository-required verified patches.
+Results are deterministic protocol simulations, not RF or real power-cut evidence.
+
+=== immutable-before-lifecycle.log ===
+  FAIL baseline/tests/native/test_lifecycle.cpp:3713: e.ledger().stats().renewals - renewals == 1u (0 vs 1)
+  FAIL baseline/tests/native/test_lifecycle.cpp:3714: e.ledger().stats().renew_deferred - deferred < 100u
+  FAIL baseline/tests/native/test_lifecycle.cpp:3715: n.eng(2).membership().stats().renewals >= 1u
+  FAIL baseline/tests/native/test_lifecycle.cpp:3738: e.ledger().stats().renewals - renewals == 1u (2 vs 1)
+[ RUN  ] REVIEW16 sim: a sleeping renewal does not monopolize signing or block an awake member
+[ FAIL ] REVIEW16 sim: a sleeping renewal does not monopolize signing or block an awake member
+[ RUN  ] REVIEW16 sim: READY during renewal load and signing is coalesced
+[ FAIL ] REVIEW16 sim: READY during renewal load and signing is coalesced
+2 test(s), 2 failed
+
+=== immutable-before-link.log ===
+  FAIL baseline/tests/native/test_link.cpp:1159: phase == link::Phase::Idle || phase == link::Phase::Zombie
+  FAIL baseline/tests/native/test_link.cpp:1161: n.lnk(y).exchange().phase() == link::Phase::Idle
+  FAIL baseline/tests/native/test_link.cpp:1162: (n.connect(y, 2)) == ::lm::Status::Ok
+  FAIL baseline/tests/native/test_link.cpp:1163: n.run_until([&] { return n.paired(y, 2); }, 5000)
+  FAIL baseline/tests/native/test_link.cpp:1159: phase == link::Phase::Idle || phase == link::Phase::Zombie
+  FAIL baseline/tests/native/test_link.cpp:1161: n.lnk(y).exchange().phase() == link::Phase::Idle
+  FAIL baseline/tests/native/test_link.cpp:1162: (n.connect(y, 2)) == ::lm::Status::Ok
+  FAIL baseline/tests/native/test_link.cpp:1163: n.run_until([&] { return n.paired(y, 2); }, 5000)
+  FAIL baseline/tests/native/test_link.cpp:1176: n.lnk(0).stats().hs_completed == 0u (1 vs 0)
+  FAIL baseline/tests/native/test_link.cpp:1187: n.run_until([&] { return n.paired(0, 1) && n.send(0, 1, payload_of(92)) == Status::Ok; }, 10'000)
+  FAIL baseline/tests/native/test_link.cpp:1189: n.sinks[1].fresh() == 1u (0 vs 1)
+  FAIL baseline/tests/native/test_link.cpp:1176: n.lnk(0).stats().hs_completed == 0u (1 vs 0)
+  FAIL baseline/tests/native/test_link.cpp:1187: n.run_until([&] { return n.paired(0, 1) && n.send(0, 1, payload_of(92)) == Status::Ok; }, 10'000)
+  FAIL baseline/tests/native/test_link.cpp:1189: n.sinks[1].fresh() == 1u (0 vs 1)
+[ RUN  ] REVIEW16 sim: an abandoned glare-yielded attempt releases the slot after its worker
+[ FAIL ] REVIEW16 sim: an abandoned glare-yielded attempt releases the slot after its worker
+[ RUN  ] REVIEW16 sim: a locally blocked Bind ACK survives a scratch loan and precedes normal traffic
+[ FAIL ] REVIEW16 sim: a locally blocked Bind ACK survives a scratch loan and precedes normal traffic
+2 test(s), 2 failed
+
+=== before-mesh.log ===
+  FAIL baseline/tests/native/test_mesh.cpp:1753: invalid
+  FAIL baseline/tests/native/test_mesh.cpp:1767: added
+[ RUN  ] REVIEW16 sim: route hints expire independently of live neighbor sessions and leave room for new candidates
+[ FAIL ] REVIEW16 sim: route hints expire independently of live neighbor sessions and leave room for new candidates
+1 test(s), 1 failed
+
+=== dispatch-before.log ===
+  FAIL tests/native/test_link.cpp:1235: proof_after_dispatch
+[ RUN  ] REVIEW16 sim: confirmation dispatches its authenticated frame before waking normal senders
+[ FAIL ] REVIEW16 sim: confirmation dispatches its authenticated frame before waking normal senders
+1 test(s), 1 failed

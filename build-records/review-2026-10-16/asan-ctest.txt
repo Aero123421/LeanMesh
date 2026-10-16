@@ -1,0 +1,94 @@
+Internal ctest changing into directory: /workspace/work/leanmesh-review/native-asan-final
+Test project /workspace/work/leanmesh-review/native-asan-final
+      Start  1: api_defined
+      Start  2: test_foundation
+ 1/31 Test  #2: test_foundation ..................   Passed    0.12 sec
+      Start  3: test_crypto_backend
+ 2/31 Test  #3: test_crypto_backend ..............   Passed    0.29 sec
+      Start  4: test_runtime_sim
+ 3/31 Test  #1: api_defined ......................   Passed    0.45 sec
+      Start  5: test_runtime_radio
+ 4/31 Test  #5: test_runtime_radio ...............   Passed    0.24 sec
+      Start  6: test_store
+ 5/31 Test  #4: test_runtime_sim .................   Passed    0.40 sec
+      Start  7: test_runtime_meshsim
+ 6/31 Test  #7: test_runtime_meshsim .............   Passed    0.48 sec
+      Start  8: test_wire
+ 7/31 Test  #8: test_wire ........................   Passed    0.11 sec
+      Start  9: test_codec
+ 8/31 Test  #9: test_codec .......................   Passed    0.16 sec
+      Start 10: test_route
+ 9/31 Test  #6: test_store .......................   Passed    2.29 sec
+      Start 11: test_security
+10/31 Test #10: test_route .......................   Passed   17.67 sec
+      Start 12: test_link
+11/31 Test #11: test_security ....................   Passed   30.50 sec
+      Start 13: test_credentials
+12/31 Test #13: test_credentials .................   Passed    2.44 sec
+      Start 14: test_serial
+13/31 Test #14: test_serial ......................   Passed    6.49 sec
+      Start 15: test_delivery
+14/31 Test #12: test_link ........................   Passed   23.86 sec
+      Start 16: test_join
+15/31 Test #16: test_join ........................   Passed   89.17 sec
+      Start 17: test_fragment
+16/31 Test #15: test_delivery ....................   Passed  100.39 sec
+      Start 18: test_sched
+17/31 Test #18: test_sched .......................   Passed    0.82 sec
+      Start 19: test_mesh
+18/31 Test #17: test_fragment ....................   Passed   35.27 sec
+      Start 20: test_group
+19/31 Test #20: test_group .......................   Passed  136.57 sec
+      Start 21: test_power
+20/31 Test #19: test_mesh ........................   Passed  338.96 sec
+      Start 22: test_channel
+21/31 Test #21: test_power .......................   Passed  182.51 sec
+      Start 23: test_diag
+22/31 Test #23: test_diag ........................   Passed    0.10 sec
+      Start 24: test_ota
+23/31 Test #24: test_ota .........................   Passed    1.74 sec
+      Start 25: test_lifecycle
+24/31 Test #22: test_channel .....................   Passed   63.04 sec
+      Start 26: test_model
+25/31 Test #26: test_model .......................   Passed   42.39 sec
+      Start 27: test_term
+26/31 Test #25: test_lifecycle ...................   Passed  102.46 sec
+      Start 28: test_field
+27/31 Test #28: test_field .......................   Passed    0.11 sec
+      Start 29: test_field_driver
+28/31 Test #29: test_field_driver ................   Passed    0.04 sec
+      Start 30: test_field_disabled
+29/31 Test #30: test_field_disabled ..............   Passed    0.03 sec
+      Start 31: test_field_disabled_symbols
+30/31 Test #31: test_field_disabled_symbols ......   Passed    0.05 sec
+31/31 Test #27: test_term ........................   Passed    3.58 sec
+
+100% tests passed, 0 tests failed out of 31
+
+Label Time Summary:
+api            =   0.45 sec*proc (1 test)
+channel        =  63.04 sec*proc (1 test)
+crypto         =  30.79 sec*proc (2 tests)
+delivery       = 135.66 sec*proc (2 tests)
+diag           =   0.10 sec*proc (1 test)
+field          =   0.23 sec*proc (4 tests)
+group          = 136.57 sec*proc (1 test)
+integration    = 1178.92 sec*proc (21 tests)
+join           =  89.17 sec*proc (1 test)
+lifecycle      = 106.04 sec*proc (2 tests)
+link           =  26.30 sec*proc (2 tests)
+mesh           = 342.54 sec*proc (2 tests)
+meshsim        =   0.48 sec*proc (1 test)
+model          =  42.39 sec*proc (1 test)
+ota            =   1.74 sec*proc (1 test)
+power          = 182.51 sec*proc (1 test)
+route          =  17.67 sec*proc (1 test)
+scenario       = 1181.40 sec*proc (24 tests)
+sched          =   0.82 sec*proc (1 test)
+serial         =   6.49 sec*proc (1 test)
+sim            = 1126.73 sec*proc (17 tests)
+store          =   4.03 sec*proc (2 tests)
+unit           =  53.70 sec*proc (13 tests)
+wire           =   0.27 sec*proc (2 tests)
+
+Total Test time (real) = 591.64 sec

@@ -1,0 +1,94 @@
+Source: 712bf78, clean native build, -O1 -g -DNDEBUG. Protocol simulations, not hardware.
+  [matrix] transfer                     node device     before: 14 cut points, 14 converged on the target state
+  [matrix] transfer                     node device     torn  : 14 cut points, 14 converged on the target state
+  [matrix] transfer                     node device     after : 14 cut points, 14 converged on the target state
+  [matrix] transfer                     node B root     before:  6 cut points,  6 converged on the target state
+  [matrix] transfer                     node B root     torn  :  6 cut points,  6 converged on the target state
+  [matrix] transfer                     node B root     after :  6 cut points,  6 converged on the target state
+  [matrix] transfer                     total: 60 cut points, 60 converged, 0 truncated sweeps
+  [matrix] handover                     node device     before: 14 cut points, 14 converged on the target state
+  [matrix] handover                     node device     torn  : 14 cut points, 14 converged on the target state
+  [matrix] handover                     node device     after : 14 cut points, 14 converged on the target state
+  [matrix] handover                     node new root   before:  6 cut points,  6 converged on the target state
+  [matrix] handover                     node new root   torn  :  6 cut points,  6 converged on the target state
+  [matrix] handover                     node new root   after :  6 cut points,  6 converged on the target state
+  [matrix] handover                     total: 60 cut points, 60 converged, 0 truncated sweeps
+  [measure] retirement cuts: 6 fired, 1 left the old root retired, the rest completed on the second install
+  [measure] window power-cut sweep: 30 cut points, 6 admitted afterwards (never above the budget of 1)
+  [matrix] ledger restore               node new root   before:  8 cut points,  0 converged on the target state
+  [matrix] ledger restore               node new root   torn  :  8 cut points,  0 converged on the target state
+  [matrix] ledger restore               node new root   after :  8 cut points,  1 converged on the target state
+  [matrix] ledger restore               total: 24 cut points, 1 converged, 0 truncated sweeps
+[ RUN  ] REVIEW16 sim: a sleeping renewal does not monopolize signing or block an awake member
+[  OK  ] REVIEW16 sim: a sleeping renewal does not monopolize signing or block an awake member
+[ RUN  ] REVIEW16 sim: READY during renewal load and signing is coalesced
+[  OK  ] REVIEW16 sim: READY during renewal load and signing is coalesced
+[ RUN  ] REVIEW16 sim: failed renewal loads and signatures retain a coalesced request
+[  OK  ] REVIEW16 sim: failed renewal loads and signatures retain a coalesced request
+[ RUN  ] REVIEW16 sim: a control lane taken during signing postpones only that renewal and retries
+[  OK  ] REVIEW16 sim: a control lane taken during signing postpones only that renewal and retries
+  R07-sim 20 cold boots (21 nodes, 20 hops): formation min 35862 / mean 46051 / max 66182 ms
+  first relay's handshakes fail: the board attached 20620 ms after the other relay was ready (2 handshakes failed)
+[ RUN  ] REVIEW16 sim: route hints expire independently of live neighbor sessions and leave room for new candidates
+[  OK  ] REVIEW16 sim: route hints expire independently of live neighbor sessions and leave room for new candidates
+[ RUN  ] REVIEW16 sim: an unsent routed Bind ACK cannot be discarded by a scratch or USB slot loan
+[  OK  ] REVIEW16 sim: an unsent routed Bind ACK cannot be discarded by a scratch or USB slot loan
+  [measure] node 0: 305 owner steps in 15 idle minutes, longest run of busy 10 ms windows 3 (sim)
+  [measure] node 1: 875 owner steps in 15 idle minutes, longest run of busy 10 ms windows 5 (sim)
+  [measure] node 2: 758 owner steps in 15 idle minutes, longest run of busy 10 ms windows 3 (sim)
+  [measure] node 3: 586 owner steps in 15 idle minutes, longest run of busy 10 ms windows 3 (sim)
+  [measure] MODEL: 53 seeds, 500 sends, 69 restarts, 0 invariant failures (commit 1ea5604)
+  [matrix] channel commit               node root       before: 12 cut points,  6 converged on the target state
+  [matrix] channel commit               node root       torn  : 12 cut points,  6 converged on the target state
+  [matrix] channel commit               node root       after : 12 cut points,  7 converged on the target state
+  [matrix] channel commit               node member     before:  6 cut points,  6 converged on the target state
+  [matrix] channel commit               node member     torn  :  6 cut points,  6 converged on the target state
+  [matrix] channel commit               node member     after :  6 cut points,  6 converged on the target state
+  [matrix] channel commit               total: 54 cut points, 37 converged, 0 truncated sweeps
+  [measure] owner steps of a relay in 10 idle minutes: 508 without / 534 with the channel module (sim)
+  [measure] 20-hop plan: clock interval of the widest node 698 ms (tolerance 2000 ms)
+  [matrix] join                         node device     before: 10 cut points, 10 converged on the target state
+  [matrix] join                         node device     torn  : 10 cut points, 10 converged on the target state
+  [matrix] join                         node device     after : 10 cut points, 10 converged on the target state
+  [matrix] join                         node root       before:  6 cut points,  6 converged on the target state
+  [matrix] join                         node root       torn  :  6 cut points,  6 converged on the target state
+  [matrix] join                         node root       after :  6 cut points,  6 converged on the target state
+  [matrix] join                         total: 48 cut points, 48 converged, 0 truncated sweeps
+  [matrix] leave                        node device     before:  2 cut points,  2 converged on the target state
+  [matrix] leave                        node device     torn  :  2 cut points,  2 converged on the target state
+  [matrix] leave                        node device     after :  2 cut points,  2 converged on the target state
+  [matrix] leave                        node root       before:  4 cut points,  4 converged on the target state
+  [matrix] leave                        node root       torn  :  4 cut points,  4 converged on the target state
+  [matrix] leave                        node root       after :  4 cut points,  4 converged on the target state
+  [matrix] leave                        total: 18 cut points, 18 converged, 0 truncated sweeps
+  [measure] sizeof(Membership)=1256 Ledger=15208 (entries 64 x 128) JoinPipe=136 Exchange=6560 LinkLayer=12024
+  [matrix] delivery durable commit      node origin     before:  2 cut points,  1 converged on the target state
+  [matrix] delivery durable commit      node origin     torn  :  2 cut points,  1 converged on the target state
+  [matrix] delivery durable commit      node origin     after :  2 cut points,  1 converged on the target state
+  [matrix] delivery durable commit      node destination before:  2 cut points,  1 converged on the target state
+  [matrix] delivery durable commit      node destination torn  :  2 cut points,  1 converged on the target state
+  [matrix] delivery durable commit      node destination after :  2 cut points,  1 converged on the target state
+  [matrix] delivery durable commit      total: 12 cut points, 6 converged, 0 truncated sweeps
+  [measure] sizeof: Delivery=66896 HopTx=472 (end sessions use the single link::Exchange=6560, HandshakeSlot=3592) Durable=3048 EndSessions=14856
+  [measure] owner-side stack depth, 4-hop APPLIED exchange (forward, deliver, receipt, report): 6488 B (thread entry depth 4480 B, includes the simulator's own frames)
+  [measure] simulator-only baseline 2760 B => owner paths ~3728 B
+  [measure] sizeof: FragState=6456 RxSlot=112 Active=304 InEntry=144 (slots=6, small=4, object lane built)
+  [measure] send 6200 report 6200
+  [measure] owner-side stack depth, fragmented APPLIED exchange over 30 hops: 6200 B (simulator baseline 2760 B => ~3440 B)
+  [measure] worker stack peak (deepest job body, incl. thread start): 8600 bytes
+  [measure] PSA heap peak above idle during a handshake: 4368 bytes (live after: +0)
+  [measure] sizeof(HandshakeSlot)=3592 sizeof(RecordSession)=80 edhoc_context=920
+  [measure] owner stack depth, RX open+dispatch then TX seal: 2088 B (entry depth 4480 B)
+  [measure] EDHOC worker stack: deepest job body 4120 B (thread entry depth 4480 B)
+  [measure] sizeof(Neighbor)=272 x 16, LinkLayer=12024, Exchange=6560, HandshakeSlot=3592,
+[ RUN  ] REVIEW16 sim: an abandoned glare-yielded attempt releases the slot after its worker
+[  OK  ] REVIEW16 sim: an abandoned glare-yielded attempt releases the slot after its worker
+[ RUN  ] REVIEW16 sim: a locally blocked Bind ACK survives a scratch loan and precedes normal traffic
+[  OK  ] REVIEW16 sim: a locally blocked Bind ACK survives a scratch loan and precedes normal traffic
+[ RUN  ] REVIEW16 sim: a lost first Bind ACK is recovered without permitting unconfirmed ordinary TX
+[  OK  ] REVIEW16 sim: a lost first Bind ACK is recovered without permitting unconfirmed ordinary TX
+[ RUN  ] REVIEW16 sim: confirmation dispatches its authenticated frame before waking normal senders
+[  OK  ] REVIEW16 sim: confirmation dispatches its authenticated frame before waking normal senders
+  [measure] 30 cut points over 5 state commits (sim store)
+  [measure] root: hs_started=4 completed=4 failed=0 busy_drop=34 rate_limited=0 steps=5292
+  [measure] credential-chain job stack depth: 3592 B (thread entry depth 4480 B)

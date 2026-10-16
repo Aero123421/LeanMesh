@@ -1,0 +1,27 @@
+{
+  "implementation": "712bf78",
+  "final_unit_integration": {
+    "passed": 553,
+    "failed": 0,
+    "log": "host-unit-integration.log",
+    "seconds": 215.57
+  },
+  "final_e2e": {
+    "passed": 59,
+    "failed": 0,
+    "source": "E2E testcases in host-final.xml; all ran against the completed native binaries"
+  },
+  "combined_unique_cases": 612,
+  "earlier_full_run": {
+    "passed": 611,
+    "failed": 1,
+    "seconds": 844.67,
+    "failure": "host.tests.integration.test_fleet_issuer::test_cli_generates_complete_batch_without_secrets_or_overwrite",
+    "cause": "PermissionError errno 13 while issuer_driver was being relinked; test input timestamp 04:21:13.554 UTC, binary link timestamp 04:21:13.645 UTC. Same preserved inputs and clean full 553-case unit/integration rerun both passed."
+  },
+  "native_artifacts_sha256": {
+    "meshsim": "a5a96e65ec8a38e2c1e3ac0bfa5dac6eee4b44fbba98aaf8889a4bba6bff0909",
+    "libleanmesh_host.so": "0a967c4508bc615bb41ca9e405e7faaed284df55bdc93689b9e3bcfec536d319",
+    "tests/native/issuer_driver": "1df6755654fcc3138fbae8ab5de7a51727f495da8d2664bed29ce3c492478fb7"
+  }
+}

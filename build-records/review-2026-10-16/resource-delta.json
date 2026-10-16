@@ -1,0 +1,416 @@
+{
+  "base": "1ea56048304ea9940c5adf4bdc6e924f8ef5464a",
+  "implementation": "712bf786c5a831906c762655919302cf02928d3a",
+  "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+  "sloc": {
+    "sdk_before": 40382,
+    "sdk_after": 40741,
+    "budget": 28000
+  },
+  "native_sizes": {
+    "leaf": {
+      "ctx": {
+        "before": 42480,
+        "after": 42560,
+        "delta": 80
+      },
+      "ctx__engine__ledger": {
+        "before": 1,
+        "after": 1,
+        "delta": 0
+      },
+      "ctx__engine__link__exchange": {
+        "before": 6504,
+        "after": 6560,
+        "delta": 56
+      },
+      "ctx__engine__mesh": {
+        "before": 1176,
+        "after": 1200,
+        "delta": 24
+      },
+      "each__neighbor": {
+        "before": 272,
+        "after": 272,
+        "delta": 0
+      },
+      "each__session_keys": {
+        "before": 144,
+        "after": 144,
+        "delta": 0
+      }
+    },
+    "relay": {
+      "ctx": {
+        "before": 47040,
+        "after": 47120,
+        "delta": 80
+      },
+      "ctx__engine__ledger": {
+        "before": 1,
+        "after": 1,
+        "delta": 0
+      },
+      "ctx__engine__link__exchange": {
+        "before": 6504,
+        "after": 6560,
+        "delta": 56
+      },
+      "ctx__engine__mesh": {
+        "before": 1176,
+        "after": 1200,
+        "delta": 24
+      },
+      "each__neighbor": {
+        "before": 272,
+        "after": 272,
+        "delta": 0
+      },
+      "each__session_keys": {
+        "before": 144,
+        "after": 144,
+        "delta": 0
+      }
+    },
+    "root": {
+      "ctx": {
+        "before": 132000,
+        "after": 132608,
+        "delta": 608
+      },
+      "ctx__engine__ledger": {
+        "before": 14680,
+        "after": 15208,
+        "delta": 528
+      },
+      "ctx__engine__link__exchange": {
+        "before": 6504,
+        "after": 6560,
+        "delta": 56
+      },
+      "ctx__engine__mesh": {
+        "before": 1176,
+        "after": 1200,
+        "delta": 24
+      },
+      "each__neighbor": {
+        "before": 272,
+        "after": 272,
+        "delta": 0
+      },
+      "each__session_keys": {
+        "before": 144,
+        "after": 144,
+        "delta": 0
+      }
+    }
+  },
+  "soc": {
+    "esp32s3": {
+      "workspace": {
+        "leaf": {
+          "before": 41888,
+          "after": 41968,
+          "delta": 80
+        },
+        "relay": {
+          "before": 46448,
+          "after": 46528,
+          "delta": 80
+        },
+        "root": {
+          "before": 131224,
+          "after": 131832,
+          "delta": 608
+        }
+      },
+      "relay": {
+        "before": {
+          "build": "/workspace/work/leanmesh-review/firmware-baseline/example_node-RELAY/esp32s3",
+          "profile": "relay",
+          "target": "esp32s3",
+          "static": {
+            "dram_bss": 23208,
+            "dram_data": 8,
+            "flash_code": 234887,
+            "flash_data": 5279
+          },
+          "image_bytes": 963365,
+          "baseline_image_bytes": 675460,
+          "binary_bytes": 963488
+        },
+        "after": {
+          "build": "/workspace/work/leanmesh-review/firmware-current/example_node-RELAY/esp32s3",
+          "profile": "relay",
+          "target": "esp32s3",
+          "static": {
+            "dram_bss": 23208,
+            "dram_data": 8,
+            "flash_code": 237953,
+            "flash_data": 5279
+          },
+          "image_bytes": 966441,
+          "baseline_image_bytes": 675460,
+          "binary_bytes": 966560
+        },
+        "delta": {
+          "image_bytes": 3076,
+          "binary_bytes": 3072,
+          "dram_bss": 0,
+          "dram_data": 0,
+          "flash_code": 3066,
+          "flash_data": 0
+        },
+        "fixed_ram": {
+          "before": 69664,
+          "after": 69744,
+          "delta": 80,
+          "basis": "workspace sizeof + libleanmesh.a static DRAM from the link map; excludes vendor heap and runtime peaks"
+        }
+      },
+      "root": {
+        "before": {
+          "build": "/workspace/work/leanmesh-review/firmware-baseline/example_node-ROOT/esp32s3",
+          "profile": "root",
+          "target": "esp32s3",
+          "static": {
+            "dram_bss": 55012,
+            "dram_data": 8,
+            "flash_code": 330326,
+            "flash_data": 5972
+          },
+          "image_bytes": 1070657,
+          "baseline_image_bytes": 675460,
+          "binary_bytes": 1070784
+        },
+        "after": {
+          "build": "/workspace/work/leanmesh-review/firmware-current/example_node-ROOT/esp32s3",
+          "profile": "root",
+          "target": "esp32s3",
+          "static": {
+            "dram_bss": 55012,
+            "dram_data": 8,
+            "flash_code": 333892,
+            "flash_data": 5972
+          },
+          "image_bytes": 1074197,
+          "baseline_image_bytes": 675460,
+          "binary_bytes": 1074320
+        },
+        "delta": {
+          "image_bytes": 3540,
+          "binary_bytes": 3536,
+          "dram_bss": 0,
+          "dram_data": 0,
+          "flash_code": 3566,
+          "flash_data": 0
+        },
+        "fixed_ram": {
+          "before": 186244,
+          "after": 186852,
+          "delta": 608,
+          "basis": "workspace sizeof + libleanmesh.a static DRAM from the link map; excludes vendor heap and runtime peaks"
+        }
+      }
+    },
+    "esp32c3": {
+      "workspace": {
+        "leaf": {
+          "before": 41888,
+          "after": 41968,
+          "delta": 80
+        },
+        "relay": {
+          "before": 46448,
+          "after": 46528,
+          "delta": 80
+        },
+        "root": {
+          "before": 131224,
+          "after": 131832,
+          "delta": 608
+        }
+      },
+      "relay": {
+        "before": {
+          "build": "/workspace/work/leanmesh-review/firmware-baseline/example_node-RELAY/esp32c3",
+          "profile": "relay",
+          "target": "esp32c3",
+          "static": {
+            "dram_bss": 23200,
+            "dram_data": 0,
+            "flash_code": 268112,
+            "flash_data": 5415
+          },
+          "image_bytes": 1028528,
+          "baseline_image_bytes": 707608,
+          "binary_bytes": 1028912
+        },
+        "after": {
+          "build": "/workspace/work/leanmesh-review/firmware-current/example_node-RELAY/esp32c3",
+          "profile": "relay",
+          "target": "esp32c3",
+          "static": {
+            "dram_bss": 23200,
+            "dram_data": 0,
+            "flash_code": 271680,
+            "flash_data": 5415
+          },
+          "image_bytes": 1032072,
+          "baseline_image_bytes": 707608,
+          "binary_bytes": 1032464
+        },
+        "delta": {
+          "image_bytes": 3544,
+          "binary_bytes": 3552,
+          "dram_bss": 0,
+          "dram_data": 0,
+          "flash_code": 3568,
+          "flash_data": 0
+        },
+        "fixed_ram": {
+          "before": 69648,
+          "after": 69728,
+          "delta": 80,
+          "basis": "workspace sizeof + libleanmesh.a static DRAM from the link map; excludes vendor heap and runtime peaks"
+        }
+      }
+    },
+    "esp32c5": {
+      "workspace": {
+        "leaf": {
+          "before": 41888,
+          "after": 41968,
+          "delta": 80
+        },
+        "relay": {
+          "before": 46448,
+          "after": 46528,
+          "delta": 80
+        },
+        "root": {
+          "before": 131224,
+          "after": 131832,
+          "delta": 608
+        }
+      },
+      "relay": {
+        "before": {
+          "build": "/workspace/work/leanmesh-review/firmware-baseline/example_node-RELAY/esp32c5",
+          "profile": "relay",
+          "target": "esp32c5",
+          "static": {
+            "dram_bss": 23200,
+            "dram_data": 0,
+            "flash_code": 268138,
+            "flash_data": 5439
+          },
+          "image_bytes": 1130221,
+          "baseline_image_bytes": 803417,
+          "binary_bytes": 1130640
+        },
+        "after": {
+          "build": "/workspace/work/leanmesh-review/firmware-current/example_node-RELAY/esp32c5",
+          "profile": "relay",
+          "target": "esp32c5",
+          "static": {
+            "dram_bss": 23200,
+            "dram_data": 0,
+            "flash_code": 271706,
+            "flash_data": 5439
+          },
+          "image_bytes": 1133765,
+          "baseline_image_bytes": 803417,
+          "binary_bytes": 1134192
+        },
+        "delta": {
+          "image_bytes": 3544,
+          "binary_bytes": 3552,
+          "dram_bss": 0,
+          "dram_data": 0,
+          "flash_code": 3568,
+          "flash_data": 0
+        },
+        "fixed_ram": {
+          "before": 69648,
+          "after": 69728,
+          "delta": 80,
+          "basis": "workspace sizeof + libleanmesh.a static DRAM from the link map; excludes vendor heap and runtime peaks"
+        }
+      }
+    },
+    "esp32c6": {
+      "workspace": {
+        "leaf": {
+          "before": 41888,
+          "after": 41968,
+          "delta": 80
+        },
+        "relay": {
+          "before": 46448,
+          "after": 46528,
+          "delta": 80
+        },
+        "root": {
+          "before": 131224,
+          "after": 131832,
+          "delta": 608
+        }
+      },
+      "relay": {
+        "before": {
+          "build": "/workspace/work/leanmesh-review/firmware-baseline/example_node-RELAY/esp32c6",
+          "profile": "relay",
+          "target": "esp32c6",
+          "static": {
+            "dram_bss": 23200,
+            "dram_data": 0,
+            "flash_code": 271370,
+            "flash_data": 5277
+          },
+          "image_bytes": 1128187,
+          "baseline_image_bytes": 801401,
+          "binary_bytes": 1128592
+        },
+        "after": {
+          "build": "/workspace/work/leanmesh-review/firmware-current/example_node-RELAY/esp32c6",
+          "profile": "relay",
+          "target": "esp32c6",
+          "static": {
+            "dram_bss": 23200,
+            "dram_data": 0,
+            "flash_code": 274944,
+            "flash_data": 5277
+          },
+          "image_bytes": 1131737,
+          "baseline_image_bytes": 801401,
+          "binary_bytes": 1132144
+        },
+        "delta": {
+          "image_bytes": 3550,
+          "binary_bytes": 3552,
+          "dram_bss": 0,
+          "dram_data": 0,
+          "flash_code": 3574,
+          "flash_data": 0
+        },
+        "fixed_ram": {
+          "before": 69648,
+          "after": 69728,
+          "delta": 80,
+          "basis": "workspace sizeof + libleanmesh.a static DRAM from the link map; excludes vendor heap and runtime peaks"
+        }
+      }
+    }
+  },
+  "measurement_basis": {
+    "image_bytes": "esp_idf_size total_size; not the .bin file length",
+    "binary_bytes": "actual leanmesh_example_node.bin file length",
+    "static": "libleanmesh.a link map; workspace is accounted separately"
+  },
+  "limits": [
+    "Software measurements only; no hardware heap/stack, CPU, airtime or J/report.",
+    "Existing Flash, fixed RAM and SLOC budget overruns remain.",
+    "No baseline crypto stack delta: native optimization flags differ."
+  ]
+}
