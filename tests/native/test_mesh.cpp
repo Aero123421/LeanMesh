@@ -1712,3 +1712,83 @@ LM_TEST("REV-2 sim: spoofed join starts cannot hold a relay's proxy slots; a rea
 }
 
 LM_TEST_MAIN()
+
+LM_TEST("REVIEW16 sim: route hints expire independently of live neighbor sessions and leave room for new candidates") {
+    MNet n(5);
+    for (unsigned a = 0; a < 5; ++a)
+        for (unsigned b = a + 1; b < 5; ++b) n.link(a, b);
+    for (unsigned i = 0; i < 4; ++i) n.boot(i);
+    n.set_time();
+    LM_CHECK(n.until([&] { return n.all_ready(4); }, 90'000));
+    auto advertise = [&](unsigned from, bool through_self) {
+        route::Beacon b;
+        b.flags = route::k_beacon_accepting;
+        b.term = n.eng(1).identity().term().value();
+        b.revision = 1;
+        b.path[0] = 1;
+        b.n = from == 0 ? 1 : (through_self ? 3 : 2);
+        if (from != 0) {
+            b.path[1] = through_self ? n.addr(1) : n.addr(from);
+            if (through_self) b.path[2] = n.addr(from);
+        }
+        std::array<uint8_t, 128> buf{};
+        std::size_t len = 0;
+        LM_CHECK_OK(route::encode_beacon(b, link::domain_hint_of(n.net.domain), MutByteView{buf}, len));
+        wire::LinkHeader h;
+        ByteView body;
+        LM_CHECK_OK(wire::decode_link_frame(ByteView{buf.data(), len}, h, body));
+        n.mesh(1).on_beacon(n.node(from).radio.mac(), body, n.now(1));
+    };
+    advertise(2, false); advertise(3, false);
+    LM_CHECK(n.until([&] {
+        return n.eng(1).link().neighbors().find_device(n.id(2)) != nullptr &&
+               n.eng(1).link().neighbors().find_device(n.id(3)) != nullptr;
+    }, 120'000));
+    advertise(2, false); // B used to be a possible parent of A
+    advertise(2, true); // B now advertises A in its route: it is A's child
+    bool invalid = false;
+    n.mesh(1).for_each_candidate(n.now(1), [&](const MacAddr &mac, auto, auto depth, auto, auto, auto, auto, auto) {
+        if (mac == n.node(2).radio.mac()) invalid = depth == 0;
+    });
+    LM_CHECK(invalid);
+    LM_CHECK(n.eng(1).link().neighbors().find_device(n.id(2)) != nullptr);
+    // Suppress only route advertisements; authenticated probes/traffic keep links alive.
+    for (unsigned i : {0u, 2u, 3u}) {
+        auto p = n.world.link(static_cast<uint16_t>(i), 1);
+        p.drop_kinds |= 1u << static_cast<unsigned>(wire::FrameKind::Discovery);
+        n.world.set_link_one_way(static_cast<uint16_t>(i), 1, p);
+    }
+    n.run_ms(100'000);
+    advertise(4, false); // three existing links must not pin stale candidate slots forever
+    bool added = false;
+    n.mesh(1).for_each_candidate(n.now(1), [&](const MacAddr &mac, auto, auto, auto, auto, auto, auto, auto) {
+        added = added || mac == n.node(4).radio.mac();
+    });
+    LM_CHECK(added);
+    LM_CHECK(n.eng(1).identity().is_member());
+    LM_CHECK(n.ready(1)); // a hint withdrawal never tears down the approved parent/membership
+}
+
+LM_TEST("REVIEW16 sim: an unsent routed Bind ACK cannot be discarded by a scratch or USB slot loan") {
+    MNet n(3);
+    n.boot(0); n.boot(1); n.set_time();
+    LM_CHECK(n.until([&] { return n.ready(1); }, 60'000));
+    n.boot(2); n.set_time_at(2);
+    LM_CHECK(n.until([&] {
+        const auto &a = n.eng(2).link().exchange();
+        const auto &b = n.eng(0).link().exchange();
+        return a.mode() == link::Mode::End && a.initiator() && a.phase() == link::Phase::AwaitBind &&
+               b.mode() == link::Mode::End && b.phase() == link::Phase::AwaitBind;
+    }, 60'000, 1));
+    n.node(0).radio.tx_fault_count = 10'000;
+    LM_CHECK(n.until([&] { return n.eng(0).link().exchange().phase() == link::Phase::Linger; }, 5000, 1));
+    auto &x = n.eng(0).link().exchange();
+    const auto scratch = x.lend_scratch();
+    LM_CHECK(scratch.empty());
+    if (!scratch.empty()) x.return_scratch();
+    LM_CHECK(x.lend_slot() == nullptr);
+    x.return_slot(); // cancel this test's USB reservation (no USB worker was submitted)
+    n.run_ms(100);
+    n.node(0).radio.tx_fault_count = 0;
+    LM_CHECK(n.until([&] { return n.ready(2); }, 30'000));
+}

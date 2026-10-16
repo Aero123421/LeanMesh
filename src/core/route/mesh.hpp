@@ -182,11 +182,14 @@ class Mesh {
         MacAddr mac;
         uint16_t addr = 0;
         uint32_t revision = 0; // path_revision the candidate advertised
+        RootTerm term;        // the route hint is qualified independently of the link session
         uint8_t n = 0;         // its root path entries (root first, itself last)
         std::array<uint16_t, k_max_root_path> path{};
         MonoTime heard{};
+        MonoTime advertised = MonoTime::never(); // route hint age; link traffic never refreshes it
         bool rssi_valid = false; // RSSI of the last frame heard from `mac` (unknown is not 0 dBm)
         int8_t rssi_dbm = 0;
+        bool wake_parent_hint = false; // one bounded reconnect to the last approved parent after sleep
         bool unproven = false; // an end session through this link failed: prove the link before relying on it (ARCH2-D2)
         MonoTime avoid_until{};
         MonoTime probe_wait = MonoTime::never();
@@ -245,11 +248,12 @@ class Mesh {
 
     // candidates
     [[nodiscard]] Cand *find_cand(const MacAddr &mac);
-    [[nodiscard]] Cand *alloc_cand(int keep);
+    [[nodiscard]] Cand *alloc_cand(int keep, MonoTime now);
     [[nodiscard]] int index_of(const Cand *c) const { return static_cast<int>(c - cands_.data()); }
     [[nodiscard]] const link::Neighbor *neighbor_of(const Cand &c) const;
     [[nodiscard]] bool linked(const Cand &c) const;
     // Heard below the floor and well below the best candidate still heard (docs/04 §6): tried last, never moved to.
+    [[nodiscard]] bool route_fresh(const Cand &c, MonoTime now) const;
     [[nodiscard]] bool weak(const Cand &c, MonoTime now) const;
     [[nodiscard]] int pick_among(MonoTime now, bool weak_ones) const;
     [[nodiscard]] int pick_candidate(MonoTime now) const;

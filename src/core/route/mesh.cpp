@@ -211,6 +211,8 @@ void Mesh::on_wake(MonoTime now, bool fresh_sessions) {
     for (Cand &c : cands_) {
         if (c.used) {
             c.heard = now;
+            c.wake_parent_hint = (fresh_sessions || state_ == State::Search) && path_n_ >= 2 &&
+                                 c.addr == path_[path_n_ - 2U];
             c.probe_wait = MonoTime::never();
             c.probe_tag = 0;
             c.nonce.fill(0);
@@ -395,8 +397,8 @@ Mesh::Cand *Mesh::find_cand(const MacAddr &mac) {
     return nullptr;
 }
 
-// A free entry, else the least valuable unlinked one (never the parent or the candidate being tried).
-Mesh::Cand *Mesh::alloc_cand(int keep) {
+// A free entry, else a stale route or the least valuable unlinked one (never the parent/attach target).
+Mesh::Cand *Mesh::alloc_cand(int keep, MonoTime now) {
     Cand *victim = nullptr;
     for (std::size_t i = 0; i < cands_.size(); ++i) {
         Cand &c = cands_[i];
@@ -404,10 +406,13 @@ Mesh::Cand *Mesh::alloc_cand(int keep) {
             return &c;
         }
         const int idx = static_cast<int>(i);
-        if (idx == keep || idx == parent_ || idx == att_.cand || linked(c)) {
+        if (idx == keep || idx == parent_ || idx == att_.cand || (linked(c) && route_fresh(c, now))) {
             continue;
         }
-        if (victim == nullptr || c.heard < victim->heard) {
+        const bool stale = !route_fresh(c, now);
+        const bool victim_stale = victim != nullptr && !route_fresh(*victim, now);
+        if (victim == nullptr || (stale && !victim_stale) ||
+            (stale == victim_stale && c.heard < victim->heard)) {
             victim = &c;
         }
     }
@@ -426,6 +431,10 @@ bool Mesh::linked(const Cand &c) const {
     return n != nullptr && n->cur.active && n->cur.tx_ready && n->address.value() == c.addr;
 }
 
+bool Mesh::route_fresh(const Cand &c, MonoTime now) const {
+    return c.n != 0 && !(c.term < term()) && !c.advertised.is_never() && now - c.advertised < k_silence;
+}
+
 // Below the floor and clearly below the best candidate heard: both, so that a site where every link is below the
 // floor still tells its usable links from its faint ones, and a lone candidate is never weak.
 bool Mesh::weak(const Cand &c, MonoTime now) const {
@@ -436,7 +445,7 @@ bool Mesh::weak(const Cand &c, MonoTime now) const {
     // Measured against the candidates that could be taken now: one that fell silent stays in the table with its old
     // RSSI, and one that is being avoided (it just failed) is no alternative either.
     for (const Cand &o : cands_) {
-        if (o.used && o.rssi_valid && o.n != 0 && now - o.heard < k_silence && now >= o.avoid_until) {
+        if (o.used && o.rssi_valid && route_fresh(o, now) && now >= o.avoid_until) {
             best = std::max<int>(best, o.rssi_dbm);
         }
     }
@@ -465,7 +474,8 @@ int Mesh::pick_among(MonoTime now, bool weak_ones) const {
             std::find(c.path.begin(), c.path.begin() + c.n, avoid_relay_) != c.path.begin() + c.n) {
             continue;
         }
-        if (!c.used || now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth || weak(c, now) != weak_ones) {
+        if (!c.used || (!c.wake_parent_hint && !route_fresh(c, now)) ||
+            now < c.avoid_until || c.n == 0 || c.n > gen::limits::root_depth || weak(c, now) != weak_ones) {
             continue;
         }
         if (linked(c) && c.q.known()) {
@@ -546,12 +556,22 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
     }
     if (is_root() || b.n == 0 || (b.flags & k_beacon_accepting) == 0 ||
         check_candidate_path(self_addr(), b.path.data(), b.n, RootTerm{b.term}, term(), false) != Status::Ok) {
+        const bool through_self = b.term >= term().value() && b.n != 0 &&
+            std::find(b.path.begin(), b.path.begin() + b.n, self_addr().value()) != b.path.begin() + b.n;
+        if (Cand *old = find_cand(src); through_self && old != nullptr && index_of(old) != parent_) {
+            old->advertised = MonoTime::never(); // withdraw only the candidate hint, never its session/membership
+            old->wake_parent_hint = false;
+            old->n = 0;
+        }
         return; // depth 21, a path through myself, an older term: not a candidate (docs/04 §3 step 4)
     }
     Cand *c = find_cand(src);
     const bool fresh = c == nullptr;
+    const bool refreshed = !fresh && (c->advertised.is_never() || now - c->advertised >= k_silence ||
+        c->term != RootTerm{b.term} || c->revision != b.revision || c->n != b.n ||
+        !std::equal(c->path.begin(), c->path.begin() + c->n, b.path.begin()));
     if (fresh) {
-        c = alloc_cand(parent_);
+        c = alloc_cand(parent_, now);
         if (c == nullptr) {
             return; // three candidates are enough: nothing is evicted for a stranger
         }
@@ -565,9 +585,12 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
     }
     c->addr = b.path[b.n - 1U];
     c->revision = b.revision;
+    c->term = RootTerm{b.term};
     c->n = b.n;
     std::copy(b.path.begin(), b.path.begin() + b.n, c->path.begin());
     c->heard = now;
+    c->advertised = now;
+    c->wake_parent_hint = false;
     // HIL-F9: our parent advertises a newer root term: the root restarted, and its RAM - our end session with it, and
     // the link session too when the parent is the root - went with it. docs/04 §7 allows trying a newer term at once
     // (the beacon's term is a hint; the root's authenticated LEASE is what moves this node's term). Without this the
@@ -596,7 +619,8 @@ void Mesh::on_beacon(const MacAddr &src, ByteView body, MonoTime now) {
         state_ = State::Search;
         attempt_at_ = now;
     }
-    if (fresh && !weak(*c, now) && (state_ == State::Search || state_ == State::Listen)) { // a weak one waits for the others
+    if ((fresh || refreshed) && now >= c->avoid_until && !weak(*c, now) &&
+        (state_ == State::Search || state_ == State::Listen)) { // a weak one waits for the others
         // A candidate that is ready: no reason to wait for the end of the listen. A beacon is unauthenticated: it may
         // end a backoff only through the rate-limited hint bucket, never reset it (review finding 1).
         state_ = State::Search;
@@ -822,7 +846,7 @@ void Mesh::trickle(MonoTime now) {
         int b = -1;
         for (std::size_t k = 0; k < cands_.size(); ++k) {
             const Cand &c = cands_[k];
-            if (static_cast<int>(k) != parent_ && c.used && linked(c) && c.q.known() && now >= c.avoid_until &&
+            if (static_cast<int>(k) != parent_ && c.used && route_fresh(c, now) && linked(c) && c.q.known() && now >= c.avoid_until &&
                 c.n <= gen::limits::root_depth && (!weak(c, now) || (p.rssi_valid && c.rssi_valid && p.rssi_dbm < c.rssi_dbm)) &&
                 (b < 0 || score_of(c, now) < score_of(cands_[static_cast<std::size_t>(b)], now))) {
                 b = static_cast<int>(k);
@@ -858,7 +882,7 @@ void Mesh::connect_spare(MonoTime now) {
     for (std::size_t k = 0; k < cands_.size(); ++k) {
         Cand &c = cands_[k];
         if (c.used && static_cast<int>(k) != parent_ && !linked(c) && now >= c.avoid_until && now >= c.spare_after &&
-            now - c.heard < k_silence && !weak(c, now)) { // docs/04 §5: a weak candidate is no spare
+            route_fresh(c, now) && !weak(c, now)) { // docs/04 §5: a weak candidate is no spare
             const Status st = engine_.link().connect(c.mac, now);
             if (st == Status::Ok) {
                 c.avoid_until = now + Duration::from_s(30); // one try per candidate per 30 s (docs/06 §8 gate)
@@ -896,8 +920,7 @@ void Mesh::on_link_up(const DeviceId &peer, MonoTime now) {
     if (att_.step == Step::Link && att_.cand == index_of(c)) {
         attach_step(now);
     } else if (state_ == State::Ready && !c->q.known()) {
-        // A spare: first measurement. [S18] Not for a session made again (a rotation): its link is measured, and the
-        // responder installs before the initiator, so a probe sent at once would die on an SID the peer lacks yet.
+        // A spare needs its first measurement. A rotation already has measurements and needs no extra probe.
         (void)send_probe(*c, now);
     }
 }
@@ -984,6 +1007,7 @@ void Mesh::attach_step(MonoTime now) {
         }
         const Status st = engine_.link().connect(c.mac, now);
         if (st == Status::Ok) {
+            c.wake_parent_hint = false; // a real attempt began; local waiting never consumes the wake hint
             if (!att_.switching && att_.step != Step::Link) {
                 disc_.note_handshake();
             }
@@ -1379,7 +1403,12 @@ void Mesh::on_lease(const LeaseRec &l, MonoTime now) {
     lease_lapsed_ = false;
     renew_at_ = now + k_lease_refresh + Duration::from_ms(jitter(6000));
     if (parent_ >= 0) {
-        alive(cands_[static_cast<std::size_t>(parent_)], now);
+        Cand &parent = cands_[static_cast<std::size_t>(parent_)];
+        if (l.n == parent.n + 1U && std::equal(parent.path.begin(), parent.path.begin() + parent.n, l.path.begin())) {
+            parent.advertised = now; // the root authenticated this exact parent path, not just the link
+            parent.term = term();
+        }
+        alive(parent, now);
     }
 }
 

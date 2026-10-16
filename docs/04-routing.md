@@ -22,6 +22,8 @@
 
 候補が同時に互いを親に選んでも、rootが1件ずつ検証することで承認木にcycleを入れない。**`parent.rank < self.rank`だけでは古い広告がある非同期系のloop-free証明にならない**。rankは候補優先度であり安全証拠ではない。
 
+候補の経路広告の取得時刻と、リンクの生存確認時刻は分ける。経路情報のroot termも保持し、古いtermまたは広告が96秒以上古い候補は選ばず、linkがある候補でも現用の親・試行対象以外は古い候補枠を置換できる。現term以降で自分を含む経路の広告は予備候補としての資格を無効にするが、古いtermの遅延広告は無視し、未認証の広告だけで現用の親・session・membershipは破壊しない。認証済みrootのLEASEが候補の親pathと一致するときは、その経路情報の確認になる。予定Sleepからの復帰では、広告の取得時刻を偽って進めず、最後にrootが承認した親に一度だけ有界attachを試せる（新しいREGISTERでrootが再検査する）。それ以外の古い候補にはこの例外を使わない。無効・期限切れだった経路が新しい広告で使えるようになった場合も、新規候補と同じrate limit付きhintとして探索を再開できる。強い候補へ選び直すときは、自分から始めてglareで応答側へ譲った交換も中止する。実行中workerは既存のZombieと世代照合で終わりを待つ。
+
 ## 4. 各hopの転送条件
 - Link AEADとsession/domain/peer generationが有効。
 - next_index < path_len、path[next_index] == self。
