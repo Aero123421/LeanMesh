@@ -38,14 +38,15 @@ MutByteView Exchange::lend_scratch() {
         return MutByteView{};
     }
     if (phase_ == Phase::Linger) {
-        finish_idle(); // the peer already holds our ACK (it sent its first join object)
+        finish_idle(); // the ACK was sent; the execution slot may be lent now
     }
     lent_ = true;
     return MutByteView{rx_.data(), rx_.size()};
 }
 
 sec::HandshakeSlot *Exchange::lend_slot() {
-    if ((phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_ || slot_lent_) {
+    if ((phase_ != Phase::Idle && phase_ != Phase::Linger) ||
+        (phase_ == Phase::Linger && (tx_active_ || tx_inflight_)) || lent_ || slot_lent_) {
         usb_reserved_ = true;
         return nullptr;
     }

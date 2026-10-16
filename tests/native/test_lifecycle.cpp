@@ -1486,7 +1486,10 @@ LM_TEST("LC10 sim: old root reappears - refused by moved members, the unreached 
     // The unreached member still has its session with the old root; the moved one refuses the old root.
     LM_CHECK_OK(n.eng(3).link().connect(n.mac(0), n.node(3).clock.now()));
     n.node(3).notify();
-    LM_CHECK(n.until([&] { return n.eng(0).link().neighbors().find_device(n.id(3)) != nullptr; }, 6000));
+    LM_CHECK(n.until([&] {
+        const auto *peer = n.eng(0).link().neighbors().find_device(n.id(3));
+        return peer != nullptr && peer->cur.tx_ready; // installed receive keys alone are not a usable link
+    }, 6000));
     const uint64_t rej = n.eng(2).link().stats().cred_rejected + n.eng(2).link().stats().rx_wrong_domain +
                          n.eng(0).link().stats().cred_rejected;
     (void)n.eng(0).link().connect(n.mac(2), n.node(0).clock.now());
@@ -2434,7 +2437,7 @@ LM_TEST("LP12 FIX5 sim: a renewal of a term older than the one the member lives 
 namespace {
 bool root_linked(DNet &n, unsigned d) {
     const link::Neighbor *nb = n.eng(0).link().neighbors().find_device(n.id(d));
-    return nb != nullptr && nb->cur.active && !nb->join_only;
+    return nb != nullptr && nb->cur.active && nb->cur.tx_ready && !nb->join_only; // a usable link, not just local keys
 }
 bool connect_root(DNet &n, unsigned d, uint64_t wait_ms = 10'000) {
     if (root_linked(n, d)) {
@@ -3672,6 +3675,7 @@ LM_TEST("FIELD sim: after its renewal a relay does not keep re-keying towards a 
     LM_CHECK_EQ(n.lease_at(1, 2), 0u); // the session ended with the neighbour's lease, as before
     LM_CHECK_EQ(not_ready_ms, 0u);
 }
+
 LM_TEST("REVIEW16 sim: a sleeping renewal does not monopolize signing or block an awake member") {
     LNet n({Spec{}, Spec{Role::Leaf}, Spec{Role::Leaf}});
     n.link(1, 2, false);

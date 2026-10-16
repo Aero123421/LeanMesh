@@ -342,16 +342,19 @@ class Exchange {
     void on_job_done(Handle slot, Status job_status, MonoTime now);
     void on_tx_outcome(const TxOutcome &o, MonoTime now);
     void on_timer(MonoTime now);
+    void confirm_peer(Neighbor &n, SessionKeys &keys, MonoTime now);
+    void clear_bind_cache();
     [[nodiscard]] MonoTime deadline() const;
     // Engine stop: aborts, wipes, and keeps the memory reserved while a job is in flight.
     void stop();
     // Ends our own 1-hop link handshake towards `mac`, if that is what runs (not a failure: nothing is counted).
     void abandon(const MacAddr &mac);
 
-    // The slot is taken. A lingering responder (only keeping its ACK for bind retransmits) is free:
-    // a new exchange replaces it and forgets the cached ACK.
+    // The execution slot is taken. A lingering join/end responder is free only after its ACK
+    // was sent/first-hop accepted. Link binding replies have their own independent bounded cache.
     [[nodiscard]] bool busy() const {
-        return (phase_ != Phase::Idle && phase_ != Phase::Linger) || lent_ || slot_lent_ || usb_reserved_;
+        return (phase_ != Phase::Idle && phase_ != Phase::Linger) ||
+               (phase_ == Phase::Linger && (tx_active_ || tx_inflight_)) || lent_ || slot_lent_ || usb_reserved_;
     }
     // FIX8-D13: a JoinInit verify job (running, or the zombie of a cancelled join) may still write `out` (the joiner's
     // JoinPeerOut): its owner must not touch it meanwhile.
@@ -467,9 +470,11 @@ class Exchange {
     [[nodiscard]] Status alloc_sid(uint32_t &sid);
 
     // link session binding (exchange.cpp)
+    [[nodiscard]] static Status bind_frame(SessionKeys &k, const std::array<uint8_t, 16> &nonce,
+                                          uint32_t domain_hint, SealedFrame &f);
     [[nodiscard]] Status seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce);
     [[nodiscard]] bool check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &sid,
-                                       std::array<uint8_t, 16> &nonce) const;
+                                       std::array<uint8_t, 16> &nonce, const Sha256Digest *context = nullptr) const;
     [[nodiscard]] Status install_session(MonoTime now, DeadlineCheck lease);
     [[nodiscard]] Neighbor *installed();
 
@@ -491,6 +496,9 @@ class Exchange {
     void send_object(ObjKind kind, bool retransmit);
     [[nodiscard]] ByteView tx_object() const;
     void pump(MonoTime now);
+    void cache_bind(Neighbor &n, bool confirmation, MonoTime now);
+    void pump_bind_cache(MonoTime now);
+    [[nodiscard]] bool cached_bind(const MacAddr &src, const wire::LinkHeader &h, ByteView frame, MonoTime now);
     [[nodiscard]] Status send_link_chunk(ByteView obj, MonoTime now);
     void arm_rto(MonoTime now);
     void heard_initiator(MonoTime now);
@@ -568,6 +576,22 @@ class Exchange {
     Handle stage_h_; // pool frame holding the EDHOC message, or the sealed bind frame/record
     std::size_t stage_len_ = 0;
     ObjKind staged_ = ObjKind::Msg1;
+
+    // One protected binding reply, independent of the worker scratch/execution slot. Capacity is fixed.
+    struct BindCache {
+        Handle frame;
+        MacAddr mac;
+        uint32_t rx_sid = 0;
+        uint32_t tag = 0;
+        MonoTime until = MonoTime::never();
+        MonoTime retry = MonoTime::never();
+        bool confirmation = false;
+        bool own_attempt = false; // a locally started handshake that yielded still belongs to its attach
+        bool inflight = false;
+        uint8_t attempts = 0;
+    } bind_cache_;
+    uint32_t bind_generation_ = 0;
+    static constexpr uint32_t k_bind_tag = 0x4C410000; // independent ACK/confirmation TX completion identity
 
     // handshake + session under construction
     sec::HandshakeSlot hs_;

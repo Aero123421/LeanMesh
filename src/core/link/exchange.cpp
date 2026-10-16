@@ -49,7 +49,11 @@ Status Exchange::start_initiator(const MacAddr &mac, MonoTime now) {
 
 // Initiator over one hop (link or join): the slot, the MAC's rate gate, a driver registration.
 Status Exchange::start_1hop(Mode mode, const MacAddr &mac, MonoTime now) {
-    if (busy()) {
+    if (mode == Mode::Link && bind_cache_.confirmation && !bind_cache_.inflight &&
+        bind_cache_.attempts != 0 && bind_cache_.retry.is_never()) {
+        clear_bind_cache(); // a transmitted confirmation may yield the one cache; an unsent ACK never does
+    }
+    if (busy() || (mode == Mode::Link && !bind_cache_.frame.is_none())) {
         return Status::Busy;
     }
     if (phase_ == Phase::Linger) {
@@ -154,12 +158,20 @@ void Exchange::stop() {
 }
 
 void Exchange::abandon(const MacAddr &mac) {
-    if (initiator_ && mode_ == Mode::Link && mac_ == mac) {
+    if (bind_cache_.mac == mac && bind_cache_.own_attempt && !bind_cache_.confirmation) {
+        if (Neighbor *n = s_.neighbors.find_mac(mac); n != nullptr && n->cur.rx_sid == bind_cache_.rx_sid &&
+            !n->cur.tx_ready) {
+            n->cur.valid_until = s_.engine.step_time(); // the abandoned receive-only binding is not a usable link
+        }
+        clear_bind_cache();
+    }
+    if ((initiator_ || yielded_) && mode_ == Mode::Link && mac_ == mac) {
         stop();
     }
 }
 
 void Exchange::wipe() {
+    clear_bind_cache();
     (void)hs_.cancel();
     pend_.wipe();
 }
@@ -175,11 +187,12 @@ void Exchange::finish_idle() {
 
 MonoTime Exchange::deadline() const {
     if (phase_ == Phase::Idle || phase_ == Phase::Zombie) {
-        return MonoTime::never();
+        return earliest(bind_cache_.until, bind_cache_.retry);
     }
     // (the same condition as on_timer: a time the timer would not act on must not wake the owner)
     const MonoTime idle = !initiator_ && phase_ != Phase::Linger ? idle_at_ : MonoTime::never();
-    return earliest(earliest(deadline_, rto_at_), earliest(retry_at_, idle));
+    return earliest(earliest(earliest(deadline_, rto_at_), earliest(retry_at_, idle)),
+                    earliest(bind_cache_.until, bind_cache_.retry));
 }
 
 // ---- jobs ----
@@ -570,7 +583,7 @@ void Exchange::finish_keys(MonoTime now) {
 
 // SESSION_BIND / ACK = [1, ctx_hash, receiver_sid, nonce]; sealed under the new key with the
 // sender's own reserved SID in the header (S5-D3). Staged for byte-identical retransmission.
-Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce) {
+Status Exchange::bind_frame(SessionKeys &k, const std::array<uint8_t, 16> &nonce, uint32_t domain_hint, SealedFrame &f) {
     std::array<uint8_t, 64> plain{};
     wire::CborWriter w{MutByteView{plain}};
     w.array(4);
@@ -579,13 +592,17 @@ Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce)
     w.uint(k.rx_sid);
     w.bytes(ByteView{nonce});
     LM_TRY(w.finish());
+    return seal_frame(k, wire::FrameKind::Edhoc, domain_hint, k.rx_sid, w.written(), f);
+}
+
+Status Exchange::seal_bind(SessionKeys &k, const std::array<uint8_t, 16> &nonce) {
     SealedFrame f;
-    LM_TRY(seal_frame(k, wire::FrameKind::Edhoc, hint(), k.rx_sid, w.written(), f));
+    LM_TRY(bind_frame(k, nonce, hint(), f));
     return stage(initiator_ ? ObjKind::Bind : ObjKind::BindAck, f.view());
 }
 
 bool Exchange::check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &sid,
-                               std::array<uint8_t, 16> &nonce) const {
+                               std::array<uint8_t, 16> &nonce, const Sha256Digest *context) const {
     if (wire::cbor_validate(plain) != Status::Ok) {
         return false;
     }
@@ -595,7 +612,7 @@ bool Exchange::check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &si
     const ByteView hash = r.bstr(32, 32);
     const uint64_t s = r.uint_in(1, 0xFFFFFFFFULL);
     const ByteView n = r.bstr(16, 16);
-    if (r.finish() != Status::Ok || !bytes_equal(hash, ByteView{ctx_hash_}) || s != header_sid) {
+    if (r.finish() != Status::Ok || !bytes_equal(hash, ByteView{context != nullptr ? *context : ctx_hash_}) || s != header_sid) {
         return false;
     }
     sid = static_cast<uint32_t>(s);
@@ -605,6 +622,9 @@ bool Exchange::check_bind_body(ByteView plain, uint32_t header_sid, uint32_t &si
 
 bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, ByteView frame,
                              MonoTime now) {
+    if (cached_bind(src, h, frame, now)) {
+        return true;
+    }
     if (src != mac_ || mode_ == Mode::End) {
         return false;
     }
@@ -653,8 +673,26 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
         abort(is);
         return true;
     }
-    count(Count::Completed);
-    s_.gate.succeeded(mac_);
+    if (mode_ != Mode::Link || initiator_) {
+        count(Count::Completed);
+        s_.gate.succeeded(mac_);
+    }
+    if (mode_ == Mode::Link) {
+        Neighbor *n = installed();
+        is = n != nullptr ? seal_bind(n->cur, nonce) : Status::RecoveryRequired;
+        if (is != Status::Ok) {
+            finish_idle();
+            return true;
+        }
+        const bool initiator = initiator_;
+        cache_bind(*n, initiator, now); // initiator: fresh-counter confirmation; responder: ACK
+        finish_idle(); // cached ciphertext, not rx_/hs_, owns all reply/retry state
+        pump_bind_cache(now);
+        if (initiator && s_.join.link_up != nullptr) {
+            s_.join.link_up(s_.join.ctx, n->device, n->role, true);
+        }
+        return true;
+    }
     if (initiator_) {
         finish_idle();
         return true;
@@ -671,6 +709,109 @@ bool Exchange::on_bind_frame(const MacAddr &src, const wire::LinkHeader &h, Byte
     rto_at_ = MonoTime::never();
     send_object(ObjKind::BindAck, false);
     pump(now);
+    return true;
+}
+
+void Exchange::clear_bind_cache() {
+    if (!bind_cache_.frame.is_none()) {
+        (void)s_.engine.frames().release(bind_cache_.frame);
+    }
+    bind_cache_ = BindCache{};
+}
+
+void Exchange::cache_bind(Neighbor &n, bool confirmation, MonoTime now) {
+    if (TxFrame *frame = s_.engine.frames().get(stage_h_)) {
+        frame->frame.len = static_cast<uint16_t>(stage_len_);
+    }
+    bind_cache_.frame = stage_h_;
+    stage_h_ = Handle{};
+    bind_cache_.mac = n.mac;
+    bind_cache_.rx_sid = n.cur.rx_sid;
+    bind_cache_.confirmation = confirmation;
+    bind_cache_.own_attempt = initiator_ || yielded_;
+    bind_cache_.tag = k_bind_tag | (++bind_generation_ & 0xFFFFU);
+    const Duration retry_span{s_.policy.rto.us * (s_.policy.max_attempts + 1) +
+                              2 * s_.engine.tx().service_bound().us * (s_.policy.max_attempts + 1)};
+    const Duration hold = retry_span > s_.policy.linger ? retry_span : s_.policy.linger;
+    bind_cache_.until = earliest(deadline_, now + (hold < s_.policy.exchange_deadline ? hold : s_.policy.exchange_deadline));
+    // Normal attach/queued traffic already proves the new SID. Give that round trip a chance first;
+    // an idle initiator still sends a bounded explicit confirmation. This timer never enables responder TX.
+    const Duration proof_grace{2 * s_.engine.tx().service_bound().us + Duration::from_ms(40).us};
+    bind_cache_.retry = confirmation ? now + proof_grace : now;
+}
+
+void Exchange::confirm_peer(Neighbor &n, SessionKeys &keys, MonoTime now) {
+    if (&keys != &n.cur || n.join_only) {
+        return; // a previous SID is no proof that the new session was installed
+    }
+    const bool notify = !keys.tx_ready;
+    keys.tx_ready = true;
+    if (notify) {
+        ++s_.stats.hs_completed;
+        s_.gate.succeeded(n.mac);
+    }
+    if (bind_cache_.mac == n.mac && bind_cache_.rx_sid == keys.rx_sid) {
+        clear_bind_cache();
+    }
+    if (notify) {
+        n.link_up_pending = true; // the current RX may itself need a reply before waiting traffic resumes
+    }
+    (void)now;
+}
+
+bool Exchange::cached_bind(const MacAddr &src, const wire::LinkHeader &h, ByteView frame, MonoTime now) {
+    Neighbor *n = s_.neighbors.by_tx_sid(src, h.link_sid);
+    if (bind_cache_.frame.is_none()) {
+        if (n == nullptr || n->join_only || !n->cur.initiator || !n->cur.tx_ready ||
+            !(now < n->cur.valid_until) || !(now < n->cur.born + s_.policy.exchange_deadline)) {
+            return false;
+        }
+        Opened op;
+        const Status st = open_frame(n->cur, h, frame, op);
+        uint32_t sid = 0;
+        std::array<uint8_t, 16> nonce{};
+        if (st != Status::Replay || op.verdict != sec::ReplayVerdict::Duplicate ||
+            !check_bind_body(op.view(), h.link_sid, sid, nonce, &n->cur.ctx_hash)) {
+            return false;
+        }
+        SealedFrame confirmation;
+        if (bind_frame(n->cur, nonce, domain_hint_of(s_.identity.delegation().domain), confirmation) != Status::Ok) {
+            return true;
+        }
+        Handle cache;
+        if (TxFrame *f = s_.engine.frames().borrow(cache)) {
+            f->frame.len = confirmation.len;
+            std::copy_n(confirmation.bytes.begin(), confirmation.len, f->frame.bytes.begin());
+            bind_cache_.frame = cache;
+            bind_cache_.mac = src;
+            bind_cache_.rx_sid = n->cur.rx_sid;
+            bind_cache_.tag = k_bind_tag | (++bind_generation_ & 0xFFFFU);
+            bind_cache_.confirmation = true;
+            bind_cache_.until = earliest(now + s_.policy.linger, n->cur.born + s_.policy.exchange_deadline);
+            bind_cache_.retry = now;
+            pump_bind_cache(now);
+        }
+        return true;
+    }
+    if (src != bind_cache_.mac || now >= bind_cache_.until) {
+        return false;
+    }
+    if (n == nullptr || n->cur.rx_sid != bind_cache_.rx_sid || !(now < n->cur.valid_until)) {
+        return false;
+    }
+    Opened op;
+    const Status st = open_frame(n->cur, h, frame, op);
+    uint32_t sid = 0;
+    std::array<uint8_t, 16> nonce{};
+    if (st == Status::Ok && !bind_cache_.confirmation &&
+        check_bind_body(op.view(), h.link_sid, sid, nonce, &n->cur.ctx_hash)) {
+        n->cur.rec.accept(h.link_counter);
+        confirm_peer(*n, n->cur, now); // fresh-counter Bind: the initiator processed our ACK
+    } else if (st == Status::Replay && op.verdict == sec::ReplayVerdict::Duplicate &&
+               !bind_cache_.inflight && bind_cache_.attempts < s_.policy.max_attempts) {
+        bind_cache_.retry = now; // lost ACK or lost confirmation: repeat the cached ciphertext
+        pump_bind_cache(now);
+    }
     return true;
 }
 
@@ -742,6 +883,9 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
         ++s_.stats.sessions_replaced;
     }
     n->cur = std::move(pend_);
+    n->link_up_pending = false;
+    n->cur.initiator = initiator_;
+    n->cur.tx_ready = initiator_;
     pend_.wipe();
     n->rotate_wanted = false;
     n->rotate_misses = 0;
@@ -757,7 +901,7 @@ Status Exchange::install_session(MonoTime now, DeadlineCheck lease) {
         n->cur.valid_until = earliest(n->cur.valid_until, now + s_.policy.renew_window);
         ++s_.stats.renew_only;
     }
-    if (s_.join.link_up != nullptr) {
+    if (mode_ != Mode::Link && s_.join.link_up != nullptr) {
         s_.join.link_up(s_.join.ctx, n->device, n->role,
                         initiator_); // [S8] e.g. the root confirmation still owed
     }

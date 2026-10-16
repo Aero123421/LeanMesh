@@ -58,6 +58,10 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
     if (o.family != Family::End && !cred && !(f.offset == 0 && f.body.size() == f.total)) {
         return; // over one hop an EDHOC message is one fragment; rx_ keeps the peer's credentials
     }
+    if (phase_ == Phase::Linger && cred && (tx_active_ || tx_inflight_)) {
+        busy_drop(o.family); // an unsent/queued ACK still owns its stage (join and routed end alike)
+        return;
+    }
     if (phase_ == Phase::Linger && cred &&
         !(o.family == family() && same_peer(o) && f.kind == ObjKind::CredI && f.xid == xid_)) {
         finish_idle(); // a new exchange takes the slot from a lingering responder
@@ -137,6 +141,14 @@ void Exchange::on_fragment(const Frag &f, const Origin &o, MonoTime now) {
 
 // An idle exchange becomes the responder of the CredI's sender, if this node may answer it.
 bool Exchange::start_responder(const Frag &f, const Origin &o, MonoTime now) {
+    if (o.family == Family::Link && bind_cache_.confirmation && !bind_cache_.inflight &&
+        bind_cache_.attempts != 0 && bind_cache_.retry.is_never()) {
+        clear_bind_cache();
+    }
+    if (o.family == Family::Link && !bind_cache_.frame.is_none()) {
+        busy_drop(o.family); // the single binding-reply cache is occupied, not a peer/RF failure
+        return false;
+    }
     switch (o.family) {
     case Family::Join:
         // [S8] Only the root answers, only while policy and a join slot allow it. A MAC that is an ordinary
@@ -336,13 +348,26 @@ void Exchange::arm_rto(MonoTime now) {
         if (phase_ == Phase::SendCred) { // CredR is out: wait for message_1, but not for long
             phase_ = Phase::AwaitMsg;
             expect_ = ObjKind::Msg1;
-            const Duration wait = mode_ == Mode::End ? delivery::round_timeout(route_.len, s_.engine.tx().service_bound()) : k_msg1_wait;
-            deadline_ = earliest(deadline_, now + (wait > k_msg1_wait ? wait : k_msg1_wait));
+            if (mode_ != Mode::End) {
+                deadline_ = earliest(deadline_, now + k_msg1_wait);
+            }
+            // A routed CredR has only reached its first hop here; its remaining fragments may still
+            // be forwarding. The bounded responder idle timer covers that tail and message_1's return.
         }
         return;
     }
     if (phase_ == Phase::SendCred || phase_ == Phase::AwaitMsg || phase_ == Phase::AwaitBind) {
-        rto_at_ = now + (mode_ == Mode::End ? delivery::round_timeout(route_.len, s_.engine.tx().service_bound()) : s_.policy.rto);
+        Duration wait = s_.policy.rto;
+        if (mode_ == Mode::End) {
+            const Duration service = s_.engine.tx().service_bound();
+            wait = delivery::round_timeout(route_.len, service);
+            if (phase_ == Phase::SendCred) {
+                const std::size_t cap = wire::data_capacity(route_.len) - k_end_obj_header;
+                const auto chunks = static_cast<int64_t>((wire::k_bootstrap_max_total + cap - 1) / cap);
+                wait = wait + Duration{2 * service.us * chunks}; // the fragmented CredR, not just one frame
+            }
+        }
+        rto_at_ = now + wait;
     }
 }
 
@@ -405,8 +430,65 @@ Status Exchange::send_link_chunk(ByteView obj, MonoTime now) {
     return Status::Ok;
 }
 
+void Exchange::pump_bind_cache(MonoTime now) {
+    if (bind_cache_.frame.is_none()) {
+        return;
+    }
+    Neighbor *n = s_.neighbors.find_mac(bind_cache_.mac);
+    if (now >= bind_cache_.until || n == nullptr || n->cur.rx_sid != bind_cache_.rx_sid) {
+        const bool failed = n != nullptr && n->cur.rx_sid == bind_cache_.rx_sid &&
+                            !bind_cache_.confirmation && !n->cur.tx_ready;
+        const bool notify = failed && bind_cache_.own_attempt;
+        const MacAddr mac = bind_cache_.mac;
+        if (failed) {
+            n->cur.valid_until = now; // failed binding: sweep the receive-only candidate session next
+            ++s_.stats.hs_failed;
+            s_.gate.failed(mac, now);
+        }
+        clear_bind_cache();
+        if (notify && s_.join.exchange_failed != nullptr) {
+            s_.join.exchange_failed(s_.join.ctx, mac, Status::Expired);
+        }
+        return;
+    }
+    if (bind_cache_.inflight || now < bind_cache_.retry) {
+        return;
+    }
+    bind_cache_.retry = MonoTime::never();
+    if (bind_cache_.attempts >= s_.policy.max_attempts) {
+        return;
+    }
+    const TxFrame *f = s_.engine.frames().get(bind_cache_.frame);
+    if (f == nullptr) {
+        clear_bind_cache();
+        return;
+    }
+    const Status st = s_.engine.transmit(bind_cache_.mac, f->frame.view(), bind_cache_.tag, now);
+    if (st == Status::Ok) {
+        ++bind_cache_.attempts;
+        ++s_.stats.tx_frames_hs;
+        bind_cache_.inflight = true;
+    } else {
+        bind_cache_.retry = now + k_pump_retry; // local refusal is never an on-air attempt
+        ++s_.stats.tx_local_busy;
+    }
+}
+
 void Exchange::on_tx_outcome(const TxOutcome &o, MonoTime now) {
-    if (is_link_tag(o.tag) && mode_ != Mode::End) {
+    if ((o.tag & 0xFFFF0000U) == k_bind_tag) {
+        if (!bind_cache_.frame.is_none() && o.tag == bind_cache_.tag) {
+            bind_cache_.inflight = false;
+            if (o.result == port::TxResult::MacFailed) {
+                ++s_.stats.tx_rf_failed;
+            }
+            bind_cache_.retry = bind_cache_.confirmation && o.result == port::TxResult::MacAcked
+                                    ? MonoTime::never() : now + s_.policy.rto;
+        }
+        pump_bind_cache(now);
+        return;
+    }
+    if (is_link_tag(o.tag) && mode_ != Mode::End && tx_inflight_ &&
+        o.tag == (k_tag_base | ((tx_seq_ - 1U) & 0xFFFFU))) {
         heard_initiator(now); // our own fragment was on the air until now (other frames of the node do not count)
         tx_inflight_ = false;
         if (rto_after_tx_) {
@@ -421,10 +503,12 @@ void Exchange::on_tx_outcome(const TxOutcome &o, MonoTime now) {
             return;
         }
     }
+    pump_bind_cache(now); // the freed radio serves binding replies before ordinary queued traffic
     pump(now);
 }
 
 void Exchange::on_timer(MonoTime now) {
+    pump_bind_cache(now);
     if (phase_ == Phase::Idle || phase_ == Phase::Zombie) {
         return;
     }

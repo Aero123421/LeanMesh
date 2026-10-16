@@ -1,6 +1,7 @@
 // Link sessions between provisioned sim nodes: real lm_context + Engine on sim ports, credentials
 // from the TEST-ONLY fleet issuer, EDHOC purpose 1 + SESSION_BIND through the worker jobs and the
 // simulated medium. Acceptance IDs in the test names (docs/IMPLEMENTATION.md §11, S5).
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -875,6 +876,7 @@ LM_TEST("S10 rotation: a silent neighbour is retried with a growing wait and doe
     const uint32_t sid2 = n.nb(0, 2)->cur.rx_sid;
     n.lnk(0).policy().rotate_lower_id = Duration::from_s(60); // node 0 rotates both sessions at one minute
     n.lnk(0).policy().rotate_higher_id = Duration::from_s(60);
+    n.node(0).notify(); // changed a deadline: an idle link has no unrelated wake to notice the test override
     n.world.set_link(0, 1, LinkParams{false, 0, 0, 1000}); // node 1 is out of reach
     n.run_s(250);
     LM_CHECK(n.nb(0, 2)->cur.rx_sid != sid2); // the reachable neighbour was rotated
@@ -1143,4 +1145,94 @@ LM_TEST("HIL-F12 slow TX completions (1.06 s) on both sides: the handshake compl
     LM_CHECK(n.run_until([&] { return n.paired(0, 1); }, 30'000));
     LM_CHECK_EQ(n.lnk(1).stats().hs_retransmits, 0u);
     LM_CHECK_EQ(n.lnk(0).stats().hs_retransmits, 0u);
+}
+
+LM_TEST("REVIEW16 sim: an abandoned glare-yielded attempt releases the slot after its worker") {
+    for (uint32_t latency : {2000u, 200'000u}) {
+        Net n(3);
+        const uint16_t y = n.id(0) < n.id(1) ? 1 : 0;
+        const uint16_t p = static_cast<uint16_t>(1 - y);
+        n.node(y).jobs.latency_us = latency;
+        LM_CHECK_OK(n.connect(y, p));
+        LM_CHECK_OK(n.connect(p, y));
+        LM_CHECK(n.run_until([&] { return !n.lnk(y).exchange().initiator() && n.lnk(y).exchange().job_pending(); }, 1000));
+        n.lnk(y).abandon_connect(n.mac(p));
+        const auto phase = n.lnk(y).exchange().phase();
+        LM_CHECK(phase == link::Phase::Idle || phase == link::Phase::Zombie);
+        n.run_ms(latency / 1000 + 5);
+        LM_CHECK(n.lnk(y).exchange().phase() == link::Phase::Idle);
+        LM_CHECK_OK(n.connect(y, 2));
+        LM_CHECK(n.run_until([&] { return n.paired(y, 2); }, 5000));
+    }
+}
+
+LM_TEST("REVIEW16 sim: a locally blocked Bind ACK survives a scratch loan and precedes normal traffic") {
+    for (uint32_t delay : {1'048'000u, 1'600'000u}) {
+        Net n(2);
+        n.node(1).radio.tx_callback_delay_us = delay;
+        LM_CHECK_OK(n.connect(1, 0));
+        LM_CHECK(n.run_until([&] { return n.lnk(0).exchange().phase() == link::Phase::AwaitBind; }, 30'000));
+        n.node(0).radio.tx_fault_count = 10'000; // block the responder's ACK, not its earlier Msg4
+        LM_CHECK(n.run_until([&] { return n.session(0, 1) && !n.session(1, 0); }, 10'000));
+        LM_CHECK(n.send(0, 1, payload_of(91)) != Status::Ok);
+        LM_CHECK_EQ(n.lnk(0).stats().hs_completed, 0u);
+        auto &x = n.lnk(0).exchange();
+        auto scratch = x.lend_scratch();
+        LM_CHECK(!scratch.empty()); // the cached ACK owns no worker/scratch slot
+        if (!scratch.empty()) {
+            std::fill(scratch.begin(), scratch.end(), 0xA5);
+            x.return_scratch();
+        }
+        n.run_ms(1700); // spans the original retry/RTO while the ACK is still blocked
+        LM_CHECK(!n.session(1, 0));
+        n.node(0).radio.tx_fault_count = 0;
+        LM_CHECK(n.run_until([&] { return n.paired(0, 1) && n.send(0, 1, payload_of(92)) == Status::Ok; }, 10'000));
+        n.run_ms(50);
+        LM_CHECK_EQ(n.sinks[1].fresh(), 1u);
+    }
+}
+
+LM_TEST("REVIEW16 sim: a lost first Bind ACK is recovered without permitting unconfirmed ordinary TX") {
+    Net n(2);
+    LM_CHECK_OK(n.connect(1, 0));
+    LM_CHECK(n.run_until([&] { return n.lnk(0).exchange().phase() == link::Phase::AwaitBind; }, 5000));
+    auto blocked = n.world.link(0, 1);
+    blocked.drop_kinds = 1u << static_cast<unsigned>(wire::FrameKind::Edhoc);
+    n.world.set_link_one_way(0, 1, blocked);
+    LM_CHECK(n.run_until([&] { return n.session(0, 1) && !n.session(1, 0); }, 5000));
+    n.run_ms(100);
+    LM_CHECK(n.send(0, 1, payload_of(93)) == Status::Busy);
+    blocked.drop_kinds = 0;
+    n.world.set_link_one_way(0, 1, blocked);
+    LM_CHECK(n.run_until([&] { return n.paired(0, 1) && n.nb(0, 1)->cur.tx_ready; }, 10'000));
+    n.run_ms(20);
+    LM_CHECK_OK(n.send(0, 1, payload_of(94)));
+    n.run_ms(50);
+    LM_CHECK_EQ(n.sinks[1].fresh(), 1u);
+}
+
+namespace {
+Sinked *proof_sink = nullptr;
+bool proof_notified = false;
+bool proof_after_dispatch = false;
+}
+
+LM_TEST("REVIEW16 sim: confirmation dispatches its authenticated frame before waking normal senders") {
+    Net n(2);
+    LM_CHECK_OK(n.connect(1, 0));
+    LM_CHECK(n.run_until([&] { return n.paired(0, 1); }, 5000));
+    n.run_ms(5); // before the idle confirmation fallback; the initiator can carry normal traffic
+    auto &hooks = n.lnk(0).join_hooks();
+    const auto saved = hooks.link_up;
+    proof_sink = &n.sinks[0];
+    proof_notified = proof_after_dispatch = false;
+    hooks.link_up = [](void *, const DeviceId &, uint8_t, bool) {
+        proof_notified = true;
+        proof_after_dispatch = proof_sink != nullptr && proof_sink->fresh() == 1;
+    };
+    LM_CHECK_OK(n.send(1, 0, payload_of(95)));
+    LM_CHECK(n.run_until([&] { return proof_notified; }, 100));
+    LM_CHECK(proof_after_dispatch);
+    hooks.link_up = saved;
+    proof_sink = nullptr;
 }

@@ -41,6 +41,8 @@ root鍵変更はfleet署名delegationの高世代を配布→stored証拠→切�
 Join proxy slots2、同時P-256 jobs1、1相手full-handshake最短30秒（完了したhandshakeの間隔）。1-hop（link・join）で開始した（message_1でgateを使った）handshakeが失敗した場合だけ、次の試行は5秒、続けて失敗すれば10、20秒…と倍にし30秒で頭打ち、完了で元に戻す（HIL 2026-10-04 F10：再起動したnodeの最初の試行は親が旧sessionを持つため失敗しやすく、失敗でも30秒待たせると再接続に40〜110秒かかった）。1相手あたり最悪でも5秒に1回の公開鍵処理で、同時P-256 jobs1の上限は変わらない。end sessionは経路が整うまで失敗しやすく、早い再試行は1つしかないexchange slotを塞ぐので、従来どおり30秒。exchange slotは1つなので、応答側は開始側から何も届かない時間が再送間隔×(max_attempts+1)（1-hop: (1.5秒＋送信の遅さ)×4、end: 経路1往復の待ち×4）を超えたら、30秒の期限を待たずに枠を空ける。開始側はmax_attempts回の再送で諦めており、それ以上待っても何も来ない。自分の公開鍵演算と、自分のhandshake frameの送信の間は数えない。同じnodeのほかの送信（HOP_ACK・DATA・beacon）は開始側の合図にしない（数えていると、送信の絶えないrootでは枠が30秒まで空かなかった。レビュー2026-10-12）。proxy越しのjoinの開始側は再送が最大4秒遅いので、join応答側は1回の待ちにその4秒を足す。経路越し（end）では開始側の各frameがhopごとに最大3回試行され、その遅さは応答側から見えないので、応答側は自分の送信が速くても1 hopの送信時間を500 ms以上として1往復を見積もる（1 hopで約10秒、2 hopで約18秒。自分の速さで見積もると3.4秒で枠を空け、開始側の3回目の試行で届いたmessage_3を捨てていた）。枠を30秒持ち続けると、handshakeの通らない弱いlinkの相手が30秒ごとに1回試すだけでrootの枠が塞がり続け、ほかのnodeのend sessionがbusy dropされる（sim: 2階ずつ離れた4台で最上階が15分attachできなかった）。root全体4handshakes/秒をadmission上限目標とするが実機の演算完了能力でさらに制限。cookie/期待hintでCPU予算を予約してから高価な演算へ進む。RF jamは解決できない。
 ESP32 entropyは公式条件でseedする。Wi-Fi稼働前に適当に乱数を作らない。[E06] テストseedはtest専用targetでのみ受け付け、本番binaryの起動で拒否。key、grant秘密、payload、Wi-Fi秘密を標準ログに出さない。NVS eraseは論理的失効であり、Flash上の全過去copyの物理消去保証ではない。
 
+routed endのcredential往復は複数fragmentなので、開始側の最初の再送待ちは経路1往復に最大credentialの送出時間（2*S*ceil(1024/C)）を足す。応答側がCredRの最終fragmentをfirst hopへ渡しても、対向への到着は未確認なので、message_1待ちを1-hop用の4秒へ短縮しない。既存の応答側idle期限と開始時に固定した全体期限で枠を有界にする。
+
 ## 9. Context bindingの正確な順序
 RFC9528のEAD labelにprivate-use範囲はない。未登録の独自EAD番号を使わない。送信するEADはpadding label0だけ（通常は省略）。未知critical EADは標準どおり中止する。Exporter label40000は§10.1のprivate-use範囲内であり、EAD番号とは別物である。
 
@@ -50,6 +52,12 @@ bootstrap credential取得と候補contextの交換は認証前にはhintにす�
 
 `SESSION_BIND`/ACKはEDHOC carrier内の認証後段階に置き、DATA用sessionの有効化前にも受信できる専用stateを使う。再送は同一ciphertext、IDとnonceを保持し、最大3回/期限30秒。30秒は鍵導出後のbinding段階に適用する。routed endのcredential転送を含む全体期限は開始時に固定し、観測service時間Sが120msを超えるときだけ30秒 + 4*S*h*(2*ceil(1024/C)+6)（h=hop数、C=data_capacity(h)からJoinChunk headerを引いた容量）とする。Sはwatchdog以下の直近完了の実測最大値（docs/08 §6の窓）でUNKNOWNは除外し、fragment到着で全体期限を延長しない。未観測時と1-hop交換は30秒。同時slot/公開鍵job/gateとbinding認証は変更しない。これは鍵交換方式の追加ではなくLM record contextの明示確認であり、独立セキュリティレビュー対象に含める。
 
+### 1-hop bindingの対向側導入確認
+
+通常linkの応答側はBindを検証して受信用sessionを入れても、対向が新SIDを使える証拠を得るまでそのsessionで通常送信しない。開始側はACKを検証したら同じbinding本文を新しいrecord counterで封止して確認を返す（元のBindの再送は同一ciphertextのまま）。この確認、または新SIDで認証・最低限の形式検査を通ったframeが対向の導入証拠になる。旧SID・MAC ACK・固定時間の経過は証拠ではない。確認frameの受信処理を終えてからlink-upを通知し、PROBE_REPLY等の返事より先に通常送信を起こさない。
+
+Bind ACKと確認frameは、実行中exchangeのscratchとは別の有界cache（node当たり1 frame）に保持する。ACKを生成・受理・送信完了した段階を対向の導入確認と混同しない。未送信ACKはscratch貸出しや別の交換で消さず、再送は同一ciphertext、最大3回、保持は30秒以内とする。cacheが埋まっていれば新しい1-hop交換をローカルBusyとして待たせるが、Flash・署名・USB用のscratch/slot貸出しとrouted end交換は継続できる。期限でcacheを解放し、対向未確認の候補sessionも失敗として終了する（membershipは消さない）。応答側の完了計数とlink-up通知も導入確認後にだけ行う。Join-onlyとrouted endも、ACKを送信・hop受理するまではLingerを空き扱いせず、scratch/slotを貸さずに未送信ACKを守る。
+
 ## 10. Powerとの横断契約
 RAM session再利用はtraffic keyだけでなく送信counter・受信window・完全peer identity・credential世代・authorization/key lifetimeの経過上限が保持できる時だけ。Light Sleepしただけでcounter=0に戻さない。相手のrestartはそのsessionを無効化し、全網Joinへ拡大しない。Deep Sleep復帰に新規人間承認を要求しないが、fresh EDHOCの演算/airtimeは発生する。停電復帰を「認証CPU負荷ゼロ」と呼ばない。
 Root/Host停止中の通信継続は既存path/session/有限authorization leaseが有効な範囲であり、無期限ではない。lease終了後は暗号上の認可を維持できない操作を保留し、アプリへ理由を返す。
@@ -58,4 +66,3 @@ Root/Host停止中の通信継続は既存path/session/有限authorization lease
 rootの台帳backup（control type 34）は、**現rootがdevice keyで署名する1つのheader**で成り立つ。headerはdomain、rootのDeviceId、rootのfleet署名RootDelegation（公開鍵への連鎖）、delegation世代、署名時のroot_term、単調なbackup sequence、台帳のchange point、recordの存在と内容のhash chain先頭を固定する。復元先（交換root）は、fleet trust anchor → headerの中の旧RootDelegation → 旧rootの署名と検証し、domain・handoverの旧root・旧generationの一致を要求する。recordはheaderのhash chainで1件ずつ書く前に検証する（署名は1つ、recordごとの署名はしない）。署名はrootのpublic-key worker jobで行い、ownerでは行わない。
 - backupに秘密は無い。entryはDeviceId・世代・request id・hash・rootが発行したMemberCredential COSE（公開情報）、floors/groups/policyは数値とid。root秘密鍵、identity、session鍵は入らない。ただしmemberのリストと資格は載るので、Hostの取得APIにはCONFIGURE権限を要求する。
 - backupはrootの権限を移さない。交換rootが台帳を受けるには、fleet署名のRootHandoverがそのrootを新rootと名指すこと（旧rootの鍵は使わず、新DeviceIdとdelegationを持つ）が必須で、旧rootの署名だけでは受理されない。古いbackupによる巻き戻し（失効・離脱の取消）は、交換rootが自分の知るsequence以上を要求して拒否し、Hostも最新sequenceだけを保持する。限界：backup後の変更は含まれない。
-

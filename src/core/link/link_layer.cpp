@@ -119,7 +119,8 @@ bool LinkLayer::on_rx(const port::RadioRx &rx, MonoTime now) {
             ++stats_.rx_lease_restricted;
             return deliver(*n, h, op, false, true);
         }
-        which->rec.accept(h.link_counter); // only after the tag and the minimum checks (docs/06 §6)
+        which->rec.accept(h.link_counter);
+        exchange_.confirm_peer(*n, *which, now); // only after the tag and the minimum checks (docs/06 §6)
         ++stats_.rx_accepted;
         if (n->rotate_misses != 0) { // the neighbour is back: its rotation is tried again within the gate time
             n->rotate_misses = 0;
@@ -243,6 +244,14 @@ void LinkLayer::on_timer(MonoTime now) {
         (void)shared_.engine.release_peer(released[i]);
         ++stats_.sessions_expired;
     }
+    neighbors_.for_each([&](Handle, Neighbor &nb) {
+        if (nb.link_up_pending) {
+            nb.link_up_pending = false;
+            if (nb.cur.active && nb.cur.tx_ready && shared_.join.link_up != nullptr) {
+                shared_.join.link_up(shared_.join.ctx, nb.device, nb.role, false);
+            }
+        }
+    });
     exchange_.on_timer(now);
     if (exchange_.busy()) {
         return;
@@ -296,6 +305,7 @@ MonoTime LinkLayer::deadline() const {
 
 void LinkLayer::stop() {
     exchange_.stop();
+    exchange_.clear_bind_cache();
     PeerHandle handles[k_max_neighbors];
     std::size_t n = 0;
     neighbors_.for_each([&](Handle, Neighbor &nb) {
@@ -319,7 +329,7 @@ Status LinkLayer::connect(const MacAddr &mac, MonoTime now, bool replace) {
     if (!replace) {
         const Neighbor *n = neighbors_.find_mac(mac);
         if (n != nullptr && n->cur.active) {
-            return Status::Conflict;
+            return n->cur.tx_ready ? Status::Conflict : Status::Busy;
         }
     }
     return exchange_.start_initiator(mac, now);
@@ -341,6 +351,9 @@ Status LinkLayer::seal(const DeviceId &peer, wire::FrameKind kind, ByteView plai
     if (n == nullptr || !n->cur.active) {
         ++stats_.tx_refused;
         return Status::AuthPending;
+    }
+    if (!n->cur.tx_ready) {
+        return Status::Busy; // no ordinary new-SID TX before the peer proved installation
     }
     if (!(now < n->cur.valid_until)) {
         ++stats_.tx_refused;

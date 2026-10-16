@@ -32,6 +32,8 @@ struct SessionKeys {
     MonoTime born;
     MonoTime valid_until = MonoTime::never(); // key lifetime for cur, grace end for prev
     bool active = false;
+    bool initiator = false; // role of this installed session, independent of the next exchange
+    bool tx_ready = true; // responder waits for authenticated proof that the peer installed this SID
 
     void wipe() {
         rec.wipe();
@@ -65,6 +67,7 @@ struct Neighbor {
     MonoTime rotate_after{};
     // [S8-D1] JOIN_ONLY session (docs/06 §4 membership 0): carries the join control objects only,
     // never DATA/ROUTE, never rotates, and is invisible to find_device(). One per joining device.
+    bool link_up_pending = false; // publish readiness after the confirming RX frame was dispatched
     bool join_only = false;
 };
 

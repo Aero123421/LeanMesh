@@ -423,7 +423,7 @@ const link::Neighbor *Mesh::neighbor_of(const Cand &c) const {
 
 bool Mesh::linked(const Cand &c) const {
     const link::Neighbor *n = neighbor_of(c);
-    return n != nullptr && n->cur.active && n->address.value() == c.addr;
+    return n != nullptr && n->cur.active && n->cur.tx_ready && n->address.value() == c.addr;
 }
 
 // Below the floor and clearly below the best candidate heard: both, so that a site where every link is below the

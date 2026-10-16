@@ -572,19 +572,6 @@ void Delivery::kick_all_waiting(MonoTime now) {
     }
 }
 
-void Delivery::retry_waiting(MonoTime at, MonoTime now) {
-    if (at <= now) {
-        kick_all_waiting(now);
-        return;
-    }
-    for (std::size_t i = 0; i < k_actives; ++i) {
-        Active *a = actives_.get(actives_.handle_at(i));
-        if (a != nullptr && (a->st == Active::St::WaitRoute || a->st == Active::St::WaitSession)) {
-            a->next_at = earliest(a->next_at, at);
-        }
-    }
-}
-
 // ---- end sessions ----
 void Delivery::request_exchange(Active &a, Op &op, const PathSpec &ps, MonoTime now) {
     const MonoTime dl = local_deadline(op.expires, op.term, now);
